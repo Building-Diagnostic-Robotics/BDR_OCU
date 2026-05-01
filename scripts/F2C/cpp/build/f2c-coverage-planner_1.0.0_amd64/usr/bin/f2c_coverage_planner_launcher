@@ -1,0 +1,72 @@
+#!/bin/bash
+# BDR Coverage Planner Launcher with ROS2 Support
+
+# Source ROS2 environment (try different distributions)
+if [ -f "/opt/ros/humble/setup.bash" ]; then
+    source /opt/ros/humble/setup.bash
+    ROS_DISTRO="humble"
+elif [ -f "/opt/ros/foxy/setup.bash" ]; then
+    source /opt/ros/foxy/setup.bash
+    ROS_DISTRO="foxy"
+elif [ -f "/opt/ros/galactic/setup.bash" ]; then
+    source /opt/ros/galactic/setup.bash
+    ROS_DISTRO="galactic"
+elif [ -f "/opt/ros/noetic/setup.bash" ]; then
+    source /opt/ros/noetic/setup.bash
+    ROS_DISTRO="noetic"
+else
+    echo "Warning: No ROS2 installation found. Waypoint publishing will not work."
+    echo "Please install ROS2 (Humble, Foxy, or Galactic recommended) to enable waypoint publishing features."
+fi
+
+# Set basic environment
+export DISPLAY=${DISPLAY:-:0}
+
+# CycloneDDS config (loopback-only for local node communication)
+# Cross-network communication is handled by Zenoh bridge DDS (managed by laptop_teleop.launch.py)
+DDS_CONFIG="$HOME/cyclone_loopback.xml"
+
+# Set CYCLONEDDS_URI if config file exists
+if [ -f "$DDS_CONFIG" ]; then
+    export CYCLONEDDS_URI="$DDS_CONFIG"
+    echo "Using CycloneDDS config (loopback): $DDS_CONFIG"
+else
+    echo "Warning: CycloneDDS config not found at $DDS_CONFIG"
+    echo "Local node communication may not work correctly."
+    echo "Expected loopback-only config at: $DDS_CONFIG"
+fi
+
+# Check if Zenoh bridge is running (managed by laptop_teleop.launch.py)
+if pgrep -x zenohd > /dev/null 2>&1; then
+    echo "Zenoh bridge DDS: running (robot communication available)"
+else
+    echo "Note: Zenoh bridge DDS not running - robot communication unavailable"
+    echo "Start with: ros2 launch pilot_control laptop_teleop.launch.py"
+fi
+
+# Add bundled library path first (highest priority)
+export LD_LIBRARY_PATH="/usr/lib/f2c-coverage-planner:$LD_LIBRARY_PATH"
+
+# Add system ROS paths if available (fallback)
+if [ -n "$ROS_DISTRO" ] && [ -d "/opt/ros/$ROS_DISTRO/lib" ]; then
+    export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/ros/$ROS_DISTRO/lib:/opt/ros/$ROS_DISTRO/lib/x86_64-linux-gnu:/opt/ros/$ROS_DISTRO/opt/ortools_vendor/lib"
+fi
+
+# Add other common library paths
+export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib"
+
+# Set Qt platform plugin path - try system Qt first, fallback to bundled
+if [ -d "/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms" ]; then
+    export QT_QPA_PLATFORM_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms:$QT_QPA_PLATFORM_PLUGIN_PATH"
+elif [ -d "/usr/lib/qt5/plugins/platforms" ]; then
+    export QT_QPA_PLATFORM_PLUGIN_PATH="/usr/lib/qt5/plugins/platforms:$QT_QPA_PLATFORM_PLUGIN_PATH"
+else
+    # Fallback to bundled plugins
+    export QT_QPA_PLATFORM_PLUGIN_PATH="/usr/lib/f2c-coverage-planner/qt5/plugins/platforms:$QT_QPA_PLATFORM_PLUGIN_PATH"
+fi
+
+# Set Qt to use xcb platform (standard Linux desktop)
+export QT_QPA_PLATFORM=xcb
+
+# Launch the application
+exec "/usr/bin/f2c_coverage_planner" "$@"

@@ -1,0 +1,98 @@
+<RCC>
+  <qresource prefix="/assets">
+    <!-- App icon -->
+    <file>assets/bdr_logo.png</file>
+
+    <!-- Login screen (source-of-truth: ../App resource/) -->
+    <file alias="bdr_wordmark.png">../App resource/Building Diagnostic Robotics Final-cropped.png</file>
+    <file alias="roofus_wireframe.png">../App resource/Gemini_Generated_Image_94rrd394rrd394rr.png</file>
+
+    <!-- Dashboard icons -->
+    <file alias="dashboard/location_pin.svg">../App resource/icons/location_pin.svg</file>
+    <file alias="dashboard/heartbeat.svg">../App resource/icons/heartbeat.svg</file>
+    <file alias="dashboard/camera.svg">../App resource/icons/Camera_icon.svg</file>
+    <file alias="dashboard/battery.svg">../App resource/icons/battery.svg</file>
+    <file alias="dashboard/settings.svg">../App resource/icons/settings.svg</file>
+    <file alias="dashboard/logout.svg">../App resource/icons/logout_icon.svg</file>
+
+    <!-- Exploration frame assets (Figma node 58:2) -->
+    <file alias="exploration/fpv_feed.svg">../App resource/icons/exploration_fpv_feed.svg</file>
+    <file alias="exploration/thermal_feed.svg">../App resource/icons/exploration_thermal_feed.svg</file>
+    <file alias="exploration/navigation_map.svg">../App resource/icons/exploration_navigation_map.svg</file>
+    <file alias="exploration/back_vector_a.svg">../App resource/icons/exploration_back_vector_a.svg</file>
+    <file alias="exploration/back_vector_b.svg">../App resource/icons/exploration_back_vector_b.svg</file>
+    <file alias="exploration/status_battery.svg">../App resource/icons/exploration_status_battery.svg</file>
+    <file alias="exploration/status_signal.svg">../App resource/icons/exploration_status_signal.svg</file>
+    <file alias="exploration/status_lock.svg">../App resource/icons/exploration_status_lock.svg</file>
+    <file alias="exploration/window_minimize.svg">../App resource/icons/exploration_window_minimize.svg</file>
+    <file alias="exploration/window_maximize.svg">../App resource/icons/exploration_window_maximize.svg</file>
+    <file alias="exploration/window_close.svg">../App resource/icons/exploration_window_close.svg</file>
+    <file alias="exploration/standby.svg">../App resource/icons/exploration_standby.svg</file>
+    <file alias="exploration/telemetry.svg">../App resource/icons/exploration_telemetry.svg</file>
+    <file alias="exploration/scan_progress.svg">../App resource/icons/exploration_scan_progress.svg</file>
+    <file alias="exploration/start_scan.svg">../App resource/icons/exploration_start_scan.svg</file>
+    <file alias="exploration/start_planning.svg">../App resource/icons/exploration_start_planning.svg</file>
+    <file alias="exploration/thermal.svg">../App resource/icons/exploration_thermal.svg</file>
+    <file alias="exploration/map.svg">../App resource/icons/exploration_map.svg</file>
+    <file alias="exploration/hardware.svg">../App resource/icons/exploration_hardware.svg</file>
+
+    <!-- Planner frame assets (Figma node 77:2) -->
+    <file alias="planner/exploration.svg">../App resource/icons/planner_exploration.svg</file>
+    <file alias="planner/stage_map_processing.svg">../App resource/icons/planner_stage_map_processing.svg</file>
+    <file alias="planner/stage_coverage_planning.svg">../App resource/icons/planner_stage_coverage_planning.svg</file>
+    <file alias="planner/stage_scan_splitting.svg">../App resource/icons/planner_stage_scan_splitting.svg</file>
+    <file alias="planner/stage_scan.svg">../App resource/icons/planner_stage_scan.svg</file>
+    <file alias="planner/point_cloud_processing.svg">../App resource/icons/planner_point_cloud_processing.svg</file>
+    <file alias="planner/compute_hull.svg">../App resource/icons/planner_compute_hull.svg</file>
+    <file alias="planner/tool_zoom_in.svg">../App resource/icons/planner_tool_zoom_in.svg</file>
+    <file alias="planner/tool_zoom_out.svg">../App resource/icons/planner_tool_zoom_out.svg</file>
+    <file alias="planner/tool_fit.svg">../App resource/icons/planner_tool_fit.svg</file>
+    <file alias="planner/tool_reset.svg">../App resource/icons/planner_tool_reset.svg</file>
+    <file alias="planner/next_arrow.svg">../App resource/icons/planner_next_arrow.svg</file>
+    <file alias="planner/point_cloud_preview.svg">../App resource/icons/planner_point_cloud_preview.svg</file>
+
+    <!-- Mission Planner frame assets (Figma node 77:2 refreshed) -->
+    <file alias="missionplanner/back.svg">../App resource/icons/mission_planner_back.svg</file>
+    <file alias="missionplanner/battery.svg">../App resource/icons/mission_planner_battery.svg</file>
+    <file alias="missionplanner/status_dot.svg">../App resource/icons/mission_planner_status_dot.svg</file>
+    <file alias="missionplanner/lock.svg">../App resource/icons/mission_planner_lock.svg</file>
+    <file alias="missionplanner/motors_armed_dot.svg">../App resource/icons/mission_planner_motors_armed_dot.svg</file>
+    <file alias="missionplanner/window_minimize.svg">../App resource/icons/mission_planner_window_minimize.svg</file>
+    <file alias="missionplanner/window_maximize.svg">../App resource/icons/mission_planner_window_maximize.svg</file>
+    <file alias="missionplanner/window_close.svg">../App resource/icons/mission_planner_window_close.svg</file>
+    <file alias="missionplanner/window_theme_left.svg">../App resource/icons/mission_planner_window_theme_left.svg</file>
+    <file alias="missionplanner/window_theme_right.svg">../App resource/icons/mission_planner_window_theme_right.svg</file>
+    <file alias="missionplanner/point_cloud_processing.svg">../App resource/icons/mission_planner_point_cloud_processing.svg</file>
+    <file alias="missionplanner/stage_map_processing.svg">../App resource/icons/mission_planner_stage_map_processing.svg</file>
+    <file alias="missionplanner/stage_coverage_planning.svg">../App resource/icons/mission_planner_stage_coverage_planning.svg</file>
+    <file alias="missionplanner/stage_scan_splitting.svg">../App resource/icons/mission_planner_stage_scan_splitting.svg</file>
+    <file alias="missionplanner/stage_scan.svg">../App resource/icons/mission_planner_stage_scan.svg</file>
+    <file alias="missionplanner/process_point_cloud.svg">../App resource/icons/mission_planner_process_point_cloud.svg</file>
+    <file alias="missionplanner/compute_hull.svg">../App resource/icons/mission_planner_compute_hull.svg</file>
+    <file alias="missionplanner/point_cloud_preview_base.svg">../App resource/icons/mission_planner_point_cloud_preview_base.svg</file>
+    <file alias="missionplanner/point_cloud_preview_points.svg">../App resource/icons/mission_planner_point_cloud_preview_points.svg</file>
+    <file alias="missionplanner/tool_zoom_in.svg">../App resource/icons/mission_planner_tool_zoom_in.svg</file>
+    <file alias="missionplanner/tool_fit.svg">../App resource/icons/mission_planner_tool_fit.svg</file>
+    <file alias="missionplanner/tool_reset.svg">../App resource/icons/mission_planner_tool_reset.svg</file>
+    <file alias="missionplanner/next_arrow.svg">../App resource/icons/mission_planner_next_arrow.svg</file>
+
+    <!-- Scan Splitting assets (Figma node 135:2) -->
+    <file alias="missionplanner/split_path.svg">../App resource/icons/mission_planner_split_path.svg</file>
+    <file alias="missionplanner/publish_selected.svg">../App resource/icons/mission_planner_publish_selected.svg</file>
+    <file alias="missionplanner/start_selected.svg">../App resource/icons/mission_planner_start_selected.svg</file>
+    <file alias="missionplanner/segment_cursor.svg">../App resource/icons/mission_planner_segment_cursor.svg</file>
+
+    <!-- Scan execution assets (Figma nodes 137:201 / 139:937) -->
+    <file alias="missionplanner/scan_card_current.svg">../App resource/icons/mission_planner_scan_card_current.svg</file>
+    <file alias="missionplanner/scan_card_progress.svg">../App resource/icons/mission_planner_scan_card_progress.svg</file>
+    <file alias="missionplanner/scan_card_telemetry.svg">../App resource/icons/mission_planner_scan_card_telemetry.svg</file>
+    <file alias="missionplanner/scan_card_segments.svg">../App resource/icons/mission_planner_scan_card_segments.svg</file>
+    <file alias="missionplanner/scan_card_stats.svg">../App resource/icons/mission_planner_scan_card_stats.svg</file>
+    <file alias="missionplanner/scan_play.svg">../App resource/icons/mission_planner_scan_play.svg</file>
+    <file alias="missionplanner/scan_pause.svg">../App resource/icons/mission_planner_scan_pause.svg</file>
+    <file alias="missionplanner/scan_emergency_stop.svg">../App resource/icons/mission_planner_scan_emergency_stop.svg</file>
+    <file alias="missionplanner/scan_check.svg">../App resource/icons/mission_planner_scan_check.svg</file>
+    <file alias="missionplanner/scan_segment_active.svg">../App resource/icons/mission_planner_scan_segment_active.svg</file>
+  </qresource>
+</RCC>
+

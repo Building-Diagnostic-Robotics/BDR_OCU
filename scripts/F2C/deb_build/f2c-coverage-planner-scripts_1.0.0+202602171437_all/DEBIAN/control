@@ -1,0 +1,11 @@
+Package: f2c-coverage-planner-scripts
+Version: 1.0.0+202602171437
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python3, python3-pyside6, python3-numpy, python3-matplotlib, python3-shapely, python3-scipy
+Maintainer: BDR <bdr@example.com>
+Description: Fields2Cover coverage planner (Python scripts)
+ Installs the latest Python GUI and helper scripts for the Fields2Cover coverage planner.
+ This package contains scripts only; runtime Python deps like open3d/fields2cover may need
+ to be installed separately depending on your system.

@@ -1,0 +1,31 @@
+---
+description: Keep answers to questions short and to the point
+alwaysApply: true
+---
+
+# Concise Answers
+
+Keep answers to questions **short**. The user does not read long walls of text.
+
+## Rules
+
+- Lead with the **direct answer in 1-3 sentences**. Nothing else above it.
+- Default ceiling: **~15 lines of prose total**. Hard ceiling: **~30 lines** even for complex questions.
+- **One** code reference / snippet only, and only if it's the actual evidence for the answer. No "compare with…" sections unless the user asks.
+- No section headers (`##`, `###`) in answers under ~15 lines. Use them only when an answer genuinely has 3+ distinct topics.
+- No "Why this happens" + "Compare with X" + "How to fix" trios unless the user asks for the fix or the comparison. Default to just the *why*.
+- Cut: restating the question, summarizing the codebase, listing every file touched, "let me know if…" closers.
+- If the user asks "why does X not Y", answer **why** — don't pre-emptively write the patch.
+- Prefer plain sentences over bullet lists when ≤3 items.
+
+## When to expand
+
+Only when the user explicitly asks: "explain in detail", "walk me through", "show me the fix", "give me the full trace", etc. Otherwise, stay short.
+
+## Example
+
+❌ Bad — 200 lines, 4 sections, full trace, comparison table, fix sketch.
+
+✅ Good (matches what the user wanted from the "complete mission doesn't disarm" question):
+
+> Complete Mission never sends `request_axis_state → IDLE` to the ODrive. It just zeroes the Twist (`setScanManualOverride(false)`) and then `pkill`s the launch processes. Killing the `odrive_can` node doesn't disarm the axes — they stay in `CLOSED_LOOP_CONTROL` until something explicitly requests `IDLE`. E-Stop and the Q-key disarm both call `sendExplorationAxisStateRequest(kOdriveAxisStateIdle)`; the Complete Mission path in `AppShellWindow::onPlannerCompleteMissionRequested` (`cpp/src/app_shell.cpp:1375`) skips that step.

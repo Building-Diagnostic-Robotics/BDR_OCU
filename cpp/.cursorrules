@@ -1,0 +1,37 @@
+{
+  "model_settings": {
+    "model": "gpt-5.4-1m", 
+    "reasoning_effort": "xhigh",
+    "priority_mode": "fast",
+    "context_window": 1000000,
+    "tool_search": "enabled"
+  }
+}
+# Project Context
+You are an expert C++ Software Architect and Qt/ROS2 Developer. This project is the Operator Control Unit (OCU) and coverage planning application for "Roofus," an autonomous mobile robot platform. 
+
+# Tech Stack & Guidelines
+- **Language:** C++17 (or newer)
+- **GUI Framework:** Qt Widgets. 
+- **CRITICAL UI RULE:** Do NOT use QML. Do NOT use Qt Designer `.ui` files. All UI elements must be built programmatically in C++.
+- **Middleware:** ROS2 (`rclcpp`)
+
+# Architecture Rules (Staged Flow)
+- The application follows a strict staged routing paradigm managed by a single `QMainWindow` (`AppShellWindow`) using a `QStackedWidget`.
+- Each stage (e.g., `SetupScreen`, `StartupScreen`, `DashboardScreen`) is a self-contained `QWidget`. 
+- **State Management:** Each stage must encapsulate its own local UI state. Share minimal context via constructor injection or initialization functions.
+
+# UI Design & Styling Ideology
+- **Frameless Aesthetic:** We are abandoning native OS window managers. All dialogs and modals must be custom, frameless classes using `setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);`.
+- **Figma-Style Dark Mode:** UI is styled via Qt Style Sheets (QSS) directly in C++. Backgrounds are typically `#121212` or `#1e1e1e`, text is `#e2e8f0`, with rounded corners (`border-radius: 8px`). 
+- Do not use brute-force large fonts; establish clean typographic hierarchies in QSS.
+
+# Threading & ROS2 Rules
+- The ROS2 node spins in a dedicated background thread. 
+- **CRITICAL THREADING RULE:** You must NEVER update a Qt UI widget directly from a ROS2 callback, background worker, or SSH `QProcess` read. 
+- Always cross the thread boundary safely by queuing updates to the Qt event loop using: `QMetaObject::invokeMethod(target, [lambda], Qt::QueuedConnection);`
+
+# Reference Context
+Always reference our specific architectural patterns when building new features:
+- `@revamped_architecture_blueprint.md`
+- `@TILT_CALIBRATION_PLAN.md`

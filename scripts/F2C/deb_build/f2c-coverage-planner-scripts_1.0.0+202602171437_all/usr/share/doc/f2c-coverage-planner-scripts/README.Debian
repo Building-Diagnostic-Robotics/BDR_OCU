@@ -1,0 +1,10 @@
+f2c-coverage-planner-scripts
+===========================
+
+Run:
+  f2c_coverage_planner
+
+Notes:
+- This package installs the Python scripts only.
+- You likely also need (via apt or pip): open3d, fields2cover, alphashape.
+- If you are using ROS2, ensure the appropriate ROS2 environment is sourced.

@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/assets">
+    <file>assets/bdr_logo.png</file>
+  </qresource>
+</RCC>
+

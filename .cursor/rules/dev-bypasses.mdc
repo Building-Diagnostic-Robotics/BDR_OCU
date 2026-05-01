@@ -1,0 +1,38 @@
+---
+description: Remind about intentional dev bypasses that must be re-wired before release
+globs: cpp/src/setup_screen.cpp,cpp/src/startup_screen.cpp,cpp/src/dashboard_screen.cpp,cpp/src/planner_screen.cpp,cpp/src/app_shell.cpp
+alwaysApply: false
+---
+
+# Intentional dev bypasses in the BDR Coverage Planner
+
+Several stages in this app are short-circuited on purpose so UI work can
+happen without a live robot. Do **not** remove these as "cleanup." They are
+tracked in `docs/DEV_BYPASSES.md`.
+
+When editing any of the files matched by this rule:
+
+- If you are about to delete, disable, or refactor away one of the bypasses
+  **without the user explicitly asking for it**, stop and surface the
+  checklist entry in `docs/DEV_BYPASSES.md` instead.
+- If the user asks to rewire a stage, update `docs/DEV_BYPASSES.md` (tick
+  the box) in the same change.
+- If you introduce a new temporary short-circuit, tag it with
+  `// BDR_REWIRE: <short note>` and add a matching bullet to
+  `docs/DEV_BYPASSES.md`.
+
+Known bypass sites:
+
+- `setup_screen.cpp` — dev bypass in `submit()`; hardcoded ping target.
+- `startup_screen.cpp` — `kEnableLaunchDashboardPassthrough = true`.
+- `app_shell.cpp` — `DashboardScreen::viewRecordingsRequested` intentionally
+  unconnected.
+- `planner_screen.cpp` — `nextStageRequested` has no emitter/receiver; no
+  waypoint publish / autonomy handoff yet.
+- `dashboard_screen.cpp` — info-card values are placeholders.
+
+Before any "prepare for release" task, run:
+
+```bash
+rg -n 'BDR_REWIRE|Dev bypass|dev bypass|kEnable.*Passthrough' cpp/
+```

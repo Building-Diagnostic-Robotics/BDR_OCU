@@ -1,0 +1,10 @@
+<svg width="100%" height="100%" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Icon">
+<circle cx="8" cy="8" r="6" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333"/>
+<circle cx="8" cy="8" r="2.66667" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333"/>
+<path d="M8 0.666667V2.66667" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333" stroke-linecap="round"/>
+<path d="M8 13.3333V15.3333" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333" stroke-linecap="round"/>
+<path d="M0.666667 8H2.66667" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333" stroke-linecap="round"/>
+<path d="M13.3333 8H15.3333" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333" stroke-linecap="round"/>
+</g>
+</svg>

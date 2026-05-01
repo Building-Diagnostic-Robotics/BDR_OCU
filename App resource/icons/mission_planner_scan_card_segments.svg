@@ -1,0 +1,10 @@
+<svg width="100%" height="100%" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Icon">
+<path d="M5.33333 4H14" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M5.33333 8H14" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M5.33333 12H14" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="2.66667" cy="4" r="0.666667" fill="var(--fill-0, #FFFFFF)"/>
+<circle cx="2.66667" cy="8" r="0.666667" fill="var(--fill-0, #FFFFFF)"/>
+<circle cx="2.66667" cy="12" r="0.666667" fill="var(--fill-0, #FFFFFF)"/>
+</g>
+</svg>

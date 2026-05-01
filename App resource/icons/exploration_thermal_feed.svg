@@ -1,0 +1,72 @@
+<svg width="320" height="160" viewBox="0 0 320 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="26" y1="18" x2="296" y2="142" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0A1020"/>
+      <stop offset="0.45" stop-color="#101B3A"/>
+      <stop offset="1" stop-color="#180B28"/>
+    </linearGradient>
+    <radialGradient id="hotA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="translate(105 102) rotate(90) scale(68 84)">
+      <stop offset="0" stop-color="#FFF59D"/>
+      <stop offset="0.22" stop-color="#FFB300"/>
+      <stop offset="0.48" stop-color="#FF5722"/>
+      <stop offset="0.8" stop-color="#7C3AED" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#7C3AED" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="hotB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="translate(228 70) rotate(90) scale(52 66)">
+      <stop offset="0" stop-color="#FDE68A"/>
+      <stop offset="0.26" stop-color="#FB923C"/>
+      <stop offset="0.58" stop-color="#EF4444"/>
+      <stop offset="0.84" stop-color="#2563EB" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#2563EB" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="floor" x1="160" y1="96" x2="160" y2="154" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#09111F" stop-opacity="0"/>
+      <stop offset="1" stop-color="#030712" stop-opacity="0.82"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="320" height="160" rx="10" fill="#020617"/>
+  <rect x="1" y="1" width="318" height="158" rx="9" fill="url(#bg)"/>
+
+  <g opacity="0.2" stroke="#94A3B8" stroke-width="0.6">
+    <path d="M32 0V160"/>
+    <path d="M96 0V160"/>
+    <path d="M160 0V160"/>
+    <path d="M224 0V160"/>
+    <path d="M288 0V160"/>
+    <path d="M0 32H320"/>
+    <path d="M0 64H320"/>
+    <path d="M0 96H320"/>
+    <path d="M0 128H320"/>
+  </g>
+
+  <rect x="0" y="0" width="320" height="160" rx="10" fill="url(#hotA)"/>
+  <rect x="0" y="0" width="320" height="160" rx="10" fill="url(#hotB)"/>
+
+  <g opacity="0.9">
+    <path d="M60 116C60 87.2812 83.2812 64 112 64H154C182.719 64 206 87.2812 206 116V126H60V116Z"
+          fill="#3B1D7A" fill-opacity="0.68"/>
+    <path d="M78 124C78 97.4903 99.4903 76 126 76C152.51 76 174 97.4903 174 124V126H78V124Z"
+          fill="#F97316" fill-opacity="0.82"/>
+    <rect x="210" y="48" width="44" height="56" rx="8" fill="#1D4ED8" fill-opacity="0.52"/>
+    <rect x="218" y="56" width="28" height="40" rx="6" fill="#F59E0B" fill-opacity="0.75"/>
+    <circle cx="103" cy="98" r="10" fill="#FDE047" fill-opacity="0.92"/>
+    <circle cx="141" cy="92" r="13" fill="#FB7185" fill-opacity="0.72"/>
+    <circle cx="234" cy="76" r="9" fill="#FDE047" fill-opacity="0.88"/>
+  </g>
+
+  <rect y="96" width="320" height="64" fill="url(#floor)"/>
+
+  <g opacity="0.75" stroke="#CBD5E1" stroke-width="0.9">
+    <path d="M24 22H296"/>
+    <path d="M24 138H296"/>
+  </g>
+
+  <g fill="#E2E8F0" font-family="Liberation Mono, monospace" font-size="10" opacity="0.8">
+    <text x="24" y="20">THERMAL FEED</text>
+    <text x="230" y="20">MAX 24.1C</text>
+    <text x="24" y="150">LOW BANDWIDTH SUMMARY</text>
+  </g>
+</svg>

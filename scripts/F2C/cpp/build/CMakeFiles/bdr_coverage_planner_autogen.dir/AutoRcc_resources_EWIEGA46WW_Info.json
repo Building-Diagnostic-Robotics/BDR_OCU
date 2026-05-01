@@ -1,0 +1,22 @@
+{
+	"BUILD_DIR" : "/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp/build/bdr_coverage_planner_autogen",
+	"CMAKE_BINARY_DIR" : "/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp/build",
+	"CMAKE_CURRENT_BINARY_DIR" : "/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp/build",
+	"CMAKE_CURRENT_SOURCE_DIR" : "/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp",
+	"CMAKE_SOURCE_DIR" : "/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp",
+	"INCLUDE_DIR" : "/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp/build/bdr_coverage_planner_autogen/include",
+	"INPUTS" : 
+	[
+		"/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp/assets/bdr_logo.png"
+	],
+	"LOCK_FILE" : "/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp/build/CMakeFiles/bdr_coverage_planner_autogen.dir/AutoRcc_resources_EWIEGA46WW_Lock.lock",
+	"MULTI_CONFIG" : false,
+	"OPTIONS" : [ "-name", "resources" ],
+	"OUTPUT_CHECKSUM" : "EWIEGA46WW",
+	"OUTPUT_NAME" : "qrc_resources.cpp",
+	"RCC_EXECUTABLE" : "/usr/lib/qt5/bin/rcc",
+	"RCC_LIST_OPTIONS" : [ "--list" ],
+	"SETTINGS_FILE" : "/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp/build/CMakeFiles/bdr_coverage_planner_autogen.dir/AutoRcc_resources_EWIEGA46WW_Used.txt",
+	"SOURCE" : "/home/raj/BDR/pilot_ws/src/pilot_control/scripts/F2C/cpp/resources.qrc",
+	"VERBOSITY" : 0
+}

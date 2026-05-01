@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+
+APP_DIR="/usr/lib/f2c-coverage-planner-scripts"
+
+# Prefer python3 from PATH
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 not found. Please install python3." >&2
+  exit 127
+fi
+
+exec python3 "${APP_DIR}/f2c_gui.py" "$@"

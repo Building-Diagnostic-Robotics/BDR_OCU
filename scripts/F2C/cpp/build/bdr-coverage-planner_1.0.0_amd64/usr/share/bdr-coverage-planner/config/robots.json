@@ -1,0 +1,21 @@
+{
+  "robots": [
+    {
+      "robot_id": "Roofus#001",
+      "host": "192.168.168.101",
+      "ssh_user": "roofus",
+      "robot_data_path": "/R_DATA",
+      "default_remote_upload_dir": "/R_DATA/waypoints",
+      "known_hosts_entry": ""
+    },
+    {
+      "robot_id": "Roofus#002",
+      "host": "192.168.168.102",
+      "ssh_user": "roofus",
+      "robot_data_path": "/R_DATA",
+      "default_remote_upload_dir": "/R_DATA/waypoints",
+      "known_hosts_entry": ""
+    }
+  ]
+}
+
