@@ -110,6 +110,12 @@ private:
     void publishExplorationTeleopTwist(double linear_x, double angular_z);
     void sendExplorationAxisStateRequest(int requested_state);
     void sendExplorationGprPowerOffRequest();
+    // Asks the coordinator to stop continuous mission GNSS logging and
+    // finalize mission_config.json, then invokes `done()` on the Qt thread.
+    // Always invokes `done()` exactly once — on success, on service error,
+    // or on the 6 s safety ceiling — so the Complete Mission state machine
+    // always advances to pipeline teardown.
+    void finalizeMissionDataCollection(std::function<void()> done);
     QString detectLocalIP() const;
     QString robotHostFromSettings() const;
     bool isLocalProcessRunning(const QString& process_name) const;
@@ -272,11 +278,28 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr exploration_save_map_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr planner_dc_pause_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr planner_dc_resume_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr planner_dc_finalize_mission_client_;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr exploration_left_axis_client_;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr exploration_right_axis_client_;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr exploration_gpr_axis_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr exploration_gpr_power_off_client_;
     bool planner_estop_active_ = false;
+
+    // Complete Mission disarm-and-teardown sequencing. We send IDLE to all
+    // axes, then poll the controller-status feedback for left/right (the
+    // GPR has no observable axis_state for this app) until both report
+    // IDLE before tearing down the launch tree. Hard ceiling at 2 s so
+    // the UI never wedges if telemetry stops mid-mission.
+    QTimer* planner_complete_mission_wait_timer_ = nullptr;
+    int planner_complete_mission_wait_ticks_ = 0;
+
+    // /dc/finalize_mission async wait. We send the request after motors
+    // disarm and before tearing down the launch tree, so the gps_driver
+    // gets a chance to flush the continuous mission .ubx cleanly. Hard
+    // ceiling at 6 s so the UI never wedges if the service hangs.
+    QTimer* planner_finalize_mission_wait_timer_ = nullptr;
+    int planner_finalize_mission_wait_ticks_ = 0;
+    bool planner_finalize_mission_in_flight_ = false;
 };
 
 }  // namespace f2c_cpp

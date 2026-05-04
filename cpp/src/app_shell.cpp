@@ -1373,10 +1373,74 @@ void AppShellWindow::onPlannerEmergencyStopRequested() {
 }
 
 void AppShellWindow::onPlannerCompleteMissionRequested() {
-    qInfo("[AppShell] PlannerScreen::completeMissionRequested — stopping pipeline and returning to dashboard");
-    onExplorationStopPipelineRequested();
-    planner_estop_active_ = false;
-    goToStage3();
+    qInfo("[AppShell] PlannerScreen::completeMissionRequested — disarming motors before pipeline teardown");
+
+    // Phase 1: command IDLE on all axes (left + right + GPR). Async — the
+    // request is queued on the rclcpp wire and shipped by the background
+    // spinner. We then poll the controller status feedback for left/right
+    // (GPR has no observable axis_state in this app) and only proceed once
+    // both report IDLE, so the launch tree stays alive long enough for the
+    // service request to actually land before we kill odrive_can.
+    sendExplorationAxisStateRequest(kOdriveAxisStateIdle);
+
+    // Idempotent stop of any prior in-flight wait (e.g. user hammered the
+    // button before disabled state propagated).
+    if (planner_complete_mission_wait_timer_ &&
+        planner_complete_mission_wait_timer_->isActive()) {
+        planner_complete_mission_wait_timer_->stop();
+    }
+    planner_complete_mission_wait_ticks_ = 0;
+
+    auto proceed = [this](bool timed_out) {
+        if (planner_complete_mission_wait_timer_) {
+            planner_complete_mission_wait_timer_->stop();
+        }
+        if (timed_out) {
+            qWarning("[AppShell] Complete Mission: motor disarm not confirmed within 2s — proceeding with finalize anyway");
+        } else {
+            qInfo("[AppShell] Complete Mission: motors confirmed IDLE — finalizing mission GNSS before teardown");
+        }
+        // Finalize the continuous mission GNSS log BEFORE we kill the launch
+        // tree. The coordinator stops gps_driver raw logging cleanly and
+        // writes mission_config.json; if the service hangs or errors, the
+        // helper still invokes the continuation after a 6 s safety ceiling
+        // so teardown always proceeds.
+        finalizeMissionDataCollection([this]() {
+            onExplorationStopPipelineRequested();
+            planner_estop_active_ = false;
+            goToStage3();
+        });
+    };
+
+    // Fast path: if for some reason both axes are already IDLE, skip the wait.
+    if (exploration_left_axis_state_ == kOdriveAxisStateIdle &&
+        exploration_right_axis_state_ == kOdriveAxisStateIdle) {
+        proceed(/*timed_out=*/false);
+        return;
+    }
+
+    if (!planner_complete_mission_wait_timer_) {
+        planner_complete_mission_wait_timer_ = new QTimer(this);
+        planner_complete_mission_wait_timer_->setInterval(50);
+        planner_complete_mission_wait_timer_->setSingleShot(false);
+    }
+
+    // Disconnect any previous lambda so we don't accumulate handlers across
+    // multiple Complete Mission cycles.
+    disconnect(planner_complete_mission_wait_timer_, &QTimer::timeout, nullptr, nullptr);
+    connect(planner_complete_mission_wait_timer_, &QTimer::timeout, this, [this, proceed]() {
+        ++planner_complete_mission_wait_ticks_;
+        if (exploration_left_axis_state_ == kOdriveAxisStateIdle &&
+            exploration_right_axis_state_ == kOdriveAxisStateIdle) {
+            proceed(/*timed_out=*/false);
+            return;
+        }
+        // 50 ms × 40 = 2000 ms hard ceiling.
+        if (planner_complete_mission_wait_ticks_ >= 40) {
+            proceed(/*timed_out=*/true);
+        }
+    });
+    planner_complete_mission_wait_timer_->start();
 }
 
 void AppShellWindow::publishExplorationTeleopTwist(double linear_x, double angular_z) {
@@ -1400,22 +1464,51 @@ void AppShellWindow::sendExplorationAxisStateRequest(int requested_state) {
         return;
     }
 
-    auto send_request = [requested_state](
-                            const rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr& client) {
+    // host_teleop.cpp does wait_for_service(1s) at startup, which forces
+    // zenoh-ros2dds discovery to fully propagate for all three clients.
+    // Our orchestrator never did that, so /right and /gpr discovery often
+    // never resolved from this node's view — async_send_request would
+    // silently no-op for those clients (rclcpp has no known service
+    // server to route to). A brief per-call wait_for_service settles
+    // discovery on first use; once cached, subsequent calls return
+    // immediately so the UI stall is one-time and tiny.
+    auto send_request = [this, requested_state](
+                            const rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr& client,
+                            const char* axis_name) {
         if (!client) {
             return;
         }
-        if (!client->service_is_ready()) {
+        const QString axis_label = QString::fromLatin1(axis_name);
+        const int target_state = requested_state;
+        if (!client->wait_for_service(std::chrono::milliseconds(150))) {
+            qWarning("[AppShell] %s axis: service not available (discovery did not settle in 150ms) — request dropped",
+                     axis_label.toUtf8().constData());
             return;
         }
         auto request = std::make_shared<odrive_can::srv::AxisState::Request>();
         request->axis_requested_state = requested_state;
-        (void)client->async_send_request(request);
+        (void)client->async_send_request(
+            request,
+            [axis_label, target_state](
+                rclcpp::Client<odrive_can::srv::AxisState>::SharedFuture future) {
+                try {
+                    auto result = future.get();
+                    qInfo("[AppShell] %s axis: state=%d errors=%d (requested %d)",
+                          axis_label.toUtf8().constData(),
+                          result->axis_state,
+                          result->active_errors,
+                          target_state);
+                } catch (const std::exception& e) {
+                    qWarning("[AppShell] %s axis request failed: %s",
+                             axis_label.toUtf8().constData(),
+                             e.what());
+                }
+            });
     };
 
-    send_request(exploration_left_axis_client_);
-    send_request(exploration_right_axis_client_);
-    send_request(exploration_gpr_axis_client_);
+    send_request(exploration_left_axis_client_, "left");
+    send_request(exploration_right_axis_client_, "right");
+    send_request(exploration_gpr_axis_client_, "gpr");
 }
 
 void AppShellWindow::sendExplorationGprPowerOffRequest() {
@@ -1430,6 +1523,84 @@ void AppShellWindow::sendExplorationGprPowerOffRequest() {
     }
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
     (void)exploration_gpr_power_off_client_->async_send_request(request);
+}
+
+void AppShellWindow::finalizeMissionDataCollection(std::function<void()> done) {
+    auto run_done = [this, done]() {
+        planner_finalize_mission_in_flight_ = false;
+        if (planner_finalize_mission_wait_timer_) {
+            planner_finalize_mission_wait_timer_->stop();
+        }
+        if (done) {
+            done();
+        }
+    };
+
+    if (!exploration_ros_node_) {
+        ensureExplorationRosInterfaces();
+    }
+    if (!planner_dc_finalize_mission_client_) {
+        qWarning("[AppShell] /dc/finalize_mission client unavailable — skipping mission finalize");
+        run_done();
+        return;
+    }
+    if (planner_finalize_mission_in_flight_) {
+        qInfo("[AppShell] /dc/finalize_mission already in flight — coalescing to single call");
+        return;
+    }
+
+    // Discovery may not have settled if the operator hits Complete Mission
+    // immediately after launch; give it a brief one-time wait. If the service
+    // never appears (e.g. coordinator crashed), don't block teardown.
+    if (!planner_dc_finalize_mission_client_->wait_for_service(std::chrono::milliseconds(250))) {
+        qWarning("[AppShell] /dc/finalize_mission service not available — skipping mission finalize");
+        run_done();
+        return;
+    }
+
+    planner_finalize_mission_in_flight_ = true;
+    planner_finalize_mission_wait_ticks_ = 0;
+    qInfo("[AppShell] Sending /dc/finalize_mission to stop continuous GNSS and finalize mission_config.json");
+
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    (void)planner_dc_finalize_mission_client_->async_send_request(
+        request,
+        [this, run_done](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+            QMetaObject::invokeMethod(this, [this, run_done, future]() mutable {
+                if (!planner_finalize_mission_in_flight_) {
+                    return;  // 6 s ceiling already fired; nothing to do.
+                }
+                try {
+                    auto result = future.get();
+                    if (result && result->success) {
+                        qInfo("[AppShell] /dc/finalize_mission OK: %s",
+                              result->message.c_str());
+                    } else {
+                        qWarning("[AppShell] /dc/finalize_mission reported failure: %s",
+                                 result ? result->message.c_str() : "(null)");
+                    }
+                } catch (const std::exception& e) {
+                    qWarning("[AppShell] /dc/finalize_mission exception: %s", e.what());
+                }
+                run_done();
+            }, Qt::QueuedConnection);
+        });
+
+    if (!planner_finalize_mission_wait_timer_) {
+        planner_finalize_mission_wait_timer_ = new QTimer(this);
+        planner_finalize_mission_wait_timer_->setInterval(50);
+        planner_finalize_mission_wait_timer_->setSingleShot(false);
+    }
+    disconnect(planner_finalize_mission_wait_timer_, &QTimer::timeout, nullptr, nullptr);
+    connect(planner_finalize_mission_wait_timer_, &QTimer::timeout, this, [this, run_done]() {
+        ++planner_finalize_mission_wait_ticks_;
+        // 50 ms × 120 = 6000 ms hard ceiling.
+        if (planner_finalize_mission_wait_ticks_ >= 120) {
+            qWarning("[AppShell] /dc/finalize_mission did not respond within 6s — proceeding with teardown anyway");
+            run_done();
+        }
+    });
+    planner_finalize_mission_wait_timer_->start();
 }
 
 void AppShellWindow::onExplorationStopPipelineRequested() {
@@ -1719,6 +1890,8 @@ void AppShellWindow::ensureExplorationRosInterfaces() {
         exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/pause");
     planner_dc_resume_client_ =
         exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/resume");
+    planner_dc_finalize_mission_client_ =
+        exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/finalize_mission");
     exploration_left_axis_client_ =
         exploration_ros_node_->create_client<odrive_can::srv::AxisState>("/left/request_axis_state");
     exploration_right_axis_client_ =
