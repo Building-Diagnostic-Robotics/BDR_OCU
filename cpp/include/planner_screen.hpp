@@ -58,6 +58,7 @@ public:
     void setTopLockChipState(const QString& text, ValueTone tone);
     void setTopMotorsChipState(const QString& text, ValueTone tone);
     void notifyScanSegmentCompleted();
+    void notifyScanSegmentSaved();
 
     // BDR_REWIRE: dev-only hook used by AppShellWindow when the env var
     // BDR_DEV_START_AT_SCAN=1 is set, so we can boot directly into the
@@ -610,6 +611,12 @@ private:
     bool scan_estop_latched_ = false;
     bool scan_pause_explicit_ = false;
     bool scan_manual_override_active_ = false;
+    // True between segment_complete (final waypoint reached) and segment_saved
+    // (controller confirmed /dc/end_and_save returned). Blocks the next-segment
+    // publish so the GP8800 actuator finishes its retract cycle before any
+    // new /dc/start fires. Also drives the "Saving…" pill + Continue lockout.
+    bool scan_dc_save_in_flight_ = false;
+    int scan_pending_next_segment_idx_ = -1;
     bool scan_manual_override_engaged_once_ = false;
     bool scan_manual_resume_after_override_ = false;
     bool scan_camera_stream_requested_ = false;

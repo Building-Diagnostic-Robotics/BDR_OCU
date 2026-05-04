@@ -7736,6 +7736,8 @@ void PlannerScreen::enterScanStage() {
     cache.scan_active_segment_index = firstPendingSelectedSegmentIndex();
     scan_active_segment_path_hint_ = 0;
     scan_estop_latched_ = false;
+    scan_dc_save_in_flight_ = false;
+    scan_pending_next_segment_idx_ = -1;
     scan_last_quality_sample_ms_ = 0;
     scan_quality_segment_index_ = -1;
     if (scan_tick_timer_) {
@@ -7815,6 +7817,14 @@ void PlannerScreen::startSegmentExecution(int segment_index, bool resume_action)
 }
 
 void PlannerScreen::notifyScanSegmentCompleted() {
+    // Phase A of the per-segment hand-off. Fires when the controller
+    // publishes "segment_complete" (final waypoint reached, just before
+    // _dc_end_sequence kicks off). The GP8800 actuator is still retracting
+    // and /dc/end_and_save has not returned yet — we MUST NOT publish the
+    // next segment here. We just mark the segment done, freeze the timer,
+    // park the run-state in "Saving…", and stash the next index for Phase B
+    // (notifyScanSegmentSaved) to consume once the controller confirms the
+    // save.
     SessionCache& cache = activeSession();
     if (cache.scan_run_state != ScanRunState::Running) {
         return;
@@ -7837,8 +7847,29 @@ void PlannerScreen::notifyScanSegmentCompleted() {
     cache.scan_run_state = ScanRunState::Paused;
     scan_pause_explicit_ = false;
     scan_manual_resume_after_override_ = false;
+    scan_dc_save_in_flight_ = true;
+    scan_pending_next_segment_idx_ =
+        firstPendingSelectedSegmentIndex(completed_idx + 1);
 
-    const int next_idx = firstPendingSelectedSegmentIndex(completed_idx + 1);
+    recomputeScanAggregateStats();
+    updateScanRunUi();
+    updateFooter();
+}
+
+void PlannerScreen::notifyScanSegmentSaved() {
+    // Phase B of the per-segment hand-off. Fires when the controller's
+    // _dc_end_sequence has finished /dc/end_and_save and the GP8800
+    // actuator is fully retracted. Now safe to either auto-advance
+    // (automatic mode) or prompt the operator (manual mode).
+    if (!scan_dc_save_in_flight_) {
+        return;
+    }
+    scan_dc_save_in_flight_ = false;
+
+    SessionCache& cache = activeSession();
+    const int next_idx = scan_pending_next_segment_idx_;
+    scan_pending_next_segment_idx_ = -1;
+
     if (next_idx < 0) {
         cache.scan_run_state = ScanRunState::Completed;
         cache.scan_active_segment_index = -1;
@@ -7853,10 +7884,19 @@ void PlannerScreen::notifyScanSegmentCompleted() {
     updateScanRunUi();
     updateFooter();
 
+    const bool automatic_mode =
+        cache.scan_progression_mode != QStringLiteral("manual");
+    if (automatic_mode) {
+        startSegmentExecution(next_idx, /*resume_action=*/false);
+        updateScanRunUi();
+        updateFooter();
+        return;
+    }
+
     const int choice = BdrMessageBox::question(
         this,
         QStringLiteral("Segment complete"),
-        QStringLiteral("Segment finished. Proceed to the next segment now?"),
+        QStringLiteral("Segment finished and saved. Proceed to the next segment now?"),
         BdrMessageBox::Yes);
     if (choice == BdrMessageBox::Yes) {
         startSegmentExecution(next_idx, /*resume_action=*/false);
@@ -7903,6 +7943,9 @@ void PlannerScreen::updateScanRunUi() {
         if (scan_manual_override_active_) {
             pill_text = QStringLiteral("Manual Override");
             dot_color = QStringLiteral("#F59E0B");
+        } else if (scan_dc_save_in_flight_) {
+            pill_text = QStringLiteral("Saving…");
+            dot_color = QStringLiteral("#F59E0B");
         } else {
             switch (run_state) {
                 case ScanRunState::Idle:      pill_text = QStringLiteral("Ready");      dot_color = QStringLiteral("#71717B"); break;
@@ -7942,6 +7985,14 @@ void PlannerScreen::updateScanRunUi() {
         }
         if (scan_manual_override_active_ && run_state != ScanRunState::Completed) {
             label = QStringLiteral("Manual Override");
+            enabled = false;
+            icon_path = QStringLiteral(":/assets/missionplanner/scan_pause.svg");
+        }
+        if (scan_dc_save_in_flight_ && run_state != ScanRunState::Completed) {
+            // Lock out Continue/Resume while the controller is mid
+            // /dc/end_and_save. Re-enabled by notifyScanSegmentSaved
+            // (Phase B) once the GP8800 actuator finishes retracting.
+            label = QStringLiteral("Saving…");
             enabled = false;
             icon_path = QStringLiteral(":/assets/missionplanner/scan_pause.svg");
         }
@@ -8333,6 +8384,12 @@ void PlannerScreen::onScanEmergencyStopClicked() {
         if (scan_tick_timer_) {
             scan_tick_timer_->stop();
         }
+        // Operator pre-empted any in-flight DC save handoff. Drop the
+        // pending-next-segment pointer so we don't auto-advance once
+        // /dc/end_and_save eventually returns and segment_saved fires
+        // — the operator is now driving via E-Stop / Resume instead.
+        scan_dc_save_in_flight_ = false;
+        scan_pending_next_segment_idx_ = -1;
     } else {
         scan_estop_latched_ = false;
         const bool waiting_for_next_segment =

@@ -2518,10 +2518,18 @@ void AppShellWindow::onPlannerScanExecutionStatus(const std_msgs::msg::String::S
         return;
     }
     const QString payload = QString::fromStdString(msg->data).trimmed();
-    if (!payload.startsWith(QStringLiteral("segment_complete"))) {
+    if (payload.startsWith(QStringLiteral("segment_complete"))) {
+        // Phase A: bot reached final waypoint. DC end-and-save is in flight
+        // on the controller side — do not advance to the next segment yet.
+        stage5_->notifyScanSegmentCompleted();
         return;
     }
-    stage5_->notifyScanSegmentCompleted();
+    if (payload.startsWith(QStringLiteral("segment_saved"))) {
+        // Phase B: controller has confirmed /dc/end_and_save returned and the
+        // GP8800 actuator has retracted. Safe to advance / prompt operator.
+        stage5_->notifyScanSegmentSaved();
+        return;
+    }
 }
 
 void AppShellWindow::onExplorationOdom(const nav_msgs::msg::Odometry::SharedPtr msg) {
