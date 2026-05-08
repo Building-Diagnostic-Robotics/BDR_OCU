@@ -1,0 +1,5 @@
+<svg width="100%" height="100%" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Icon">
+<path d="M2.66667 4H13.3333M6 4V2.66667C6 2.29848 6.29848 2 6.66667 2H9.33333C9.70152 2 10 2.29848 10 2.66667V4M11.3333 4V13.3333C11.3333 13.7015 11.0349 14 10.6667 14H5.33333C4.96514 14 4.66667 13.7015 4.66667 13.3333V4H11.3333ZM6.66667 7.33333V10.6667M9.33333 7.33333V10.6667" stroke="var(--stroke-0, #FFFFFF)" stroke-width="1.33333" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+</svg>

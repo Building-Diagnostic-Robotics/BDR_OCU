@@ -1,5 +1,7 @@
 #include "exploration_screen.hpp"
 
+#include "components/auto_hide_scroll_bar.hpp"
+
 #include "coverage_gui.hpp"
 
 #include <algorithm>
@@ -61,6 +63,22 @@ constexpr int kTopStatusMotorsChipHeight = 20;
 constexpr int kTopStatusMotorsChipHorizontalPadding = 9;
 constexpr int kTopStatusMotorsChipSpacing = 6;
 constexpr int kTopStatusWindowControlsReservedWidth = 184;
+
+// Width budget for the bottom-bar action buttons (Start Scan / Start
+// Planning). Both buttons share the same inner layout: contentsMargins
+// (24, 0, 12, 0), 6 px spacing, items = [icon, label, stretch]. The
+// stretch is a real layout item so QHBoxLayout reserves its inter-item
+// spacing (6 px) on both sides of the label, not just before it. Total
+// non-text reservation = 24 + 20 + 6 + 6 + 12 = 68 px.
+constexpr int kExplActionButtonChrome = 24 + 20 + 6 + 6 + 12;
+// Slack on top of QFontMetrics::horizontalAdvance() to cover bold-glyph
+// ink overhang and Qt's sub-pixel-to-integer layout rounding. Tuned
+// empirically against Arimo Bold 16 px.
+constexpr int kExplActionButtonSafetyPad = 8;
+// Floor preserved for the planning button so the single-text "Start Planning"
+// CTA matches its Figma minimum even though the chrome+advance math
+// produces a slightly smaller value.
+constexpr int kExplStartPlanningMinWidth = 185;
 
 QByteArray stripPngIccpChunk(const QByteArray& png_data) {
     static const unsigned char kPngSig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
@@ -1090,6 +1108,10 @@ void ExplorationScreen::setDarkMode(bool dark_mode) {
     if (thermal_pixel_widget_) {
         thermal_pixel_widget_->setDarkMode(dark_mode_);
     }
+    const auto auto_hide_bars = findChildren<AutoHideScrollBar*>();
+    for (auto* bar : auto_hide_bars) {
+        bar->setDarkMode(dark_mode_);
+    }
     applyStyle();
 }
 
@@ -1986,11 +2008,16 @@ void ExplorationScreen::refreshPrimaryActionButton() {
         return;
     }
 
+    // Each state below routes its label through setPrimaryActionLabel() so
+    // the button width snugs to the new text. RunningLocked is special:
+    // pre-sized once for "Running... (60s / 60s)" so the per-second
+    // onMappingLockTick() text update doesn't bounce the button width as
+    // the digit count crosses 9 → 10 / 9 → 60.
     QString button_style;
     switch (primary_action_state_) {
         case PrimaryActionState::StartMapping:
             primary_action_enabled_by_state_ = true;
-            btn_start_scan_text_->setText("Start Mapping");
+            setPrimaryActionLabel(QStringLiteral("Start Mapping"));
             button_style =
                 "QPushButton { background: #10B981; border: none; border-radius: 10px; }"
                 "QPushButton:hover:enabled { background: #34D399; }"
@@ -1998,14 +2025,19 @@ void ExplorationScreen::refreshPrimaryActionButton() {
             break;
         case PrimaryActionState::RunningLocked:
             primary_action_enabled_by_state_ = false;
-            btn_start_scan_text_->setText("Running... (0s / 60s)");
+            // Pre-size for the worst-case digit count (60s / 60s), then
+            // overwrite the text with the actual t=0 string. Subsequent
+            // per-tick setText calls in onMappingLockTick() leave the
+            // button width untouched.
+            setPrimaryActionLabel(QStringLiteral("Running... (60s / 60s)"));
+            btn_start_scan_text_->setText(QStringLiteral("Running... (0s / 60s)"));
             button_style =
                 "QPushButton { background: #27272A; border: none; border-radius: 10px; }"
                 "QPushButton:disabled { background: #27272A; }";
             break;
         case PrimaryActionState::FinishAndSaveMap:
             primary_action_enabled_by_state_ = true;
-            btn_start_scan_text_->setText("Finish & Save Map");
+            setPrimaryActionLabel(QStringLiteral("Finish & Save Map"));
             button_style =
                 "QPushButton { background: #3B82F6; border: none; border-radius: 10px; }"
                 "QPushButton:hover:enabled { background: #2563EB; }"
@@ -2013,21 +2045,21 @@ void ExplorationScreen::refreshPrimaryActionButton() {
             break;
         case PrimaryActionState::SavingMap:
             primary_action_enabled_by_state_ = false;
-            btn_start_scan_text_->setText("Saving map...");
+            setPrimaryActionLabel(QStringLiteral("Saving map..."));
             button_style =
                 "QPushButton { background: #1F2937; border: none; border-radius: 10px; }"
                 "QPushButton:disabled { background: #1F2937; }";
             break;
         case PrimaryActionState::DownloadingMap:
             primary_action_enabled_by_state_ = false;
-            btn_start_scan_text_->setText("Downloading map...");
+            setPrimaryActionLabel(QStringLiteral("Downloading map..."));
             button_style =
                 "QPushButton { background: #1F2937; border: none; border-radius: 10px; }"
                 "QPushButton:disabled { background: #1F2937; }";
             break;
         case PrimaryActionState::MapReady:
             primary_action_enabled_by_state_ = false;
-            btn_start_scan_text_->setText("Map Ready");
+            setPrimaryActionLabel(QStringLiteral("Map Ready"));
             button_style =
                 "QPushButton { background: #0F766E; border: none; border-radius: 10px; }"
                 "QPushButton:disabled { background: #0F766E; }";
@@ -2036,6 +2068,17 @@ void ExplorationScreen::refreshPrimaryActionButton() {
 
     btn_start_scan_->setStyleSheet(button_style);
     btn_start_scan_->setEnabled(primary_action_enabled_by_state_ && !launch_in_progress_);
+}
+
+void ExplorationScreen::setPrimaryActionLabel(const QString& text) {
+    if (!btn_start_scan_ || !btn_start_scan_text_) {
+        return;
+    }
+    btn_start_scan_text_->setText(text);
+    const int text_w =
+        QFontMetrics(btn_start_scan_text_->font()).horizontalAdvance(text);
+    btn_start_scan_->setFixedWidth(
+        kExplActionButtonChrome + text_w + kExplActionButtonSafetyPad);
 }
 
 void ExplorationScreen::resetMappingWorkflowUi() {
@@ -2355,6 +2398,7 @@ void ExplorationScreen::buildUi() {
     launch_diagnostics_view_->setLineWrapMode(QPlainTextEdit::NoWrap);
     launch_diagnostics_view_->setFocusPolicy(Qt::NoFocus);
     launch_diagnostics_view_->setMinimumHeight(130);
+    AutoHideScrollBar::install(launch_diagnostics_view_, dark_mode_);
     progress_layout->addWidget(launch_diagnostics_view_, 1);
     left_panel_layout->addWidget(launch_progress_card_);
 
@@ -2489,14 +2533,15 @@ void ExplorationScreen::buildUi() {
     action_font.setBold(true);
     action_font.setPixelSize(16);
     btn_start_scan_text_->setFont(action_font);
-    const QFontMetrics scan_metrics(action_font);
-    const int scan_text_w = scan_metrics.horizontalAdvance(btn_start_scan_text_->text());
-    const int scan_w = std::max(154, 24 + 20 + 6 + scan_text_w + 12);
-    btn_start_scan_->setFixedWidth(scan_w);
+    btn_start_scan_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     btn_start_scan_layout->addWidget(btn_start_scan_text_, 0, Qt::AlignVCenter);
     btn_start_scan_layout->addStretch(1);
     left_controls_layout->addWidget(btn_start_scan_);
     connect(btn_start_scan_, &QPushButton::clicked, this, &ExplorationScreen::onStartScanClicked);
+    // Width is sized to the current text by setPrimaryActionLabel(); seed it
+    // here so the initial "Start Scan" state renders snug instead of at the
+    // QPushButton default sizeHint.
+    setPrimaryActionLabel(btn_start_scan_text_->text());
 
     auto* move_hint = new QLabel("WASD keys to move", left_controls);
     move_hint->setObjectName("ExplMoveHint");
@@ -2524,10 +2569,15 @@ void ExplorationScreen::buildUi() {
     btn_start_planning_text_ = new QLabel("Start Planning", btn_start_planning_);
     btn_start_planning_text_->setObjectName("ExplActionButtonText");
     btn_start_planning_text_->setFont(action_font);
+    // Single-text CTA — snug-fit via shared chrome + safety pad, with the
+    // Figma 185 px floor preserved.
     const QFontMetrics planning_metrics(action_font);
     const int planning_text_w = planning_metrics.horizontalAdvance(btn_start_planning_text_->text());
-    const int planning_w = std::max(185, 24 + 20 + 6 + planning_text_w + 12);
+    const int planning_w = std::max(
+        kExplStartPlanningMinWidth,
+        kExplActionButtonChrome + planning_text_w + kExplActionButtonSafetyPad);
     btn_start_planning_->setFixedWidth(planning_w);
+    btn_start_planning_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     btn_start_planning_layout->addWidget(btn_start_planning_text_, 0, Qt::AlignVCenter);
     btn_start_planning_layout->addStretch(1);
     controls_layout->addWidget(btn_start_planning_, 0, Qt::AlignVCenter);

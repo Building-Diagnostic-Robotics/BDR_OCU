@@ -272,6 +272,8 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/c++/11/bits/unique_lock.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QHash \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qhash.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QPointer \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qpointer.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QString \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qstring.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QWidget \
@@ -810,16 +812,48 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/boost/mpl/aux_/fold_impl.hpp \
  /usr/include/boost/mpl/aux_/preprocessed/gcc/fold_impl.hpp \
  /home/avenblake/BDR_CP/cpp/include/obstacle_detector.hpp \
- /home/avenblake/BDR_CP/cpp/include/components/bdr_message_box.hpp \
+ /home/avenblake/BDR_CP/cpp/include/preset_manager.hpp \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qobject.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QStringList \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qstringlist.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonobject.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qcborvalue.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qregularexpression.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qurl.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QDir \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qdir.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qfileinfo.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qfile.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qfiledevice.h \
+ /home/avenblake/BDR_CP/cpp/include/components/auto_hide_scroll_bar.hpp \
+ /home/avenblake/BDR_CP/cpp/include/components/bdr_input_dialog.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QDialog \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qdialog.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qwidget.h \
+ /home/avenblake/BDR_CP/cpp/include/components/bdr_message_box.hpp \
  /home/avenblake/BDR_CP/cpp/include/components/fpv_camera_view.hpp \
+ /home/avenblake/BDR_CP/cpp/include/components/pre_scan_checklist_dialog.hpp \
+ /home/avenblake/BDR_CP/cpp/include/components/svg_icon_button.hpp \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QByteArray \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qbytearray.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/QColor \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/qcolor.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QPushButton \
+ /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qpushbutton.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qabstractbutton.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/qicon.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/QPixmap \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/qpixmap.h \
  /home/avenblake/BDR_CP/cpp/include/coverage_gui.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QMainWindow \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qmainwindow.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qtabwidget.h \
- /usr/include/x86_64-linux-gnu/qt5/QtGui/qicon.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QVBoxLayout \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qboxlayout.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qlayout.h \
@@ -830,9 +864,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QGroupBox \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qgroupbox.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qframe.h \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QPushButton \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qpushbutton.h \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qabstractbutton.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QLabel \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qlabel.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QLineEdit \
@@ -845,7 +876,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qspinbox.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qabstractspinbox.h \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/qvalidator.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qregularexpression.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QSpinBox \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QComboBox \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qcombobox.h \
@@ -878,15 +908,9 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QFileDialog \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qfiledialog.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qdir.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qfileinfo.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qfile.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qfiledevice.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qurl.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qdialog.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QProcess \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qprocess.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/QDir \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qdir.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QDate \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QSettings \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qsettings.h \
@@ -932,16 +956,11 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qbasictimer.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qbitarray.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qbuffer.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qbytearray.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qbytearraylist.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qbytearraymatcher.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qcache.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qcalendar.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qcborarray.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qcborvalue.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qcbormap.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qcborstream.h \
@@ -982,9 +1001,7 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qfileinfo.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qfileselector.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qobject.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QStringList \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qstringlist.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qfilesystemwatcher.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qfinalstate.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qabstractstate.h \
@@ -1003,9 +1020,7 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qitemselectionmodel.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qiterator.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonarray.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qjsondocument.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonobject.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qlibrary.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qlibraryinfo.h \
@@ -1044,7 +1059,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qlibrary.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qplugin.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qpoint.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qpointer.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qprocessordetection.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qpropertyanimation.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qvariantanimation.h \
@@ -1807,8 +1821,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/gstreamer-1.0/gst/video/videoorientation.h \
  /usr/include/gstreamer-1.0/gst/video/video-overlay-composition.h \
  /home/avenblake/BDR_CP/cpp/include/transfer_manager.hpp \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/QStringList \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QMutex \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QSet /usr/include/c++/11/deque \
  /usr/include/c++/11/bits/stl_deque.h /usr/include/c++/11/bits/deque.tcc \
@@ -1822,12 +1834,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qcalendarwidget.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QGridLayout \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qgridlayout.h \
- /home/avenblake/BDR_CP/cpp/include/preset_manager.hpp \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
- /home/avenblake/BDR_CP/cpp/include/preset_dialog.hpp \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QInputDialog \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qinputdialog.h \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qlineedit.h \
  /home/avenblake/BDR_CP/cpp/include/teleop_widget.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QDockWidget \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qdockwidget.h \
@@ -1908,27 +1914,35 @@ CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qapplication.h \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/qguiapplication.h \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/qinputmethod.h \
- /usr/include/x86_64-linux-gnu/qt5/QtGui/QColor \
- /usr/include/x86_64-linux-gnu/qt5/QtGui/qcolor.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QCryptographicHash \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/QDoubleValidator \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/qvalidator.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QFile \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QFileInfo \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QGraphicsDropShadowEffect \
+ /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QGraphicsBlurEffect \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qgraphicseffect.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QGraphicsDropShadowEffect \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/QHideEvent \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/QKeySequence \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/qkeysequence.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QListWidgetItem \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QLocale \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/QFont \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/qfont.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/QFontMetrics \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/qfontmetrics.h \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/QPainterPath \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/qpainterpath.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/QPointer \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QRegularExpression \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/QResizeEvent \
+ /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QScrollBar \
+ /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qscrollbar.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QSignalBlocker \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QSizePolicy \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qsizepolicy.h \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/QShowEvent \
+ /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QStyledItemDelegate \
+ /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qstyleditemdelegate.h \
  /usr/include/x86_64-linux-gnu/qt5/QtSvg/QSvgRenderer \
  /usr/include/x86_64-linux-gnu/qt5/QtSvg/qsvgrenderer.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qxmlstream.h \

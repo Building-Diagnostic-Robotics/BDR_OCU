@@ -1823,10 +1823,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/coverage_gui.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qgridlayout.h \
  /home/avenblake/BDR_CP/cpp/include/preset_manager.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
- /home/avenblake/BDR_CP/cpp/include/preset_dialog.hpp \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QInputDialog \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qinputdialog.h \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qlineedit.h \
  /home/avenblake/BDR_CP/cpp/include/teleop_widget.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QDockWidget \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qdockwidget.h \

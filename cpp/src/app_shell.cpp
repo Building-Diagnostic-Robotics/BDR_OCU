@@ -38,6 +38,7 @@
 #include <QtSvg/QSvgRenderer>
 #endif
 
+#include "components/bdr_message_box.hpp"
 #include "dashboard_screen.hpp"
 #include "exploration_screen.hpp"
 #include "planner_screen.hpp"
@@ -722,6 +723,8 @@ void AppShellWindow::goToStage5() {
     pushPlannerTelemetrySnapshot();
     stack_->setCurrentWidget(stage5_);
     pushExplorationTelemetryToUiSlow();
+    // No SetParameters client warmup — sendControllerMaxLinearVelocity now
+    // creates a fresh client per call (see comment there for why).
 }
 
 void AppShellWindow::onThemeToggleChanged(bool dark_mode) {
@@ -817,12 +820,15 @@ void AppShellWindow::ensureStage5() {
     connect(stage5_, &PlannerScreen::scanStartRequested, this, &AppShellWindow::onPlannerScanStartRequested);
     connect(stage5_, &PlannerScreen::scanPauseRequested, this, &AppShellWindow::onPlannerScanPauseRequested);
     connect(stage5_, &PlannerScreen::scanResumeRequested, this, &AppShellWindow::onPlannerScanResumeRequested);
+    connect(stage5_, &PlannerScreen::wakeGprRequested, this, &AppShellWindow::onPlannerWakeGprRequested);
     connect(stage5_, &PlannerScreen::emergencyStopRequested, this, &AppShellWindow::onPlannerEmergencyStopRequested);
     connect(stage5_, &PlannerScreen::scanTeleopTwistRequested, this, &AppShellWindow::onExplorationTeleopTwistRequested);
     connect(stage5_, &PlannerScreen::scanTeleopArmRequested, this, &AppShellWindow::onExplorationTeleopArmRequested);
     connect(stage5_, &PlannerScreen::scanTeleopDisarmRequested, this, &AppShellWindow::onExplorationTeleopDisarmRequested);
     connect(stage5_, &PlannerScreen::scanTeleopGprPowerOffRequested, this, &AppShellWindow::onExplorationTeleopGprPowerOffRequested);
     connect(stage5_, &PlannerScreen::completeMissionRequested, this, &AppShellWindow::onPlannerCompleteMissionRequested);
+    connect(stage5_, &PlannerScreen::cancelScanRequested, this, &AppShellWindow::onPlannerCancelScanRequested);
+    connect(stage5_, &PlannerScreen::discardScanRequested, this, &AppShellWindow::onPlannerDiscardScanRequested);
     stage5_->setDarkMode(dark_mode_);
     stage5_->setRobotId(robot_id_);
     stage5_->setMapPath(latest_saved_map_local_path_);
@@ -1329,7 +1335,12 @@ void AppShellWindow::callPlannerTriggerService(
     (void)client->async_send_request(request);
 }
 
-void AppShellWindow::onPlannerScanStartRequested() {
+void AppShellWindow::onPlannerScanStartRequested(double speed_mps) {
+    // Push the operator-selected cruise speed to the controller BEFORE
+    // arming autonomy. set_parameters mutates max_linear_velocity
+    // synchronously inside the controller, so the autonomy-enable that
+    // follows will see the new cap.
+    sendControllerMaxLinearVelocity(speed_mps);
     if (planner_estop_active_) {
         callPlannerTriggerService(planner_dc_resume_client_);
         sendExplorationAxisStateRequest(kOdriveAxisStateClosedLoopControl);
@@ -1373,10 +1384,68 @@ void AppShellWindow::onPlannerEmergencyStopRequested() {
 }
 
 void AppShellWindow::onPlannerCompleteMissionRequested() {
-    qInfo("[AppShell] PlannerScreen::completeMissionRequested — stopping pipeline and returning to dashboard");
-    onExplorationStopPipelineRequested();
-    planner_estop_active_ = false;
-    goToStage3();
+    qInfo("[AppShell] PlannerScreen::completeMissionRequested — disarming motors before pipeline teardown");
+
+    beginExplorationMotorsIdleWait([this](bool timed_out) {
+        if (timed_out) {
+            qWarning("[AppShell] Complete Mission: motor disarm not confirmed within 2s — proceeding with finalize anyway");
+        } else {
+            qInfo("[AppShell] Complete Mission: motors confirmed IDLE — finalizing mission GNSS before teardown");
+        }
+        finalizeMissionDataCollection([this]() {
+            performExplorationPipelineTeardown();
+            planner_estop_active_ = false;
+            goToStage3();
+        });
+    });
+}
+
+void AppShellWindow::beginExplorationMotorsIdleWait(std::function<void(bool timed_out)> continuation) {
+    // IDLE on all axes (left + right + GPR). Async on rclcpp; poll left/right
+    // feedback until IDLE so the launch tree stays alive long enough for the
+    // request to reach odrive_can.
+    sendExplorationAxisStateRequest(kOdriveAxisStateIdle);
+
+    if (exploration_motors_idle_wait_timer_ && exploration_motors_idle_wait_timer_->isActive()) {
+        exploration_motors_idle_wait_timer_->stop();
+    }
+    exploration_motors_idle_wait_ticks_ = 0;
+
+    auto finish = [this, continuation](bool timed_out) {
+        if (exploration_motors_idle_wait_timer_) {
+            exploration_motors_idle_wait_timer_->stop();
+        }
+        if (continuation) {
+            continuation(timed_out);
+        }
+    };
+
+    if (exploration_left_axis_state_ == kOdriveAxisStateIdle &&
+        exploration_right_axis_state_ == kOdriveAxisStateIdle) {
+        finish(/*timed_out=*/false);
+        return;
+    }
+
+    if (!exploration_motors_idle_wait_timer_) {
+        exploration_motors_idle_wait_timer_ = new QTimer(this);
+        exploration_motors_idle_wait_timer_->setInterval(50);
+        exploration_motors_idle_wait_timer_->setSingleShot(false);
+    }
+
+    disconnect(exploration_motors_idle_wait_timer_, &QTimer::timeout, nullptr, nullptr);
+    connect(exploration_motors_idle_wait_timer_, &QTimer::timeout, this, [this, finish]() {
+        ++exploration_motors_idle_wait_ticks_;
+        if (exploration_left_axis_state_ == kOdriveAxisStateIdle &&
+            exploration_right_axis_state_ == kOdriveAxisStateIdle) {
+            finish(/*timed_out=*/false);
+            return;
+        }
+        // 50 ms × 40 = 2000 ms hard ceiling.
+        if (exploration_motors_idle_wait_ticks_ >= 40) {
+            finish(/*timed_out=*/true);
+        }
+    });
+    exploration_motors_idle_wait_timer_->start();
 }
 
 void AppShellWindow::publishExplorationTeleopTwist(double linear_x, double angular_z) {
@@ -1400,22 +1469,51 @@ void AppShellWindow::sendExplorationAxisStateRequest(int requested_state) {
         return;
     }
 
-    auto send_request = [requested_state](
-                            const rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr& client) {
+    // host_teleop.cpp does wait_for_service(1s) at startup, which forces
+    // zenoh-ros2dds discovery to fully propagate for all three clients.
+    // Our orchestrator never did that, so /right and /gpr discovery often
+    // never resolved from this node's view — async_send_request would
+    // silently no-op for those clients (rclcpp has no known service
+    // server to route to). A brief per-call wait_for_service settles
+    // discovery on first use; once cached, subsequent calls return
+    // immediately so the UI stall is one-time and tiny.
+    auto send_request = [this, requested_state](
+                            const rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr& client,
+                            const char* axis_name) {
         if (!client) {
             return;
         }
-        if (!client->service_is_ready()) {
+        const QString axis_label = QString::fromLatin1(axis_name);
+        const int target_state = requested_state;
+        if (!client->wait_for_service(std::chrono::milliseconds(150))) {
+            qWarning("[AppShell] %s axis: service not available (discovery did not settle in 150ms) — request dropped",
+                     axis_label.toUtf8().constData());
             return;
         }
         auto request = std::make_shared<odrive_can::srv::AxisState::Request>();
         request->axis_requested_state = requested_state;
-        (void)client->async_send_request(request);
+        (void)client->async_send_request(
+            request,
+            [axis_label, target_state](
+                rclcpp::Client<odrive_can::srv::AxisState>::SharedFuture future) {
+                try {
+                    auto result = future.get();
+                    qInfo("[AppShell] %s axis: state=%d errors=%d (requested %d)",
+                          axis_label.toUtf8().constData(),
+                          result->axis_state,
+                          result->active_errors,
+                          target_state);
+                } catch (const std::exception& e) {
+                    qWarning("[AppShell] %s axis request failed: %s",
+                             axis_label.toUtf8().constData(),
+                             e.what());
+                }
+            });
     };
 
-    send_request(exploration_left_axis_client_);
-    send_request(exploration_right_axis_client_);
-    send_request(exploration_gpr_axis_client_);
+    send_request(exploration_left_axis_client_, "left");
+    send_request(exploration_right_axis_client_, "right");
+    send_request(exploration_gpr_axis_client_, "gpr");
 }
 
 void AppShellWindow::sendExplorationGprPowerOffRequest() {
@@ -1432,7 +1530,253 @@ void AppShellWindow::sendExplorationGprPowerOffRequest() {
     (void)exploration_gpr_power_off_client_->async_send_request(request);
 }
 
-void AppShellWindow::onExplorationStopPipelineRequested() {
+void AppShellWindow::sendGprLineStopRequest() {
+    if (!exploration_ros_node_) {
+        ensureExplorationRosInterfaces();
+    }
+    if (!exploration_gpr_line_stop_client_) {
+        return;
+    }
+    if (!exploration_gpr_line_stop_client_->service_is_ready()) {
+        RCLCPP_WARN(rclcpp::get_logger("AppShellWindow"),
+                    "/gpr_line_stop service not ready; skipping wake request.");
+        return;
+    }
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    (void)exploration_gpr_line_stop_client_->async_send_request(request);
+}
+
+void AppShellWindow::onPlannerWakeGprRequested() {
+    sendGprLineStopRequest();
+}
+
+void AppShellWindow::finalizeMissionDataCollection(std::function<void()> done) {
+    auto run_done = [this, done]() {
+        planner_finalize_mission_in_flight_ = false;
+        if (planner_finalize_mission_wait_timer_) {
+            planner_finalize_mission_wait_timer_->stop();
+        }
+        if (done) {
+            done();
+        }
+    };
+
+    if (!exploration_ros_node_) {
+        ensureExplorationRosInterfaces();
+    }
+    if (!planner_dc_finalize_mission_client_) {
+        qWarning("[AppShell] /dc/finalize_mission client unavailable — skipping mission finalize");
+        run_done();
+        return;
+    }
+    if (planner_finalize_mission_in_flight_) {
+        qInfo("[AppShell] /dc/finalize_mission already in flight — coalescing to single call");
+        return;
+    }
+
+    // Discovery may not have settled if the operator hits Complete Mission
+    // immediately after launch; give it a brief one-time wait. If the service
+    // never appears (e.g. coordinator crashed), don't block teardown.
+    if (!planner_dc_finalize_mission_client_->wait_for_service(std::chrono::milliseconds(250))) {
+        qWarning("[AppShell] /dc/finalize_mission service not available — skipping mission finalize");
+        run_done();
+        return;
+    }
+
+    planner_finalize_mission_in_flight_ = true;
+    planner_finalize_mission_wait_ticks_ = 0;
+    qInfo("[AppShell] Sending /dc/finalize_mission to stop continuous GNSS and finalize mission_config.json");
+
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    (void)planner_dc_finalize_mission_client_->async_send_request(
+        request,
+        [this, run_done](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+            QMetaObject::invokeMethod(this, [this, run_done, future]() mutable {
+                if (!planner_finalize_mission_in_flight_) {
+                    return;  // 6 s ceiling already fired; nothing to do.
+                }
+                try {
+                    auto result = future.get();
+                    if (result && result->success) {
+                        qInfo("[AppShell] /dc/finalize_mission OK: %s",
+                              result->message.c_str());
+                    } else {
+                        qWarning("[AppShell] /dc/finalize_mission reported failure: %s",
+                                 result ? result->message.c_str() : "(null)");
+                    }
+                } catch (const std::exception& e) {
+                    qWarning("[AppShell] /dc/finalize_mission exception: %s", e.what());
+                }
+                run_done();
+            }, Qt::QueuedConnection);
+        });
+
+    if (!planner_finalize_mission_wait_timer_) {
+        planner_finalize_mission_wait_timer_ = new QTimer(this);
+        planner_finalize_mission_wait_timer_->setInterval(50);
+        planner_finalize_mission_wait_timer_->setSingleShot(false);
+    }
+    disconnect(planner_finalize_mission_wait_timer_, &QTimer::timeout, nullptr, nullptr);
+    connect(planner_finalize_mission_wait_timer_, &QTimer::timeout, this, [this, run_done]() {
+        ++planner_finalize_mission_wait_ticks_;
+        // 50 ms × 120 = 6000 ms hard ceiling.
+        if (planner_finalize_mission_wait_ticks_ >= 120) {
+            qWarning("[AppShell] /dc/finalize_mission did not respond within 6s — proceeding with teardown anyway");
+            run_done();
+        }
+    });
+    planner_finalize_mission_wait_timer_->start();
+}
+
+void AppShellWindow::onPlannerCancelScanRequested() {
+    qInfo("[AppShell] PlannerScreen::cancelScanRequested — aborting scan, deleting all mission data");
+
+    // Phase 1: command IDLE on all axes so the bot doesn't keep moving
+    // while the controller rips data off disk. The pipeline stays alive,
+    // so the operator can re-arm later by simply starting a new mission.
+    sendExplorationAxisStateRequest(kOdriveAxisStateIdle);
+    publishPlannerAutonomyEnable(false);
+
+    cancelActiveScanDataCollection([this](bool success) {
+        // Always clear our local "estop latched" state so the planner can
+        // exit the latched UI; PlannerScreen::notifyScanCancelled does the
+        // segment-list / planned-path / stage navigation reset.
+        planner_estop_active_ = false;
+        if (stage5_) {
+            stage5_->notifyScanCancelled(success);
+        }
+    });
+}
+
+void AppShellWindow::cancelActiveScanDataCollection(std::function<void(bool)> done) {
+    auto run_done = [this, done](bool success) {
+        planner_cancel_scan_in_flight_ = false;
+        if (planner_cancel_scan_wait_timer_) {
+            planner_cancel_scan_wait_timer_->stop();
+        }
+        if (done) {
+            done(success);
+        }
+    };
+
+    if (!exploration_ros_node_) {
+        ensureExplorationRosInterfaces();
+    }
+    if (!planner_dc_cancel_scan_client_) {
+        qWarning("[AppShell] /dc/cancel_scan client unavailable — proceeding with UI reset only");
+        run_done(false);
+        return;
+    }
+    if (planner_cancel_scan_in_flight_) {
+        qInfo("[AppShell] /dc/cancel_scan already in flight — coalescing to single call");
+        return;
+    }
+
+    // Brief discovery wait. The planner reaches this code only after a scan
+    // has actually started, so the coordinator service should already be
+    // discovered, but we keep parity with finalize for safety.
+    if (!planner_dc_cancel_scan_client_->wait_for_service(std::chrono::milliseconds(250))) {
+        qWarning("[AppShell] /dc/cancel_scan service not available — proceeding with UI reset only");
+        run_done(false);
+        return;
+    }
+
+    planner_cancel_scan_in_flight_ = true;
+    planner_cancel_scan_wait_ticks_ = 0;
+    qInfo("[AppShell] Sending /dc/cancel_scan to delete all mission data");
+
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    (void)planner_dc_cancel_scan_client_->async_send_request(
+        request,
+        [this, run_done](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+            QMetaObject::invokeMethod(this, [this, run_done, future]() mutable {
+                if (!planner_cancel_scan_in_flight_) {
+                    return;  // 8 s ceiling already fired; nothing to do.
+                }
+                bool success = false;
+                try {
+                    auto result = future.get();
+                    if (result && result->success) {
+                        success = true;
+                        qInfo("[AppShell] /dc/cancel_scan OK: %s",
+                              result->message.c_str());
+                    } else {
+                        qWarning("[AppShell] /dc/cancel_scan reported failure: %s",
+                                 result ? result->message.c_str() : "(null)");
+                    }
+                } catch (const std::exception& e) {
+                    qWarning("[AppShell] /dc/cancel_scan exception: %s", e.what());
+                }
+                run_done(success);
+            }, Qt::QueuedConnection);
+        });
+
+    if (!planner_cancel_scan_wait_timer_) {
+        planner_cancel_scan_wait_timer_ = new QTimer(this);
+        planner_cancel_scan_wait_timer_->setInterval(50);
+        planner_cancel_scan_wait_timer_->setSingleShot(false);
+    }
+    disconnect(planner_cancel_scan_wait_timer_, &QTimer::timeout, nullptr, nullptr);
+    connect(planner_cancel_scan_wait_timer_, &QTimer::timeout, this, [this, run_done]() {
+        ++planner_cancel_scan_wait_ticks_;
+        // 50 ms × 160 = 8000 ms hard ceiling. Cancel needs more headroom
+        // than finalize because the controller may rmtree a multi-section
+        // mission folder (lots of small files).
+        if (planner_cancel_scan_wait_ticks_ >= 160) {
+            qWarning("[AppShell] /dc/cancel_scan did not respond within 8s — proceeding with UI reset anyway");
+            run_done(false);
+        }
+    });
+    planner_cancel_scan_wait_timer_->start();
+}
+
+void AppShellWindow::onPlannerDiscardScanRequested() {
+    qInfo("[AppShell] PlannerScreen::discardScanRequested — post-Completed delete with retry-once");
+
+    // Phase 1: motors should already be IDLE because the mission completed,
+    // but defensively command IDLE again + drop autonomy. Cheap, idempotent.
+    sendExplorationAxisStateRequest(kOdriveAxisStateIdle);
+    publishPlannerAutonomyEnable(false);
+
+    discardCompletedScanDataCollection([this](bool success) {
+        // Discard never tears down the pipeline — operator advances by
+        // pressing Complete Mission. Just hand the result back to the
+        // PlannerScreen which latches its terminal "Discarded" UI state.
+        if (stage5_) {
+            stage5_->notifyScanDiscarded(success);
+        }
+    });
+}
+
+void AppShellWindow::discardCompletedScanDataCollection(std::function<void(bool)> done) {
+    // First attempt. On success → done(true). On failure → second attempt.
+    // On second failure → done(false). Total worst-case wait ≈ 16s (two
+    // 8s ceilings back-to-back).
+    cancelActiveScanDataCollection([this, done](bool first_success) {
+        if (first_success) {
+            qInfo("[AppShell] Discard: /dc/cancel_scan succeeded on first attempt");
+            if (done) {
+                done(true);
+            }
+            return;
+        }
+
+        qWarning("[AppShell] Discard: /dc/cancel_scan failed on first attempt — retrying once");
+        cancelActiveScanDataCollection([done](bool retry_success) {
+            if (retry_success) {
+                qInfo("[AppShell] Discard: /dc/cancel_scan succeeded on retry");
+            } else {
+                qCritical("[AppShell] Discard: /dc/cancel_scan FAILED on retry — UI will latch "
+                          "Discarded state but the controller may still hold mission data on disk");
+            }
+            if (done) {
+                done(retry_success);
+            }
+        });
+    });
+}
+
+void AppShellWindow::performExplorationPipelineTeardownPreamble() {
     const QString robot_host =
         active_robot_host_.trimmed().isEmpty() ? robotHostFromSettings() : active_robot_host_.trimmed();
     active_robot_host_ = robot_host;
@@ -1444,6 +1788,11 @@ void AppShellWindow::onExplorationStopPipelineRequested() {
         stage4_->forceTeleopStop();
         stage4_->stopFpvStream();
     }
+}
+
+void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
+    const QString robot_host =
+        active_robot_host_.trimmed().isEmpty() ? robotHostFromSettings() : active_robot_host_.trimmed();
 
     auto stopProcess = [](QProcess* proc, int terminate_wait_ms, int kill_wait_ms) {
         if (!proc || proc->state() == QProcess::NotRunning) {
@@ -1595,6 +1944,23 @@ void AppShellWindow::onExplorationStopPipelineRequested() {
     }
 }
 
+void AppShellWindow::performExplorationPipelineTeardown() {
+    performExplorationPipelineTeardownPreamble();
+    explorationStopPipelineTeardownKillProcessesAndResetUi();
+}
+
+void AppShellWindow::onExplorationStopPipelineRequested() {
+    performExplorationPipelineTeardownPreamble();
+    beginExplorationMotorsIdleWait([this](bool timed_out) {
+        if (timed_out) {
+            qWarning("[AppShell] Stop Pipeline: motor disarm not confirmed within 2s — proceeding with teardown anyway");
+        } else {
+            qInfo("[AppShell] Stop Pipeline: motors confirmed IDLE — tearing down launch processes");
+        }
+        explorationStopPipelineTeardownKillProcessesAndResetUi();
+    });
+}
+
 void AppShellWindow::onExplorationLaunchPoll() {
     if (!exploration_launch_in_progress_ && !exploration_launch_ready_) {
         return;
@@ -1719,6 +2085,10 @@ void AppShellWindow::ensureExplorationRosInterfaces() {
         exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/pause");
     planner_dc_resume_client_ =
         exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/resume");
+    planner_dc_finalize_mission_client_ =
+        exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/finalize_mission");
+    planner_dc_cancel_scan_client_ =
+        exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/cancel_scan");
     exploration_left_axis_client_ =
         exploration_ros_node_->create_client<odrive_can::srv::AxisState>("/left/request_axis_state");
     exploration_right_axis_client_ =
@@ -1727,6 +2097,8 @@ void AppShellWindow::ensureExplorationRosInterfaces() {
         exploration_ros_node_->create_client<odrive_can::srv::AxisState>("/gpr/request_axis_state");
     exploration_gpr_power_off_client_ =
         exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/gpr_power_off");
+    exploration_gpr_line_stop_client_ =
+        exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/gpr_line_stop");
     planner_f2c_waypoints_pub_ =
         exploration_ros_node_->create_publisher<std_msgs::msg::Float64MultiArray>(
             "/f2c_waypoints", rclcpp::QoS(rclcpp::KeepLast(10)).reliable().transient_local());
@@ -2630,6 +3002,178 @@ void AppShellWindow::pushPlannerMotorsChipState() {
                                                 : PlannerScreen::ValueTone::Muted);
 }
 
+bool AppShellWindow::sendControllerMaxLinearVelocity(double max_linear_velocity_mps) {
+    // Push the operator-selected cruise speed to the MPC controller's
+    // `max_linear_velocity` AND `desired_linear_speed` ROS params. The
+    // controller's `_on_parameter_change` callback fans both names into
+    // the same `_set_navigation_speed()` setter today; we set both so
+    // the controller's cruise target and hard cap stay in sync if the
+    // controller ever splits them.
+    //
+    // Implementation: callback-form async_send_request, fire-and-forget
+    // from this slot's perspective. Surface success/failure
+    // ASYNCHRONOUSLY via BdrMessageBox::warning posted to the Qt main
+    // thread from the response callback.
+    //
+    // History (do not regress): we previously tried two synchronous
+    // patterns, both produced false-positive 2-second timeouts even
+    // though the controller logged the param update within ~50 ms:
+    //   1) `rclcpp::spin_until_future_complete(node, future, 2s)` —
+    //      temp executor in rclcpp Humble doesn't reliably wake on the
+    //      response when the same node is also spun by a Qt-tick
+    //      `spin_some` elsewhere. ros2/rclcpp issues 1839 / 1990.
+    //   2) `future.wait_for(...)` polled inside a manual `spin_some`
+    //      loop on the same node — same symptom, same root cause:
+    //      response is consumed by rclcpp internals but not paired with
+    //      our pending future.
+    // The callback variant works because the response handler is
+    // dispatched by the node's existing live_fast_timer `spin_some`
+    // (same path that delivers /dc/cancel_scan replies at
+    // app_shell.cpp:1690). No polling, no future-completion race.
+    //
+    // The local client `set_params_client` is captured by value into
+    // the response lambda so it OUTLIVES this function. Without that
+    // capture the client would be destroyed when the function returns
+    // and the response handler would never fire.
+    //
+    // Returns true on dispatch (caller proceeds to arm autonomy). The
+    // controller applies the new cap synchronously inside its
+    // _on_parameter_change before MPC's next iteration runs, so by the
+    // time autonomy_enable's Bool is observed by the controller's
+    // main loop the new speed is already live.
+    if (!std::isfinite(max_linear_velocity_mps) || max_linear_velocity_mps <= 0.0) {
+        return false;
+    }
+    if (!exploration_ros_node_) {
+        ensureExplorationRosInterfaces();
+    }
+    if (!exploration_ros_node_ || !rclcpp::ok()) {
+        BdrMessageBox::warning(
+            this,
+            QStringLiteral("Speed update failed"),
+            QStringLiteral(
+                "ROS interfaces are not initialized; the robot will use "
+                "its current cruise speed instead of the operator-selected "
+                "value. Re-press Start Scan to retry."));
+        return false;
+    }
+
+    // Service name MUST match the launched node's ROS graph name. The
+    // Python file calls `super().__init__("mpc_accel_controller")`, but
+    // robot_complete and mpc_accel_autonomous_scan launch files pass
+    // `name="mpc_accel_autonomous_controller"`, which overrides it. Use
+    // the launch name or the SetParameters service is never found.
+    auto set_params_client =
+        exploration_ros_node_->create_client<rcl_interfaces::srv::SetParameters>(
+            "/mpc_accel_autonomous_controller/set_parameters");
+
+    // Synchronous 1.5 s wait for service discovery. This part doesn't
+    // hit the future-completion bug — wait_for_service uses graph
+    // events, not service responses. Worth keeping so we can surface a
+    // crisp "controller not reachable" warning before dispatching a
+    // request that would never get answered.
+    if (!set_params_client->wait_for_service(std::chrono::milliseconds(1500))) {
+        RCLCPP_WARN(rclcpp::get_logger("AppShellWindow"),
+                    "/mpc_accel_autonomous_controller/set_parameters not "
+                    "available after 1.5 s; cruise speed push skipped.");
+        BdrMessageBox::warning(
+            this,
+            QStringLiteral("Speed update failed"),
+            QString::fromUtf8(
+                "Could not reach the autonomous controller's parameter "
+                "service within 1.5 s. The robot will use its current "
+                "cruise speed (most likely the launch-time default, not "
+                "the %1 m/s you selected). Verify the robot stack is up "
+                "and re-press Start Scan to retry.")
+                .arg(max_linear_velocity_mps, 0, 'f', 2));
+        return false;
+    }
+
+    auto request = std::make_shared<rcl_interfaces::srv::SetParameters::Request>();
+    request->parameters.reserve(2);
+    for (const char* name : {"max_linear_velocity", "desired_linear_speed"}) {
+        rcl_interfaces::msg::Parameter p;
+        p.name = name;
+        p.value.type = rcl_interfaces::msg::ParameterType::PARAMETER_DOUBLE;
+        p.value.double_value = max_linear_velocity_mps;
+        request->parameters.push_back(std::move(p));
+    }
+
+    // Dispatch with callback. `set_params_client` and `request` are
+    // captured by value so they outlive this function (the client owns
+    // the pending request map; if it dies before the response, the
+    // callback is never invoked). The lambda runs on the rclcpp
+    // executor thread (the live_fast_timer's `spin_some`), so we hop
+    // back to the Qt main thread via QMetaObject::invokeMethod before
+    // touching any UI.
+    set_params_client->async_send_request(
+        request,
+        [this, set_params_client, request, max_linear_velocity_mps](
+            rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedFuture future) {
+            QMetaObject::invokeMethod(
+                this,
+                [this, future, request, max_linear_velocity_mps]() mutable {
+                    rcl_interfaces::srv::SetParameters::Response::SharedPtr response;
+                    try {
+                        response = future.get();
+                    } catch (const std::exception& ex) {
+                        RCLCPP_WARN(rclcpp::get_logger("AppShellWindow"),
+                                    "SetParameters future threw: %s", ex.what());
+                        BdrMessageBox::warning(
+                            this,
+                            QStringLiteral("Speed update failed"),
+                            QString::fromUtf8(
+                                "The cruise speed update raised an exception: "
+                                "%1. The robot will use its current cruise speed.")
+                                .arg(QString::fromUtf8(ex.what())));
+                        return;
+                    }
+
+                    if (!response ||
+                        response->results.size() != request->parameters.size()) {
+                        BdrMessageBox::warning(
+                            this,
+                            QStringLiteral("Speed update failed"),
+                            QStringLiteral(
+                                "The autonomous controller returned an unexpected "
+                                "response to the cruise speed update. The robot "
+                                "will use its current cruise speed."));
+                        return;
+                    }
+
+                    QStringList rejected;
+                    for (size_t i = 0; i < response->results.size(); ++i) {
+                        if (!response->results[i].successful) {
+                            const std::string& name = request->parameters[i].name;
+                            const std::string& reason = response->results[i].reason;
+                            RCLCPP_WARN(
+                                rclcpp::get_logger("AppShellWindow"),
+                                "mpc_accel_autonomous_controller rejected %s=%.2f: %s",
+                                name.c_str(), max_linear_velocity_mps,
+                                reason.c_str());
+                            rejected << QString::fromStdString(name + ": " + reason);
+                        }
+                    }
+                    if (!rejected.isEmpty()) {
+                        BdrMessageBox::warning(
+                            this,
+                            QStringLiteral("Speed update partially rejected"),
+                            QString::fromUtf8(
+                                "The autonomous controller rejected the "
+                                "following cruise speed parameters:\n\n%1\n\n"
+                                "The robot may run at an unintended speed.")
+                                .arg(rejected.join(QStringLiteral("\n"))));
+                    }
+                },
+                Qt::QueuedConnection);
+        });
+
+    // Best-effort: dispatch confirmed. Caller proceeds to arm autonomy.
+    // Any failure surfaces asynchronously via BdrMessageBox in the
+    // response callback above.
+    return true;
+}
+
 void AppShellWindow::onExplorationLocalNavGrid(
     const std_msgs::msg::UInt8MultiArray::SharedPtr msg) {
     if (!msg || msg->data.size() != static_cast<size_t>(kLocalNavGridBytes)) {
@@ -3019,6 +3563,12 @@ void AppShellWindow::pushExplorationTelemetryToUiFast() {
         odom_fresh ? std::hypot(exploration_latest_vx_mps_, exploration_latest_vy_mps_) : 0.0;
     stage4_->setTelemetrySpeedMps(speed_mps);
     stage4_->setFpvSpeedMps(speed_mps);
+    // Stage 5 uses the same odom-derived speed for ETA when a scan is active
+    // (PlannerScreen::effectiveScanSpeedMps falls back to the cached
+    // controller max_linear_velocity ROS param when the robot is idle).
+    if (stage5_) {
+        stage5_->setLiveRobotSpeedMps(speed_mps);
+    }
 
     if (!exploration_launch_ready_) {
         stage4_->setThermalThumbnailStale(false);

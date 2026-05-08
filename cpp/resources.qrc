@@ -75,6 +75,8 @@
     <file alias="missionplanner/tool_fit.svg">../App resource/icons/mission_planner_tool_fit.svg</file>
     <file alias="missionplanner/tool_reset.svg">../App resource/icons/mission_planner_tool_reset.svg</file>
     <file alias="missionplanner/next_arrow.svg">../App resource/icons/mission_planner_next_arrow.svg</file>
+    <file alias="missionplanner/stepper_minus.svg">../App resource/icons/mission_planner_stepper_minus.svg</file>
+    <file alias="missionplanner/stepper_plus.svg">../App resource/icons/mission_planner_stepper_plus.svg</file>
 
     <!-- Scan Splitting assets (Figma node 135:2) -->
     <file alias="missionplanner/split_path.svg">../App resource/icons/mission_planner_split_path.svg</file>
@@ -92,7 +94,15 @@
     <file alias="missionplanner/scan_pause.svg">../App resource/icons/mission_planner_scan_pause.svg</file>
     <file alias="missionplanner/scan_emergency_stop.svg">../App resource/icons/mission_planner_scan_emergency_stop.svg</file>
     <file alias="missionplanner/scan_check.svg">../App resource/icons/mission_planner_scan_check.svg</file>
+    <file alias="missionplanner/scan_cancel.svg">../App resource/icons/mission_planner_scan_cancel.svg</file>
+    <file alias="missionplanner/scan_discard.svg">../App resource/icons/mission_planner_scan_discard.svg</file>
     <file alias="missionplanner/scan_segment_active.svg">../App resource/icons/mission_planner_scan_segment_active.svg</file>
+
+    <!-- Custom preset row icons (rebuildCoveragePresetRows in planner_screen.cpp).
+         preset_delete reuses the trash-2 SVG already shipped for scan_discard;
+         the second alias keeps call-site grep semantically clean. -->
+    <file alias="missionplanner/preset_rename.svg">../App resource/icons/mission_planner_preset_rename.svg</file>
+    <file alias="missionplanner/preset_delete.svg">../App resource/icons/mission_planner_scan_discard.svg</file>
   </qresource>
 </RCC>
 

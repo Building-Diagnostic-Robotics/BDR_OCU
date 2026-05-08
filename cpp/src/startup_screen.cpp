@@ -4,6 +4,7 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QLabel>
+#include "components/auto_hide_scroll_bar.hpp"
 #include "components/bdr_message_box.hpp"
 #include <QNetworkInterface>
 #include <QPlainTextEdit>
@@ -45,6 +46,7 @@ StartupScreen::StartupScreen(QWidget* parent)
     scroll_area_->setObjectName("DiagScrollArea");
     scroll_area_->setWidgetResizable(true);
     scroll_area_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    AutoHideScrollBar::install(scroll_area_, dark_mode_);
     root->addWidget(scroll_area_);
 
     auto* scroll_content = new QWidget(scroll_area_);
@@ -410,6 +412,7 @@ StartupScreen::StartupScreen(QWidget* parent)
     txt_log_->setObjectName("LiveResultsLog");
     txt_log_->setReadOnly(true);
     txt_log_->setMaximumBlockCount(2500);
+    AutoHideScrollBar::install(txt_log_, dark_mode_);
     log_layout->addWidget(txt_log_, 1);
 
     live_content_layout->addWidget(live_results_log_pane_, 2);
@@ -480,6 +483,10 @@ void StartupScreen::setDarkMode(bool dark_mode) {
         return;
     }
     dark_mode_ = dark_mode;
+    const auto auto_hide_bars = findChildren<AutoHideScrollBar*>();
+    for (auto* bar : auto_hide_bars) {
+        bar->setDarkMode(dark_mode_);
+    }
     applyLocalStyle();
 }
 

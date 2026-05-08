@@ -7,7 +7,6 @@
   /home/avenblake/BDR_CP/cpp/include/data_transfer_dialog.hpp \
   /home/avenblake/BDR_CP/cpp/include/network_monitor.hpp \
   /home/avenblake/BDR_CP/cpp/include/obstacle_detector.hpp \
-  /home/avenblake/BDR_CP/cpp/include/preset_dialog.hpp \
   /home/avenblake/BDR_CP/cpp/include/preset_manager.hpp \
   /home/avenblake/BDR_CP/cpp/include/scan_session_tracker.hpp \
   /home/avenblake/BDR_CP/cpp/include/teleop_widget.hpp \
@@ -1690,7 +1689,6 @@
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QGridLayout \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QGroupBox \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QHBoxLayout \
-  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QInputDialog \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QLabel \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QLineEdit \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QListWidget \
@@ -1730,7 +1728,6 @@
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qframe.h \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qgridlayout.h \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qgroupbox.h \
-  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qinputdialog.h \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qlabel.h \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qlayout.h \
   /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qlayoutitem.h \

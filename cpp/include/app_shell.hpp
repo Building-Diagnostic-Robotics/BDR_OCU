@@ -6,12 +6,14 @@
 #include <QProcess>
 #include <QString>
 #include <QtGlobal>
+#include <functional>
 #include <vector>
 
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <odrive_can/msg/controller_status.hpp>
 #include <odrive_can/srv/axis_state.hpp>
+#include <rcl_interfaces/srv/set_parameters.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -69,11 +71,21 @@ private slots:
     void onExplorationTeleopGprPowerOffRequested();
     void onPlannerPublishScanSegmentsRequested(const std::vector<double>& xy_pairs);
     void onPlannerStartScanSegmentsRequested(const QString& progression_mode);
-    void onPlannerScanStartRequested();
+    // Carries the cruise speed (m/s) the planner UI's slider was set to at
+    // start-scan time. Pushed straight into the MPC controller's
+    // `max_linear_velocity` ROS param via sendControllerMaxLinearVelocity()
+    // before autonomy is armed.
+    void onPlannerScanStartRequested(double speed_mps);
     void onPlannerScanPauseRequested();
     void onPlannerScanResumeRequested();
+    // Operator pressed the Wake GPR button inside the pre-scan checklist
+    // dialog. Forwards to /gpr_line_stop Trigger (the Arduino bridge
+    // interprets that as the wake-from-sleep keystroke).
+    void onPlannerWakeGprRequested();
     void onPlannerEmergencyStopRequested();
     void onPlannerCompleteMissionRequested();
+    void onPlannerCancelScanRequested();
+    void onPlannerDiscardScanRequested();
     void onExplorationLaunchPoll();
     void onExplorationLiveFastTick();
     void onExplorationLiveSlowTick();
@@ -110,6 +122,36 @@ private:
     void publishExplorationTeleopTwist(double linear_x, double angular_z);
     void sendExplorationAxisStateRequest(int requested_state);
     void sendExplorationGprPowerOffRequest();
+    // Sends a /gpr_line_stop Trigger. The Arduino bridge translates this
+    // into the wake-from-sleep keystroke on the GPR control panel. Used
+    // by the pre-scan checklist dialog's Wake GPR button. Fire-and-forget
+    // — no acknowledgment from the GPR is observable, so the operator
+    // can press multiple times if needed.
+    void sendGprLineStopRequest();
+    // Asks the coordinator to stop continuous mission GNSS logging and
+    // finalize mission_config.json, then invokes `done()` on the Qt thread.
+    // Always invokes `done()` exactly once — on success, on service error,
+    // or on the 6 s safety ceiling — so the Complete Mission state machine
+    // always advances to pipeline teardown.
+    void finalizeMissionDataCollection(std::function<void()> done);
+    void beginExplorationMotorsIdleWait(std::function<void(bool timed_out)> continuation);
+    void performExplorationPipelineTeardownPreamble();
+    void explorationStopPipelineTeardownKillProcessesAndResetUi();
+    void performExplorationPipelineTeardown();
+    // Asks the coordinator to abort the active scan: stop DC, delete every
+    // section folder this mission produced (including the in-flight one),
+    // and remove the entire mission folder (continuous UBX + config). The
+    // pipeline launch processes are NOT torn down — they keep running so
+    // the operator can immediately re-plan and start a new mission. Always
+    // invokes `done(success)` exactly once on the Qt thread, even on the 8 s
+    // safety ceiling, so the planner UI always advances.
+    void cancelActiveScanDataCollection(std::function<void(bool)> done);
+    // Wraps cancelActiveScanDataCollection with one automatic retry on
+    // failure. Used for the post-Completed Discard Scan flow where the
+    // operator has explicitly chosen to throw away a finished mission and
+    // we want a best-effort second attempt before reporting failure.
+    // `done(success)` always invoked exactly once on the Qt thread.
+    void discardCompletedScanDataCollection(std::function<void(bool)> done);
     QString detectLocalIP() const;
     QString robotHostFromSettings() const;
     bool isLocalProcessRunning(const QString& process_name) const;
@@ -138,6 +180,19 @@ private:
     void pushPlannerTelemetrySnapshot();
     void pushExplorationTopMotorsChipState();
     void pushPlannerMotorsChipState();
+
+    // Push the operator-selected cruise speed to
+    // mpc_accel_autonomous_controller's `max_linear_velocity` /
+    // `desired_linear_speed` ROS params via a synchronous SetParameters
+    // call (wait_for_service + spin_until_future_complete). The client
+    // is built fresh on every call (NOT cached) — see the comment at the
+    // top of the implementation for the failure mode caching produced.
+    // Called exactly once per start-scan press from
+    // onPlannerScanStartRequested. Returns true on confirmed success;
+    // on failure surfaces a BdrMessageBox warning to the operator and
+    // returns false. The caller may choose to proceed or block
+    // start-scan based on that.
+    bool sendControllerMaxLinearVelocity(double max_linear_velocity_mps);
 
     struct ExplorationOdomSample {
         double x = 0.0;
@@ -272,11 +327,41 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr exploration_save_map_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr planner_dc_pause_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr planner_dc_resume_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr planner_dc_finalize_mission_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr planner_dc_cancel_scan_client_;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr exploration_left_axis_client_;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr exploration_right_axis_client_;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr exploration_gpr_axis_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr exploration_gpr_power_off_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr exploration_gpr_line_stop_client_;
     bool planner_estop_active_ = false;
+
+    // (No cached SetParameters client. sendControllerMaxLinearVelocity
+    // creates one local to each call to avoid stale Zenoh-bridge
+    // discovery state and the rclcpp Humble race between cached
+    // clients' response waitables and `spin_until_future_complete`. See
+    // the implementation comment for full diagnosis.)
+
+    // Shared: after IDLE request, poll left/right axis_state until IDLE (≤2 s)
+    // before killing the launch tree so odrive_can receives the service.
+    QTimer* exploration_motors_idle_wait_timer_ = nullptr;
+    int exploration_motors_idle_wait_ticks_ = 0;
+
+    // /dc/finalize_mission async wait. We send the request after motors
+    // disarm and before tearing down the launch tree, so the gps_driver
+    // gets a chance to flush the continuous mission .ubx cleanly. Hard
+    // ceiling at 6 s so the UI never wedges if the service hangs.
+    QTimer* planner_finalize_mission_wait_timer_ = nullptr;
+    int planner_finalize_mission_wait_ticks_ = 0;
+    bool planner_finalize_mission_in_flight_ = false;
+
+    // /dc/cancel_scan async wait. Mirrors the finalize timer above: a single
+    // shared QTimer polls for the async response so we never block the Qt
+    // event loop, and an 8 s ceiling guarantees the UI always advances even
+    // if the controller hangs while ripping data off disk.
+    QTimer* planner_cancel_scan_wait_timer_ = nullptr;
+    int planner_cancel_scan_wait_ticks_ = 0;
+    bool planner_cancel_scan_in_flight_ = false;
 };
 
 }  // namespace f2c_cpp
