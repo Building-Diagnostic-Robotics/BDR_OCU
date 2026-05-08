@@ -68,7 +68,8 @@
 #include "transfer_manager.hpp"
 #include "data_transfer_dialog.hpp"
 #include "preset_manager.hpp"
-#include "preset_dialog.hpp"
+// preset_dialog.hpp deleted in the preset UX rework; legacy openPresetManager
+// in coverage_gui.cpp is now a no-op stub (kept for reference, never called).
 #include "teleop_widget.hpp"
 #include "cloud_upload_dialog.hpp"
 #include "scan_session_tracker.hpp"

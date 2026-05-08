@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QFutureWatcher>
 #include <QHash>
+#include <QPointer>
 #include <QString>
 #include <QWidget>
 #include <optional>
@@ -10,6 +11,7 @@
 
 #include "coverage_pipeline.hpp"
 #include "obstacle_detector.hpp"
+#include "preset_manager.hpp"
 
 class QLabel;
 class QComboBox;
@@ -54,11 +56,29 @@ public:
     void setMapPath(const QString& map_path);
     void setLiveRobotTelemetry(const std::optional<PathState>& pose,
                                const std::vector<Point2D>& trail);
+    // Latest robot ground speed (m/s, unsigned). Fed from AppShellWindow's
+    // odometry pipe. Used by effectiveScanSpeedMps() while a scan is running.
+    void setLiveRobotSpeedMps(double speed_mps);
     void setTopSignalState(const QString& text, ValueTone tone);
     void setTopLockChipState(const QString& text, ValueTone tone);
     void setTopMotorsChipState(const QString& text, ValueTone tone);
     void notifyScanSegmentCompleted();
     void notifyScanSegmentSaved();
+    // Called by AppShell after /dc/cancel_scan has returned (or hit the
+    // safety ceiling). Wipes per-mission Stage-4 runtime state, clears the
+    // planned path / segments / coverage cache so the operator must re-plan,
+    // and navigates back to the Map Processing step. `success` is logged
+    // only — the UI always proceeds with the reset, since by the time we
+    // reach this point the controller has already torn down DC.
+    void notifyScanCancelled(bool success);
+
+    // Called by AppShell after the post-Completed Discard Scan flow
+    // finishes (success after retry, or terminal failure). Unlike Cancel,
+    // Discard does NOT navigate away — the operator stays on Stage 5 with
+    // the planned path + last stats still visible, the segment list cleared,
+    // and the action button locked into a terminal "Discarded" state. The
+    // operator advances by pressing Complete Mission.
+    void notifyScanDiscarded(bool success);
 
     // BDR_REWIRE: dev-only hook used by AppShellWindow when the env var
     // BDR_DEV_START_AT_SCAN=1 is set, so we can boot directly into the
@@ -73,7 +93,12 @@ signals:
     void publishScanSegmentsRequested(const std::vector<double>& xy_pairs);
     void startScanSegmentsRequested(const QString& progression_mode);
     // Stage 4 (Scan execution) signals
-    void scanStartRequested();
+    // Carries the current scan-speed slider value (m/s). AppShellWindow
+    // forwards it to /mpc_accel_controller's `max_linear_velocity` param via
+    // sendControllerMaxLinearVelocity() before resuming autonomy. Signal
+    // payload (vs. shared cache fetch) keeps the start-scan path
+    // self-describing and races-free.
+    void scanStartRequested(double speed_mps);
     void scanPauseRequested();
     void scanResumeRequested();
     void emergencyStopRequested();
@@ -82,6 +107,18 @@ signals:
     void scanTeleopDisarmRequested();
     void scanTeleopGprPowerOffRequested();
     void completeMissionRequested();
+    // Operator pressed Cancel Scan and confirmed the destructive dialog.
+    // AppShell calls /dc/cancel_scan and then notifyScanCancelled() to
+    // reset our UI back to Map Processing.
+    void cancelScanRequested();
+    // Operator pressed Discard Scan (post-Completed reuse of the same
+    // button slot) and confirmed the destructive dialog. AppShell calls
+    // /dc/cancel_scan with retry-once and then notifyScanDiscarded(). The
+    // UI does NOT navigate away — see notifyScanDiscarded() for details.
+    void discardScanRequested();
+    // Operator pressed Wake GPR inside the pre-scan checklist dialog.
+    // AppShell forwards to /gpr_line_stop (the Arduino wake keystroke).
+    void wakeGprRequested();
 
 private slots:
     void onBackClicked();
@@ -116,7 +153,10 @@ private:
             double path_spacing = 0.50;
             double headland_width = 0.30;
             QString scan_axis;
-            double scan_speed_mps = 0.30;
+            // Robot cruise speed (m/s) pushed to the controller's
+            // `max_linear_velocity` ROS param at scan-start. Per-preset
+            // (preset switch updates the slider).
+            double scan_speed_mps = 0.40;
             bool custom = false;
         };
 
@@ -152,7 +192,11 @@ private:
         double coverage_path_spacing = 0.50;
         double coverage_headland_width = 0.30;
         QString coverage_scan_axis = QStringLiteral("parallel");
-        double coverage_scan_speed_mps = 0.30;
+        // Cruise speed (m/s). Pushed to /mpc_accel_controller's
+        // `max_linear_velocity` param at scan-start (signal-with-payload via
+        // scanStartRequested). Slider locked while scan running — config-
+        // only, no live runtime mutation.
+        double coverage_scan_speed_mps = 0.40;
         QString coverage_selected_preset = QStringLiteral("Standard");
         std::vector<CoveragePreset> coverage_presets;
         QString coverage_new_preset_name;
@@ -180,6 +224,11 @@ private:
         double scan_distance_traveled_m = 0.0;
         qint64 scan_elapsed_ms = 0;
         qint64 scan_estimated_ms_left = -1;
+        // Set true after the operator confirms the pre-scan checklist
+        // dialog. Reset on every entry to ScanSplitting so each transit
+        // through the splitting -> scan path forces a re-acknowledgment.
+        // Not persisted across runs.
+        bool scan_preflight_acknowledged = false;
         bool raw_loaded = false;
         bool processing_complete = false;
         bool hull_complete = false;
@@ -262,6 +311,16 @@ private:
     void persistParameters() const;
     void persistCurrentStep();
     void ensureCoverageDefaults(SessionCache& cache) const;
+    // Preset persistence (production-grade: PresetManager JSON-per-file).
+    // Factory presets are code-only constants and never touched on disk.
+    void reloadCoveragePresetsFromDisk(SessionCache& cache) const;
+    PlanningPreset buildPlanningPresetFromSession(const SessionCache& cache) const;
+    void applyPlanningPresetToSession(const PlanningPreset& preset, SessionCache& cache) const;
+    static const std::vector<SessionCache::CoveragePreset>& factoryPresets();
+    static bool isFactoryPresetName(const QString& name);
+    // ETA speed source: live odometry while scanning, else cached controller
+    // max_linear_velocity, else 0.4 m/s. Pure (no UI side effects).
+    double effectiveScanSpeedMps() const;
     void invalidateProcessingResult(const QString& status_message = QString());
     void invalidateHullResult(const QString& status_message = QString());
     void invalidateCoverageResult(const QString& status_message = QString());
@@ -308,6 +367,10 @@ private:
     void onScanDistanceEdited();
     void onProgressionModeChanged(const QString& mode);
     void invalidateScanSegments(const QString& status_message = QString());
+    // Show the modal pre-scan checklist gate. Blurs the Stage 4 content
+    // behind the dialog. Sets cache.scan_preflight_acknowledged = true on
+    // confirm. Has no Cancel path — operator must confirm to proceed.
+    void showScanPreflightDialog();
 
     // Scan execution (Stage 4)
     QWidget* buildScanPage(QWidget* parent);
@@ -324,8 +387,15 @@ private:
     void updateScanRunUi();
     void updateScanLiveTelemetry();
     void refreshScanSegmentStatusList();
+    void ensureScanSegmentSpinnerTimer();
+    void tickScanSegmentSpinner();
     void onScanStartPauseClicked();
     void onScanEmergencyStopClicked();
+    // Single dispatch slot for the dual-mode Cancel/Discard button. Branches
+    // internally on run_state == Completed → Discard flow (post-completion
+    // delete), else → Cancel flow (mid-scan abort).
+    void onScanCancelClicked();
+    void onScanDiscardClicked();
     void onCompleteMissionClicked(const char* trigger = "unspecified");
     void onScanFooterBackClicked();
     void onScanTick();
@@ -380,7 +450,10 @@ private:
     std::optional<PathState> live_robot_pose_;
     std::vector<Point2D> live_robot_trail_;
     double robot_marker_size_m_ = 0.6;
+    // Latest robot ground speed (m/s, unsigned). Pushed from AppShellWindow.
+    double live_robot_speed_mps_ = 0.0;
     QHash<QString, SessionCache> session_cache_;
+    PresetManager* preset_manager_ = nullptr;
 
     QWidget* top_bar_ = nullptr;
     QWidget* top_motors_chip_ = nullptr;
@@ -513,6 +586,8 @@ private:
     QPushButton* btn_scan_split_path_ = nullptr;
     QPushButton* btn_scan_publish_selected_ = nullptr;
     QPushButton* btn_scan_start_selected_ = nullptr;
+    QPushButton* btn_segments_select_all_ = nullptr;
+    QPushButton* btn_segments_clear_all_ = nullptr;
     QListWidget* list_scan_segments_ = nullptr;
     QLabel* lbl_scan_segments_footer_ = nullptr;
     QLabel* lbl_scan_splitting_status_ = nullptr;
@@ -544,6 +619,15 @@ private:
     std::vector<QLabel*> mono12_muted_labels_;
     std::vector<QLabel*> mono12_white_labels_;
     std::vector<QLabel*> mono12_accent_labels_;
+
+    struct StepperButton {
+        QPushButton* button = nullptr;
+        QLabel* icon = nullptr;
+        QString icon_path;
+    };
+    std::vector<StepperButton> stepper_buttons_;
+    void applyStepperButtonStyle(QPushButton* button) const;
+    void refreshStepperButtons();
     std::vector<QWidget*> output_cards_;
     std::vector<QWidget*> stage_separator_widgets_;
 
@@ -582,6 +666,13 @@ private:
     QLabel* lbl_scan_manual_override_state_ = nullptr;
     QWidget* scan_segment_status_card_ = nullptr;
     QListWidget* list_scan_segment_status_ = nullptr;
+    // Driven by `scan_segment_spinner_timer_`: rotates the active-segment
+    // ring icon by 12° every 30 ms (full revolution ~900 ms). The label
+    // is owned by the QListWidgetItem and may be destroyed when the list
+    // refreshes, so we hold it via QPointer.
+    QPointer<QLabel> scan_segment_spinner_label_;
+    QTimer* scan_segment_spinner_timer_ = nullptr;
+    int scan_segment_spinner_angle_ = 0;
     QLabel* lbl_scan_stats_distance_ = nullptr;
     QLabel* lbl_scan_stats_points_ = nullptr;
     QLabel* lbl_scan_stats_avg_quality_ = nullptr;
@@ -598,6 +689,9 @@ private:
     QPushButton* btn_scan_emergency_stop_ = nullptr;
     QLabel* lbl_scan_emergency_stop_icon_ = nullptr;
     QLabel* lbl_scan_emergency_stop_text_ = nullptr;
+    QPushButton* btn_scan_cancel_ = nullptr;
+    QLabel* lbl_scan_cancel_icon_ = nullptr;
+    QLabel* lbl_scan_cancel_text_ = nullptr;
     QPushButton* btn_complete_mission_ = nullptr;
     QLabel* lbl_complete_mission_icon_ = nullptr;
     QLabel* lbl_complete_mission_text_ = nullptr;
@@ -618,6 +712,23 @@ private:
     bool scan_dc_save_in_flight_ = false;
     int scan_pending_next_segment_idx_ = -1;
     bool scan_manual_override_engaged_once_ = false;
+    // Set true between the operator confirming Cancel Scan and AppShell
+    // calling notifyScanCancelled(). Used to disable the Cancel button so
+    // the operator can't double-fire it while the controller is rmtree'ing.
+    bool scan_cancel_in_flight_ = false;
+    // Same idea for the post-Completed Discard flow. Distinct from
+    // scan_cancel_in_flight_ because Discard has retry-once + a different
+    // terminal UI state (button locks to "Discarded" instead of resetting).
+    bool scan_discard_in_flight_ = false;
+    // Latches true once Discard succeeds (or terminally fails after retry).
+    // Drives the post-discard Stage-4 visual: button shows "Discarded" grey
+    // and disabled, status pill reads "Discarded", segment list cleared,
+    // planned path + last stats kept on screen for context. Cleared when
+    // the operator presses Complete Mission and Stage 5 tears down.
+    bool scan_discarded_ = false;
+    // True only when Discard's retry path also failed. Logged by AppShell;
+    // UI still latches to "Discarded" so the operator isn't stuck.
+    bool scan_discard_failed_ = false;
     bool scan_manual_resume_after_override_ = false;
     bool scan_camera_stream_requested_ = false;
     bool scan_key_w_down_ = false;

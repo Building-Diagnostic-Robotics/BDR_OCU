@@ -361,4 +361,7 @@ CMakeFiles/bdr_coverage_planner.dir/src/preset_dialog.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QDateTime \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qdatetime.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QDir \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qdir.h
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qdir.h \
+ /home/avenblake/BDR_CP/cpp/include/components/auto_hide_scroll_bar.hpp \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QPointer \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qpointer.h

@@ -1624,9 +1624,21 @@
 			null
 		],
 		[
+			"/home/avenblake/BDR_CP/cpp/include/components/auto_hide_scroll_bar.hpp",
+			"MU",
+			"B37CIN4C3K/moc_auto_hide_scroll_bar.cpp",
+			null
+		],
+		[
 			"/home/avenblake/BDR_CP/cpp/include/components/banter_loader_widget.hpp",
 			"MU",
 			"B37CIN4C3K/moc_banter_loader_widget.cpp",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/include/components/bdr_input_dialog.hpp",
+			"MU",
+			"B37CIN4C3K/moc_bdr_input_dialog.cpp",
 			null
 		],
 		[
@@ -1645,6 +1657,18 @@
 			"/home/avenblake/BDR_CP/cpp/include/components/fpv_camera_view.hpp",
 			"MU",
 			"B37CIN4C3K/moc_fpv_camera_view.cpp",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/include/components/pre_scan_checklist_dialog.hpp",
+			"MU",
+			"B37CIN4C3K/moc_pre_scan_checklist_dialog.cpp",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/include/components/svg_icon_button.hpp",
+			"MU",
+			"B37CIN4C3K/moc_svg_icon_button.cpp",
 			null
 		],
 		[
@@ -1699,12 +1723,6 @@
 			"/home/avenblake/BDR_CP/cpp/include/planner_screen.hpp",
 			"MU",
 			"6YEA5652QU/moc_planner_screen.cpp",
-			null
-		],
-		[
-			"/home/avenblake/BDR_CP/cpp/include/preset_dialog.hpp",
-			"MU",
-			"6YEA5652QU/moc_preset_dialog.cpp",
 			null
 		],
 		[
@@ -1896,7 +1914,17 @@
 		[ "/home/avenblake/BDR_CP/cpp/src/cloud_upload_dialog.cpp", "MU", null ],
 		[ "/home/avenblake/BDR_CP/cpp/src/cloud_upload_manager.cpp", "MU", null ],
 		[
+			"/home/avenblake/BDR_CP/cpp/src/components/auto_hide_scroll_bar.cpp",
+			"MU",
+			null
+		],
+		[
 			"/home/avenblake/BDR_CP/cpp/src/components/banter_loader_widget.cpp",
+			"MU",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/src/components/bdr_input_dialog.cpp",
 			"MU",
 			null
 		],
@@ -1916,6 +1944,16 @@
 			null
 		],
 		[
+			"/home/avenblake/BDR_CP/cpp/src/components/pre_scan_checklist_dialog.cpp",
+			"MU",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/src/components/svg_icon_button.cpp",
+			"MU",
+			null
+		],
+		[
 			"/home/avenblake/BDR_CP/cpp/src/components/tilt_calibration_dialog.cpp",
 			"MU",
 			null
@@ -1929,7 +1967,6 @@
 		[ "/home/avenblake/BDR_CP/cpp/src/network_monitor.cpp", "MU", null ],
 		[ "/home/avenblake/BDR_CP/cpp/src/obstacle_detector.cpp", "MU", null ],
 		[ "/home/avenblake/BDR_CP/cpp/src/planner_screen.cpp", "MU", null ],
-		[ "/home/avenblake/BDR_CP/cpp/src/preset_dialog.cpp", "MU", null ],
 		[ "/home/avenblake/BDR_CP/cpp/src/preset_manager.cpp", "MU", null ],
 		[ "/home/avenblake/BDR_CP/cpp/src/robot_login.cpp", "MU", null ],
 		[ "/home/avenblake/BDR_CP/cpp/src/robot_registry.cpp", "MU", null ],

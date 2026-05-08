@@ -1,7 +1,11 @@
 #include "planner_screen.hpp"
 
+#include "components/auto_hide_scroll_bar.hpp"
+#include "components/bdr_input_dialog.hpp"
 #include "components/bdr_message_box.hpp"
 #include "components/fpv_camera_view.hpp"
+#include "components/pre_scan_checklist_dialog.hpp"
+#include "components/svg_icon_button.hpp"
 #include "coverage_gui.hpp"
 #include "settings_constants.hpp"
 
@@ -15,11 +19,13 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFrame>
+#include <QGraphicsBlurEffect>
 #include <QGraphicsDropShadowEffect>
 #include <QGridLayout>
 #include <QHideEvent>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -34,11 +40,13 @@
 #include <QRegularExpression>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QStringList>
 #include <QSizePolicy>
 #include <QStackedWidget>
 #include <QShowEvent>
+#include <QStyledItemDelegate>
 #include <QTimer>
 #include <QtConcurrent>
 #include <QVBoxLayout>
@@ -71,8 +79,13 @@ constexpr double kCoveragePathSpacingMin = 0.20;
 constexpr double kCoveragePathSpacingMax = 1.00;
 constexpr double kCoverageHeadlandMin = 0.10;
 constexpr double kCoverageHeadlandMax = 1.00;
-constexpr double kCoverageScanSpeedMin = 0.10;
-constexpr double kCoverageScanSpeedMax = 0.80;
+// Robot cruise-speed slider envelope. 0.1 m/s steps. The hard ceiling
+// matches the working MPC tune envelope on the platform — controller
+// guards against exceeding this internally too.
+constexpr double kCoverageScanSpeedMin = 0.30;
+constexpr double kCoverageScanSpeedMax = 0.60;
+constexpr double kCoverageScanSpeedStep = 0.10;
+constexpr double kCoverageScanSpeedDefault = 0.40;
 // Pre-planning waypoint-count estimate spacing for the metrics card only.
 // The actual coverage pipeline runs with `cfg.waypoint_spacing = 0.0`
 // (resampling disabled) so axial-turn corners are preserved exactly.
@@ -91,6 +104,36 @@ constexpr int kStageRowWidth = 668;
 // Stage 4). See docs/DEV_BYPASSES.md.
 constexpr bool kBypassPlannerStageGates = true;
 constexpr int kFooterCallToActionWidth = 278;
+
+// QSettings key for the globally-shared selected preset name (not per-robot).
+constexpr const char* kGlobalSelectedPresetKey = "planner/coverage_selected_preset";
+
+// =============================================================================
+// Coverage preset vocab translators.
+//
+// UI-side strings (kept for backwards compat with existing buttons / preset
+// rows): "boustro" | "snake" | "spiral", and "parallel" | "perpendicular".
+// PresetManager JSON canonical strings (PlanningPreset schema): "boustrophedon"
+// | "snake" | "spiral", and "longest" | "perpendicular". Keep the boundary
+// translation here so all on-disk preset files use the canonical schema and
+// can be exported/imported across builds.
+// =============================================================================
+QString uiPatternToCanonical(const QString& ui) {
+    if (ui == QLatin1String("boustro")) return QStringLiteral("boustrophedon");
+    return ui;
+}
+QString canonicalToUiPattern(const QString& canon) {
+    if (canon == QLatin1String("boustrophedon")) return QStringLiteral("boustro");
+    return canon;
+}
+QString uiAxisToDirection(const QString& ui) {
+    if (ui == QLatin1String("parallel")) return QStringLiteral("longest");
+    return ui;
+}
+QString directionToUiAxis(const QString& canon) {
+    if (canon == QLatin1String("longest")) return QStringLiteral("parallel");
+    return canon;
+}
 // Keep the planner header clear of the frameless shell controls overlay.
 constexpr int kWindowControlsReservedWidth = 184;
 constexpr int kStatusItemHeight = 20;
@@ -201,6 +244,63 @@ private:
     QPointer<QWidget> top_right_overlay_;
     QPointer<QWidget> top_left_overlay_;
     QPointer<QWidget> bottom_left_overlay_;
+};
+
+// QSS `border-radius` clips the background brush with a 1-bit mask in Qt 5,
+// which leaves visibly aliased corner pixels showing the parent widget's
+// background through the rounded curve. On a high-contrast surface (e.g. the
+// near-black map at #09090B) those exposed pixels read as dirty "corner
+// fragments" that no border / radius / opacity tweak can hide — the
+// geometry of a rounded rect over a contrasting parent always exposes
+// triangular corner regions of size r²(1 - π/4) per corner.
+//
+// This widget paints its own rounded background through QPainter with
+// QPainter::Antialiasing enabled, which produces 8-bit alpha-blended edges
+// instead of a 1-bit mask. The exposed corner pixels still belong to the
+// parent, but the antialiased blend along the curve fades the pill colour
+// smoothly into the parent colour, eliminating the visible artifact.
+class RoundedFillWidget : public QWidget {
+public:
+    RoundedFillWidget(QColor fill, qreal radius, QWidget* parent = nullptr)
+        : QWidget(parent), fill_(std::move(fill)), radius_(radius) {
+        // Disable Qt's default styled background so the QSS path can't paint
+        // a competing 1-bit-clipped fill underneath ours.
+        setAttribute(Qt::WA_StyledBackground, false);
+    }
+
+    void setFillColor(const QColor& color) {
+        if (fill_ == color) {
+            return;
+        }
+        fill_ = color;
+        update();
+    }
+
+    void setRadius(qreal radius) {
+        if (qFuzzyCompare(radius_, radius)) {
+            return;
+        }
+        radius_ = radius;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent* event) override {
+        Q_UNUSED(event);
+        QPainter painter(this);
+        painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(fill_);
+        // Inset by 0.5px so the antialiased edge sits inside the widget rect
+        // — otherwise Qt rounds the half-pixel toward the bounding box and
+        // we lose the alpha-fade row, recreating the same hard-edge problem.
+        const QRectF rect = QRectF(this->rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        painter.drawRoundedRect(rect, radius_, radius_);
+    }
+
+private:
+    QColor fill_;
+    qreal radius_;
 };
 
 bool sanitizePlannerParameters(double* voxel_size,
@@ -617,6 +717,34 @@ QString deriveQualityLabel(qsizetype raw_count, qsizetype processed_count, doubl
     return QStringLiteral("Low");
 }
 
+// Forward decl so the rotated variant can call into the standard renderer
+// for callers that pass angle == 0 (unrotated path stays cheap).
+QPixmap loadSvgPixmap(const QString& resource_path,
+                      int width,
+                      int height,
+                      const QString& color);
+
+QPixmap loadRotatedSvgPixmap(const QString& resource_path,
+                             int width,
+                             int height,
+                             const QString& color,
+                             qreal angle_deg) {
+    QPixmap base = loadSvgPixmap(resource_path, width, height, color);
+    if (base.isNull() || std::abs(angle_deg) < 0.001) {
+        return base;
+    }
+    QPixmap out(width, height);
+    out.fill(Qt::transparent);
+    QPainter painter(&out);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    painter.translate(width / 2.0, height / 2.0);
+    painter.rotate(angle_deg);
+    painter.translate(-width / 2.0, -height / 2.0);
+    painter.drawPixmap(0, 0, base);
+    return out;
+}
+
 QPixmap loadSvgPixmap(const QString& resource_path,
                       int width,
                       int height,
@@ -735,7 +863,7 @@ void applyDropShadow(QWidget* widget, int blur_radius, int y_offset, const QColo
 class PlannerTrackSlider : public QWidget {
 public:
     explicit PlannerTrackSlider(QWidget* parent = nullptr) : QWidget(parent) {
-        setFixedHeight(12);
+        setFixedHeight(kWidgetHeight);
         setCursor(Qt::PointingHandCursor);
         setMouseTracking(true);
     }
@@ -747,6 +875,7 @@ public:
     }
 
     void setStep(double step) { step_ = std::max(0.0, step); }
+    double step() const { return step_; }
     void setDecimals(int decimals) { decimals_ = std::max(0, decimals); }
     void setDarkMode(bool dark_mode) {
         dark_mode_ = dark_mode;
@@ -763,6 +892,8 @@ public:
     }
 
     double value() const { return value_; }
+    double minimum() const { return minimum_; }
+    double maximum() const { return maximum_; }
 
     std::function<void(double)> on_value_changed;
 
@@ -773,28 +904,49 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
 
-        const QRectF track_rect(0.0, (height() - 6.0) / 2.0, width(), 6.0);
-        const QColor track_color = isEnabled()
-                                       ? (dark_mode_ ? QColor(QStringLiteral("#27272A"))
-                                                     : QColor(QStringLiteral("#D1D5DB")))
-                                       : (dark_mode_ ? QColor(QStringLiteral("#1F1F23"))
-                                                     : QColor(QStringLiteral("#E5E7EB")));
-        const QColor accent = QColor(dark_mode_ ? QStringLiteral("#00D492")
-                                                : QStringLiteral("#059669"));
-        const double handle_x = valueToX(value_);
+        const qreal track_height = 8.0;
+        const qreal track_radius = track_height / 2.0;
+        const qreal track_left = kThumbRadius;
+        const qreal track_right = width() - kThumbRadius;
+        const qreal track_width = std::max<qreal>(0.0, track_right - track_left);
+        const qreal track_y = (height() - track_height) / 2.0;
+        const QRectF track_rect(track_left, track_y, track_width, track_height);
+
+        const QColor track_unfilled = isEnabled()
+                                          ? (dark_mode_ ? QColor(QStringLiteral("#3F3F47"))
+                                                        : QColor(QStringLiteral("#D4D4D8")))
+                                          : (dark_mode_ ? QColor(QStringLiteral("#27272A"))
+                                                        : QColor(QStringLiteral("#E5E7EB")));
+        const QColor accent = isEnabled()
+                                  ? (dark_mode_ ? QColor(QStringLiteral("#00BC7D"))
+                                                : QColor(QStringLiteral("#009966")))
+                                  : (dark_mode_ ? QColor(QStringLiteral("#3F3F47"))
+                                                : QColor(QStringLiteral("#A1A1AA")));
 
         painter.setPen(Qt::NoPen);
-        painter.setBrush(track_color);
-        painter.drawRoundedRect(track_rect, 3.0, 3.0);
+        painter.setBrush(track_unfilled);
+        painter.drawRoundedRect(track_rect, track_radius, track_radius);
 
-        if (isEnabled() && (dragging_ || underMouse())) {
+        const qreal handle_cx = trackValueX(value_, track_left, track_width);
+        const qreal handle_cy = track_rect.center().y();
+
+        const qreal filled_right = std::clamp<qreal>(handle_cx, track_left, track_right);
+        if (filled_right > track_left) {
+            QRectF filled_rect(track_left, track_y, filled_right - track_left, track_height);
             painter.setBrush(accent);
-            painter.setPen(QPen(dark_mode_ ? QColor(QStringLiteral("#09090B"))
-                                           : QColor(QStringLiteral("#FFFFFF")),
-                                1.0));
-            const qreal handle_radius = dragging_ ? 4.0 : 3.4;
-            painter.drawEllipse(QPointF(handle_x, track_rect.center().y()), handle_radius, handle_radius);
+            painter.drawRoundedRect(filled_rect, track_radius, track_radius);
         }
+
+        const qreal handle_radius = dragging_ ? kThumbRadius + 1.0 : kThumbRadius;
+        const QPointF handle_center(handle_cx, handle_cy);
+
+        const QColor shadow_color(0, 0, 0, dark_mode_ ? 90 : 60);
+        painter.setBrush(shadow_color);
+        painter.drawEllipse(handle_center + QPointF(0.0, 2.0),
+                            handle_radius + 1.5, handle_radius + 1.5);
+
+        painter.setBrush(accent);
+        painter.drawEllipse(handle_center, handle_radius, handle_radius);
     }
 
     void mousePressEvent(QMouseEvent* event) override {
@@ -838,6 +990,9 @@ protected:
     }
 
 private:
+    static constexpr int kWidgetHeight = 28;
+    static constexpr qreal kThumbRadius = 10.0;
+
     double clampValue(double value) const {
         return std::min(maximum_, std::max(minimum_, value));
     }
@@ -854,21 +1009,24 @@ private:
         return std::round(clampValue(snapped) * factor) / factor;
     }
 
-    double valueToX(double value) const {
-        if (maximum_ <= minimum_ || width() <= 0) {
-            return 0.0;
+    qreal trackValueX(double value, qreal track_left, qreal track_width) const {
+        if (maximum_ <= minimum_ || track_width <= 0.0) {
+            return track_left;
         }
-
         const double t = (value - minimum_) / (maximum_ - minimum_);
-        return std::min<double>(width(), std::max<double>(0.0, t * width()));
+        return track_left + std::clamp<qreal>(t, 0.0, 1.0) * track_width;
     }
 
     void updateFromX(double x) {
-        if (maximum_ <= minimum_ || width() <= 0) {
+        const qreal track_left = kThumbRadius;
+        const qreal track_right = width() - kThumbRadius;
+        const qreal track_width = std::max<qreal>(0.0, track_right - track_left);
+        if (maximum_ <= minimum_ || track_width <= 0.0) {
             return;
         }
 
-        const double t = std::min<double>(1.0, std::max<double>(0.0, x / width()));
+        const qreal clamped = std::clamp<qreal>(x, track_left, track_right);
+        const double t = (clamped - track_left) / track_width;
         const double next_value = snapValue(minimum_ + t * (maximum_ - minimum_));
         if (std::abs(next_value - value_) < 1e-9) {
             return;
@@ -895,6 +1053,23 @@ PlannerScreen::PlannerScreen(QWidget* parent) : QWidget(parent) {
     buildUi();
     autotest_enabled_ = qEnvironmentVariableIsSet("BDR_PLANNER_AUTOTEST_MAP");
     autotest_mode_ = qEnvironmentVariable("BDR_PLANNER_AUTOTEST_MODE", QStringLiteral("full"));
+
+    // Preset persistence (PresetManager: JSON-per-file at
+    // ~/.config/PilotControl/presets/<name>.json). Must be live before the
+    // first call to restoreCurrentSession() / ensureCoverageDefaults() since
+    // those drive reloadCoveragePresetsFromDisk().
+    preset_manager_ = new PresetManager(this);
+    connect(preset_manager_, &PresetManager::presetsChanged, this, [this]() {
+        // Refresh every cached robot session so a preset added/removed on one
+        // robot is visible immediately when the operator switches contexts.
+        for (auto& cache : session_cache_) {
+            reloadCoveragePresetsFromDisk(cache);
+        }
+        refreshCoveragePresetCombo();
+        rebuildCoveragePresetRows();
+        applySessionToUi();
+    });
+
     setMapPath(QString());
 }
 
@@ -924,6 +1099,16 @@ void PlannerScreen::setDarkMode(bool dark_mode) {
     }
     if (slider_coverage_scan_speed_) {
         slider_coverage_scan_speed_->setDarkMode(dark_mode_);
+    }
+    const auto auto_hide_bars = findChildren<AutoHideScrollBar*>();
+    for (auto* bar : auto_hide_bars) {
+        bar->setDarkMode(dark_mode_);
+    }
+    // Per-row Rename/Delete icon buttons in the Custom Presets card. They
+    // re-render the cached tinted pixmap on theme flip.
+    const auto svg_icon_buttons = findChildren<SvgIconButton*>();
+    for (auto* btn : svg_icon_buttons) {
+        btn->setDarkMode(dark_mode_);
     }
     applyStyle();
     updateHeaderForCurrentStep();
@@ -1429,10 +1614,44 @@ void PlannerScreen::applyStyle() {
         slider_coverage_scan_speed_->setDarkMode(dark_mode_);
     }
 
+    refreshStepperButtons();
+
     setTopSignalState(top_signal_text_, top_signal_tone_);
     setTopLockChipState(top_lock_text_, top_lock_tone_);
     setTopMotorsChipState(top_motors_text_, top_motors_tone_);
     updateCoveragePlanningUi();
+}
+
+void PlannerScreen::applyStepperButtonStyle(QPushButton* button) const {
+    if (!button) {
+        return;
+    }
+    const QString bg = dark_mode_ ? QStringLiteral("#27272A") : QStringLiteral("#FFFFFF");
+    const QString hover_bg = dark_mode_ ? QStringLiteral("#3F3F47") : QStringLiteral("#F4F4F5");
+    const QString pressed_bg = dark_mode_ ? QStringLiteral("#1F1F23") : QStringLiteral("#E4E4E7");
+    const QString border = dark_mode_ ? QStringLiteral("#3F3F47") : QStringLiteral("#D4D4D8");
+    const QString disabled_bg = dark_mode_ ? QStringLiteral("#1F1F23") : QStringLiteral("#F4F4F5");
+    button->setStyleSheet(
+        QStringLiteral("QPushButton[plannerStepper=\"true\"] { background: %1; border: 1px solid "
+                       "%2; border-radius: 8px; padding: 0; } "
+                       "QPushButton[plannerStepper=\"true\"]:hover { background: %3; } "
+                       "QPushButton[plannerStepper=\"true\"]:pressed { background: %4; } "
+                       "QPushButton[plannerStepper=\"true\"]:disabled { background: %5; }")
+            .arg(bg, border, hover_bg, pressed_bg, disabled_bg));
+}
+
+void PlannerScreen::refreshStepperButtons() {
+    const QString icon_color =
+        dark_mode_ ? QStringLiteral("#D4D4D8") : QStringLiteral("#3F3F47");
+    for (const auto& entry : stepper_buttons_) {
+        if (!entry.button) {
+            continue;
+        }
+        applyStepperButtonStyle(entry.button);
+        if (entry.icon) {
+            entry.icon->setPixmap(loadSvgPixmap(entry.icon_path, 14, 14, icon_color));
+        }
+    }
 }
 
 void PlannerScreen::setRobotId(const QString& robot_id) {
@@ -1531,9 +1750,90 @@ void PlannerScreen::setLiveRobotTelemetry(const std::optional<PathState>& pose,
     updateScanRunUi();
 }
 
+void PlannerScreen::setLiveRobotSpeedMps(double speed_mps) {
+    // Clamp negatives to zero — we treat speed as scalar magnitude. The
+    // odometry pipe in AppShellWindow already feeds |v|, but be defensive.
+    const double clamped = (std::isfinite(speed_mps) && speed_mps > 0.0) ? speed_mps : 0.0;
+    if (live_robot_speed_mps_ == clamped) {
+        return;
+    }
+    live_robot_speed_mps_ = clamped;
+    // ETA only refreshes when updateCoveragePlanningUi() runs (on regenerate
+    // / step change). Don't churn UI on every odom tick — value is a pure
+    // estimate, not a live readout.
+}
+
+double PlannerScreen::effectiveScanSpeedMps() const {
+    // ETA priority:
+    //   1) Live odom |v| while a scan is actually running — the ground truth.
+    //   2) The configured slider value (cache.coverage_scan_speed_mps) —
+    //      which is exactly what the controller will be told to cruise at on
+    //      the next start-scan.
+    //   3) Hard-coded 0.4 m/s default that matches
+    //      `declare_parameter("max_linear_velocity", 0.4)` in
+    //      mpc_accel_autonomous_controller.py.
+    const SessionCache* cache = activeSessionPtr();
+    const bool running = cache && cache->scan_run_state == ScanRunState::Running;
+    if (running && live_robot_speed_mps_ > 0.0) {
+        return live_robot_speed_mps_;
+    }
+    if (cache && std::isfinite(cache->coverage_scan_speed_mps) &&
+        cache->coverage_scan_speed_mps > 0.0) {
+        return cache->coverage_scan_speed_mps;
+    }
+    return 0.4;
+}
+
 bool PlannerScreen::eventFilter(QObject* watched, QEvent* event) {
     if (!event) {
         return QWidget::eventFilter(watched, event);
+    }
+
+    // Scan-Splitting list shortcuts: Space toggles current row,
+    // Ctrl+A selects all (skips completed/locked), Esc clears all.
+    // Arrow keys fall through to QListWidget default navigation.
+    if (watched == list_scan_segments_ && event->type() == QEvent::KeyPress) {
+        auto* key_event = static_cast<QKeyEvent*>(event);
+        if (key_event->key() == Qt::Key_Space) {
+            if (list_scan_segments_) {
+                const int row = list_scan_segments_->currentRow();
+                SessionCache& cache = activeSession();
+                if (row >= 0 && row < list_scan_segments_->count() &&
+                    row < static_cast<int>(cache.scan_segments.size()) &&
+                    !cache.scan_segments[static_cast<size_t>(row)].completed) {
+                    auto* item = list_scan_segments_->item(row);
+                    if (item) {
+                        item->setSelected(!item->isSelected());
+                    }
+                }
+            }
+            key_event->accept();
+            return true;
+        }
+        if (key_event->matches(QKeySequence::SelectAll)) {
+            SessionCache& cache = activeSession();
+            for (auto& seg : cache.scan_segments) {
+                if (!seg.completed) {
+                    seg.selected = true;
+                }
+            }
+            refreshScanSegmentList();
+            pushScanSegmentsToPlot();
+            updateScanSplittingUi();
+            key_event->accept();
+            return true;
+        }
+        if (key_event->key() == Qt::Key_Escape) {
+            SessionCache& cache = activeSession();
+            for (auto& seg : cache.scan_segments) {
+                seg.selected = false;
+            }
+            refreshScanSegmentList();
+            pushScanSegmentsToPlot();
+            updateScanSplittingUi();
+            key_event->accept();
+            return true;
+        }
     }
 
     if (current_step_ == PlannerStep::Scan && event->type() == QEvent::MouseButtonPress) {
@@ -1789,8 +2089,10 @@ void PlannerScreen::loadPersistedParameters(SessionCache& cache) const {
         cache.coverage_scan_speed_mps =
             settings.value(QStringLiteral("coverage_scan_speed_mps")).toDouble();
     }
+    // Per-robot key kept only for one-time migration (see global block below).
+    QString legacy_per_robot_selected;
     if (settings.contains(QStringLiteral("coverage_selected_preset"))) {
-        cache.coverage_selected_preset =
+        legacy_per_robot_selected =
             settings.value(QStringLiteral("coverage_selected_preset")).toString();
     }
     if (settings.contains(QStringLiteral("coverage_roi_drawing_tool"))) {
@@ -1814,6 +2116,34 @@ void PlannerScreen::loadPersistedParameters(SessionCache& cache) const {
     }
     settings.endGroup();
     settings.endGroup();
+
+    // Selected preset name is global across robots (one preset library shared
+    // by every operator/robot). On first launch after the per-robot → global
+    // migration we copy any non-default per-robot value forward, then clear
+    // the legacy key so subsequent writes don't drift.
+    QSettings global_settings(kSettingsOrgName, kSettingsAppName);
+    QString global_selected =
+        global_settings.value(QLatin1String(kGlobalSelectedPresetKey)).toString();
+    if (global_selected.isEmpty()) {
+        if (!legacy_per_robot_selected.isEmpty()) {
+            global_settings.setValue(QLatin1String(kGlobalSelectedPresetKey),
+                                     legacy_per_robot_selected);
+            global_selected = legacy_per_robot_selected;
+        } else {
+            global_selected = QStringLiteral("Standard");
+        }
+    }
+    cache.coverage_selected_preset = global_selected;
+    // Drop the legacy per-robot key — the global key is authoritative now.
+    if (!legacy_per_robot_selected.isEmpty()) {
+        QSettings cleanup(kSettingsOrgName, kSettingsAppName);
+        cleanup.beginGroup(QStringLiteral("planner/mission_planner"));
+        cleanup.beginGroup(settingsGroupKey());
+        cleanup.remove(QStringLiteral("coverage_selected_preset"));
+        cleanup.endGroup();
+        cleanup.endGroup();
+    }
+
     ensureCoverageDefaults(cache);
 }
 
@@ -1838,7 +2168,8 @@ void PlannerScreen::persistParameters() const {
     settings.setValue(QStringLiteral("coverage_headland_width"), cache->coverage_headland_width);
     settings.setValue(QStringLiteral("coverage_scan_axis"), cache->coverage_scan_axis);
     settings.setValue(QStringLiteral("coverage_scan_speed_mps"), cache->coverage_scan_speed_mps);
-    settings.setValue(QStringLiteral("coverage_selected_preset"), cache->coverage_selected_preset);
+    // Selected preset name is intentionally NOT written here — it's stored
+    // globally below so a preset selection survives switching robots.
     settings.setValue(QStringLiteral("coverage_roi_drawing_tool"), cache->coverage_roi_drawing_tool);
     settings.setValue(QStringLiteral("coverage_obstacle_mode"), cache->coverage_obstacle_mode);
     settings.setValue(QStringLiteral("coverage_drawing_tool"), cache->coverage_drawing_tool);
@@ -1846,6 +2177,11 @@ void PlannerScreen::persistParameters() const {
     settings.setValue(QStringLiteral("scan_progression_mode"), cache->scan_progression_mode);
     settings.endGroup();
     settings.endGroup();
+
+    // Global selected-preset key (shared library across robots).
+    QSettings global_settings(kSettingsOrgName, kSettingsAppName);
+    global_settings.setValue(QLatin1String(kGlobalSelectedPresetKey),
+                             cache->coverage_selected_preset);
 }
 
 void PlannerScreen::persistCurrentStep() {
@@ -1854,42 +2190,19 @@ void PlannerScreen::persistCurrentStep() {
 
 void PlannerScreen::ensureCoverageDefaults(SessionCache& cache) const {
     if (cache.coverage_presets.empty()) {
-        cache.coverage_presets = {
-            {QStringLiteral("Standard"),
-             QStringLiteral("boustro"),
-             0.50,
-             0.30,
-             QStringLiteral("parallel"),
-             0.30,
-             false},
-            {QStringLiteral("Fast Scan"),
-             QStringLiteral("snake"),
-             0.80,
-             0.20,
-             QStringLiteral("parallel"),
-             0.60,
-             false},
-            {QStringLiteral("Detailed Survey"),
-             QStringLiteral("boustro"),
-             0.25,
-             0.40,
-             QStringLiteral("perpendicular"),
-             0.15,
-             false},
-            {QStringLiteral("Warehouse"),
-             QStringLiteral("snake"),
-             0.60,
-             0.50,
-             QStringLiteral("parallel"),
-             0.40,
-             false},
-        };
+        // Lazy populate: factories from code + customs from disk via
+        // PresetManager. Real refresh on save/delete is driven by the
+        // presetsChanged signal connection wired in the ctor.
+        reloadCoveragePresetsFromDisk(cache);
     }
 
     cache.coverage_path_spacing =
         clampValue(cache.coverage_path_spacing, kCoveragePathSpacingMin, kCoveragePathSpacingMax);
     cache.coverage_headland_width =
         clampValue(cache.coverage_headland_width, kCoverageHeadlandMin, kCoverageHeadlandMax);
+    if (!std::isfinite(cache.coverage_scan_speed_mps) || cache.coverage_scan_speed_mps <= 0.0) {
+        cache.coverage_scan_speed_mps = kCoverageScanSpeedDefault;
+    }
     cache.coverage_scan_speed_mps =
         clampValue(cache.coverage_scan_speed_mps, kCoverageScanSpeedMin, kCoverageScanSpeedMax);
 
@@ -1923,6 +2236,101 @@ void PlannerScreen::ensureCoverageDefaults(SessionCache& cache) const {
                      });
     if (preset_it == cache.coverage_presets.end()) {
         cache.coverage_selected_preset = QStringLiteral("Standard");
+    }
+}
+
+// =============================================================================
+// Preset persistence (Plan B). Factory presets are immutable code constants;
+// customs live one-JSON-per-file under PresetManager::presetsDir(). The
+// SessionCache::coverage_presets vector is a derived cache populated by
+// reloadCoveragePresetsFromDisk() and refreshed on PresetManager's
+// presetsChanged signal.
+// =============================================================================
+
+const std::vector<PlannerScreen::SessionCache::CoveragePreset>&
+PlannerScreen::factoryPresets() {
+    // {name, route_pattern, path_spacing, headland_width, scan_axis,
+    //  scan_speed_mps, custom}. Speeds slot into the [0.30, 0.60] m/s slider
+    // envelope; pick conservative defaults per factory profile.
+    static const std::vector<SessionCache::CoveragePreset> kFactories = {
+        {QStringLiteral("Standard"),        QStringLiteral("boustro"), 0.50, 0.30,
+         QStringLiteral("parallel"),        0.40, false},
+        {QStringLiteral("Fast Scan"),       QStringLiteral("snake"),   0.80, 0.20,
+         QStringLiteral("parallel"),        0.60, false},
+        {QStringLiteral("Detailed Survey"), QStringLiteral("boustro"), 0.25, 0.40,
+         QStringLiteral("perpendicular"),   0.30, false},
+        {QStringLiteral("Warehouse"),       QStringLiteral("snake"),   0.60, 0.50,
+         QStringLiteral("parallel"),        0.40, false},
+    };
+    return kFactories;
+}
+
+bool PlannerScreen::isFactoryPresetName(const QString& name) {
+    for (const auto& f : factoryPresets()) {
+        if (f.name == name) return true;
+    }
+    return false;
+}
+
+void PlannerScreen::reloadCoveragePresetsFromDisk(SessionCache& cache) const {
+    cache.coverage_presets.clear();
+    for (const auto& f : factoryPresets()) {
+        cache.coverage_presets.push_back(f);
+    }
+    if (!preset_manager_) {
+        return;
+    }
+    const QStringList disk_names = preset_manager_->availablePresets();
+    for (const QString& name : disk_names) {
+        // Defensive: factory names should never appear on disk because the
+        // save handler rejects them, but guard anyway in case the user copied
+        // a JSON manually.
+        if (isFactoryPresetName(name)) {
+            continue;
+        }
+        const PlanningPreset p = preset_manager_->loadPreset(name);
+        if (!p.isValid()) {
+            continue;
+        }
+        SessionCache::CoveragePreset cp;
+        cp.name           = p.name;
+        cp.route_pattern  = canonicalToUiPattern(p.route_pattern);
+        cp.path_spacing   = p.swath_width;
+        cp.headland_width = p.headland_width;
+        cp.scan_axis      = directionToUiAxis(p.direction);
+        cp.scan_speed_mps =
+            (std::isfinite(p.robot_speed) && p.robot_speed > 0.0)
+                ? clampValue(p.robot_speed, kCoverageScanSpeedMin, kCoverageScanSpeedMax)
+                : kCoverageScanSpeedDefault;
+        cp.custom         = true;
+        cache.coverage_presets.push_back(cp);
+    }
+}
+
+PlanningPreset PlannerScreen::buildPlanningPresetFromSession(
+    const SessionCache& cache) const {
+    // Seed from PresetManager::defaultPreset() so untouched fields (filtering,
+    // hull, turn_radius, decomposition…) get sensible JSON values today, and
+    // the on-disk schema stays forward-compatible if the UI later exposes
+    // those knobs.
+    PlanningPreset p = PresetManager::defaultPreset();
+    p.route_pattern  = uiPatternToCanonical(cache.coverage_pattern);
+    p.swath_width    = cache.coverage_path_spacing;
+    p.headland_width = cache.coverage_headland_width;
+    p.direction      = uiAxisToDirection(cache.coverage_scan_axis);
+    p.robot_speed    = cache.coverage_scan_speed_mps;
+    return p;
+}
+
+void PlannerScreen::applyPlanningPresetToSession(const PlanningPreset& p,
+                                                 SessionCache& cache) const {
+    cache.coverage_pattern         = canonicalToUiPattern(p.route_pattern);
+    cache.coverage_path_spacing    = p.swath_width;
+    cache.coverage_headland_width  = p.headland_width;
+    cache.coverage_scan_axis       = directionToUiAxis(p.direction);
+    if (std::isfinite(p.robot_speed) && p.robot_speed > 0.0) {
+        cache.coverage_scan_speed_mps =
+            clampValue(p.robot_speed, kCoverageScanSpeedMin, kCoverageScanSpeedMax);
     }
 }
 
@@ -2014,7 +2422,7 @@ void PlannerScreen::updateValueLabels() {
     }
     if (lbl_coverage_scan_speed_value_) {
         lbl_coverage_scan_speed_value_->setText(
-            QStringLiteral("%1m/s").arg(cache.coverage_scan_speed_mps, 0, 'f', 1));
+            QString::asprintf("%.2f m/s", cache.coverage_scan_speed_mps));
     }
 }
 
@@ -2205,12 +2613,30 @@ void PlannerScreen::refreshCoveragePresetCombo() {
     const SessionCache& cache = activeSession();
     QSignalBlocker blocker(combo_coverage_presets_);
     combo_coverage_presets_->clear();
-    for (const auto& preset : cache.coverage_presets) {
-        QString label = preset.name;
-        if (preset.custom) {
-            label += QStringLiteral(" (Custom)");
+
+    // Factories pinned at top in canonical order.
+    for (const auto& f : factoryPresets()) {
+        combo_coverage_presets_->addItem(f.name, f.name);
+    }
+
+    // Customs sorted A->Z, separated visually from factories.
+    QStringList custom_names;
+    for (const auto& p : cache.coverage_presets) {
+        if (p.custom) {
+            custom_names << p.name;
         }
-        combo_coverage_presets_->addItem(label, preset.name);
+    }
+    custom_names.sort(Qt::CaseInsensitive);
+    if (!custom_names.isEmpty()) {
+        combo_coverage_presets_->insertSeparator(combo_coverage_presets_->count());
+        for (const QString& name : custom_names) {
+            combo_coverage_presets_->addItem(name + QStringLiteral(" (Custom)"), name);
+        }
+    }
+
+    const int idx = combo_coverage_presets_->findData(cache.coverage_selected_preset);
+    if (idx >= 0) {
+        combo_coverage_presets_->setCurrentIndex(idx);
     }
 }
 
@@ -2232,8 +2658,6 @@ void PlannerScreen::rebuildCoveragePresetRows() {
                                     : QStringLiteral("#374151");
     const QString muted = dark_mode_ ? QStringLiteral("#71717B")
                                      : QStringLiteral("#6B7280");
-    const QString danger = dark_mode_ ? QStringLiteral("#F87171")
-                                      : QStringLiteral("#DC2626");
 
     bool has_custom = false;
     for (const auto& preset : cache.coverage_presets) {
@@ -2243,9 +2667,16 @@ void PlannerScreen::rebuildCoveragePresetRows() {
 
         has_custom = true;
         auto* row = new QWidget(coverage_custom_presets_card_);
+        row->setObjectName(QStringLiteral("PresetRow"));
         row->setAttribute(Qt::WA_StyledBackground, true);
-        row->setStyleSheet(QStringLiteral("background: %1; border: 1px solid %2; border-radius: 8px;")
-                               .arg(row_bg, row_border));
+        // Selector scoped to #PresetRow so background/border/radius do not
+        // cascade onto child SvgIconButtons (which would inherit the 1px
+        // border + radius and clip the 24x24 tinted icon to nothing).
+        row->setStyleSheet(
+            QStringLiteral(
+                "QWidget#PresetRow { background: %1; border: 1px solid %2; "
+                "border-radius: 8px; }")
+                .arg(row_bg, row_border));
         auto* row_layout = new QHBoxLayout(row);
         row_layout->setContentsMargins(10, 8, 8, 8);
         row_layout->setSpacing(8);
@@ -2262,7 +2693,7 @@ void PlannerScreen::rebuildCoveragePresetRows() {
             row,
             QStringLiteral("%1 | %2m spacing")
                 .arg(preset.route_pattern == QStringLiteral("snake") ? QStringLiteral("Snake")
-                                                                    : QStringLiteral("Boustrophedon"))
+                                                                    : QStringLiteral("Zigzag"))
                 .arg(preset.path_spacing, 0, 'f', 2),
             QStringLiteral("font-family: 'Arimo'; font-size: 10px; font-weight: 400; color: %1;")
                 .arg(muted));
@@ -2270,44 +2701,146 @@ void PlannerScreen::rebuildCoveragePresetRows() {
         text_col->addWidget(meta_label);
         row_layout->addLayout(text_col, 1);
 
-        auto* delete_button = new QPushButton(QStringLiteral("Delete"), row);
-        delete_button->setCursor(Qt::PointingHandCursor);
-        delete_button->setFlat(true);
-        delete_button->setStyleSheet(
-            QStringLiteral("QPushButton { background: transparent; border: none; color: %1; "
-                           "font-family: 'Arimo'; font-size: 11px; font-weight: 600; } "
-                           "QPushButton:hover { color: %2; }")
-                .arg(muted, danger));
-        connect(delete_button, &QPushButton::clicked, this, [this, preset_name = preset.name]() {
-            SessionCache& session = activeSession();
-            session.coverage_presets.erase(
-                std::remove_if(session.coverage_presets.begin(),
-                               session.coverage_presets.end(),
-                               [&preset_name](const SessionCache::CoveragePreset& candidate) {
-                                   return candidate.custom && candidate.name == preset_name;
-                               }),
-                session.coverage_presets.end());
-            if (session.coverage_selected_preset == preset_name) {
-                session.coverage_selected_preset = QStringLiteral("Standard");
-                const auto standard_it =
-                    std::find_if(session.coverage_presets.begin(),
-                                 session.coverage_presets.end(),
-                                 [](const SessionCache::CoveragePreset& candidate) {
-                                     return candidate.name == QStringLiteral("Standard");
-                                 });
-                if (standard_it != session.coverage_presets.end()) {
-                    session.coverage_pattern = standard_it->route_pattern;
-                    session.coverage_path_spacing = standard_it->path_spacing;
-                    session.coverage_headland_width = standard_it->headland_width;
-                    session.coverage_scan_axis = standard_it->scan_axis;
-                    session.coverage_scan_speed_mps = standard_it->scan_speed_mps;
+        // ---- Rename button ----
+        // Lucide square-pen icon, runtime-tinted via SvgIconButton. Opens a
+        // themed BdrInputDialog prefilled with the current name. Validator
+        // blocks empty / unchanged / factory-collision / custom-collision.
+        SvgIconButton::Palette rename_palette;
+        rename_palette.dark_resting  = QColor("#71717B");
+        rename_palette.dark_hover    = QColor("#F59E0B");
+        rename_palette.light_resting = QColor("#6B7280");
+        rename_palette.light_hover   = QColor("#F59E0B");
+        auto* rename_button = new SvgIconButton(
+            QStringLiteral(":/assets/missionplanner/preset_rename.svg"),
+            rename_palette,
+            24,
+            row);
+        rename_button->setDarkMode(dark_mode_);
+        rename_button->setToolTip(QStringLiteral("Rename preset"));
+        connect(rename_button, &QPushButton::clicked, this,
+                [this, preset_name = preset.name]() {
+            if (isFactoryPresetName(preset_name) || !preset_manager_) {
+                return;
+            }
+            // Snapshot the existing custom names (case-sensitive) so the
+            // validator doesn't have to re-walk the cache on every keystroke.
+            QStringList existing_custom;
+            for (const auto& candidate : activeSession().coverage_presets) {
+                if (candidate.custom && candidate.name != preset_name) {
+                    existing_custom.append(candidate.name);
                 }
             }
-            persistParameters();
-            updateValueLabels();
-            updatePreview();
-            updateButtonsAndStatus();
+            auto validator = [preset_name, existing_custom](const QString& candidate)
+                -> QString {
+                const QString trimmed = candidate.trimmed();
+                if (trimmed.isEmpty()) {
+                    return QStringLiteral("Name cannot be empty.");
+                }
+                if (trimmed == preset_name) {
+                    // No-op: same name; treat as cancel so we don't churn disk.
+                    // Validator returns empty → dialog accepts → caller compares
+                    // and short-circuits before calling renamePreset.
+                    return QString();
+                }
+                if (PlannerScreen::isFactoryPresetName(trimmed)) {
+                    return QStringLiteral(
+                        "'%1' is a built-in preset name and cannot be reused.")
+                        .arg(trimmed);
+                }
+                if (existing_custom.contains(trimmed)) {
+                    return QStringLiteral(
+                        "A preset named '%1' already exists.").arg(trimmed);
+                }
+                return QString();
+            };
+            bool accepted = false;
+            const QString new_name = BdrInputDialog::getText(
+                this,
+                QStringLiteral("Rename preset"),
+                QStringLiteral("New name for preset '%1':").arg(preset_name),
+                preset_name,
+                dark_mode_,
+                validator,
+                &accepted);
+            if (!accepted || new_name.isEmpty() || new_name == preset_name) {
+                return;
+            }
+            if (!preset_manager_->renamePreset(preset_name, new_name)) {
+                BdrMessageBox::critical(
+                    this,
+                    QStringLiteral("Rename failed"),
+                    QStringLiteral("Could not rename preset '%1' to '%2'.")
+                        .arg(preset_name, new_name));
+                return;
+            }
+            SessionCache& session = activeSession();
+            if (session.coverage_selected_preset == preset_name) {
+                session.coverage_selected_preset = new_name;
+                persistParameters();
+            }
+            // PresetManager::renamePreset emitted presetsChanged synchronously,
+            // so the row list and combo are already rebuilt. Re-sync the rest
+            // of the UI in case the selected preset string moved.
             applySessionToUi();
+        });
+        row_layout->addWidget(rename_button, 0, Qt::AlignVCenter);
+
+        // ---- Delete button ----
+        // Same Lucide trash-2 SVG aliased under preset_delete. Gated behind a
+        // BdrMessageBox::question to avoid an instant-destroy on a tiny click
+        // target.
+        SvgIconButton::Palette delete_palette;
+        delete_palette.dark_resting  = QColor("#71717B");
+        delete_palette.dark_hover    = QColor("#F87171");
+        delete_palette.light_resting = QColor("#6B7280");
+        delete_palette.light_hover   = QColor("#DC2626");
+        auto* delete_button = new SvgIconButton(
+            QStringLiteral(":/assets/missionplanner/preset_delete.svg"),
+            delete_palette,
+            24,
+            row);
+        delete_button->setDarkMode(dark_mode_);
+        delete_button->setToolTip(QStringLiteral("Delete preset"));
+        connect(delete_button, &QPushButton::clicked, this,
+                [this, preset_name = preset.name]() {
+            if (isFactoryPresetName(preset_name) || !preset_manager_) {
+                return;
+            }
+            const int answer = BdrMessageBox::question(
+                this,
+                QStringLiteral("Delete preset?"),
+                QStringLiteral(
+                    "Delete preset '%1'? This cannot be undone.").arg(preset_name),
+                BdrMessageBox::No);
+            if (answer != BdrMessageBox::Yes) {
+                return;
+            }
+            if (!preset_manager_->deletePreset(preset_name)) {
+                BdrMessageBox::critical(
+                    this,
+                    QStringLiteral("Delete failed"),
+                    QStringLiteral("Could not delete preset '%1'.").arg(preset_name));
+                return;
+            }
+            SessionCache& session = activeSession();
+            if (session.coverage_selected_preset == preset_name) {
+                session.coverage_selected_preset = QStringLiteral("Standard");
+                const auto& factories = factoryPresets();
+                const auto standard_it = std::find_if(
+                    factories.begin(), factories.end(),
+                    [](const SessionCache::CoveragePreset& candidate) {
+                        return candidate.name == QStringLiteral("Standard");
+                    });
+                if (standard_it != factories.end()) {
+                    session.coverage_pattern        = standard_it->route_pattern;
+                    session.coverage_path_spacing   = standard_it->path_spacing;
+                    session.coverage_headland_width = standard_it->headland_width;
+                    session.coverage_scan_axis      = standard_it->scan_axis;
+                    session.coverage_scan_speed_mps = standard_it->scan_speed_mps;
+                }
+                persistParameters();
+                applySessionToUi();
+            }
         });
         row_layout->addWidget(delete_button, 0, Qt::AlignVCenter);
         coverage_custom_presets_layout_->addWidget(row);
@@ -2794,9 +3327,10 @@ void PlannerScreen::updateCoveragePlanningUi() {
                                          ? static_cast<qsizetype>(cache.planned_path.size())
                                          : static_cast<qsizetype>(
                                                std::llround(path_length / kCoveragePathEstimateSpacingMeters));
+    const double eta_speed_mps = effectiveScanSpeedMps();
     const double estimated_minutes =
-        cache.coverage_scan_speed_mps > 0.0 ? (path_length / cache.coverage_scan_speed_mps) / 60.0
-                                            : 0.0;
+        eta_speed_mps > 0.0 ? (path_length / eta_speed_mps) / 60.0
+                            : 0.0;
 
     if (lbl_coverage_area_) {
         lbl_coverage_area_->setText(effective_area > 0.0 ? formatArea(effective_area)
@@ -3325,9 +3859,39 @@ void PlannerScreen::applySessionToUi() {
 }
 
 void PlannerScreen::navigateToStep(PlannerStep step) {
+    // Self-clicks on the same stage pill should be a no-op for the
+    // checklist gate — we don't want to re-prompt the operator just for
+    // re-pressing Scan while already on Scan.
+    const PlannerStep previous_step = current_step_;
     current_step_ = step;
     persistCurrentStep();
     applySessionToUi();
+    // Auto-split on entry to the Scan Splitting step using the cached
+    // scan_distance_m, so the operator doesn't have to click Split path
+    // every time. Skipped when segments are already populated and not
+    // dirty, to preserve in-progress selection / completion state. The
+    // splitting stage is also where the preflight ack resets — every
+    // round-trip through here forces a new acknowledgment on the next
+    // Scan entry.
+    if (step == PlannerStep::ScanSplitting) {
+        SessionCache& c = activeSession();
+        c.scan_preflight_acknowledged = false;
+        if (c.planning_complete && c.planned_path.size() >= 2 &&
+            (c.scan_segments.empty() || c.scan_splits_dirty)) {
+            onSplitPathClicked();
+        }
+    }
+    // Pre-scan operator checklist gate. Defer with a zero-delay timer so
+    // the Scan stage paints once before the modal overlays it, otherwise
+    // the operator briefly sees an empty/half-built page behind the
+    // dialog. previous_step != Scan suppresses the prompt on stage-pill
+    // self-clicks while already on Scan.
+    if (step == PlannerStep::Scan && previous_step != PlannerStep::Scan) {
+        const SessionCache* c = activeSessionPtr();
+        if (c && !c->scan_preflight_acknowledged) {
+            QTimer::singleShot(0, this, [this]() { showScanPreflightDialog(); });
+        }
+    }
     maybeRunAutotest();
 }
 
@@ -4180,6 +4744,68 @@ void PlannerScreen::applyDetectResult(quint64 generation, ObstacleDetectionResul
 namespace {
 
 constexpr double kScanWaypointDuplicateEpsilon = 1e-3;
+constexpr int kScanSegmentRowHeight = 52;
+constexpr int kScanSegmentCompletedRole = Qt::UserRole + 1;
+
+// Custom delegate for the scan-segment list. Paints two extras on top of the
+// stylesheet-driven row:
+//   * a 4px green accent stripe on the left edge of the row that currently
+//     has focus (mirrors the plot-side "active segment" highlight)
+//   * a green checkmark on the right edge of any row whose segment is
+//     marked completed (auto-deselect+lock policy enforces unselected state)
+class ScanSegmentItemDelegate : public QStyledItemDelegate {
+public:
+    ScanSegmentItemDelegate(QListWidget* list, QObject* parent = nullptr)
+        : QStyledItemDelegate(parent), list_(list) {}
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        QStyledItemDelegate::paint(painter, option, index);
+        if (!painter) {
+            return;
+        }
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+
+        if (list_ && list_->currentRow() == index.row()) {
+            const QRect r = option.rect;
+            const QRect stripe(r.left() + 2, r.top() + 6, 4, r.height() - 12);
+            painter->fillRect(stripe, QColor("#10B981"));
+        }
+
+        if (index.data(kScanSegmentCompletedRole).toBool()) {
+            const int sz = 18;
+            const int margin = 14;
+            const QRect chk(option.rect.right() - margin - sz,
+                            option.rect.center().y() - sz / 2,
+                            sz, sz);
+            const QColor color = option.state.testFlag(QStyle::State_Selected)
+                                     ? QColor("#FFFFFF")
+                                     : QColor("#00D492");
+            QPen pen(color, 2.5);
+            pen.setCapStyle(Qt::RoundCap);
+            pen.setJoinStyle(Qt::RoundJoin);
+            painter->setPen(pen);
+            QPainterPath path;
+            path.moveTo(chk.left() + 2, chk.center().y());
+            path.lineTo(chk.center().x() - 1, chk.bottom() - 3);
+            path.lineTo(chk.right() - 2, chk.top() + 3);
+            painter->drawPath(path);
+        }
+
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option,
+                   const QModelIndex& index) const override {
+        QSize sz = QStyledItemDelegate::sizeHint(option, index);
+        sz.setHeight(kScanSegmentRowHeight);
+        return sz;
+    }
+
+private:
+    QListWidget* list_;
+};
 
 PathStateList dedupeScanPathStates(const PathStateList& path) {
     PathStateList filtered;
@@ -4230,6 +4856,9 @@ void PlannerScreen::invalidateScanSegments(const QString& status_message) {
     cache.scan_segments.clear();
     cache.scan_splits_dirty = true;
     cache.scan_waypoints_published = false;
+    // Splits changed -> any prior preflight ack is stale. Force the
+    // operator to re-acknowledge before the next Scan stage entry.
+    cache.scan_preflight_acknowledged = false;
     if (lbl_scan_splitting_status_ && !status_message.isEmpty()) {
         lbl_scan_splitting_status_->setText(status_message);
     }
@@ -4277,7 +4906,7 @@ void PlannerScreen::rebuildScanSegments() {
         s.path.assign(base.begin() + a, base.begin() + b + 1);
         s.turns = estimateScanTurns(s.path);
         s.completed = false;
-        s.selected = false;
+        s.selected = true;
         cache.scan_segments.push_back(std::move(s));
         return true;
     };
@@ -4292,18 +4921,18 @@ void PlannerScreen::rebuildScanSegments() {
         const size_t lower = upper > 0 ? upper - 1 : upper;
         size_t cut = (target - cum[lower] <= cum[upper] - target) ? lower : upper;
         if (cut <= start_idx) cut = std::min(start_idx + 1, base.size() - 1);
-        if (addSeg(start_idx, cut, QString("Scan %1").arg(idx))) {
+        if (addSeg(start_idx, cut, QString("Segment %1").arg(idx))) {
             ++idx;
         }
         start_idx = cut;
     }
-    if (addSeg(start_idx, base.size() - 1, QString("Scan %1").arg(idx))) {
+    if (addSeg(start_idx, base.size() - 1, QString("Segment %1").arg(idx))) {
         ++idx;
     }
 
     // If the path is very short, keep a single segment as long as it is meaningful.
     if (cache.scan_segments.empty() && total > min_segment_m) {
-        (void)addSeg(0, base.size() - 1, QString("Scan 1"));
+        (void)addSeg(0, base.size() - 1, QString("Segment 1"));
     }
 
     cache.scan_splits_dirty = false;
@@ -4340,12 +4969,12 @@ void PlannerScreen::refreshScanSegmentList() {
                 .arg(seg.name)
                 .arg(seg.length_m, 0, 'f', 1)
                 .arg(seg.turns));
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(seg.selected ? Qt::Checked : Qt::Unchecked);
-        const QString fg = seg.completed ? QStringLiteral("#00D492")
-                                         : QStringLiteral("#E4E4E7");
-        item->setForeground(QColor(fg));
+        item->setData(kScanSegmentCompletedRole, seg.completed);
+        if (seg.completed) {
+            item->setForeground(QColor(QStringLiteral("#00D492")));
+        }
         list_scan_segments_->addItem(item);
+        item->setSelected(seg.selected);
         if (seg.completed) ++done;
     }
     if (lbl_scan_segments_footer_) {
@@ -4433,8 +5062,15 @@ void PlannerScreen::onScanDistanceEdited() {
     if (ok && value > 0.0) {
         if (std::fabs(value - cache.scan_distance_m) > 1e-6) {
             cache.scan_distance_m = value;
-            invalidateScanSegments(
-                QStringLiteral("Distance changed. Click Split path to regenerate segments."));
+            // Re-split immediately when a coverage plan exists. Selections
+            // are intentionally cleared by rebuildScanSegments — the
+            // operator will re-tick segments before publishing.
+            if (cache.planning_complete && cache.planned_path.size() >= 2) {
+                rebuildScanSegments();
+            } else {
+                invalidateScanSegments(
+                    QStringLiteral("Distance changed. Generate a coverage plan to split."));
+            }
         }
     } else {
         edit_scan_distance_->setText(
@@ -4473,6 +5109,49 @@ void PlannerScreen::onSplitPathClicked() {
     refreshScanSegmentList();
     pushScanSegmentsToPlot();
     updateScanSplittingUi();
+}
+
+void PlannerScreen::showScanPreflightDialog() {
+    // Already acknowledged this round (e.g. another async call raced
+    // into here). Bail out quietly.
+    if (activeSession().scan_preflight_acknowledged) {
+        return;
+    }
+
+    auto* dialog = new PreScanChecklistDialog(dark_mode_, this);
+    // Forward Wake GPR clicks up to AppShellWindow via the planner-level
+    // signal; AppShellWindow's onPlannerWakeGprRequested fires the
+    // /gpr_line_stop Trigger.
+    connect(dialog, &PreScanChecklistDialog::wakeGprRequested,
+            this, &PlannerScreen::wakeGprRequested);
+
+    // Blur the Stage 4 content behind the dialog so the operator's eye
+    // is drawn to the modal. Mirrors the exploration_screen pattern at
+    // exploration_screen.cpp:1918. Effect attached to `this` because
+    // PlannerScreen owns its layout directly (no content_root_ wrapper).
+    auto* blur = new QGraphicsBlurEffect(this);
+    blur->setBlurRadius(10.0);
+    setGraphicsEffect(blur);
+
+    // Center the dialog on the PlannerScreen, deferred until after the
+    // dialog has its real size (post-show).
+    QPointer<PreScanChecklistDialog> guard(dialog);
+    QTimer::singleShot(0, dialog, [this, guard]() {
+        if (!guard) return;
+        const QPoint top_left = mapToGlobal(QPoint(
+            (width() - guard->width()) / 2,
+            (height() - guard->height()) / 2));
+        guard->move(top_left);
+    });
+
+    const int rc = dialog->exec();
+
+    setGraphicsEffect(nullptr);
+    dialog->deleteLater();
+
+    if (rc == QDialog::Accepted) {
+        activeSession().scan_preflight_acknowledged = true;
+    }
 }
 
 void PlannerScreen::onPublishSelectedClicked() {
@@ -5018,6 +5697,7 @@ void PlannerScreen::buildUi() {
     left_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     left_scroll->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; border: none; }"));
     left_scroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
+    AutoHideScrollBar::install(left_scroll, dark_mode_);
     map_processing_page_layout->addWidget(left_scroll, 1);
 
     auto* left_content = new QWidget(left_scroll);
@@ -5027,48 +5707,105 @@ void PlannerScreen::buildUi() {
     left_content_layout->setContentsMargins(24, 12, 24, 24);
     left_content_layout->setSpacing(0);
 
-    auto make_range_block = [&](QWidget* parent,
-                                const QString& label_text,
-                                const QString& desc_text,
-                                const QString& min_text,
-                                const QString& max_text,
-                                double minimum,
-                                double maximum,
-                                double step,
-                                int decimals,
-                                PlannerTrackSlider** out_slider,
-                                QLabel** out_value_label) -> QWidget* {
+    auto make_stepper_button = [this](QWidget* parent, const QString& icon_path) {
+        auto* btn = new QPushButton(parent);
+        btn->setObjectName(QStringLiteral("PlannerStepper"));
+        btn->setProperty("plannerStepper", true);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setFlat(true);
+        btn->setFixedSize(28, 28);
+        btn->setFocusPolicy(Qt::NoFocus);
+        btn->setAutoRepeat(true);
+        btn->setAutoRepeatDelay(400);
+        btn->setAutoRepeatInterval(50);
+        auto* icon_layout = new QHBoxLayout(btn);
+        icon_layout->setContentsMargins(0, 0, 0, 0);
+        icon_layout->setSpacing(0);
+        auto* icon = makeIconLabel(btn, icon_path, 14,
+                                   dark_mode_ ? QStringLiteral("#D4D4D8")
+                                              : QStringLiteral("#3F3F47"));
+        icon_layout->addWidget(icon, 0, Qt::AlignCenter);
+        stepper_buttons_.push_back({btn, icon, icon_path});
+        applyStepperButtonStyle(btn);
+        return btn;
+    };
+
+    auto make_range_block = [&, this](QWidget* parent,
+                                      const QString& label_text,
+                                      const QString& desc_text,
+                                      const QString& min_text,
+                                      const QString& max_text,
+                                      double minimum,
+                                      double maximum,
+                                      double step,
+                                      int decimals,
+                                      PlannerTrackSlider** out_slider,
+                                      QLabel** out_value_label) -> QWidget* {
         auto* block = new QWidget(parent);
-        block->setFixedHeight(84);
+        block->setFixedHeight(100);
         auto* layout = new QVBoxLayout(block);
         layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(12);
+        layout->setSpacing(4);
 
-        auto* top_row = new QHBoxLayout();
-        top_row->setContentsMargins(0, 0, 0, 0);
-        top_row->setSpacing(12);
+        layout->addWidget(makeTrackedLabel(block, desc_text, kInitialLabel10, &label10_labels_));
 
-        auto* left_col = new QVBoxLayout();
-        left_col->setContentsMargins(0, 0, 0, 0);
-        left_col->setSpacing(3);
-        left_col->addWidget(makeTrackedLabel(block, label_text, kInitialLabel12, &label12_labels_));
-        left_col->addWidget(makeTrackedLabel(block, desc_text, kInitialLabel10, &label10_labels_));
-        top_row->addLayout(left_col, 1);
-
+        auto* header_row = new QHBoxLayout();
+        header_row->setContentsMargins(0, 0, 0, 0);
+        header_row->setSpacing(12);
+        header_row->addWidget(
+            makeTrackedLabel(block, label_text, kInitialLabel12, &label12_labels_), 1);
         *out_value_label = makeTrackedLabel(block,
                                             QStringLiteral("--"),
-                                            kInitialMono12Green,
-                                            &mono12_accent_labels_,
-                                            Qt::AlignRight | Qt::AlignTop);
-        top_row->addWidget(*out_value_label);
-        layout->addLayout(top_row);
+                                            kInitialMono12White,
+                                            &mono12_white_labels_,
+                                            Qt::AlignRight | Qt::AlignVCenter);
+        header_row->addWidget(*out_value_label);
+        layout->addLayout(header_row);
+        layout->addSpacing(4);
+
+        auto* slider_row = new QHBoxLayout();
+        slider_row->setContentsMargins(0, 0, 0, 0);
+        slider_row->setSpacing(8);
+
+        auto* btn_minus =
+            make_stepper_button(block, QStringLiteral(":/assets/missionplanner/stepper_minus.svg"));
+        slider_row->addWidget(btn_minus, 0, Qt::AlignVCenter);
 
         auto* slider = new PlannerTrackSlider(block);
         slider->setRange(minimum, maximum);
         slider->setStep(step);
         slider->setDecimals(decimals);
-        layout->addWidget(slider);
+        slider_row->addWidget(slider, 1, Qt::AlignVCenter);
         *out_slider = slider;
+
+        auto* btn_plus =
+            make_stepper_button(block, QStringLiteral(":/assets/missionplanner/stepper_plus.svg"));
+        slider_row->addWidget(btn_plus, 0, Qt::AlignVCenter);
+
+        connect(btn_minus, &QPushButton::clicked, this, [slider]() {
+            const double next = slider->value() - slider->step();
+            const double clamped = std::max(slider->minimum(), next);
+            if (std::abs(clamped - slider->value()) < 1e-9) {
+                return;
+            }
+            slider->setValue(clamped);
+            if (slider->on_value_changed) {
+                slider->on_value_changed(slider->value());
+            }
+        });
+        connect(btn_plus, &QPushButton::clicked, this, [slider]() {
+            const double next = slider->value() + slider->step();
+            const double clamped = std::min(slider->maximum(), next);
+            if (std::abs(clamped - slider->value()) < 1e-9) {
+                return;
+            }
+            slider->setValue(clamped);
+            if (slider->on_value_changed) {
+                slider->on_value_changed(slider->value());
+            }
+        });
+
+        layout->addLayout(slider_row);
 
         auto* range_row = new QHBoxLayout();
         range_row->setContentsMargins(0, 0, 0, 0);
@@ -5085,7 +5822,7 @@ void PlannerScreen::buildUi() {
     };
 
     auto* downsampling_section = new QWidget(left_content);
-    downsampling_section->setFixedHeight(108);
+    downsampling_section->setFixedHeight(124);
     auto* downsampling_layout = new QVBoxLayout(downsampling_section);
     downsampling_layout->setContentsMargins(0, 0, 0, 0);
     downsampling_layout->setSpacing(8);
@@ -5106,7 +5843,7 @@ void PlannerScreen::buildUi() {
     left_content_layout->addSpacing(12);
 
     auto* height_section = new QWidget(left_content);
-    height_section->setFixedHeight(206);
+    height_section->setFixedHeight(238);
     auto* height_layout = new QVBoxLayout(height_section);
     height_layout->setContentsMargins(0, 4, 0, 0);
     height_layout->setSpacing(8);
@@ -5180,7 +5917,7 @@ void PlannerScreen::buildUi() {
     left_content_layout->addSpacing(12);
 
     auto* hull_section = new QWidget(left_content);
-    hull_section->setFixedHeight(158);
+    hull_section->setFixedHeight(174);
     auto* hull_layout = new QVBoxLayout(hull_section);
     hull_layout->setContentsMargins(0, 4, 0, 0);
     hull_layout->setSpacing(8);
@@ -5377,6 +6114,7 @@ void PlannerScreen::buildUi() {
     coverage_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     coverage_scroll->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; border: none; }"));
     coverage_scroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
+    AutoHideScrollBar::install(coverage_scroll, dark_mode_);
     coverage_page_layout->addWidget(coverage_scroll, 1);
 
     auto* coverage_content = new QWidget(coverage_scroll);
@@ -5543,7 +6281,7 @@ void PlannerScreen::buildUi() {
     pattern_grid->setVerticalSpacing(8);
     btn_coverage_pattern_boustro_ =
         make_choice_button(pattern_section,
-                           QStringLiteral("Boustrophedon"),
+                           QStringLiteral("Zigzag"),
                            QString(),
                            &lbl_coverage_pattern_boustro_icon_,
                            84);
@@ -5620,15 +6358,18 @@ void PlannerScreen::buildUi() {
                                                    2,
                                                    &slider_coverage_headland_,
                                                    &lbl_coverage_headland_value_));
+    // Robot cruise speed (m/s). Slider is config-only; the value gets pushed
+    // to /mpc_accel_controller's `max_linear_velocity` ROS param at scan-
+    // start. Range matches the safe envelope of the current MPC tune.
     path_blocks_layout->addWidget(make_range_block(path_section,
-                                                   QStringLiteral("Scan Speed"),
-                                                   QStringLiteral("Robot movement speed"),
-                                                   QStringLiteral("0.1 m/s"),
-                                                   QStringLiteral("0.8 m/s"),
+                                                   QStringLiteral("Robot Speed"),
+                                                   QStringLiteral("Cruise speed during scan"),
+                                                   QStringLiteral("0.30 m/s"),
+                                                   QStringLiteral("0.60 m/s"),
                                                    kCoverageScanSpeedMin,
                                                    kCoverageScanSpeedMax,
-                                                   0.1,
-                                                   1,
+                                                   kCoverageScanSpeedStep,
+                                                   2,
                                                    &slider_coverage_scan_speed_,
                                                    &lbl_coverage_scan_speed_value_));
     path_section_layout->addWidget(path_blocks);
@@ -5834,6 +6575,7 @@ void PlannerScreen::buildUi() {
     scan_scroll->setWidgetResizable(true);
     scan_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scan_scroll->setStyleSheet(QStringLiteral("background: transparent;"));
+    AutoHideScrollBar::install(scan_scroll, dark_mode_);
     scan_page_layout->addWidget(scan_scroll, 1);
 
     auto* scan_content = new QWidget(scan_scroll);
@@ -6013,17 +6755,55 @@ void PlannerScreen::buildUi() {
     applyDropShadow(btn_scan_start_selected_, 16, 4, QColor(21, 93, 252, 52));
     scan_content_layout->addWidget(btn_scan_start_selected_);
 
+    auto* segment_actions_row = new QWidget(scan_content);
+    segment_actions_row->setAttribute(Qt::WA_StyledBackground, true);
+    segment_actions_row->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* segment_actions_layout = new QHBoxLayout(segment_actions_row);
+    segment_actions_layout->setContentsMargins(2, 6, 2, 2);
+    segment_actions_layout->setSpacing(14);
+    segment_actions_layout->addStretch(1);
+
+    const QString segment_action_qss = QStringLiteral(
+        "QPushButton { background: transparent; border: none; "
+        "  font-family: 'Arimo'; font-size: 13px; font-weight: 600; "
+        "  padding: 4px 6px; color: %1; }"
+        "QPushButton:hover { color: %2; }"
+        "QPushButton:disabled { color: #3F3F47; }");
+
+    btn_segments_select_all_ = new QPushButton(QStringLiteral("Select all"), segment_actions_row);
+    btn_segments_select_all_->setFlat(true);
+    btn_segments_select_all_->setCursor(Qt::PointingHandCursor);
+    btn_segments_select_all_->setStyleSheet(segment_action_qss.arg("#00D492", "#34D399"));
+    segment_actions_layout->addWidget(btn_segments_select_all_);
+
+    btn_segments_clear_all_ = new QPushButton(QStringLiteral("Clear"), segment_actions_row);
+    btn_segments_clear_all_->setFlat(true);
+    btn_segments_clear_all_->setCursor(Qt::PointingHandCursor);
+    btn_segments_clear_all_->setStyleSheet(segment_action_qss.arg("#A1A1AA", "#FFFFFF"));
+    segment_actions_layout->addWidget(btn_segments_clear_all_);
+
+    scan_content_layout->addWidget(segment_actions_row);
+
     list_scan_segments_ = new QListWidget(scan_content);
-    list_scan_segments_->setSelectionMode(QAbstractItemView::NoSelection);
-    list_scan_segments_->setFocusPolicy(Qt::NoFocus);
+    list_scan_segments_->setSelectionMode(QAbstractItemView::MultiSelection);
+    list_scan_segments_->setFocusPolicy(Qt::StrongFocus);
     list_scan_segments_->setAttribute(Qt::WA_StyledBackground, true);
     list_scan_segments_->setStyleSheet(QStringLiteral(
         "QListWidget { background: rgba(39,39,42,0.3); border: 1px solid #3F3F47; "
-        "  border-radius: 10px; padding: 8px; color: #E4E4E7; }"
-        "QListWidget::item { padding: 6px 8px; border-radius: 6px; }"
-        "QListWidget::item:hover { background: rgba(63,63,71,0.4); }"));
+        "  border-radius: 10px; padding: 8px; color: #E4E4E7; "
+        "  font-family: 'Arimo'; font-size: 17px; font-weight: 500; "
+        "  outline: 0; }"
+        "QListWidget::item { padding: 12px 44px 12px 18px; border-radius: 8px; "
+        "  margin: 3px 0; }"
+        "QListWidget::item:hover { background: rgba(63,63,71,0.4); }"
+        "QListWidget::item:selected { background: #00BC7D; color: #FFFFFF; }"
+        "QListWidget::item:selected:hover { background: #0ACB8B; }"));
     list_scan_segments_->setMinimumHeight(360);
     list_scan_segments_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    list_scan_segments_->setItemDelegate(
+        new ScanSegmentItemDelegate(list_scan_segments_, list_scan_segments_));
+    list_scan_segments_->installEventFilter(this);
+    AutoHideScrollBar::install(list_scan_segments_, dark_mode_);
     scan_content_layout->addWidget(list_scan_segments_, 1);
 
     lbl_scan_segments_footer_ = makeTextLabel(
@@ -6384,7 +7164,9 @@ void PlannerScreen::buildUi() {
     btn_next_->setAutoDefault(false);
     btn_next_->setDefault(false);
     btn_next_->installEventFilter(this);
-    btn_next_->setFixedSize(kFooterCallToActionWidth, 44);
+    btn_next_->setFixedHeight(44);
+    btn_next_->setMinimumWidth(kFooterCallToActionWidth);
+    btn_next_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     btn_next_->setStyleSheet(QStringLiteral(
         "QPushButton {"
         "  background: #00BC7D;"
@@ -6488,7 +7270,10 @@ void PlannerScreen::buildUi() {
         cache.coverage_path_spacing = preset_it->path_spacing;
         cache.coverage_headland_width = preset_it->headland_width;
         cache.coverage_scan_axis = preset_it->scan_axis;
-        cache.coverage_scan_speed_mps = preset_it->scan_speed_mps;
+        cache.coverage_scan_speed_mps =
+            clampValue(preset_it->scan_speed_mps,
+                       kCoverageScanSpeedMin,
+                       kCoverageScanSpeedMax);
         cache.coverage_show_save_preset = false;
         cache.coverage_new_preset_name.clear();
         persistParameters();
@@ -6698,22 +7483,52 @@ void PlannerScreen::buildUi() {
             return;
         }
 
-        cache.coverage_presets.erase(
-            std::remove_if(cache.coverage_presets.begin(),
-                           cache.coverage_presets.end(),
-                           [&preset_name](const SessionCache::CoveragePreset& preset) {
-                               return preset.custom && preset.name == preset_name;
-                           }),
-            cache.coverage_presets.end());
-        cache.coverage_presets.push_back(SessionCache::CoveragePreset{
-            preset_name,
-            cache.coverage_pattern,
-            cache.coverage_path_spacing,
-            cache.coverage_headland_width,
-            cache.coverage_scan_axis,
-            cache.coverage_scan_speed_mps,
-            true,
-        });
+        // Reject collisions with reserved factory preset names. Factories are
+        // immutable code constants — letting a custom shadow them would make
+        // the in-memory derived cache ambiguous and break `isFactoryPresetName`.
+        if (isFactoryPresetName(preset_name)) {
+            BdrMessageBox::warning(
+                this,
+                QStringLiteral("Reserved name"),
+                QStringLiteral("'%1' is reserved for factory presets. "
+                               "Choose a different name.").arg(preset_name));
+            return;
+        }
+
+        if (!preset_manager_) {
+            BdrMessageBox::critical(
+                this,
+                QStringLiteral("Save failed"),
+                QStringLiteral("Preset manager unavailable. Please restart the app."));
+            return;
+        }
+
+        if (preset_manager_->presetExists(preset_name)) {
+            const int choice = BdrMessageBox::question(
+                this,
+                QStringLiteral("Overwrite preset"),
+                QStringLiteral("A preset named '%1' already exists. Overwrite it?")
+                    .arg(preset_name),
+                BdrMessageBox::No);
+            if (choice != BdrMessageBox::Yes) {
+                return;
+            }
+        }
+
+        PlanningPreset to_save = buildPlanningPresetFromSession(cache);
+        to_save.name = preset_name;
+        if (!preset_manager_->savePreset(to_save)) {
+            BdrMessageBox::critical(
+                this,
+                QStringLiteral("Save failed"),
+                QStringLiteral("Could not save preset '%1'. Check filesystem permissions "
+                               "for ~/.config/PilotControl/presets/.").arg(preset_name));
+            return;
+        }
+
+        // savePreset emitted presetsChanged synchronously — the connection
+        // already reloaded coverage_presets and refreshed the UI but used
+        // the OLD selected name. Commit the new selection now and re-apply.
         cache.coverage_selected_preset = preset_name;
         cache.coverage_show_save_preset = false;
         cache.coverage_new_preset_name.clear();
@@ -6781,21 +7596,33 @@ void PlannerScreen::buildUi() {
     }
     if (list_scan_segments_) {
         connect(list_scan_segments_,
-                &QListWidget::itemChanged,
+                &QListWidget::itemSelectionChanged,
                 this,
-                [this](QListWidgetItem* item) {
-                    if (!item || !list_scan_segments_) {
+                [this]() {
+                    if (!list_scan_segments_) {
                         return;
                     }
-                    const int row = list_scan_segments_->row(item);
                     SessionCache& cache = activeSession();
-                    if (row < 0 ||
-                        row >= static_cast<int>(cache.scan_segments.size())) {
-                        return;
+                    QSignalBlocker blocker(list_scan_segments_);
+                    for (int i = 0; i < list_scan_segments_->count(); ++i) {
+                        if (i >= static_cast<int>(cache.scan_segments.size())) {
+                            break;
+                        }
+                        auto* item = list_scan_segments_->item(i);
+                        if (!item) continue;
+                        auto& seg = cache.scan_segments[static_cast<size_t>(i)];
+                        if (seg.completed) {
+                            // Locked: completed segments stay deselected.
+                            if (item->isSelected()) {
+                                item->setSelected(false);
+                            }
+                            seg.selected = false;
+                        } else {
+                            seg.selected = item->isSelected();
+                        }
                     }
-                    cache.scan_segments[row].selected =
-                        (item->checkState() == Qt::Checked);
                     updateScanSplittingUi();
+                    pushScanSegmentsToPlot();
                 });
         connect(list_scan_segments_,
                 &QListWidget::currentRowChanged,
@@ -6804,7 +7631,34 @@ void PlannerScreen::buildUi() {
                     if (plot_) {
                         plot_->setActiveScanSegment(row);
                     }
+                    if (list_scan_segments_ && list_scan_segments_->viewport()) {
+                        list_scan_segments_->viewport()->update();
+                    }
                 });
+    }
+    if (btn_segments_select_all_) {
+        connect(btn_segments_select_all_, &QPushButton::clicked, this, [this]() {
+            SessionCache& cache = activeSession();
+            for (auto& seg : cache.scan_segments) {
+                if (!seg.completed) {
+                    seg.selected = true;
+                }
+            }
+            refreshScanSegmentList();
+            pushScanSegmentsToPlot();
+            updateScanSplittingUi();
+        });
+    }
+    if (btn_segments_clear_all_) {
+        connect(btn_segments_clear_all_, &QPushButton::clicked, this, [this]() {
+            SessionCache& cache = activeSession();
+            for (auto& seg : cache.scan_segments) {
+                seg.selected = false;
+            }
+            refreshScanSegmentList();
+            pushScanSegmentsToPlot();
+            updateScanSplittingUi();
+        });
     }
     connect(btn_coverage_axis_parallel_, &QPushButton::clicked, this, [this]() {
         SessionCache& cache = activeSession();
@@ -6856,12 +7710,23 @@ void PlannerScreen::buildUi() {
             return;
         }
         SessionCache& cache = activeSession();
-        cache.coverage_scan_speed_mps = value;
+        // Snap to the configured 0.1 m/s grid before persist. The slider
+        // emits raw `double`s on every track tick, so explicit snap keeps
+        // QSettings, the JSON preset payload, and the controller param in
+        // lockstep with what the operator actually selected.
+        const double snapped = clampValue(
+            std::round(value / kCoverageScanSpeedStep) * kCoverageScanSpeedStep,
+            kCoverageScanSpeedMin,
+            kCoverageScanSpeedMax);
+        cache.coverage_scan_speed_mps = snapped;
         persistParameters();
         updateValueLabels();
+        // No invalidateCoverageResult / updatePreview — speed is config-only;
+        // the boustrophedon path is unchanged, the controller just cruises
+        // it faster/slower. ETA card refreshes via updateValueLabels for
+        // free (effectiveScanSpeedMps reads cache.coverage_scan_speed_mps).
         updateCoveragePlanningUi();
     };
-
     connect(btn_coverage_obstacle_auto_, &QPushButton::clicked, this, [this]() {
         SessionCache& cache = activeSession();
         if (plot_) {
@@ -7037,6 +7902,7 @@ QWidget* PlannerScreen::buildScanPage(QWidget* parent) {
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setStyleSheet(QStringLiteral("background: transparent;"));
+    AutoHideScrollBar::install(scroll, dark_mode_);
     page_layout->addWidget(scroll, 1);
 
     auto* content = new QWidget(scroll);
@@ -7470,9 +8336,11 @@ QWidget* PlannerScreen::buildScanSegmentStatusCard(QWidget* parent) {
     layout->setSpacing(0);
 
     auto* header = new QWidget(card);
+    header->setObjectName(QStringLiteral("segmentStatusHeader"));
     header->setFixedHeight(40);
     header->setAttribute(Qt::WA_StyledBackground, true);
-    header->setStyleSheet(QStringLiteral("background: #3F3F47; border-radius: 10px 10px 0 0;"));
+    header->setStyleSheet(QStringLiteral(
+        "QWidget#segmentStatusHeader { background: #3F3F47; border-radius: 10px 10px 0 0; }"));
     auto* header_layout = new QHBoxLayout(header);
     header_layout->setContentsMargins(12, 8, 12, 8);
     header_layout->setSpacing(8);
@@ -7493,7 +8361,11 @@ QWidget* PlannerScreen::buildScanSegmentStatusCard(QWidget* parent) {
     list_scan_segment_status_ = new QListWidget(card);
     list_scan_segment_status_->setSelectionMode(QAbstractItemView::NoSelection);
     list_scan_segment_status_->setFocusPolicy(Qt::NoFocus);
-    list_scan_segment_status_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // QAbstractScrollArea draws its own QFrame border around the viewport
+    // even when the QListWidget QSS sets `border: none;`. That frame was the
+    // thin "residual line" visible at the bottom of the Segment Status card.
+    list_scan_segment_status_->setFrameShape(QFrame::NoFrame);
+    list_scan_segment_status_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     list_scan_segment_status_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     list_scan_segment_status_->setAttribute(Qt::WA_StyledBackground, true);
     list_scan_segment_status_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -7501,8 +8373,8 @@ QWidget* PlannerScreen::buildScanSegmentStatusCard(QWidget* parent) {
     list_scan_segment_status_->setStyleSheet(QStringLiteral(
         "QListWidget { background: transparent; border: none; padding: 12px 12px 12px 12px; "
         "  color: #E4E4E7; outline: none; }"
-        "QListWidget::item { border: none; background: transparent; margin: 0; padding: 0; }"
-        "QScrollBar:vertical, QScrollBar:horizontal { width: 0px; height: 0px; background: transparent; }"));
+        "QListWidget::item { border: none; background: transparent; margin: 0; padding: 0; }"));
+    AutoHideScrollBar::install(list_scan_segment_status_, dark_mode_);
     list_scan_segment_status_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     layout->addWidget(list_scan_segment_status_, 1);
     return card;
@@ -7552,7 +8424,9 @@ QWidget* PlannerScreen::buildScanCenterControlBar(QWidget* parent) {
     btn_scan_start_pause_ = new QPushButton(bar);
     btn_scan_start_pause_->setCursor(Qt::PointingHandCursor);
     btn_scan_start_pause_->setFlat(true);
-    btn_scan_start_pause_->setFixedSize(154, 48);
+    btn_scan_start_pause_->setFixedHeight(48);
+    btn_scan_start_pause_->setMinimumWidth(154);
+    btn_scan_start_pause_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     btn_scan_start_pause_->setStyleSheet(QStringLiteral(
         "QPushButton { background: #00BC7D; border: none; border-radius: 10px; }"
         "QPushButton:hover { background: #0ACB8B; }"
@@ -7591,10 +8465,61 @@ QWidget* PlannerScreen::buildScanCenterControlBar(QWidget* parent) {
 
     layout->addStretch(1);
 
+    // Cancel Scan — Figma node 162:233. Amber pill (166x48, 10px radius) that
+    // sits 12px to the left of Emergency Stop. Lives next to E-Stop because
+    // both are "abort"-flavoured controls; the gating is intentionally
+    // narrower (estop latched OR manual override engaged) so the operator
+    // can't fat-finger a destructive delete during a normal autonomous run.
+    btn_scan_cancel_ = new QPushButton(bar);
+    btn_scan_cancel_->setCursor(Qt::PointingHandCursor);
+    btn_scan_cancel_->setFlat(true);
+    btn_scan_cancel_->setFixedHeight(48);
+    btn_scan_cancel_->setMinimumWidth(166);
+    btn_scan_cancel_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    btn_scan_cancel_->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #FE9A00; border: none; border-radius: 10px; }"
+        "QPushButton:hover { background: #FFAA22; }"
+        "QPushButton:disabled { background: rgba(82,82,91,0.4); color: rgba(228,228,231,0.5); }"));
+    {
+        auto* btn_layout = new QHBoxLayout(btn_scan_cancel_);
+        btn_layout->setContentsMargins(16, 0, 16, 0);
+        btn_layout->setSpacing(8);
+        btn_layout->addStretch(1);
+        lbl_scan_cancel_icon_ = makeIconLabel(
+            btn_scan_cancel_,
+            QStringLiteral(":/assets/missionplanner/scan_cancel.svg"),
+            20,
+            QStringLiteral("#FFFFFF"));
+        btn_layout->addWidget(lbl_scan_cancel_icon_);
+        lbl_scan_cancel_text_ = makeTextLabel(
+            btn_scan_cancel_,
+            QStringLiteral("Cancel Scan"),
+            QStringLiteral("font-family: 'Arimo'; font-size: 16px; font-weight: 700; color: #FFFFFF;"));
+        btn_layout->addWidget(lbl_scan_cancel_text_);
+        btn_layout->addStretch(1);
+    }
+    btn_scan_cancel_->setEnabled(false);
+    // Dual-mode dispatch: same button hosts Cancel Scan (mid-run abort,
+    // amber) and Discard Scan (post-Completed delete, dark red). The slot
+    // branches on run_state == Completed → Discard, else → Cancel.
+    connect(btn_scan_cancel_, &QPushButton::clicked, this, [this]() {
+        const SessionCache* cache = activeSessionPtr();
+        const bool completed =
+            cache && cache->scan_run_state == ScanRunState::Completed;
+        if (completed) {
+            onScanDiscardClicked();
+        } else {
+            onScanCancelClicked();
+        }
+    });
+    layout->addWidget(btn_scan_cancel_);
+
     btn_scan_emergency_stop_ = new QPushButton(bar);
     btn_scan_emergency_stop_->setCursor(Qt::PointingHandCursor);
     btn_scan_emergency_stop_->setFlat(true);
-    btn_scan_emergency_stop_->setFixedSize(200, 48);
+    btn_scan_emergency_stop_->setFixedHeight(48);
+    btn_scan_emergency_stop_->setMinimumWidth(200);
+    btn_scan_emergency_stop_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     btn_scan_emergency_stop_->setStyleSheet(QStringLiteral(
         "QPushButton { background: #DC2626; border: none; border-radius: 10px; }"
         "QPushButton:hover { background: #EF4444; }"
@@ -7626,22 +8551,20 @@ QWidget* PlannerScreen::buildScanCenterControlBar(QWidget* parent) {
 }
 
 QWidget* PlannerScreen::buildScanStatusPill(QWidget* parent) {
-    auto* pill = new QWidget(parent);
+    // Custom-painted rounded fill (see RoundedFillWidget). QSS-based
+    // border-radius left visible corner artifacts on the dark map because
+    // Qt 5 clips the background with a 1-bit mask; QPainter::Antialiasing
+    // gives 8-bit alpha edges that fade cleanly into the parent colour.
+    // Figma node 139:823 spec: zinc-900 fill, 10px radius. We render the
+    // fill fully opaque (Figma uses 0.9 alpha, but transparency makes the
+    // contrast issue worse, not better, on this background).
+    auto* pill = new RoundedFillWidget(QColor(0x27, 0x27, 0x2A), 10.0, parent);
     pill->setObjectName(QStringLiteral("scanStatusPill"));
-    pill->setAttribute(Qt::WA_StyledBackground, true);
     pill->setFixedHeight(40);
     // Preferred + Fixed so the pill keeps its sizeHint width when its parent
     // (top_right_column / overlay) calls adjustSize. Maximum was collapsing the
     // pill down to its dot icon's natural width.
     pill->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    // Object-name selector so this rule is more specific than any unqualified
-    // `background:` cascade from an ancestor stylesheet (e.g. center_stage_host
-    // or any future wrapper). Without this, `* { background: ... }` rules from
-    // ancestors silently override the capsule fill and the pill renders as a
-    // transparent line of text.
-    pill->setStyleSheet(QStringLiteral(
-        "QWidget#scanStatusPill { background: rgba(24,24,27,0.9); "
-        "border: 1px solid #27272A; border-radius: 20px; }"));
     auto* layout = new QHBoxLayout(pill);
     layout->setContentsMargins(16, 8, 16, 8);
     layout->setSpacing(8);
@@ -7656,6 +8579,10 @@ QWidget* PlannerScreen::buildScanStatusPill(QWidget* parent) {
         QStringLiteral("Ready"),
         QStringLiteral("font-family: 'Arimo'; font-size: 16px; font-weight: 700; color: #D4D4D8;"));
     layout->addWidget(lbl_scan_status_pill_text_, 0, Qt::AlignVCenter);
+    // Figma applies a soft drop shadow, but on this dark map background the
+    // shadow's blur extends past the rounded clip path and renders as faint
+    // dark "smudges" at each corner instead of as elevation. Skip it — the
+    // pill is plenty legible from the fill contrast alone.
     pill->adjustSize();
     return pill;
 }
@@ -7710,6 +8637,15 @@ QWidget* PlannerScreen::buildScanLegendChip(QWidget* parent) {
 // ============================================================================
 
 void PlannerScreen::enterScanStage() {
+    // INVARIANT: every entry into the Scan substep MUST go through this
+    // function. The three discard flags
+    // (scan_discard_in_flight_ / scan_discarded_ / scan_discard_failed_)
+    // and the cancel/estop/manual-override latches below are PlannerScreen
+    // members rather than SessionCache fields, so they are reset only
+    // here and at the bottom of notifyScanCancelled / notifyScanDiscarded.
+    // If you add a new navigation path into the Scan substep that does NOT
+    // go through this function, call it explicitly or you will latch a
+    // stale "Discarded" button (or a stale E-Stop pill) into the next run.
     SessionCache& cache = activeSession();
     setScanManualOverride(false);
     scan_manual_override_engaged_once_ = false;
@@ -7737,6 +8673,10 @@ void PlannerScreen::enterScanStage() {
     scan_active_segment_path_hint_ = 0;
     scan_estop_latched_ = false;
     scan_dc_save_in_flight_ = false;
+    scan_cancel_in_flight_ = false;
+    scan_discard_in_flight_ = false;
+    scan_discarded_ = false;
+    scan_discard_failed_ = false;
     scan_pending_next_segment_idx_ = -1;
     scan_last_quality_sample_ms_ = 0;
     scan_quality_segment_index_ = -1;
@@ -7809,7 +8749,11 @@ void PlannerScreen::startSegmentExecution(int segment_index, bool resume_action)
     if (resume_action) {
         emit scanResumeRequested();
     } else {
-        emit scanStartRequested();
+        // Pass the configured cruise speed so AppShellWindow can push it to
+        // /mpc_accel_controller's `max_linear_velocity` ROS param BEFORE
+        // arming autonomy. Resume reuses the param already set on the
+        // initial start.
+        emit scanStartRequested(cache.coverage_scan_speed_mps);
     }
     if (scan_tick_timer_ && !scan_tick_timer_->isActive()) {
         scan_tick_timer_->start();
@@ -7838,6 +8782,7 @@ void PlannerScreen::notifyScanSegmentCompleted() {
         return;
     }
     completed_seg.completed = true;
+    completed_seg.selected = false;  // Auto-deselect + lock on completion.
     completed_seg.progress_pct = 100.0;
     completed_seg.quality_pct = std::max(completed_seg.quality_pct, 1.0);
 
@@ -7852,6 +8797,8 @@ void PlannerScreen::notifyScanSegmentCompleted() {
         firstPendingSelectedSegmentIndex(completed_idx + 1);
 
     recomputeScanAggregateStats();
+    refreshScanSegmentList();
+    pushScanSegmentsToPlot();
     updateScanRunUi();
     updateFooter();
 }
@@ -7917,6 +8864,14 @@ void PlannerScreen::updateScanRunUi() {
     const ScanRunState run_state =
         cache ? cache->scan_run_state : ScanRunState::Idle;
 
+    // Lock the cruise-speed slider while a scan is mid-flight. The value is
+    // committed to /mpc_accel_controller's `max_linear_velocity` ROS param
+    // exactly once at scan-start; mid-scan changes would silently desync UI
+    // from controller state, so we just disable the input.
+    if (slider_coverage_scan_speed_) {
+        slider_coverage_scan_speed_->setEnabled(run_state != ScanRunState::Running);
+    }
+
     // Single-segment ("complete scan") mode collapses redundant per-segment
     // UI: the Current Segment card duplicates Overall Progress, the Segment
     // Status list has one row, and the legend chip's counts never change
@@ -7940,7 +8895,16 @@ void PlannerScreen::updateScanRunUi() {
     if (lbl_scan_status_pill_text_ && lbl_scan_status_pill_dot_) {
         QString pill_text;
         QString dot_color;
-        if (scan_manual_override_active_) {
+        if (scan_discarded_) {
+            // Terminal post-Discard state — outranks every other label so
+            // the operator sees "Discarded" until they press Complete
+            // Mission and Stage 5 tears down.
+            pill_text = QStringLiteral("Discarded");
+            dot_color = QStringLiteral("#B91C1C");
+        } else if (scan_discard_in_flight_) {
+            pill_text = QStringLiteral("Discarding…");
+            dot_color = QStringLiteral("#F59E0B");
+        } else if (scan_manual_override_active_) {
             pill_text = QStringLiteral("Manual Override");
             dot_color = QStringLiteral("#F59E0B");
         } else if (scan_dc_save_in_flight_) {
@@ -8009,6 +8973,82 @@ void PlannerScreen::updateScanRunUi() {
                 scan_estop_latched_ ? QStringLiteral("Clear E-Stop")
                                     : QStringLiteral("Emergency Stop"));
         }
+    }
+    if (btn_scan_cancel_) {
+        // Dual-mode button. Three visual states:
+        //   1. Cancel Scan (amber #FE9A00, X icon) — Running/Paused with
+        //      estop OR manual-override unlocked. Mid-scan abort path.
+        //   2. Discard Scan (dark red #B91C1C, trash icon) — Completed and
+        //      not yet discarded. Post-completion delete path.
+        //   3. Discarded (grey, trash icon, disabled) — terminal state
+        //      after Discard finishes (success or terminal failure).
+        // The connected lambda dispatches to onScanCancelClicked vs
+        // onScanDiscardClicked based on run_state == Completed.
+        const bool is_discarded = scan_discarded_;
+        const bool is_completed_state = run_state == ScanRunState::Completed;
+        const bool is_discard_mode = is_completed_state || is_discarded;
+
+        QString style;
+        QString icon_path;
+        QString label;
+        bool enabled = false;
+
+        if (is_discarded) {
+            // Terminal "Discarded" — grey, disabled, trash icon. Operator
+            // advances by pressing Complete Mission.
+            style = QStringLiteral(
+                "QPushButton { background: rgba(82,82,91,0.4); border: none; "
+                "border-radius: 10px; }"
+                "QPushButton:disabled { background: rgba(82,82,91,0.4); "
+                "color: rgba(228,228,231,0.5); }");
+            icon_path = QStringLiteral(":/assets/missionplanner/scan_discard.svg");
+            label = scan_discard_failed_
+                ? QStringLiteral("Discarded (failed)")
+                : QStringLiteral("Discarded");
+            enabled = false;
+        } else if (is_completed_state) {
+            // Discard Scan — dark red (#B91C1C, one shade darker than
+            // E-Stop's #DC2626 so the two reds read as related-but-distinct).
+            style = QStringLiteral(
+                "QPushButton { background: #B91C1C; border: none; "
+                "border-radius: 10px; }"
+                "QPushButton:hover { background: #DC2626; }"
+                "QPushButton:disabled { background: rgba(82,82,91,0.4); "
+                "color: rgba(228,228,231,0.5); }");
+            icon_path = QStringLiteral(":/assets/missionplanner/scan_discard.svg");
+            label = scan_discard_in_flight_ ? QStringLiteral("Discarding…")
+                                            : QStringLiteral("Discard Scan");
+            enabled = !scan_discard_in_flight_;
+        } else {
+            // Cancel Scan — amber #FE9A00 per Figma node 162:233. Gated
+            // behind unlocked (estop OR manual-override) AND not mid-save.
+            style = QStringLiteral(
+                "QPushButton { background: #FE9A00; border: none; "
+                "border-radius: 10px; }"
+                "QPushButton:hover { background: #FFAA22; }"
+                "QPushButton:disabled { background: rgba(82,82,91,0.4); "
+                "color: rgba(228,228,231,0.5); }");
+            icon_path = QStringLiteral(":/assets/missionplanner/scan_cancel.svg");
+            label = scan_cancel_in_flight_ ? QStringLiteral("Cancelling…")
+                                           : QStringLiteral("Cancel Scan");
+            const bool unlocked =
+                scan_estop_latched_ || scan_manual_override_engaged_once_;
+            enabled = unlocked &&
+                      !scan_cancel_in_flight_ &&
+                      !scan_dc_save_in_flight_;
+        }
+
+        btn_scan_cancel_->setStyleSheet(style);
+        btn_scan_cancel_->setEnabled(enabled);
+        if (lbl_scan_cancel_text_) {
+            lbl_scan_cancel_text_->setText(label);
+        }
+        if (lbl_scan_cancel_icon_) {
+            lbl_scan_cancel_icon_->setPixmap(
+                loadSvgPixmap(icon_path, 20, 20, QStringLiteral("#FFFFFF")));
+        }
+        // Suppress unused warning when neither branch needs the variable.
+        (void)is_discard_mode;
     }
 
     // Current Segment card.
@@ -8143,6 +9183,20 @@ void PlannerScreen::refreshScanSegmentStatusList() {
         return;
     }
     const SessionCache* cache = activeSessionPtr();
+    // The previous spinner label is destroyed by QListWidget::clear; null
+    // the QPointer explicitly so the timer's next tick won't try to paint
+    // into a dangling label before the new active row is created below.
+    scan_segment_spinner_label_.clear();
+
+    // Preserve the operator's scroll position across rebuilds. Without this,
+    // the high-frequency refresh cadence (telemetry tick + DC events) snaps
+    // the scrollbar back to 0 on every redraw, making it impossible to scroll
+    // down to inspect later segments. The QListWidget API does not expose a
+    // "model in-place update" without a real model, so we keep the simple
+    // clear+rebuild but save and restore the vertical scroll value around it.
+    auto* scroll_bar = list_scan_segment_status_->verticalScrollBar();
+    const int saved_scroll = scroll_bar ? scroll_bar->value() : 0;
+
     list_scan_segment_status_->clear();
     if (!cache) {
         return;
@@ -8157,30 +9211,57 @@ void PlannerScreen::refreshScanSegmentStatusList() {
         const bool is_active = !is_completed &&
                                static_cast<int>(i) == cache->scan_active_segment_index;
         int row_height = 52;
+        // QSS selectors are scoped to a unique objectName + leading-dot
+        // (strict class match) so the background + border + border-radius
+        // do NOT cascade onto child QWidgets/QLabels. Without this, every
+        // child widget inside the row inherited the 2 px tinted border and
+        // painted a ghost rounded rectangle inside the card (most visible
+        // around the "Coverage" row in active state). Border width, fills,
+        // and heights mirror the Figma segment-status spec
+        // (node 139:858 / 139:876 / 139:887).
         QString row_style = QStringLiteral(
-            "background: #18181B; border: 1px solid #3F3F47; border-radius: 10px;");
+            ".QWidget#segmentRow { background: #18181B; border: 2px solid #3F3F47; "
+            "  border-radius: 10px; }");
         if (is_completed) {
             row_height = 88;
             row_style = QStringLiteral(
-                "background: rgba(0,188,125,0.10); border: 2px solid rgba(0,188,125,0.30); "
-                "border-radius: 10px;");
+                ".QWidget#segmentRow { background: rgba(0,188,125,0.10); "
+                "  border: 2px solid rgba(0,188,125,0.30); border-radius: 10px; }");
         } else if (is_active) {
             row_height = 68;
             row_style = QStringLiteral(
-                "background: rgba(43,127,255,0.12); border: 2px solid rgba(43,127,255,0.35); "
-                "border-radius: 10px;");
+                ".QWidget#segmentRow { background: rgba(43,127,255,0.10); "
+                "  border: 2px solid rgba(43,127,255,0.30); border-radius: 10px; }");
         }
 
         auto* item = new QListWidgetItem(list_scan_segment_status_);
         list_scan_segment_status_->addItem(item);
         auto* row = new QWidget(list_scan_segment_status_);
+        row->setObjectName(QStringLiteral("segmentRow"));
         row->setAttribute(Qt::WA_StyledBackground, true);
         row->setStyleSheet(row_style);
         auto* row_layout = new QHBoxLayout(row);
-        row_layout->setContentsMargins(14, 14, 14, 14);
+        // Figma spec: pt-[14] pb-[2] px-[14]. The previous symmetric (14,14,14,14)
+        // padded the bottom too far, leaving a visible gap between the Coverage
+        // row and the card's bottom edge in the active state.
+        row_layout->setContentsMargins(14, 14, 14, 2);
         row_layout->setSpacing(8);
 
-        auto* meta = new QWidget(row);
+        // Helper: every child container we add inside the row must be
+        // explicitly transparent. Even one stray non-transparent QWidget here
+        // gets composited on top of the row's tinted background and looks
+        // like a "grey box inside the card" — which is exactly what the
+        // operator was reporting on the active row.
+        auto make_transparent_panel = [row](QWidget* parent) -> QWidget* {
+            auto* w = new QWidget(parent);
+            w->setAttribute(Qt::WA_TranslucentBackground, true);
+            w->setAttribute(Qt::WA_NoSystemBackground, true);
+            w->setAutoFillBackground(false);
+            w->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+            return w;
+        };
+
+        auto* meta = make_transparent_panel(row);
         auto* meta_layout = new QVBoxLayout(meta);
         meta_layout->setContentsMargins(0, 0, 0, 0);
         meta_layout->setSpacing(4);
@@ -8190,7 +9271,7 @@ void PlannerScreen::refreshScanSegmentStatusList() {
             QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 700; "
                            "color: #FFFFFF;")));
         if (is_completed) {
-            auto* coverage_row = new QWidget(meta);
+            auto* coverage_row = make_transparent_panel(meta);
             auto* coverage_layout = new QHBoxLayout(coverage_row);
             coverage_layout->setContentsMargins(0, 0, 0, 0);
             coverage_layout->setSpacing(8);
@@ -8207,7 +9288,7 @@ void PlannerScreen::refreshScanSegmentStatusList() {
                                "color: #D4D4D8;")));
             meta_layout->addWidget(coverage_row);
 
-            auto* quality_row = new QWidget(meta);
+            auto* quality_row = make_transparent_panel(meta);
             auto* quality_layout = new QHBoxLayout(quality_row);
             quality_layout->setContentsMargins(0, 0, 0, 0);
             quality_layout->setSpacing(8);
@@ -8224,7 +9305,7 @@ void PlannerScreen::refreshScanSegmentStatusList() {
                                "color: #D4D4D8;")));
             meta_layout->addWidget(quality_row);
         } else if (is_active) {
-            auto* coverage_row = new QWidget(meta);
+            auto* coverage_row = make_transparent_panel(meta);
             auto* coverage_layout = new QHBoxLayout(coverage_row);
             coverage_layout->setContentsMargins(0, 0, 0, 0);
             coverage_layout->setSpacing(8);
@@ -8243,28 +9324,83 @@ void PlannerScreen::refreshScanSegmentStatusList() {
         }
         row_layout->addWidget(meta, 1);
 
+        // Indicator: 16x16 per Figma spec (139:862 / 139:880 / 139:891).
         auto* indicator = new QLabel(row);
-        indicator->setFixedSize(18, 18);
+        indicator->setFixedSize(16, 16);
+        indicator->setAttribute(Qt::WA_TranslucentBackground, true);
         indicator->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        indicator->setStyleSheet(QStringLiteral("background: transparent;"));
+        indicator->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
         if (is_completed) {
             indicator->setPixmap(loadSvgPixmap(
                 QStringLiteral(":/assets/missionplanner/scan_check.svg"),
-                18, 18, QStringLiteral("#00D492")));
+                16, 16, QStringLiteral("#00D492")));
         } else if (is_active) {
-            indicator->setPixmap(loadSvgPixmap(
+            // Render the spinner at the current rotation angle; the timer
+            // started below keeps it spinning while the segment is in
+            // progress (Figma node 139:880 shows the same -84.74° rotation
+            // applied to the 3/4-circle ring icon to convey motion).
+            indicator->setPixmap(loadRotatedSvgPixmap(
                 QStringLiteral(":/assets/missionplanner/scan_segment_active.svg"),
-                18, 18, QStringLiteral("#3B82F6")));
+                16, 16, QStringLiteral("#3B82F6"),
+                static_cast<qreal>(scan_segment_spinner_angle_)));
+            scan_segment_spinner_label_ = indicator;
+            ensureScanSegmentSpinnerTimer();
         } else {
             indicator->setPixmap(loadSvgPixmap(
                 QStringLiteral(":/assets/missionplanner/status_dot.svg"),
                 10, 10, QStringLiteral("#52525B")));
         }
-        row_layout->addWidget(indicator, 0, Qt::AlignVCenter);
+        // Anchor the indicator to the top of the card so it sits inline with
+        // the title row, matching the Figma layout (the icon is in the same
+        // horizontal row as the segment name, not vertically centred over the
+        // entire card).
+        row_layout->addWidget(indicator, 0, Qt::AlignTop);
 
         item->setSizeHint(QSize(0, row_height));
         list_scan_segment_status_->setItemWidget(item, row);
     }
+
+    // No active row was found this refresh — stop the spinner timer so we
+    // don't burn CPU rotating into a label that no longer exists.
+    if (!scan_segment_spinner_label_ && scan_segment_spinner_timer_) {
+        scan_segment_spinner_timer_->stop();
+    }
+
+    // Restore the previous scroll position, clamped to the new content range.
+    // Done after the layout has been finalized via items + setItemWidget so
+    // QScrollBar::maximum() reflects the rebuilt content height.
+    if (scroll_bar) {
+        list_scan_segment_status_->doItemsLayout();
+        const int new_max = scroll_bar->maximum();
+        scroll_bar->setValue(std::min(saved_scroll, new_max));
+    }
+}
+
+void PlannerScreen::ensureScanSegmentSpinnerTimer() {
+    if (!scan_segment_spinner_timer_) {
+        scan_segment_spinner_timer_ = new QTimer(this);
+        // 30 ms ticks * 12° per tick = full revolution every ~900 ms.
+        scan_segment_spinner_timer_->setInterval(30);
+        connect(scan_segment_spinner_timer_, &QTimer::timeout,
+                this, &PlannerScreen::tickScanSegmentSpinner);
+    }
+    if (!scan_segment_spinner_timer_->isActive()) {
+        scan_segment_spinner_timer_->start();
+    }
+}
+
+void PlannerScreen::tickScanSegmentSpinner() {
+    if (!scan_segment_spinner_label_) {
+        if (scan_segment_spinner_timer_) {
+            scan_segment_spinner_timer_->stop();
+        }
+        return;
+    }
+    scan_segment_spinner_angle_ = (scan_segment_spinner_angle_ + 12) % 360;
+    scan_segment_spinner_label_->setPixmap(loadRotatedSvgPixmap(
+        QStringLiteral(":/assets/missionplanner/scan_segment_active.svg"),
+        16, 16, QStringLiteral("#3B82F6"),
+        static_cast<qreal>(scan_segment_spinner_angle_)));
 }
 
 void PlannerScreen::updateScanLiveTelemetry() {
@@ -8408,6 +9544,227 @@ void PlannerScreen::onScanEmergencyStopClicked() {
     updateFooter();
 }
 
+void PlannerScreen::onScanCancelClicked() {
+    // Defensive re-check of the gate. updateScanRunUi already disables the
+    // button when these conditions don't hold, but guard against signal
+    // races (e.g. button disabled mid-event-dispatch).
+    if (scan_cancel_in_flight_ || scan_dc_save_in_flight_) {
+        return;
+    }
+    SessionCache& cache = activeSession();
+    if (cache.scan_run_state == ScanRunState::Completed) {
+        return;
+    }
+    if (!scan_estop_latched_ && !scan_manual_override_engaged_once_) {
+        return;
+    }
+
+    const int confirm = BdrMessageBox::question(
+        this,
+        QStringLiteral("Cancel scan"),
+        QStringLiteral(
+            "All scan data collected so far will be permanently deleted, "
+            "and the mission will reset back to Map Processing so you can "
+            "re-plan and try again. The robot pipeline will keep running. "
+            "This cannot be undone."),
+        BdrMessageBox::No);
+    if (confirm != BdrMessageBox::Yes) {
+        return;
+    }
+
+    qInfo("[PlannerScreen] Cancel Scan confirmed — emitting cancelScanRequested; "
+          "estop_latched=%d manual_override_once=%d",
+          scan_estop_latched_ ? 1 : 0,
+          scan_manual_override_engaged_once_ ? 1 : 0);
+
+    // Lock the UI immediately so the operator can't double-fire while
+    // AppShell hits the controller. AppShell calls notifyScanCancelled()
+    // when /dc/cancel_scan returns (or hits its 8 s ceiling), which clears
+    // this flag and navigates back to Map Processing.
+    scan_cancel_in_flight_ = true;
+    if (scan_tick_timer_) {
+        scan_tick_timer_->stop();
+    }
+    setScanManualOverride(false);
+    stopScanCameraStream();
+    updateScanRunUi();
+    updateFooter();
+
+    emit cancelScanRequested();
+}
+
+void PlannerScreen::notifyScanCancelled(bool success) {
+    qInfo("[PlannerScreen] notifyScanCancelled — controller %s",
+          success ? "succeeded" : "failed (proceeding with UI reset anyway)");
+
+    SessionCache& cache = activeSession();
+
+    // Wipe per-mission Stage-4 runtime state. Mirrors the bottom half of
+    // enterScanStage() but without auto-rebuilding segments — the operator
+    // is being sent back to Map Processing precisely so they can re-plan.
+    cache.scan_run_state = ScanRunState::Idle;
+    cache.scan_active_segment_index = -1;
+    cache.scan_total_coverage_pct = 0.0;
+    cache.scan_avg_quality_pct = 0.0;
+    cache.scan_total_points_m = 0.0;
+    cache.scan_distance_traveled_m = 0.0;
+    cache.scan_elapsed_ms = 0;
+    cache.scan_estimated_ms_left = -1;
+    cache.scan_segments.clear();
+    cache.scan_splits_dirty = true;
+    cache.scan_waypoints_published = false;
+
+    // Clear the planned path / coverage so the operator must re-plan
+    // before the next scan. Map + hull are intentionally preserved so they
+    // don't have to re-load and re-process the point cloud.
+    cache.planning_complete = false;
+    cache.planned_swaths.clear();
+    cache.planned_route.clear();
+    cache.planned_path.clear();
+
+    // Reset Stage-4 control flags.
+    scan_cancel_in_flight_ = false;
+    scan_estop_latched_ = false;
+    scan_pause_explicit_ = false;
+    scan_manual_override_engaged_once_ = false;
+    scan_manual_resume_after_override_ = false;
+    scan_dc_save_in_flight_ = false;
+    scan_pending_next_segment_idx_ = -1;
+    scan_active_segment_path_hint_ = 0;
+    scan_last_quality_sample_ms_ = 0;
+    scan_quality_segment_index_ = -1;
+    scan_camera_stream_requested_ = false;
+    if (scan_tick_timer_) {
+        scan_tick_timer_->stop();
+    }
+    setScanManualOverride(false);
+    stopScanCameraStream();
+
+    // Send the operator back to Map Processing. navigateToStep() also
+    // re-applies the session to the UI, which will refresh the stepper,
+    // footer gates, and hide the Stage-4 widgets.
+    navigateToStep(PlannerStep::MapProcessing);
+}
+
+void PlannerScreen::onScanDiscardClicked() {
+    // Defensive re-check. Same dispatch lambda gates this, but guard against
+    // signal races (button disabled mid-event-dispatch).
+    if (scan_discard_in_flight_ || scan_discarded_) {
+        return;
+    }
+    SessionCache& cache = activeSession();
+    if (cache.scan_run_state != ScanRunState::Completed) {
+        return;
+    }
+
+    const int confirm = BdrMessageBox::question(
+        this,
+        QStringLiteral("Discard scan"),
+        QStringLiteral(
+            "The completed mission's scan data will be permanently deleted "
+            "from the robot. The mission will reset back to Map Processing "
+            "so you can re-plan from scratch. The robot pipeline will keep "
+            "running. This cannot be undone."),
+        BdrMessageBox::No);
+    if (confirm != BdrMessageBox::Yes) {
+        return;
+    }
+
+    qInfo("[PlannerScreen] Discard Scan confirmed — emitting discardScanRequested");
+
+    scan_discard_in_flight_ = true;
+    if (scan_tick_timer_) {
+        scan_tick_timer_->stop();
+    }
+    setScanManualOverride(false);
+    stopScanCameraStream();
+    updateScanRunUi();
+    updateFooter();
+
+    emit discardScanRequested();
+}
+
+void PlannerScreen::notifyScanDiscarded(bool success) {
+    qInfo("[PlannerScreen] notifyScanDiscarded — controller %s",
+          success ? "succeeded" : "FAILED after retry");
+
+    // Discard now mirrors Cancel: the operator is sent back to Map
+    // Processing so they can re-plan from scratch. The previous "stay on
+    // Stage 5 with planned path preserved" behavior was deliberately
+    // dropped because the confirmation dialog promises a return to Map
+    // Processing and the operator's next action is always to re-plan.
+    //
+    // Failure path: if /dc/cancel_scan failed both attempts, mission data
+    // may still be on the robot. Surface that loudly with a warning popup
+    // BEFORE navigating away, so the operator can ssh in and clean up
+    // /R_DATA/<date>/ manually if needed. We still navigate after the
+    // popup is dismissed — the OCU has no way to recover the partial
+    // mission cleanly anyway, and pinning the operator to Stage 5 with
+    // a "Discarded (failed)" button only delays the same outcome.
+
+    if (!success) {
+        BdrMessageBox::warning(
+            this,
+            QStringLiteral("Discard incomplete"),
+            QStringLiteral(
+                "The robot did not confirm deletion of the mission data. "
+                "Some scan files may still be on the robot under "
+                "/R_DATA/<today>/ and the mission GNSS log may still be "
+                "open. SSH into the robot to verify and clean up manually "
+                "before starting another mission. The OCU will return to "
+                "Map Processing now."));
+    }
+
+    SessionCache& cache = activeSession();
+
+    // Mirror notifyScanCancelled's reset block. Map + hull are intentionally
+    // preserved (point cloud is expensive to reload); everything downstream
+    // of planning is wiped so re-plan is forced.
+    cache.scan_run_state = ScanRunState::Idle;
+    cache.scan_active_segment_index = -1;
+    cache.scan_total_coverage_pct = 0.0;
+    cache.scan_avg_quality_pct = 0.0;
+    cache.scan_total_points_m = 0.0;
+    cache.scan_distance_traveled_m = 0.0;
+    cache.scan_elapsed_ms = 0;
+    cache.scan_estimated_ms_left = -1;
+    cache.scan_segments.clear();
+    cache.scan_splits_dirty = true;
+    cache.scan_waypoints_published = false;
+
+    cache.planning_complete = false;
+    cache.planned_swaths.clear();
+    cache.planned_route.clear();
+    cache.planned_path.clear();
+
+    // Reset every Stage-4 control flag, including the three discard flags.
+    // Once we navigate away these become unreachable until enterScanStage()
+    // runs again, which re-resets them — this is belt-and-suspenders so a
+    // future navigation path that bypasses enterScanStage() can't latch a
+    // stale "Discarded" button.
+    scan_cancel_in_flight_ = false;
+    scan_discard_in_flight_ = false;
+    scan_discarded_ = false;
+    scan_discard_failed_ = false;
+    scan_estop_latched_ = false;
+    scan_pause_explicit_ = false;
+    scan_manual_override_engaged_once_ = false;
+    scan_manual_resume_after_override_ = false;
+    scan_dc_save_in_flight_ = false;
+    scan_pending_next_segment_idx_ = -1;
+    scan_active_segment_path_hint_ = 0;
+    scan_last_quality_sample_ms_ = 0;
+    scan_quality_segment_index_ = -1;
+    scan_camera_stream_requested_ = false;
+    if (scan_tick_timer_) {
+        scan_tick_timer_->stop();
+    }
+    setScanManualOverride(false);
+    stopScanCameraStream();
+
+    navigateToStep(PlannerStep::MapProcessing);
+}
+
 void PlannerScreen::onCompleteMissionClicked(const char* trigger) {
     const SessionCache* cache = activeSessionPtr();
     const bool dev_force_complete =
@@ -8533,6 +9890,16 @@ void PlannerScreen::maybeScheduleScanQualityUpdate() {
     }
     const auto& seg = cache.scan_segments[static_cast<size_t>(idx)];
     if (seg.completed || seg.path.size() < 2 || live_robot_trail_.size() < 2) {
+        return;
+    }
+
+    // Gate quality sampling until the robot has actually reached the first
+    // waypoint of the active segment. `scan_active_segment_path_hint_` is
+    // the segment-relative index of the path leg the robot is closest to;
+    // it stays at 0 until the robot has driven past seg.path[1]. Sampling
+    // before that point produces a meaningless reprojection score against a
+    // few centimetres of trail and inflates the running EWMA forever.
+    if (scan_active_segment_path_hint_ < 1) {
         return;
     }
 

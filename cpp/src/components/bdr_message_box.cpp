@@ -73,6 +73,14 @@ BdrMessageBox::BdrMessageBox(QWidget* parent)
 void BdrMessageBox::buildUi() {
     auto* container = new QWidget(this);
     container->setObjectName("BdrMessageBoxContainer");
+    // WA_StyledBackground required for QSS background-color to paint on
+    // a plain QWidget. Without it the four panel widgets below silently
+    // skip their background fill and the widget shows the platform's
+    // QPalette::Window grey, while the QLabels — which Qt auto-promotes
+    // because their QSS rules set `color` — still paint their palette
+    // default. The visual result was a darker box around the title +
+    // body text against a lighter "frame" everywhere else.
+    container->setAttribute(Qt::WA_StyledBackground, true);
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -85,6 +93,7 @@ void BdrMessageBox::buildUi() {
     // Top bar
     auto* topBar = new QWidget(container);
     topBar->setObjectName("BdrMessageBoxTopBar");
+    topBar->setAttribute(Qt::WA_StyledBackground, true);
     topBar->setFixedHeight(48);
     auto* topLayout = new QHBoxLayout(topBar);
     topLayout->setContentsMargins(20, 0, 12, 0);
@@ -112,6 +121,7 @@ void BdrMessageBox::buildUi() {
     // Content area (icon + text)
     auto* content = new QWidget(container);
     content->setObjectName("BdrMessageBoxContent");
+    content->setAttribute(Qt::WA_StyledBackground, true);
     auto* contentLayout = new QHBoxLayout(content);
     contentLayout->setContentsMargins(20, 20, 20, 16);
     contentLayout->setSpacing(16);
@@ -134,6 +144,7 @@ void BdrMessageBox::buildUi() {
     // Button box
     button_box_ = new QWidget(container);
     button_box_->setObjectName("BdrMessageBoxButtonBox");
+    button_box_->setAttribute(Qt::WA_StyledBackground, true);
     button_layout_ = new QHBoxLayout(button_box_);
     button_layout_->setContentsMargins(20, 0, 20, 20);
     button_layout_->setSpacing(12);
@@ -155,9 +166,13 @@ void BdrMessageBox::applyStyle() {
             border-top-right-radius: 8px;
         }
         #BdrMessageBoxTitle {
+            background: transparent;
             color: #e2e8f0;
             font-size: 16px;
             font-weight: 600;
+        }
+        #BdrMessageBoxIcon {
+            background: transparent;
         }
         #BdrMessageBoxClose {
             background: transparent;
@@ -174,6 +189,7 @@ void BdrMessageBox::applyStyle() {
             background-color: #121212;
         }
         #BdrMessageBoxText {
+            background: transparent;
             color: #e2e8f0;
             font-size: 14px;
             line-height: 1.5;

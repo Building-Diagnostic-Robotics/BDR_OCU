@@ -722,6 +722,10 @@ void AppShellWindow::goToStage5() {
     pushPlannerTelemetrySnapshot();
     stack_->setCurrentWidget(stage5_);
     pushExplorationTelemetryToUiSlow();
+    // Warm the param client so the very first start-scan press doesn't pay
+    // the discovery penalty. The actual SET happens on scan-start in
+    // onPlannerScanStartRequested().
+    ensurePlannerControllerParamClient();
 }
 
 void AppShellWindow::onThemeToggleChanged(bool dark_mode) {
@@ -817,12 +821,15 @@ void AppShellWindow::ensureStage5() {
     connect(stage5_, &PlannerScreen::scanStartRequested, this, &AppShellWindow::onPlannerScanStartRequested);
     connect(stage5_, &PlannerScreen::scanPauseRequested, this, &AppShellWindow::onPlannerScanPauseRequested);
     connect(stage5_, &PlannerScreen::scanResumeRequested, this, &AppShellWindow::onPlannerScanResumeRequested);
+    connect(stage5_, &PlannerScreen::wakeGprRequested, this, &AppShellWindow::onPlannerWakeGprRequested);
     connect(stage5_, &PlannerScreen::emergencyStopRequested, this, &AppShellWindow::onPlannerEmergencyStopRequested);
     connect(stage5_, &PlannerScreen::scanTeleopTwistRequested, this, &AppShellWindow::onExplorationTeleopTwistRequested);
     connect(stage5_, &PlannerScreen::scanTeleopArmRequested, this, &AppShellWindow::onExplorationTeleopArmRequested);
     connect(stage5_, &PlannerScreen::scanTeleopDisarmRequested, this, &AppShellWindow::onExplorationTeleopDisarmRequested);
     connect(stage5_, &PlannerScreen::scanTeleopGprPowerOffRequested, this, &AppShellWindow::onExplorationTeleopGprPowerOffRequested);
     connect(stage5_, &PlannerScreen::completeMissionRequested, this, &AppShellWindow::onPlannerCompleteMissionRequested);
+    connect(stage5_, &PlannerScreen::cancelScanRequested, this, &AppShellWindow::onPlannerCancelScanRequested);
+    connect(stage5_, &PlannerScreen::discardScanRequested, this, &AppShellWindow::onPlannerDiscardScanRequested);
     stage5_->setDarkMode(dark_mode_);
     stage5_->setRobotId(robot_id_);
     stage5_->setMapPath(latest_saved_map_local_path_);
@@ -1329,7 +1336,12 @@ void AppShellWindow::callPlannerTriggerService(
     (void)client->async_send_request(request);
 }
 
-void AppShellWindow::onPlannerScanStartRequested() {
+void AppShellWindow::onPlannerScanStartRequested(double speed_mps) {
+    // Push the operator-selected cruise speed to the controller BEFORE
+    // arming autonomy. set_parameters mutates max_linear_velocity
+    // synchronously inside the controller, so the autonomy-enable that
+    // follows will see the new cap.
+    sendControllerMaxLinearVelocity(speed_mps);
     if (planner_estop_active_) {
         callPlannerTriggerService(planner_dc_resume_client_);
         sendExplorationAxisStateRequest(kOdriveAxisStateClosedLoopControl);
@@ -1525,6 +1537,26 @@ void AppShellWindow::sendExplorationGprPowerOffRequest() {
     (void)exploration_gpr_power_off_client_->async_send_request(request);
 }
 
+void AppShellWindow::sendGprLineStopRequest() {
+    if (!exploration_ros_node_) {
+        ensureExplorationRosInterfaces();
+    }
+    if (!exploration_gpr_line_stop_client_) {
+        return;
+    }
+    if (!exploration_gpr_line_stop_client_->service_is_ready()) {
+        RCLCPP_WARN(rclcpp::get_logger("AppShellWindow"),
+                    "/gpr_line_stop service not ready; skipping wake request.");
+        return;
+    }
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    (void)exploration_gpr_line_stop_client_->async_send_request(request);
+}
+
+void AppShellWindow::onPlannerWakeGprRequested() {
+    sendGprLineStopRequest();
+}
+
 void AppShellWindow::finalizeMissionDataCollection(std::function<void()> done) {
     auto run_done = [this, done]() {
         planner_finalize_mission_in_flight_ = false;
@@ -1601,6 +1633,154 @@ void AppShellWindow::finalizeMissionDataCollection(std::function<void()> done) {
         }
     });
     planner_finalize_mission_wait_timer_->start();
+}
+
+void AppShellWindow::onPlannerCancelScanRequested() {
+    qInfo("[AppShell] PlannerScreen::cancelScanRequested — aborting scan, deleting all mission data");
+
+    // Phase 1: command IDLE on all axes so the bot doesn't keep moving
+    // while the controller rips data off disk. The pipeline stays alive,
+    // so the operator can re-arm later by simply starting a new mission.
+    sendExplorationAxisStateRequest(kOdriveAxisStateIdle);
+    publishPlannerAutonomyEnable(false);
+
+    cancelActiveScanDataCollection([this](bool success) {
+        // Always clear our local "estop latched" state so the planner can
+        // exit the latched UI; PlannerScreen::notifyScanCancelled does the
+        // segment-list / planned-path / stage navigation reset.
+        planner_estop_active_ = false;
+        if (stage5_) {
+            stage5_->notifyScanCancelled(success);
+        }
+    });
+}
+
+void AppShellWindow::cancelActiveScanDataCollection(std::function<void(bool)> done) {
+    auto run_done = [this, done](bool success) {
+        planner_cancel_scan_in_flight_ = false;
+        if (planner_cancel_scan_wait_timer_) {
+            planner_cancel_scan_wait_timer_->stop();
+        }
+        if (done) {
+            done(success);
+        }
+    };
+
+    if (!exploration_ros_node_) {
+        ensureExplorationRosInterfaces();
+    }
+    if (!planner_dc_cancel_scan_client_) {
+        qWarning("[AppShell] /dc/cancel_scan client unavailable — proceeding with UI reset only");
+        run_done(false);
+        return;
+    }
+    if (planner_cancel_scan_in_flight_) {
+        qInfo("[AppShell] /dc/cancel_scan already in flight — coalescing to single call");
+        return;
+    }
+
+    // Brief discovery wait. The planner reaches this code only after a scan
+    // has actually started, so the coordinator service should already be
+    // discovered, but we keep parity with finalize for safety.
+    if (!planner_dc_cancel_scan_client_->wait_for_service(std::chrono::milliseconds(250))) {
+        qWarning("[AppShell] /dc/cancel_scan service not available — proceeding with UI reset only");
+        run_done(false);
+        return;
+    }
+
+    planner_cancel_scan_in_flight_ = true;
+    planner_cancel_scan_wait_ticks_ = 0;
+    qInfo("[AppShell] Sending /dc/cancel_scan to delete all mission data");
+
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    (void)planner_dc_cancel_scan_client_->async_send_request(
+        request,
+        [this, run_done](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+            QMetaObject::invokeMethod(this, [this, run_done, future]() mutable {
+                if (!planner_cancel_scan_in_flight_) {
+                    return;  // 8 s ceiling already fired; nothing to do.
+                }
+                bool success = false;
+                try {
+                    auto result = future.get();
+                    if (result && result->success) {
+                        success = true;
+                        qInfo("[AppShell] /dc/cancel_scan OK: %s",
+                              result->message.c_str());
+                    } else {
+                        qWarning("[AppShell] /dc/cancel_scan reported failure: %s",
+                                 result ? result->message.c_str() : "(null)");
+                    }
+                } catch (const std::exception& e) {
+                    qWarning("[AppShell] /dc/cancel_scan exception: %s", e.what());
+                }
+                run_done(success);
+            }, Qt::QueuedConnection);
+        });
+
+    if (!planner_cancel_scan_wait_timer_) {
+        planner_cancel_scan_wait_timer_ = new QTimer(this);
+        planner_cancel_scan_wait_timer_->setInterval(50);
+        planner_cancel_scan_wait_timer_->setSingleShot(false);
+    }
+    disconnect(planner_cancel_scan_wait_timer_, &QTimer::timeout, nullptr, nullptr);
+    connect(planner_cancel_scan_wait_timer_, &QTimer::timeout, this, [this, run_done]() {
+        ++planner_cancel_scan_wait_ticks_;
+        // 50 ms × 160 = 8000 ms hard ceiling. Cancel needs more headroom
+        // than finalize because the controller may rmtree a multi-section
+        // mission folder (lots of small files).
+        if (planner_cancel_scan_wait_ticks_ >= 160) {
+            qWarning("[AppShell] /dc/cancel_scan did not respond within 8s — proceeding with UI reset anyway");
+            run_done(false);
+        }
+    });
+    planner_cancel_scan_wait_timer_->start();
+}
+
+void AppShellWindow::onPlannerDiscardScanRequested() {
+    qInfo("[AppShell] PlannerScreen::discardScanRequested — post-Completed delete with retry-once");
+
+    // Phase 1: motors should already be IDLE because the mission completed,
+    // but defensively command IDLE again + drop autonomy. Cheap, idempotent.
+    sendExplorationAxisStateRequest(kOdriveAxisStateIdle);
+    publishPlannerAutonomyEnable(false);
+
+    discardCompletedScanDataCollection([this](bool success) {
+        // Discard never tears down the pipeline — operator advances by
+        // pressing Complete Mission. Just hand the result back to the
+        // PlannerScreen which latches its terminal "Discarded" UI state.
+        if (stage5_) {
+            stage5_->notifyScanDiscarded(success);
+        }
+    });
+}
+
+void AppShellWindow::discardCompletedScanDataCollection(std::function<void(bool)> done) {
+    // First attempt. On success → done(true). On failure → second attempt.
+    // On second failure → done(false). Total worst-case wait ≈ 16s (two
+    // 8s ceilings back-to-back).
+    cancelActiveScanDataCollection([this, done](bool first_success) {
+        if (first_success) {
+            qInfo("[AppShell] Discard: /dc/cancel_scan succeeded on first attempt");
+            if (done) {
+                done(true);
+            }
+            return;
+        }
+
+        qWarning("[AppShell] Discard: /dc/cancel_scan failed on first attempt — retrying once");
+        cancelActiveScanDataCollection([done](bool retry_success) {
+            if (retry_success) {
+                qInfo("[AppShell] Discard: /dc/cancel_scan succeeded on retry");
+            } else {
+                qCritical("[AppShell] Discard: /dc/cancel_scan FAILED on retry — UI will latch "
+                          "Discarded state but the controller may still hold mission data on disk");
+            }
+            if (done) {
+                done(retry_success);
+            }
+        });
+    });
 }
 
 void AppShellWindow::onExplorationStopPipelineRequested() {
@@ -1892,6 +2072,8 @@ void AppShellWindow::ensureExplorationRosInterfaces() {
         exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/resume");
     planner_dc_finalize_mission_client_ =
         exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/finalize_mission");
+    planner_dc_cancel_scan_client_ =
+        exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/dc/cancel_scan");
     exploration_left_axis_client_ =
         exploration_ros_node_->create_client<odrive_can::srv::AxisState>("/left/request_axis_state");
     exploration_right_axis_client_ =
@@ -1900,6 +2082,8 @@ void AppShellWindow::ensureExplorationRosInterfaces() {
         exploration_ros_node_->create_client<odrive_can::srv::AxisState>("/gpr/request_axis_state");
     exploration_gpr_power_off_client_ =
         exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/gpr_power_off");
+    exploration_gpr_line_stop_client_ =
+        exploration_ros_node_->create_client<std_srvs::srv::Trigger>("/gpr_line_stop");
     planner_f2c_waypoints_pub_ =
         exploration_ros_node_->create_publisher<std_msgs::msg::Float64MultiArray>(
             "/f2c_waypoints", rclcpp::QoS(rclcpp::KeepLast(10)).reliable().transient_local());
@@ -2803,6 +2987,78 @@ void AppShellWindow::pushPlannerMotorsChipState() {
                                                 : PlannerScreen::ValueTone::Muted);
 }
 
+void AppShellWindow::ensurePlannerControllerParamClient() {
+    if (planner_controller_param_client_ || !exploration_ros_node_) {
+        return;
+    }
+    // Node name MUST match `super().__init__("mpc_accel_controller")` in
+    // `mpc_accel_autonomous_controller.py`. The script filename and the node
+    // name are intentionally different — do not change to
+    // "mpc_accel_autonomous_controller".
+    planner_controller_param_client_ =
+        std::make_shared<rclcpp::AsyncParametersClient>(
+            exploration_ros_node_, "mpc_accel_controller");
+}
+
+void AppShellWindow::sendControllerMaxLinearVelocity(double max_linear_velocity_mps) {
+    // Push the operator-selected cruise speed to the MPC controller's
+    // `max_linear_velocity` AND `desired_linear_speed` ROS params. The
+    // controller's `_on_parameter_change` callback fans both names into the
+    // same `_set_navigation_speed()` setter today, but we set both so the
+    // controller's internal cruise target and hard cap stay in sync if the
+    // controller ever disambiguates them. Fire-and-forget — the controller
+    // mutates its internal cap synchronously inside set_parameters, so the
+    // very next /f2c_waypoints publish (which kicks autonomy on) will pick
+    // up the new value. We deliberately don't block the start-scan path on
+    // the future; if the param service is unreachable we surface a console
+    // warning and fall back to the controller's launch-time default.
+    if (!std::isfinite(max_linear_velocity_mps) || max_linear_velocity_mps <= 0.0) {
+        return;
+    }
+    if (!exploration_ros_node_) {
+        ensureExplorationRosInterfaces();
+    }
+    ensurePlannerControllerParamClient();
+    if (!planner_controller_param_client_ || !rclcpp::ok()) {
+        return;
+    }
+    if (!planner_controller_param_client_->service_is_ready()) {
+        RCLCPP_WARN(rclcpp::get_logger("AppShellWindow"),
+                    "mpc_accel_controller param service not ready; "
+                    "skipping cruise-speed push (%.2f m/s).",
+                    max_linear_velocity_mps);
+        return;
+    }
+    const std::vector<rclcpp::Parameter> params{
+        rclcpp::Parameter("max_linear_velocity",  max_linear_velocity_mps),
+        rclcpp::Parameter("desired_linear_speed", max_linear_velocity_mps),
+    };
+    planner_controller_param_client_->set_parameters(
+        params,
+        [max_linear_velocity_mps, params](std::shared_future<
+                                          std::vector<rcl_interfaces::msg::SetParametersResult>>
+                                              future) {
+            try {
+                const auto results = future.get();
+                for (size_t i = 0; i < results.size(); ++i) {
+                    if (!results[i].successful) {
+                        const std::string& name =
+                            (i < params.size()) ? params[i].get_name() : std::string("<unknown>");
+                        RCLCPP_WARN(rclcpp::get_logger("AppShellWindow"),
+                                    "mpc_accel_controller rejected "
+                                    "%s=%.2f: %s",
+                                    name.c_str(),
+                                    max_linear_velocity_mps,
+                                    results[i].reason.c_str());
+                    }
+                }
+            } catch (...) {
+                // Service torn down mid-request — controller restart / net
+                // blip. The next start-scan press will retry.
+            }
+        });
+}
+
 void AppShellWindow::onExplorationLocalNavGrid(
     const std_msgs::msg::UInt8MultiArray::SharedPtr msg) {
     if (!msg || msg->data.size() != static_cast<size_t>(kLocalNavGridBytes)) {
@@ -3192,6 +3448,12 @@ void AppShellWindow::pushExplorationTelemetryToUiFast() {
         odom_fresh ? std::hypot(exploration_latest_vx_mps_, exploration_latest_vy_mps_) : 0.0;
     stage4_->setTelemetrySpeedMps(speed_mps);
     stage4_->setFpvSpeedMps(speed_mps);
+    // Stage 5 uses the same odom-derived speed for ETA when a scan is active
+    // (PlannerScreen::effectiveScanSpeedMps falls back to the cached
+    // controller max_linear_velocity ROS param when the robot is idle).
+    if (stage5_) {
+        stage5_->setLiveRobotSpeedMps(speed_mps);
+    }
 
     if (!exploration_launch_ready_) {
         stage4_->setThermalThumbnailStale(false);

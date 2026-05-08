@@ -900,6 +900,8 @@ CMakeFiles/bdr_coverage_planner.dir/src/app_shell.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qresultstore.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QHash \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qhash.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QPointer \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qpointer.h \
  /home/avenblake/BDR_CP/cpp/include/coverage_pipeline.hpp \
  /usr/include/eigen3/Eigen/Dense /usr/include/eigen3/Eigen/Core \
  /usr/include/eigen3/Eigen/src/Core/util/DisableStupidWarnings.h \
@@ -1361,9 +1363,9 @@ CMakeFiles/bdr_coverage_planner.dir/src/app_shell.cpp.o: \
  /usr/include/boost/mpl/aux_/fold_impl.hpp \
  /usr/include/boost/mpl/aux_/preprocessed/gcc/fold_impl.hpp \
  /home/avenblake/BDR_CP/cpp/include/obstacle_detector.hpp \
- /home/avenblake/BDR_CP/cpp/include/robot_registry.hpp \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/QList \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qlist.h \
+ /home/avenblake/BDR_CP/cpp/include/preset_manager.hpp \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qobject.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonobject.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qjsonvalue.h \
@@ -1372,6 +1374,9 @@ CMakeFiles/bdr_coverage_planner.dir/src/app_shell.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qcborcommon.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qregularexpression.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/quuid.h \
+ /home/avenblake/BDR_CP/cpp/include/robot_registry.hpp \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QList \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qlist.h \
  /home/avenblake/BDR_CP/cpp/include/setup_screen.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/QPixmap \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/qpixmap.h \

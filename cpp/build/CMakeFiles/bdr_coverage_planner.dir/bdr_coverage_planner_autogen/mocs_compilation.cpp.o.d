@@ -950,16 +950,30 @@ CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/mocs_compilatio
  /opt/ros/humble/include/sensor_msgs/sensor_msgs/msg/detail/nav_sat_fix__type_support.hpp \
  /opt/ros/humble/include/sensor_msgs/sensor_msgs/msg/rosidl_generator_cpp__visibility_control.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_cloud_upload_manager.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_auto_hide_scroll_bar.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/auto_hide_scroll_bar.hpp \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QPointer \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qpointer.h \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_banter_loader_widget.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/banter_loader_widget.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QWidget \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qwidget.h \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_bdr_input_dialog.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/bdr_input_dialog.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_bdr_message_box.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/bdr_message_box.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_bdr_progress_dialog.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/bdr_progress_dialog.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_fpv_camera_view.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/fpv_camera_view.hpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_pre_scan_checklist_dialog.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/pre_scan_checklist_dialog.hpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_svg_icon_button.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/svg_icon_button.hpp \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/QColor \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/qcolor.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/QPixmap \
+ /usr/include/x86_64-linux-gnu/qt5/QtGui/qpixmap.h \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_tilt_calibration_dialog.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/tilt_calibration_dialog.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QFrame \
@@ -1130,7 +1144,6 @@ CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/mocs_compilatio
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qpluginloader.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qlibrary.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qplugin.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qpointer.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qprocessordetection.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qpropertyanimation.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qvariantanimation.h \
@@ -1921,10 +1934,6 @@ CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/mocs_compilatio
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QCalendarWidget \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qcalendarwidget.h \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/preset_manager.hpp \
- /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/preset_dialog.hpp \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QInputDialog \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qinputdialog.h \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qlineedit.h \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/teleop_widget.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QDockWidget \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qdockwidget.h \
@@ -1941,15 +1950,11 @@ CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/mocs_compilatio
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_planner_screen.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/planner_screen.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QHash \
- /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_preset_dialog.cpp \
- /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/preset_dialog.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_preset_manager.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/preset_manager.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_scan_session_tracker.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_setup_screen.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/setup_screen.hpp \
- /usr/include/x86_64-linux-gnu/qt5/QtGui/QPixmap \
- /usr/include/x86_64-linux-gnu/qt5/QtGui/qpixmap.h \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_startup_screen.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/startup_screen.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_teleop_widget.cpp \

@@ -6667,39 +6667,19 @@ void CoverageGUI::saveCurrentPreset() {
 }
 
 void CoverageGUI::createNewPreset() {
+    // Stub. NewPresetDialog was deleted with the preset UX rework. Legacy
+    // CoverageGUI is reference-only (not instantiated from main.cpp). The
+    // PlannerScreen "+" / Save flow replaced this entry point.
     if (!preset_manager_) return;
-    
-    QStringList existing = preset_manager_->availablePresets();
-    NewPresetDialog dialog(existing, this);
-    
-    if (dialog.exec() == QDialog::Accepted) {
-        QString name = dialog.presetName();
-        
-        PlanningPreset preset = gatherCurrentSettings();
-        preset.name = name;
-        preset.created = QDateTime::currentDateTime();
-        
-        if (preset_manager_->savePreset(preset)) {
-            // Select the new preset
-            int idx = combo_preset_->findText(name);
-            if (idx >= 0) {
-                combo_preset_->setCurrentIndex(idx);
-            }
-            setStatus(QString("Created preset: %1").arg(name));
-        }
-    }
 }
 
 void CoverageGUI::openPresetManager() {
+    // Legacy CoverageGUI is reference-only (not instantiated from main.cpp;
+    // see AGENTS.md). PresetManagerDialog was deleted as part of the preset
+    // UX rework — rename + delete now live inline in PlannerScreen's custom
+    // preset rows. Stub kept so the symbol still resolves for the dead code
+    // path; refreshPresetList still useful if/when this gets re-wired.
     if (!preset_manager_) return;
-    
-    PresetManagerDialog dialog(preset_manager_, this);
-    connect(&dialog, &PresetManagerDialog::presetLoadRequested,
-            this, &CoverageGUI::loadPreset);
-    
-    dialog.exec();
-    
-    // Refresh combo in case presets were deleted/renamed
     refreshPresetList();
 }
 

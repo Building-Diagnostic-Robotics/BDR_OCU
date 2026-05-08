@@ -1,5 +1,7 @@
 #include "exploration_screen.hpp"
 
+#include "components/auto_hide_scroll_bar.hpp"
+
 #include "coverage_gui.hpp"
 
 #include <algorithm>
@@ -61,6 +63,22 @@ constexpr int kTopStatusMotorsChipHeight = 20;
 constexpr int kTopStatusMotorsChipHorizontalPadding = 9;
 constexpr int kTopStatusMotorsChipSpacing = 6;
 constexpr int kTopStatusWindowControlsReservedWidth = 184;
+
+// Width budget for the bottom-bar action buttons (Start Scan / Start
+// Planning). Both buttons share the same inner layout: contentsMargins
+// (24, 0, 12, 0), 6 px spacing, items = [icon, label, stretch]. The
+// stretch is a real layout item so QHBoxLayout reserves its inter-item
+// spacing (6 px) on both sides of the label, not just before it. Total
+// non-text reservation = 24 + 20 + 6 + 6 + 12 = 68 px.
+constexpr int kExplActionButtonChrome = 24 + 20 + 6 + 6 + 12;
+// Slack on top of QFontMetrics::horizontalAdvance() to cover bold-glyph
+// ink overhang and Qt's sub-pixel-to-integer layout rounding. Tuned
+// empirically against Arimo Bold 16 px.
+constexpr int kExplActionButtonSafetyPad = 8;
+// Lower bounds preserved from the previous implementation so the buttons
+// never visually shrink even when the candidate text is very short.
+constexpr int kExplStartScanMinWidth = 154;
+constexpr int kExplStartPlanningMinWidth = 185;
 
 QByteArray stripPngIccpChunk(const QByteArray& png_data) {
     static const unsigned char kPngSig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
@@ -1090,6 +1108,10 @@ void ExplorationScreen::setDarkMode(bool dark_mode) {
     if (thermal_pixel_widget_) {
         thermal_pixel_widget_->setDarkMode(dark_mode_);
     }
+    const auto auto_hide_bars = findChildren<AutoHideScrollBar*>();
+    for (auto* bar : auto_hide_bars) {
+        bar->setDarkMode(dark_mode_);
+    }
     applyStyle();
 }
 
@@ -1986,6 +2008,11 @@ void ExplorationScreen::refreshPrimaryActionButton() {
         return;
     }
 
+    // NOTE: btn_start_scan_'s width is pinned at construction against
+    // kStartScanCandidateTexts (see the Start Scan QPushButton setup).
+    // If you add a new state below or change a state's text to anything
+    // wider than the existing entries, update kStartScanCandidateTexts to
+    // match — otherwise the new label will clip.
     QString button_style;
     switch (primary_action_state_) {
         case PrimaryActionState::StartMapping:
@@ -2355,6 +2382,7 @@ void ExplorationScreen::buildUi() {
     launch_diagnostics_view_->setLineWrapMode(QPlainTextEdit::NoWrap);
     launch_diagnostics_view_->setFocusPolicy(Qt::NoFocus);
     launch_diagnostics_view_->setMinimumHeight(130);
+    AutoHideScrollBar::install(launch_diagnostics_view_, dark_mode_);
     progress_layout->addWidget(launch_diagnostics_view_, 1);
     left_panel_layout->addWidget(launch_progress_card_);
 
@@ -2489,10 +2517,31 @@ void ExplorationScreen::buildUi() {
     action_font.setBold(true);
     action_font.setPixelSize(16);
     btn_start_scan_text_->setFont(action_font);
-    const QFontMetrics scan_metrics(action_font);
-    const int scan_text_w = scan_metrics.horizontalAdvance(btn_start_scan_text_->text());
-    const int scan_w = std::max(154, 24 + 20 + 6 + scan_text_w + 12);
-    btn_start_scan_->setFixedWidth(scan_w);
+
+    // Pin the button to the widest text it can ever display so no
+    // primary-action state transition (Start Scan → Start Mapping →
+    // Running... (NNs / NNs) → Finish & Save Map → Saving map... →
+    // Downloading map... → Map Ready) can clip the label. The list MUST
+    // stay in sync with the strings set inside refreshPrimaryActionButton().
+    const QFontMetrics action_metrics(action_font);
+    const QStringList kStartScanCandidateTexts = {
+        QStringLiteral("Start Scan"),
+        QStringLiteral("Start Mapping"),
+        QStringLiteral("Running... (60s / 60s)"),
+        QStringLiteral("Finish & Save Map"),
+        QStringLiteral("Saving map..."),
+        QStringLiteral("Downloading map..."),
+        QStringLiteral("Map Ready"),
+    };
+    int start_scan_text_w = 0;
+    for (const QString& t : kStartScanCandidateTexts) {
+        start_scan_text_w = std::max(start_scan_text_w, action_metrics.horizontalAdvance(t));
+    }
+    const int start_scan_w = std::max(
+        kExplStartScanMinWidth,
+        kExplActionButtonChrome + start_scan_text_w + kExplActionButtonSafetyPad);
+    btn_start_scan_->setFixedWidth(start_scan_w);
+    btn_start_scan_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     btn_start_scan_layout->addWidget(btn_start_scan_text_, 0, Qt::AlignVCenter);
     btn_start_scan_layout->addStretch(1);
     left_controls_layout->addWidget(btn_start_scan_);
@@ -2524,10 +2573,22 @@ void ExplorationScreen::buildUi() {
     btn_start_planning_text_ = new QLabel("Start Planning", btn_start_planning_);
     btn_start_planning_text_->setObjectName("ExplActionButtonText");
     btn_start_planning_text_->setFont(action_font);
-    const QFontMetrics planning_metrics(action_font);
-    const int planning_text_w = planning_metrics.horizontalAdvance(btn_start_planning_text_->text());
-    const int planning_w = std::max(185, 24 + 20 + 6 + planning_text_w + 12);
+
+    // Symmetric with btn_start_scan_: even though Start Planning has only
+    // one state today, size it through the same chrome + safety-pad budget
+    // so adding a second state in the future doesn't silently regress.
+    const QStringList kStartPlanningCandidateTexts = {
+        btn_start_planning_text_->text(),
+    };
+    int planning_text_w = 0;
+    for (const QString& t : kStartPlanningCandidateTexts) {
+        planning_text_w = std::max(planning_text_w, action_metrics.horizontalAdvance(t));
+    }
+    const int planning_w = std::max(
+        kExplStartPlanningMinWidth,
+        kExplActionButtonChrome + planning_text_w + kExplActionButtonSafetyPad);
     btn_start_planning_->setFixedWidth(planning_w);
+    btn_start_planning_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     btn_start_planning_layout->addWidget(btn_start_planning_text_, 0, Qt::AlignVCenter);
     btn_start_planning_layout->addStretch(1);
     controls_layout->addWidget(btn_start_planning_, 0, Qt::AlignVCenter);

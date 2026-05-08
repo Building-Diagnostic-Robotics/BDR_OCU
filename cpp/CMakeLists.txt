@@ -80,7 +80,6 @@ set(HEADERS
     include/transfer_manager.hpp
     include/data_transfer_dialog.hpp
     include/preset_manager.hpp
-    include/preset_dialog.hpp
     include/teleop_widget.hpp
     include/ui_theme_constants.hpp
     include/network_monitor.hpp
@@ -89,10 +88,14 @@ set(HEADERS
     include/cloud_upload_dialog.hpp
     include/robot_registry.hpp
     include/components/bdr_message_box.hpp
+    include/components/bdr_input_dialog.hpp
     include/components/bdr_progress_dialog.hpp
     include/components/banter_loader_widget.hpp
     include/components/tilt_calibration_dialog.hpp
+    include/components/pre_scan_checklist_dialog.hpp
     include/components/fpv_camera_view.hpp
+    include/components/auto_hide_scroll_bar.hpp
+    include/components/svg_icon_button.hpp
 )
 
 # Source files
@@ -112,7 +115,6 @@ set(GUI_SOURCES
     src/transfer_manager.cpp
     src/data_transfer_dialog.cpp
     src/preset_manager.cpp
-    src/preset_dialog.cpp
     src/teleop_widget.cpp
     src/network_monitor.cpp
     src/cloud_upload_manager.cpp
@@ -121,10 +123,14 @@ set(GUI_SOURCES
     src/robot_registry.cpp
     src/robot_login.cpp
     src/components/bdr_message_box.cpp
+    src/components/bdr_input_dialog.cpp
     src/components/bdr_progress_dialog.cpp
     src/components/banter_loader_widget.cpp
     src/components/tilt_calibration_dialog.cpp
+    src/components/pre_scan_checklist_dialog.cpp
     src/components/fpv_camera_view.cpp
+    src/components/auto_hide_scroll_bar.cpp
+    src/components/svg_icon_button.cpp
     src/main.cpp
     resources.qrc
 )

@@ -203,33 +203,60 @@ bool PresetManager::savePreset(const PlanningPreset& preset) {
         emit error("Preset name cannot be empty");
         return false;
     }
-    
+
     PlanningPreset toSave = preset;
-    
-    // Set timestamps
+
     if (!toSave.created.isValid()) {
         toSave.created = QDateTime::currentDateTime();
     }
     toSave.modified = QDateTime::currentDateTime();
-    
-    QString filePath = presetFilePath(toSave.name);
-    QFile file(filePath);
-    
-    if (!file.open(QIODevice::WriteOnly)) {
-        QString msg = QString("Failed to save preset: %1").arg(file.errorString());
+
+    const QString filePath = presetFilePath(toSave.name);
+    const QString tmpPath = filePath + QStringLiteral(".tmp");
+
+    // Crash-safe write: serialize to a sibling .tmp file, fsync, then atomic
+    // rename into place. Survives power loss or process kill mid-write — the
+    // existing file is either fully replaced or untouched.
+    QFile tmp(tmpPath);
+    if (!tmp.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QString msg = QString("Failed to save preset: %1").arg(tmp.errorString());
         qWarning() << "[PresetManager]" << msg;
         emit error(msg);
         return false;
     }
-    
-    QJsonDocument doc(toSave.toJson());
-    file.write(doc.toJson(QJsonDocument::Indented));
-    file.close();
-    
+
+    const QByteArray bytes = QJsonDocument(toSave.toJson()).toJson(QJsonDocument::Indented);
+    if (tmp.write(bytes) != bytes.size()) {
+        QString msg = QString("Short write on preset: %1").arg(tmp.errorString());
+        qWarning() << "[PresetManager]" << msg;
+        emit error(msg);
+        tmp.close();
+        QFile::remove(tmpPath);
+        return false;
+    }
+    tmp.flush();
+    tmp.close();
+
+    // QFile::rename does not overwrite on POSIX, so remove first if present.
+    if (QFile::exists(filePath) && !QFile::remove(filePath)) {
+        QString msg = QString("Failed to replace preset '%1'").arg(toSave.name);
+        qWarning() << "[PresetManager]" << msg;
+        emit error(msg);
+        QFile::remove(tmpPath);
+        return false;
+    }
+    if (!QFile::rename(tmpPath, filePath)) {
+        QString msg = QString("Failed to commit preset '%1'").arg(toSave.name);
+        qWarning() << "[PresetManager]" << msg;
+        emit error(msg);
+        QFile::remove(tmpPath);
+        return false;
+    }
+
     qDebug() << "[PresetManager] Saved preset:" << toSave.name;
     emit presetSaved(toSave.name);
     emit presetsChanged();
-    
+
     return true;
 }
 

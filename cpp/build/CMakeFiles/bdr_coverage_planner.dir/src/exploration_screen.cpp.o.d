@@ -287,6 +287,11 @@ CMakeFiles/bdr_coverage_planner.dir/src/exploration_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qsizepolicy.h \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/qcursor.h \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/qkeysequence.h \
+ /home/avenblake/BDR_CP/cpp/include/components/auto_hide_scroll_bar.hpp \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qobject.h \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/QPointer \
+ /usr/include/x86_64-linux-gnu/qt5/QtCore/qpointer.h \
  /home/avenblake/BDR_CP/cpp/include/coverage_gui.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QMainWindow \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qmainwindow.h \
@@ -466,7 +471,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/exploration_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qfileinfo.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qfileselector.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qobject.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QStringList \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qstringlist.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qfilesystemwatcher.h \
@@ -560,7 +564,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/exploration_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qlibrary.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qplugin.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qpoint.h \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/qpointer.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qprocessordetection.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qpropertyanimation.h \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/qvariantanimation.h \
@@ -1807,7 +1810,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/exploration_screen.cpp.o: \
  /usr/include/boost/mpl/aux_/preprocessed/gcc/fold_impl.hpp \
  /home/avenblake/BDR_CP/cpp/include/obstacle_detector.hpp \
  /home/avenblake/BDR_CP/cpp/include/transfer_manager.hpp \
- /usr/include/x86_64-linux-gnu/qt5/QtCore/QObject \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QStringList \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QDateTime \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QMutex \
@@ -1825,10 +1827,6 @@ CMakeFiles/bdr_coverage_planner.dir/src/exploration_screen.cpp.o: \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qgridlayout.h \
  /home/avenblake/BDR_CP/cpp/include/preset_manager.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtCore/QJsonObject \
- /home/avenblake/BDR_CP/cpp/include/preset_dialog.hpp \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QInputDialog \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qinputdialog.h \
- /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qlineedit.h \
  /home/avenblake/BDR_CP/cpp/include/teleop_widget.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QDockWidget \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qdockwidget.h \

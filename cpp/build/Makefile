@@ -343,6 +343,30 @@ src/cloud_upload_manager.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/cloud_upload_manager.cpp.s
 .PHONY : src/cloud_upload_manager.cpp.s
 
+src/components/auto_hide_scroll_bar.o: src/components/auto_hide_scroll_bar.cpp.o
+.PHONY : src/components/auto_hide_scroll_bar.o
+
+# target to build an object file
+src/components/auto_hide_scroll_bar.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/auto_hide_scroll_bar.cpp.o
+.PHONY : src/components/auto_hide_scroll_bar.cpp.o
+
+src/components/auto_hide_scroll_bar.i: src/components/auto_hide_scroll_bar.cpp.i
+.PHONY : src/components/auto_hide_scroll_bar.i
+
+# target to preprocess a source file
+src/components/auto_hide_scroll_bar.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/auto_hide_scroll_bar.cpp.i
+.PHONY : src/components/auto_hide_scroll_bar.cpp.i
+
+src/components/auto_hide_scroll_bar.s: src/components/auto_hide_scroll_bar.cpp.s
+.PHONY : src/components/auto_hide_scroll_bar.s
+
+# target to generate assembly for a file
+src/components/auto_hide_scroll_bar.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/auto_hide_scroll_bar.cpp.s
+.PHONY : src/components/auto_hide_scroll_bar.cpp.s
+
 src/components/banter_loader_widget.o: src/components/banter_loader_widget.cpp.o
 .PHONY : src/components/banter_loader_widget.o
 
@@ -366,6 +390,30 @@ src/components/banter_loader_widget.s: src/components/banter_loader_widget.cpp.s
 src/components/banter_loader_widget.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/banter_loader_widget.cpp.s
 .PHONY : src/components/banter_loader_widget.cpp.s
+
+src/components/bdr_input_dialog.o: src/components/bdr_input_dialog.cpp.o
+.PHONY : src/components/bdr_input_dialog.o
+
+# target to build an object file
+src/components/bdr_input_dialog.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/bdr_input_dialog.cpp.o
+.PHONY : src/components/bdr_input_dialog.cpp.o
+
+src/components/bdr_input_dialog.i: src/components/bdr_input_dialog.cpp.i
+.PHONY : src/components/bdr_input_dialog.i
+
+# target to preprocess a source file
+src/components/bdr_input_dialog.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/bdr_input_dialog.cpp.i
+.PHONY : src/components/bdr_input_dialog.cpp.i
+
+src/components/bdr_input_dialog.s: src/components/bdr_input_dialog.cpp.s
+.PHONY : src/components/bdr_input_dialog.s
+
+# target to generate assembly for a file
+src/components/bdr_input_dialog.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/bdr_input_dialog.cpp.s
+.PHONY : src/components/bdr_input_dialog.cpp.s
 
 src/components/bdr_message_box.o: src/components/bdr_message_box.cpp.o
 .PHONY : src/components/bdr_message_box.o
@@ -438,6 +486,54 @@ src/components/fpv_camera_view.s: src/components/fpv_camera_view.cpp.s
 src/components/fpv_camera_view.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/fpv_camera_view.cpp.s
 .PHONY : src/components/fpv_camera_view.cpp.s
+
+src/components/pre_scan_checklist_dialog.o: src/components/pre_scan_checklist_dialog.cpp.o
+.PHONY : src/components/pre_scan_checklist_dialog.o
+
+# target to build an object file
+src/components/pre_scan_checklist_dialog.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/pre_scan_checklist_dialog.cpp.o
+.PHONY : src/components/pre_scan_checklist_dialog.cpp.o
+
+src/components/pre_scan_checklist_dialog.i: src/components/pre_scan_checklist_dialog.cpp.i
+.PHONY : src/components/pre_scan_checklist_dialog.i
+
+# target to preprocess a source file
+src/components/pre_scan_checklist_dialog.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/pre_scan_checklist_dialog.cpp.i
+.PHONY : src/components/pre_scan_checklist_dialog.cpp.i
+
+src/components/pre_scan_checklist_dialog.s: src/components/pre_scan_checklist_dialog.cpp.s
+.PHONY : src/components/pre_scan_checklist_dialog.s
+
+# target to generate assembly for a file
+src/components/pre_scan_checklist_dialog.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/pre_scan_checklist_dialog.cpp.s
+.PHONY : src/components/pre_scan_checklist_dialog.cpp.s
+
+src/components/svg_icon_button.o: src/components/svg_icon_button.cpp.o
+.PHONY : src/components/svg_icon_button.o
+
+# target to build an object file
+src/components/svg_icon_button.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.o
+.PHONY : src/components/svg_icon_button.cpp.o
+
+src/components/svg_icon_button.i: src/components/svg_icon_button.cpp.i
+.PHONY : src/components/svg_icon_button.i
+
+# target to preprocess a source file
+src/components/svg_icon_button.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.i
+.PHONY : src/components/svg_icon_button.cpp.i
+
+src/components/svg_icon_button.s: src/components/svg_icon_button.cpp.s
+.PHONY : src/components/svg_icon_button.s
+
+# target to generate assembly for a file
+src/components/svg_icon_button.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.s
+.PHONY : src/components/svg_icon_button.cpp.s
 
 src/components/tilt_calibration_dialog.o: src/components/tilt_calibration_dialog.cpp.o
 .PHONY : src/components/tilt_calibration_dialog.o
@@ -679,30 +775,6 @@ src/planner_screen.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/planner_screen.cpp.s
 .PHONY : src/planner_screen.cpp.s
 
-src/preset_dialog.o: src/preset_dialog.cpp.o
-.PHONY : src/preset_dialog.o
-
-# target to build an object file
-src/preset_dialog.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/preset_dialog.cpp.o
-.PHONY : src/preset_dialog.cpp.o
-
-src/preset_dialog.i: src/preset_dialog.cpp.i
-.PHONY : src/preset_dialog.i
-
-# target to preprocess a source file
-src/preset_dialog.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/preset_dialog.cpp.i
-.PHONY : src/preset_dialog.cpp.i
-
-src/preset_dialog.s: src/preset_dialog.cpp.s
-.PHONY : src/preset_dialog.s
-
-# target to generate assembly for a file
-src/preset_dialog.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/preset_dialog.cpp.s
-.PHONY : src/preset_dialog.cpp.s
-
 src/preset_manager.o: src/preset_manager.cpp.o
 .PHONY : src/preset_manager.o
 
@@ -927,9 +999,15 @@ help:
 	@echo "... src/cloud_upload_manager.o"
 	@echo "... src/cloud_upload_manager.i"
 	@echo "... src/cloud_upload_manager.s"
+	@echo "... src/components/auto_hide_scroll_bar.o"
+	@echo "... src/components/auto_hide_scroll_bar.i"
+	@echo "... src/components/auto_hide_scroll_bar.s"
 	@echo "... src/components/banter_loader_widget.o"
 	@echo "... src/components/banter_loader_widget.i"
 	@echo "... src/components/banter_loader_widget.s"
+	@echo "... src/components/bdr_input_dialog.o"
+	@echo "... src/components/bdr_input_dialog.i"
+	@echo "... src/components/bdr_input_dialog.s"
 	@echo "... src/components/bdr_message_box.o"
 	@echo "... src/components/bdr_message_box.i"
 	@echo "... src/components/bdr_message_box.s"
@@ -939,6 +1017,12 @@ help:
 	@echo "... src/components/fpv_camera_view.o"
 	@echo "... src/components/fpv_camera_view.i"
 	@echo "... src/components/fpv_camera_view.s"
+	@echo "... src/components/pre_scan_checklist_dialog.o"
+	@echo "... src/components/pre_scan_checklist_dialog.i"
+	@echo "... src/components/pre_scan_checklist_dialog.s"
+	@echo "... src/components/svg_icon_button.o"
+	@echo "... src/components/svg_icon_button.i"
+	@echo "... src/components/svg_icon_button.s"
 	@echo "... src/components/tilt_calibration_dialog.o"
 	@echo "... src/components/tilt_calibration_dialog.i"
 	@echo "... src/components/tilt_calibration_dialog.s"
@@ -969,9 +1053,6 @@ help:
 	@echo "... src/planner_screen.o"
 	@echo "... src/planner_screen.i"
 	@echo "... src/planner_screen.s"
-	@echo "... src/preset_dialog.o"
-	@echo "... src/preset_dialog.i"
-	@echo "... src/preset_dialog.s"
 	@echo "... src/preset_manager.o"
 	@echo "... src/preset_manager.i"
 	@echo "... src/preset_manager.s"
