@@ -32,6 +32,8 @@
 #include <QListWidgetItem>
 #include <QLocale>
 #include <QMouseEvent>
+#include <QFont>
+#include <QFontMetrics>
 #include <QPainter>
 #include <QProgressBar>
 #include <QPainterPath>
@@ -3535,6 +3537,51 @@ void PlannerScreen::updateStageSteps() {
     style_step(step_scan_, 3, scan_ready);
 }
 
+// Width budget for the footer next-stage CTA (btn_next_). Inner layout =
+// contentsMargins(16, 0, 16, 0), spacing 10, items = [stretch, text, icon].
+// Stretch is a real layout item so the 10 px inter-item spacing is reserved
+// on both sides of the text label. Icon is 16x16. Total non-text reservation =
+// 16 + 0 + 10 + 10 + 16 + 16 = 68 px. 8 px safety pad covers Arimo Bold 16 px
+// ink overhang and Qt sub-pixel rounding (matches kExplActionButtonSafetyPad).
+namespace {
+constexpr int kFooterNextChrome = 16 + 10 + 10 + 16 + 16;
+constexpr int kFooterNextSafetyPad = 8;
+// Scan center bar buttons (btn_scan_start_pause_, btn_scan_cancel_,
+// btn_scan_emergency_stop_) all share inner layout = contentsMargins
+// (16, 0, 16, 0), spacing 8, items = [stretch, icon, text, stretch].
+// Three inter-item spacings (8 px each) plus a 20 px icon → chrome = 76 px.
+constexpr int kScanActionChrome = 16 + 8 + 20 + 8 + 8 + 16;
+constexpr int kScanActionSafetyPad = 8;
+}  // namespace
+
+void PlannerScreen::setNextStageLabel(const QString& text) {
+    if (!btn_next_ || !lbl_next_text_) {
+        return;
+    }
+    lbl_next_text_->setText(text);
+    // The label's font is set via stylesheet (font-family: 'Arimo';
+    // font-size: 16px; font-weight: 700;), which Qt may not have polished
+    // into QLabel::font() yet — measure against an explicit QFont matching
+    // the stylesheet so width is deterministic at first paint.
+    QFont next_font(QStringLiteral("Arimo"));
+    next_font.setBold(true);
+    next_font.setPixelSize(16);
+    const int text_w = QFontMetrics(next_font).horizontalAdvance(text);
+    btn_next_->setFixedWidth(kFooterNextChrome + text_w + kFooterNextSafetyPad);
+}
+
+void PlannerScreen::setScanActionLabel(QPushButton* btn, QLabel* label, const QString& text) {
+    if (!btn || !label) {
+        return;
+    }
+    label->setText(text);
+    QFont scan_font(QStringLiteral("Arimo"));
+    scan_font.setBold(true);
+    scan_font.setPixelSize(16);
+    const int text_w = QFontMetrics(scan_font).horizontalAdvance(text);
+    btn->setFixedWidth(kScanActionChrome + text_w + kScanActionSafetyPad);
+}
+
 void PlannerScreen::updateFooter() {
     if (!lbl_stage_footer_ || !btn_next_ || !lbl_next_text_ || !lbl_next_icon_) {
         return;
@@ -3549,7 +3596,7 @@ void PlannerScreen::updateFooter() {
         kBypassPlannerStageGates || (cache && cache->scan_waypoints_published);
     if (current_step_ == PlannerStep::MapProcessing) {
         lbl_stage_footer_->setText(QStringLiteral("Stage 1 of 4"));
-        lbl_next_text_->setText(QStringLiteral("Stage 2 (Coverage Planning)"));
+        setNextStageLabel(QStringLiteral("Stage 2 (Coverage Planning)"));
         lbl_next_text_->setStyleSheet(
             QStringLiteral("font-family: 'Arimo'; font-size: 16px; font-weight: 700; "
                            "color: %1; background: transparent;")
@@ -3562,7 +3609,7 @@ void PlannerScreen::updateFooter() {
         btn_next_->setToolTip(QStringLiteral("Open the coverage planning step."));
     } else if (current_step_ == PlannerStep::CoveragePlanning) {
         lbl_stage_footer_->setText(QStringLiteral("Stage 2 of 4"));
-        lbl_next_text_->setText(QStringLiteral("Stage 3 (Scan Splitting)"));
+        setNextStageLabel(QStringLiteral("Stage 3 (Scan Splitting)"));
         const QString tone = plan_ready ? next_active : muted;
         lbl_next_text_->setStyleSheet(
             QStringLiteral("font-family: 'Arimo'; font-size: 16px; font-weight: 700; "
@@ -3578,7 +3625,7 @@ void PlannerScreen::updateFooter() {
                                   : QStringLiteral("Generate a coverage plan before splitting scans."));
     } else if (current_step_ == PlannerStep::ScanSplitting) {
         lbl_stage_footer_->setText(QStringLiteral("Stage 3 of 4"));
-        lbl_next_text_->setText(QStringLiteral("Stage 4 (Scan)"));
+        setNextStageLabel(QStringLiteral("Stage 4 (Scan)"));
         const QString tone = scan_ready ? next_active : muted;
         lbl_next_text_->setStyleSheet(
             QStringLiteral("font-family: 'Arimo'; font-size: 16px; font-weight: 700; "
@@ -3595,7 +3642,7 @@ void PlannerScreen::updateFooter() {
     } else {
         // PlannerStep::Scan — Complete Mission button on the right.
         lbl_stage_footer_->setText(QStringLiteral("Stage 4 of 4"));
-        lbl_next_text_->setText(QStringLiteral("Complete Mission"));
+        setNextStageLabel(QStringLiteral("Complete Mission"));
         const bool dev_force_complete =
             qEnvironmentVariable("BDR_DEV_START_AT_SCAN").trimmed() == QStringLiteral("1");
         const bool can_complete =
@@ -6359,7 +6406,7 @@ void PlannerScreen::buildUi() {
                                                    &slider_coverage_headland_,
                                                    &lbl_coverage_headland_value_));
     // Robot cruise speed (m/s). Slider is config-only; the value gets pushed
-    // to /mpc_accel_controller's `max_linear_velocity` ROS param at scan-
+    // to mpc_accel_autonomous_controller's `max_linear_velocity` ROS param at scan-
     // start. Range matches the safe envelope of the current MPC tune.
     path_blocks_layout->addWidget(make_range_block(path_section,
                                                    QStringLiteral("Robot Speed"),
@@ -7165,8 +7212,10 @@ void PlannerScreen::buildUi() {
     btn_next_->setDefault(false);
     btn_next_->installEventFilter(this);
     btn_next_->setFixedHeight(44);
-    btn_next_->setMinimumWidth(kFooterCallToActionWidth);
-    btn_next_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    // Width is sized per-text by setNextStageLabel(); seeded after layout
+    // is wired below. No floor — the button snugs to whatever string
+    // refreshFooterStageState() routes through.
+    btn_next_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     btn_next_->setStyleSheet(QStringLiteral(
         "QPushButton {"
         "  background: #00BC7D;"
@@ -7190,6 +7239,7 @@ void PlannerScreen::buildUi() {
     next_layout->addWidget(lbl_next_icon_);
     connect(btn_next_, &QPushButton::clicked, this, &PlannerScreen::onNextClicked);
     footer_layout->addWidget(btn_next_, 0, Qt::AlignVCenter);
+    setNextStageLabel(lbl_next_text_->text());
     root_layout->addWidget(footer_);
 
     slider_voxel_->on_value_changed = [this](double value) {
@@ -8425,8 +8475,8 @@ QWidget* PlannerScreen::buildScanCenterControlBar(QWidget* parent) {
     btn_scan_start_pause_->setCursor(Qt::PointingHandCursor);
     btn_scan_start_pause_->setFlat(true);
     btn_scan_start_pause_->setFixedHeight(48);
-    btn_scan_start_pause_->setMinimumWidth(154);
-    btn_scan_start_pause_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    // Width sized per-text by setScanActionLabel(); seeded after layout.
+    btn_scan_start_pause_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     btn_scan_start_pause_->setStyleSheet(QStringLiteral(
         "QPushButton { background: #00BC7D; border: none; border-radius: 10px; }"
         "QPushButton:hover { background: #0ACB8B; }"
@@ -8452,6 +8502,8 @@ QWidget* PlannerScreen::buildScanCenterControlBar(QWidget* parent) {
     applyDropShadow(btn_scan_start_pause_, 16, 4, QColor(0, 188, 125, 64));
     connect(btn_scan_start_pause_, &QPushButton::clicked,
             this, &PlannerScreen::onScanStartPauseClicked);
+    setScanActionLabel(btn_scan_start_pause_, lbl_scan_start_pause_text_,
+                       lbl_scan_start_pause_text_->text());
     layout->addWidget(btn_scan_start_pause_);
 
     lbl_scan_run_summary_ = makeTextLabel(
@@ -8474,8 +8526,8 @@ QWidget* PlannerScreen::buildScanCenterControlBar(QWidget* parent) {
     btn_scan_cancel_->setCursor(Qt::PointingHandCursor);
     btn_scan_cancel_->setFlat(true);
     btn_scan_cancel_->setFixedHeight(48);
-    btn_scan_cancel_->setMinimumWidth(166);
-    btn_scan_cancel_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    // Width sized per-text by setScanActionLabel(); seeded after layout.
+    btn_scan_cancel_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     btn_scan_cancel_->setStyleSheet(QStringLiteral(
         "QPushButton { background: #FE9A00; border: none; border-radius: 10px; }"
         "QPushButton:hover { background: #FFAA22; }"
@@ -8512,14 +8564,16 @@ QWidget* PlannerScreen::buildScanCenterControlBar(QWidget* parent) {
             onScanCancelClicked();
         }
     });
+    setScanActionLabel(btn_scan_cancel_, lbl_scan_cancel_text_,
+                       lbl_scan_cancel_text_->text());
     layout->addWidget(btn_scan_cancel_);
 
     btn_scan_emergency_stop_ = new QPushButton(bar);
     btn_scan_emergency_stop_->setCursor(Qt::PointingHandCursor);
     btn_scan_emergency_stop_->setFlat(true);
     btn_scan_emergency_stop_->setFixedHeight(48);
-    btn_scan_emergency_stop_->setMinimumWidth(200);
-    btn_scan_emergency_stop_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    // Width sized per-text by setScanActionLabel(); seeded after layout.
+    btn_scan_emergency_stop_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     btn_scan_emergency_stop_->setStyleSheet(QStringLiteral(
         "QPushButton { background: #DC2626; border: none; border-radius: 10px; }"
         "QPushButton:hover { background: #EF4444; }"
@@ -8545,6 +8599,8 @@ QWidget* PlannerScreen::buildScanCenterControlBar(QWidget* parent) {
     btn_scan_emergency_stop_->setEnabled(false);
     connect(btn_scan_emergency_stop_, &QPushButton::clicked,
             this, &PlannerScreen::onScanEmergencyStopClicked);
+    setScanActionLabel(btn_scan_emergency_stop_, lbl_scan_emergency_stop_text_,
+                       lbl_scan_emergency_stop_text_->text());
     layout->addWidget(btn_scan_emergency_stop_);
 
     return bar;
@@ -8750,7 +8806,7 @@ void PlannerScreen::startSegmentExecution(int segment_index, bool resume_action)
         emit scanResumeRequested();
     } else {
         // Pass the configured cruise speed so AppShellWindow can push it to
-        // /mpc_accel_controller's `max_linear_velocity` ROS param BEFORE
+        // mpc_accel_autonomous_controller's `max_linear_velocity` ROS param BEFORE
         // arming autonomy. Resume reuses the param already set on the
         // initial start.
         emit scanStartRequested(cache.coverage_scan_speed_mps);
@@ -8865,7 +8921,7 @@ void PlannerScreen::updateScanRunUi() {
         cache ? cache->scan_run_state : ScanRunState::Idle;
 
     // Lock the cruise-speed slider while a scan is mid-flight. The value is
-    // committed to /mpc_accel_controller's `max_linear_velocity` ROS param
+    // committed to mpc_accel_autonomous_controller's `max_linear_velocity` ROS param
     // exactly once at scan-start; mid-scan changes would silently desync UI
     // from controller state, so we just disable the input.
     if (slider_coverage_scan_speed_) {
@@ -8960,7 +9016,7 @@ void PlannerScreen::updateScanRunUi() {
             enabled = false;
             icon_path = QStringLiteral(":/assets/missionplanner/scan_pause.svg");
         }
-        lbl_scan_start_pause_text_->setText(label);
+        setScanActionLabel(btn_scan_start_pause_, lbl_scan_start_pause_text_, label);
         lbl_scan_start_pause_icon_->setPixmap(
             loadSvgPixmap(icon_path, 20, 20, QStringLiteral("#FFFFFF")));
         btn_scan_start_pause_->setEnabled(enabled);
@@ -8969,9 +9025,9 @@ void PlannerScreen::updateScanRunUi() {
         btn_scan_emergency_stop_->setEnabled(
             run_state == ScanRunState::Running || run_state == ScanRunState::Paused);
         if (lbl_scan_emergency_stop_text_) {
-            lbl_scan_emergency_stop_text_->setText(
-                scan_estop_latched_ ? QStringLiteral("Clear E-Stop")
-                                    : QStringLiteral("Emergency Stop"));
+            setScanActionLabel(btn_scan_emergency_stop_, lbl_scan_emergency_stop_text_,
+                               scan_estop_latched_ ? QStringLiteral("Clear E-Stop")
+                                                   : QStringLiteral("Emergency Stop"));
         }
     }
     if (btn_scan_cancel_) {
@@ -9041,7 +9097,7 @@ void PlannerScreen::updateScanRunUi() {
         btn_scan_cancel_->setStyleSheet(style);
         btn_scan_cancel_->setEnabled(enabled);
         if (lbl_scan_cancel_text_) {
-            lbl_scan_cancel_text_->setText(label);
+            setScanActionLabel(btn_scan_cancel_, lbl_scan_cancel_text_, label);
         }
         if (lbl_scan_cancel_icon_) {
             lbl_scan_cancel_icon_->setPixmap(

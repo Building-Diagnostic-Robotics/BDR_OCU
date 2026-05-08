@@ -123,6 +123,13 @@ private:
     void applyStyle();
     void setPrimaryActionState(PrimaryActionState state);
     void refreshPrimaryActionButton();
+    // Sets the primary action button label AND resizes the button to snug-fit
+    // the new text via QFontMetrics (chrome + advance + safety pad). Used by
+    // every state transition in refreshPrimaryActionButton(). The per-second
+    // mapping-lock timer deliberately bypasses this helper — see
+    // onMappingLockTick() — so the button width stays constant during the
+    // 60 s lock instead of nudging on each digit rollover.
+    void setPrimaryActionLabel(const QString& text);
     void setLoadingOverlayVisible(bool visible);
     void updateLoadingOverlayGeometry();
     void updateLoadingOverlayText();

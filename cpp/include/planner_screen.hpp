@@ -94,7 +94,7 @@ signals:
     void startScanSegmentsRequested(const QString& progression_mode);
     // Stage 4 (Scan execution) signals
     // Carries the current scan-speed slider value (m/s). AppShellWindow
-    // forwards it to /mpc_accel_controller's `max_linear_velocity` param via
+    // forwards it to mpc_accel_autonomous_controller's `max_linear_velocity` param via
     // sendControllerMaxLinearVelocity() before resuming autonomy. Signal
     // payload (vs. shared cache fetch) keeps the start-scan path
     // self-describing and races-free.
@@ -192,7 +192,7 @@ private:
         double coverage_path_spacing = 0.50;
         double coverage_headland_width = 0.30;
         QString coverage_scan_axis = QStringLiteral("parallel");
-        // Cruise speed (m/s). Pushed to /mpc_accel_controller's
+        // Cruise speed (m/s). Pushed to mpc_accel_autonomous_controller's
         // `max_linear_velocity` param at scan-start (signal-with-payload via
         // scanStartRequested). Slider locked while scan running — config-
         // only, no live runtime mutation.
@@ -384,6 +384,14 @@ private:
     QWidget* buildScanCenterControlBar(QWidget* parent);
     QWidget* buildScanStatusPill(QWidget* parent);
     QWidget* buildScanLegendChip(QWidget* parent);
+    // Sets the footer next-stage button label AND resizes the button to
+    // snug-fit the new text. Used for both the cross-stage "Stage N (...)"
+    // forward CTA and the Stage 4 "Complete Mission" terminal CTA.
+    void setNextStageLabel(const QString& text);
+    // Generic snug-fit helper for the Scan center control bar buttons
+    // (Start/Pause, Cancel/Discard, Emergency Stop). All three share the
+    // same chrome (76 px) and Arimo bold 16 px stylesheet font.
+    void setScanActionLabel(QPushButton* btn, QLabel* label, const QString& text);
     void updateScanRunUi();
     void updateScanLiveTelemetry();
     void refreshScanSegmentStatusList();

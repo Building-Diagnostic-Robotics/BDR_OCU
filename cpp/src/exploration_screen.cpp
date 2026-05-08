@@ -75,9 +75,9 @@ constexpr int kExplActionButtonChrome = 24 + 20 + 6 + 6 + 12;
 // ink overhang and Qt's sub-pixel-to-integer layout rounding. Tuned
 // empirically against Arimo Bold 16 px.
 constexpr int kExplActionButtonSafetyPad = 8;
-// Lower bounds preserved from the previous implementation so the buttons
-// never visually shrink even when the candidate text is very short.
-constexpr int kExplStartScanMinWidth = 154;
+// Floor preserved for the planning button so the single-text "Start Planning"
+// CTA matches its Figma minimum even though the chrome+advance math
+// produces a slightly smaller value.
 constexpr int kExplStartPlanningMinWidth = 185;
 
 QByteArray stripPngIccpChunk(const QByteArray& png_data) {
@@ -2008,16 +2008,16 @@ void ExplorationScreen::refreshPrimaryActionButton() {
         return;
     }
 
-    // NOTE: btn_start_scan_'s width is pinned at construction against
-    // kStartScanCandidateTexts (see the Start Scan QPushButton setup).
-    // If you add a new state below or change a state's text to anything
-    // wider than the existing entries, update kStartScanCandidateTexts to
-    // match — otherwise the new label will clip.
+    // Each state below routes its label through setPrimaryActionLabel() so
+    // the button width snugs to the new text. RunningLocked is special:
+    // pre-sized once for "Running... (60s / 60s)" so the per-second
+    // onMappingLockTick() text update doesn't bounce the button width as
+    // the digit count crosses 9 → 10 / 9 → 60.
     QString button_style;
     switch (primary_action_state_) {
         case PrimaryActionState::StartMapping:
             primary_action_enabled_by_state_ = true;
-            btn_start_scan_text_->setText("Start Mapping");
+            setPrimaryActionLabel(QStringLiteral("Start Mapping"));
             button_style =
                 "QPushButton { background: #10B981; border: none; border-radius: 10px; }"
                 "QPushButton:hover:enabled { background: #34D399; }"
@@ -2025,14 +2025,19 @@ void ExplorationScreen::refreshPrimaryActionButton() {
             break;
         case PrimaryActionState::RunningLocked:
             primary_action_enabled_by_state_ = false;
-            btn_start_scan_text_->setText("Running... (0s / 60s)");
+            // Pre-size for the worst-case digit count (60s / 60s), then
+            // overwrite the text with the actual t=0 string. Subsequent
+            // per-tick setText calls in onMappingLockTick() leave the
+            // button width untouched.
+            setPrimaryActionLabel(QStringLiteral("Running... (60s / 60s)"));
+            btn_start_scan_text_->setText(QStringLiteral("Running... (0s / 60s)"));
             button_style =
                 "QPushButton { background: #27272A; border: none; border-radius: 10px; }"
                 "QPushButton:disabled { background: #27272A; }";
             break;
         case PrimaryActionState::FinishAndSaveMap:
             primary_action_enabled_by_state_ = true;
-            btn_start_scan_text_->setText("Finish & Save Map");
+            setPrimaryActionLabel(QStringLiteral("Finish & Save Map"));
             button_style =
                 "QPushButton { background: #3B82F6; border: none; border-radius: 10px; }"
                 "QPushButton:hover:enabled { background: #2563EB; }"
@@ -2040,21 +2045,21 @@ void ExplorationScreen::refreshPrimaryActionButton() {
             break;
         case PrimaryActionState::SavingMap:
             primary_action_enabled_by_state_ = false;
-            btn_start_scan_text_->setText("Saving map...");
+            setPrimaryActionLabel(QStringLiteral("Saving map..."));
             button_style =
                 "QPushButton { background: #1F2937; border: none; border-radius: 10px; }"
                 "QPushButton:disabled { background: #1F2937; }";
             break;
         case PrimaryActionState::DownloadingMap:
             primary_action_enabled_by_state_ = false;
-            btn_start_scan_text_->setText("Downloading map...");
+            setPrimaryActionLabel(QStringLiteral("Downloading map..."));
             button_style =
                 "QPushButton { background: #1F2937; border: none; border-radius: 10px; }"
                 "QPushButton:disabled { background: #1F2937; }";
             break;
         case PrimaryActionState::MapReady:
             primary_action_enabled_by_state_ = false;
-            btn_start_scan_text_->setText("Map Ready");
+            setPrimaryActionLabel(QStringLiteral("Map Ready"));
             button_style =
                 "QPushButton { background: #0F766E; border: none; border-radius: 10px; }"
                 "QPushButton:disabled { background: #0F766E; }";
@@ -2063,6 +2068,17 @@ void ExplorationScreen::refreshPrimaryActionButton() {
 
     btn_start_scan_->setStyleSheet(button_style);
     btn_start_scan_->setEnabled(primary_action_enabled_by_state_ && !launch_in_progress_);
+}
+
+void ExplorationScreen::setPrimaryActionLabel(const QString& text) {
+    if (!btn_start_scan_ || !btn_start_scan_text_) {
+        return;
+    }
+    btn_start_scan_text_->setText(text);
+    const int text_w =
+        QFontMetrics(btn_start_scan_text_->font()).horizontalAdvance(text);
+    btn_start_scan_->setFixedWidth(
+        kExplActionButtonChrome + text_w + kExplActionButtonSafetyPad);
 }
 
 void ExplorationScreen::resetMappingWorkflowUi() {
@@ -2517,35 +2533,15 @@ void ExplorationScreen::buildUi() {
     action_font.setBold(true);
     action_font.setPixelSize(16);
     btn_start_scan_text_->setFont(action_font);
-
-    // Pin the button to the widest text it can ever display so no
-    // primary-action state transition (Start Scan → Start Mapping →
-    // Running... (NNs / NNs) → Finish & Save Map → Saving map... →
-    // Downloading map... → Map Ready) can clip the label. The list MUST
-    // stay in sync with the strings set inside refreshPrimaryActionButton().
-    const QFontMetrics action_metrics(action_font);
-    const QStringList kStartScanCandidateTexts = {
-        QStringLiteral("Start Scan"),
-        QStringLiteral("Start Mapping"),
-        QStringLiteral("Running... (60s / 60s)"),
-        QStringLiteral("Finish & Save Map"),
-        QStringLiteral("Saving map..."),
-        QStringLiteral("Downloading map..."),
-        QStringLiteral("Map Ready"),
-    };
-    int start_scan_text_w = 0;
-    for (const QString& t : kStartScanCandidateTexts) {
-        start_scan_text_w = std::max(start_scan_text_w, action_metrics.horizontalAdvance(t));
-    }
-    const int start_scan_w = std::max(
-        kExplStartScanMinWidth,
-        kExplActionButtonChrome + start_scan_text_w + kExplActionButtonSafetyPad);
-    btn_start_scan_->setFixedWidth(start_scan_w);
     btn_start_scan_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     btn_start_scan_layout->addWidget(btn_start_scan_text_, 0, Qt::AlignVCenter);
     btn_start_scan_layout->addStretch(1);
     left_controls_layout->addWidget(btn_start_scan_);
     connect(btn_start_scan_, &QPushButton::clicked, this, &ExplorationScreen::onStartScanClicked);
+    // Width is sized to the current text by setPrimaryActionLabel(); seed it
+    // here so the initial "Start Scan" state renders snug instead of at the
+    // QPushButton default sizeHint.
+    setPrimaryActionLabel(btn_start_scan_text_->text());
 
     auto* move_hint = new QLabel("WASD keys to move", left_controls);
     move_hint->setObjectName("ExplMoveHint");
@@ -2573,17 +2569,10 @@ void ExplorationScreen::buildUi() {
     btn_start_planning_text_ = new QLabel("Start Planning", btn_start_planning_);
     btn_start_planning_text_->setObjectName("ExplActionButtonText");
     btn_start_planning_text_->setFont(action_font);
-
-    // Symmetric with btn_start_scan_: even though Start Planning has only
-    // one state today, size it through the same chrome + safety-pad budget
-    // so adding a second state in the future doesn't silently regress.
-    const QStringList kStartPlanningCandidateTexts = {
-        btn_start_planning_text_->text(),
-    };
-    int planning_text_w = 0;
-    for (const QString& t : kStartPlanningCandidateTexts) {
-        planning_text_w = std::max(planning_text_w, action_metrics.horizontalAdvance(t));
-    }
+    // Single-text CTA — snug-fit via shared chrome + safety pad, with the
+    // Figma 185 px floor preserved.
+    const QFontMetrics planning_metrics(action_font);
+    const int planning_text_w = planning_metrics.horizontalAdvance(btn_start_planning_text_->text());
     const int planning_w = std::max(
         kExplStartPlanningMinWidth,
         kExplActionButtonChrome + planning_text_w + kExplActionButtonSafetyPad);

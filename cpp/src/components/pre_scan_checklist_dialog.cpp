@@ -238,6 +238,7 @@ void PreScanChecklistDialog::buildUi() {
         if (i == 0) {
             btn_wake_ = new QPushButton(QStringLiteral("Wake GPR"), row_widget);
             btn_wake_->setObjectName("PreScanChecklistWakeBtn");
+            btn_wake_->setAttribute(Qt::WA_StyledBackground, true);
             btn_wake_->setCursor(Qt::PointingHandCursor);
             btn_wake_->setFixedHeight(36);
             btn_wake_->setMinimumWidth(150);
@@ -291,10 +292,6 @@ void PreScanChecklistDialog::buildUi() {
 
 void PreScanChecklistDialog::applyStyle() {
     const auto t = uiThemeTokens(dark_mode_);
-    const QString accent = dark_mode_ ? QStringLiteral("#10B981")
-                                      : QStringLiteral("#155DFC");
-    const QString accent_hover = dark_mode_ ? QStringLiteral("#34D399")
-                                            : QStringLiteral("#1D4ED8");
     const QString row_hover = dark_mode_ ? QStringLiteral("#1F2937")
                                          : QStringLiteral("#F1F5F9");
     const QString disabled_bg = dark_mode_ ? QStringLiteral("#1F2937")
@@ -352,23 +349,6 @@ void PreScanChecklistDialog::applyStyle() {
             font-size: 14px;
             font-weight: 500;
         }
-        #PreScanChecklistWakeBtn {
-            background-color: %6;
-            color: #FFFFFF;
-            border: none;
-            border-radius: 6px;
-            padding: 0px 16px;
-            font-family: 'Arimo';
-            font-size: 13px;
-            font-weight: 600;
-        }
-        #PreScanChecklistWakeBtn:hover {
-            background-color: %7;
-        }
-        #PreScanChecklistWakeBtn:disabled {
-            background-color: %8;
-            color: %9;
-        }
         #PreScanChecklistFooter {
             background-color: %1;
             border-bottom-left-radius: 12px;
@@ -394,7 +374,34 @@ void PreScanChecklistDialog::applyStyle() {
         }
     )")
                       .arg(t.card_bg, t.border, t.text, t.muted, row_hover,
-                           accent, accent_hover, disabled_bg, disabled_fg));
+                           t.accent, t.accent_hover, disabled_bg, disabled_fg));
+
+    // Wake GPR sits inside a QListWidget row (setItemWidget). Ancestor
+    // QSS rarely paints that QPushButton correctly; drive colors from a
+    // widget-local sheet + WA_StyledBackground (set in buildUi).
+    if (btn_wake_) {
+        btn_wake_->setStyleSheet(QString(R"(
+            QPushButton#PreScanChecklistWakeBtn {
+                background-color: %1;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 0px 16px;
+                font-family: 'Arimo';
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton#PreScanChecklistWakeBtn:hover {
+                background-color: %2;
+            }
+            QPushButton#PreScanChecklistWakeBtn:disabled {
+                background-color: %3;
+                color: %4;
+            }
+        )")
+                                     .arg(t.accent, t.accent_hover, disabled_bg,
+                                          disabled_fg));
+    }
 }
 
 bool PreScanChecklistDialog::allRowsTicked() const {

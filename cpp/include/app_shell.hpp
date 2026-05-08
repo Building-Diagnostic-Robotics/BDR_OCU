@@ -6,12 +6,14 @@
 #include <QProcess>
 #include <QString>
 #include <QtGlobal>
+#include <functional>
 #include <vector>
 
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <odrive_can/msg/controller_status.hpp>
 #include <odrive_can/srv/axis_state.hpp>
+#include <rcl_interfaces/srv/set_parameters.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -132,6 +134,10 @@ private:
     // or on the 6 s safety ceiling — so the Complete Mission state machine
     // always advances to pipeline teardown.
     void finalizeMissionDataCollection(std::function<void()> done);
+    void beginExplorationMotorsIdleWait(std::function<void(bool timed_out)> continuation);
+    void performExplorationPipelineTeardownPreamble();
+    void explorationStopPipelineTeardownKillProcessesAndResetUi();
+    void performExplorationPipelineTeardown();
     // Asks the coordinator to abort the active scan: stop DC, delete every
     // section folder this mission produced (including the in-flight one),
     // and remove the entire mission folder (continuous UBX + config). The
@@ -175,15 +181,18 @@ private:
     void pushExplorationTopMotorsChipState();
     void pushPlannerMotorsChipState();
 
-    // Lazily build the AsyncParametersClient against the controller node.
-    // Safe to call repeatedly; no-ops once the client exists.
-    void ensurePlannerControllerParamClient();
-    // Push the operator-selected cruise speed to /mpc_accel_controller's
-    // `max_linear_velocity` ROS param via async set_parameters. Called
-    // exactly once per start-scan press from onPlannerScanStartRequested.
-    // No-op if the param service is not yet discoverable; the next
-    // start-scan press will retry.
-    void sendControllerMaxLinearVelocity(double max_linear_velocity_mps);
+    // Push the operator-selected cruise speed to
+    // mpc_accel_autonomous_controller's `max_linear_velocity` /
+    // `desired_linear_speed` ROS params via a synchronous SetParameters
+    // call (wait_for_service + spin_until_future_complete). The client
+    // is built fresh on every call (NOT cached) — see the comment at the
+    // top of the implementation for the failure mode caching produced.
+    // Called exactly once per start-scan press from
+    // onPlannerScanStartRequested. Returns true on confirmed success;
+    // on failure surfaces a BdrMessageBox warning to the operator and
+    // returns false. The caller may choose to proceed or block
+    // start-scan based on that.
+    bool sendControllerMaxLinearVelocity(double max_linear_velocity_mps);
 
     struct ExplorationOdomSample {
         double x = 0.0;
@@ -327,21 +336,16 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr exploration_gpr_line_stop_client_;
     bool planner_estop_active_ = false;
 
-    // Async parameter client for the autonomous controller node. Used to
-    // PUSH the operator-selected cruise speed onto `max_linear_velocity` at
-    // scan-start. The controller node name `mpc_accel_controller` is
-    // hardcoded here to match `mpc_accel_autonomous_controller.py`'s
-    // `super().__init__("mpc_accel_controller")` call. If that node ever
-    // gets renamed, this constant has to move with it.
-    rclcpp::AsyncParametersClient::SharedPtr planner_controller_param_client_;
+    // (No cached SetParameters client. sendControllerMaxLinearVelocity
+    // creates one local to each call to avoid stale Zenoh-bridge
+    // discovery state and the rclcpp Humble race between cached
+    // clients' response waitables and `spin_until_future_complete`. See
+    // the implementation comment for full diagnosis.)
 
-    // Complete Mission disarm-and-teardown sequencing. We send IDLE to all
-    // axes, then poll the controller-status feedback for left/right (the
-    // GPR has no observable axis_state for this app) until both report
-    // IDLE before tearing down the launch tree. Hard ceiling at 2 s so
-    // the UI never wedges if telemetry stops mid-mission.
-    QTimer* planner_complete_mission_wait_timer_ = nullptr;
-    int planner_complete_mission_wait_ticks_ = 0;
+    // Shared: after IDLE request, poll left/right axis_state until IDLE (≤2 s)
+    // before killing the launch tree so odrive_can receives the service.
+    QTimer* exploration_motors_idle_wait_timer_ = nullptr;
+    int exploration_motors_idle_wait_ticks_ = 0;
 
     // /dc/finalize_mission async wait. We send the request after motors
     // disarm and before tearing down the launch tree, so the gps_driver
