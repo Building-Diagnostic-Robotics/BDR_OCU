@@ -64,7 +64,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $ARCH
-Depends: libqt5core5a (>= 5.9.5), libqt5widgets5 (>= 5.9.5), libqt5gui5 (>= 5.9.5), libc6 (>= 2.27), libstdc++6 (>= 6.0), libgcc-s1 (>= 3.0), ros-humble-rclcpp, ros-humble-std-msgs
+Depends: libqt5core5a (>= 5.9.5), libqt5widgets5 (>= 5.9.5), libqt5gui5 (>= 5.9.5), libc6 (>= 2.27), libstdc++6 (>= 6.0), libgcc-s1 (>= 3.0), ros-humble-rclcpp, ros-humble-std-msgs, ros-humble-std-srvs, ros-humble-geometry-msgs, ros-humble-sensor-msgs, ros-humble-nav-msgs, ros-humble-tf2, ros-humble-tf2-geometry-msgs, ros-humble-rmw-cyclonedds-cpp
 Maintainer: Your Name <your.email@example.com>
 Description: Coverage Path Planning GUI with ROS2 Integration
  Fields2Cover Coverage Path Planning GUI application with ROS2 waypoint publishing (BDR Coverage Planner).
