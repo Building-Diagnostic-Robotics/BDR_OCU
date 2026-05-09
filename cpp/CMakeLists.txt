@@ -66,6 +66,15 @@ else()
     message(STATUS "Using Qt6: ${Qt6Core_VERSION}")
 endif()
 
+# PCL 1.12 on Ubuntu 22.04 transitively pulls VTK 9.1, which declares
+# MPI::MPI_C in its target link interface. Without an explicit
+# find_package(MPI) here, CMake fails to register the imported MPI
+# target and configure aborts with:
+#   "VTK::mpi contains MPI::MPI_C but the target was not found"
+# We don't actually use MPI in our code; this is purely to satisfy
+# VTK's transitive dependency chain.
+find_package(MPI QUIET)
+
 # Find PCL (no visualization component to avoid Qt/VTK conflicts)
 # 3D viewing is done via external viewers (pcl_viewer, Open3D, CloudCompare)
 find_package(PCL 1.10 REQUIRED COMPONENTS common io filters)
