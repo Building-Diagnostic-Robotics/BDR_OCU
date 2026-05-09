@@ -58,6 +58,7 @@ jobs:
             qtbase5-dev libqt5widgets5 libqt5gui5 libqt5network5 \
             libqt5concurrent5 libqt5svg5-dev \
             libpcl-dev libeigen3-dev \
+            libunwind-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             ros-humble-ros-base ros-humble-rclcpp ros-humble-std-msgs \
             ros-humble-std-srvs ros-humble-geometry-msgs ros-humble-sensor-msgs \
