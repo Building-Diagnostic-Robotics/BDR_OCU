@@ -1,0 +1,47 @@
+# Build artefacts
+build/
+cpp/build/
+_ros_ws/
+_f2c_build/
+_f2c_install/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+*.cmake.in.out
+
+# Compiled binaries / objects
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local cache files
+.cache/
+
+# Generated source-stamping artefacts
+generated/
+version_info.hpp
+
+# Debian package outputs (CI artefacts; releases live on GitHub)
+*.deb
+*.deb.sha256
