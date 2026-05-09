@@ -291,6 +291,46 @@ if [ -f "/opt/ros/humble/opt/ortools_vendor/lib/libortools.so.9" ]; then
     cp "/opt/ros/humble/opt/ortools_vendor/lib/libortools.so.9" "$DEB_DIR/usr/lib/bdr-coverage-planner/"
 fi
 
+# Bundle the vendored odrive_can interface libs.
+#
+# odrive_can lives in vendor/odrive_can/ and is built by colcon into
+# _ros_ws/install/odrive_can/lib/ (CI does this in the "Build vendored
+# ROS2 interface packages" step; locally a developer who's run colcon
+# in pilot_ws or BDR_CP will have it under their own _ros_ws/install).
+# It's NOT a /opt/ros/humble package, so without explicit bundling the
+# OCU fails to load with:
+#   error while loading shared libraries:
+#   libodrive_can__rosidl_typesupport_cpp.so: cannot open shared object
+# This was invisible from a terminal launch on machines with a colcon
+# overlay sourced via .bashrc, but desktop-entry launches don't source
+# .bashrc and surface the failure.
+echo "Copying vendored odrive_can interface libraries..."
+# CI uses `colcon build --merge-install`, which flattens all package libs
+# into install/lib/. Local developer workflows usually use the default
+# (per-package) layout install/<pkg>/lib/. We try both.
+ODRIVE_CAN_LIB_CANDIDATES=(
+    "${SCRIPT_DIR}/../_ros_ws/install/lib"
+    "${SCRIPT_DIR}/../_ros_ws/install/odrive_can/lib"
+    "${HOME}/pilot_ws/install/lib"
+    "${HOME}/pilot_ws/install/odrive_can/lib"
+    "${HOME}/BDR_CP/_ros_ws/install/lib"
+    "${HOME}/BDR_CP/_ros_ws/install/odrive_can/lib"
+)
+for ODRIVE_CAN_LIB_DIR in "${ODRIVE_CAN_LIB_CANDIDATES[@]}"; do
+    if [ -d "$ODRIVE_CAN_LIB_DIR" ] && \
+       ls "$ODRIVE_CAN_LIB_DIR"/libodrive_can*.so* >/dev/null 2>&1; then
+        cp -P "$ODRIVE_CAN_LIB_DIR"/libodrive_can*.so* \
+              "$DEB_DIR/usr/lib/bdr-coverage-planner/"
+        echo "  bundled odrive_can libs from: $ODRIVE_CAN_LIB_DIR"
+        break
+    fi
+done
+if ! ls "$DEB_DIR/usr/lib/bdr-coverage-planner/"libodrive_can*.so* >/dev/null 2>&1; then
+    echo "Error: failed to bundle odrive_can libs; OCU will fail to launch on clean systems."
+    echo "       Looked under: ${ODRIVE_CAN_LIB_CANDIDATES[*]}"
+    exit 1
+fi
+
 # Copy other required libraries (only non-standard ones)
 REQUIRED_LIBS=$(ldd "${BUILD_DIR}/bdr_coverage_planner" | grep -v "=>" | grep -v "linux-vdso" | grep -v "ld-linux" | awk '{print $1}')
 for lib in $REQUIRED_LIBS; do
