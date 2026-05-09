@@ -298,6 +298,23 @@ void UpdateChecker::handleSuccess(const QByteArray& payload) {
         return;
     }
 
+    // Rollback denylist: if the OCU previously rolled back from this SHA
+    // (because the install crashed before bootHealthy fired), never offer
+    // it again. Without this guard, the OCU would loop indefinitely:
+    // install → crash → rollback → poll → "new update available!" → install
+    // → crash → ... until a fix-forward commit is pushed. A bad release
+    // can sit on `latest` for hours; the operator-facing experience must
+    // not regress in that window.
+    if (isDenylisted(info.commitSha)) {
+        log::warn(
+            "checker",
+            QStringLiteral("ignoring release %1 (denylisted: previously "
+                           "rolled back on this OCU)")
+                .arg(info.commitSha.left(7)));
+        emit noUpdateAvailable();
+        return;
+    }
+
     if (isSnoozed()) {
         // A new build exists but the operator told us to stay quiet. Treat as
         // "no update" from the UI's perspective; banner stays hidden.

@@ -27,6 +27,7 @@
 #include "settings_constants.hpp"
 #include "update/update_lockfile.hpp"
 #include "update/update_log.hpp"
+#include "update/update_settings.hpp"
 #include "update/update_state.hpp"
 #include "version_info.hpp"
 
@@ -302,6 +303,27 @@ int main(int argc, char* argv[])
     //     ever showing a UI; the runner takes over the screen.
     StartupContext startup = determineStartupAction();
     if (startup.action == StartupAction::HandoffToRollbackRunner) {
+        // Record the bad SHA in the rollback denylist BEFORE handing off.
+        // The handoff exec's us out of the process, so any work after this
+        // point may not run. QSettings::sync() in addToDenylist guarantees
+        // the entry is on disk before exec.
+        const QString bad_sha = f2c_cpp::update::shortShaFromDebPath(
+            startup.marker.currentDebPath);
+        if (!bad_sha.isEmpty()) {
+            f2c_cpp::update::addToDenylist(bad_sha);
+            f2c_cpp::update::log::warn(
+                "main",
+                QStringLiteral("crash-loop rollback: denylisting %1")
+                    .arg(bad_sha));
+        } else {
+            f2c_cpp::update::log::warn(
+                "main",
+                QStringLiteral("crash-loop rollback: could not parse SHA "
+                               "from current_deb_path '%1' — skipping "
+                               "denylist add (rollback will still proceed)")
+                    .arg(startup.marker.currentDebPath));
+        }
+
         QSettings settings(QString::fromLatin1(f2c_cpp::kSettingsOrgName),
                            QString::fromLatin1(f2c_cpp::kSettingsAppName));
         const bool dark_mode = settings.value("ui/dark_mode", false).toBool();
@@ -365,11 +387,24 @@ int main(int argc, char* argv[])
         // handoff polls and quit() works.
         QObject::connect(
             probe_timer, &QTimer::timeout,
-            [previous_deb]() {
+            [current_deb, previous_deb]() {
                 f2c_cpp::update::log::error(
                     "main",
                     QStringLiteral("watchdog: 60 s deadline expired without "
                                    "bootHealthy — rolling back"));
+
+                // Denylist the bad SHA before handoff (mirrors the
+                // crash-loop seam in determineStartupAction).
+                const QString bad_sha =
+                    f2c_cpp::update::shortShaFromDebPath(current_deb);
+                if (!bad_sha.isEmpty()) {
+                    f2c_cpp::update::addToDenylist(bad_sha);
+                    f2c_cpp::update::log::warn(
+                        "main",
+                        QStringLiteral("watchdog rollback: denylisting %1")
+                            .arg(bad_sha));
+                }
+
                 QSettings settings(QString::fromLatin1(f2c_cpp::kSettingsOrgName),
                                    QString::fromLatin1(f2c_cpp::kSettingsAppName));
                 const bool dark_mode = settings.value("ui/dark_mode", false).toBool();
@@ -378,7 +413,9 @@ int main(int argc, char* argv[])
                 } else {
                     // No prev.deb / runner missing. Best we can do is
                     // log and let the OCU keep running on the broken
-                    // version; operator can manually re-install.
+                    // version; operator can manually re-install. The
+                    // denylist add above still stands, so future polls
+                    // won't re-offer this SHA.
                     f2c_cpp::update::log::error(
                         "main",
                         QStringLiteral("watchdog: rollback handoff FAILED — "
