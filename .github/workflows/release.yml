@@ -73,6 +73,16 @@ jobs:
         # builds to fail with "boost/mpl/assert.hpp: No such file".
         # ccache below is the bigger speedup anyway; the ~60s saved by
         # apt caching isn't worth the reliability cost.
+        #
+        # Fields2Cover deps:
+        #   - libgdal-dev / libgeos-dev / libtinyxml2-dev: link-time headers
+        #     for F2C's geo stack. Runtime equivalents (libgdal30,
+        #     libgeos-c1v5, libtinyxml2-9) ship via the OCU .deb's
+        #     Depends: line so end-user OCUs pull them in via apt.
+        #   - ros-humble-ortools-vendor: F2C is built with USE_ORTOOLS_VENDOR=ON
+        #     (mirrors the dev workflow in pilot_ws). The vendor pkg
+        #     provides /opt/ros/humble/opt/ortools_vendor/lib/libortools.so.9
+        #     which libFields2Cover.so links against.
         run: |
           sudo apt install -y \
             build-essential cmake pkg-config git \
@@ -84,12 +94,14 @@ jobs:
             libunwind-dev \
             libopenmpi-dev libmpich-dev \
             libcgal-dev \
+            libgdal-dev libgeos-dev libtinyxml2-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             ros-humble-ros-base ros-humble-rclcpp ros-humble-std-msgs \
             ros-humble-std-srvs ros-humble-geometry-msgs ros-humble-sensor-msgs \
             ros-humble-nav-msgs ros-humble-tf2 ros-humble-tf2-geometry-msgs \
             ros-humble-ament-cmake ros-humble-rosidl-default-generators \
-            ros-humble-rosidl-default-runtime
+            ros-humble-rosidl-default-runtime \
+            ros-humble-ortools-vendor
 
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -104,6 +116,43 @@ jobs:
           ln -sfn "${GITHUB_WORKSPACE}/vendor/odrive_can" _ros_ws/src/odrive_can
           cd _ros_ws
           colcon build --packages-select odrive_can --merge-install
+
+      - name: Build and install Fields2Cover (pinned v2.0.0)
+        # Fields2Cover has no upstream apt package, so CI clones it at a
+        # pinned tag, builds it, and installs to /usr/local. The OCU's
+        # cpp/CMakeLists.txt uses find_package(Fields2Cover QUIET); the
+        # /usr/local install makes that resolve and sets HAVE_FIELDS2COVER
+        # at compile time. The .deb packaging step then bundles the
+        # resulting libFields2Cover.so* (+ libsteering_functions.so,
+        # libmatplot.so*) into /usr/lib/bdr-coverage-planner/ so end-user
+        # OCUs don't need a /usr/local install.
+        #
+        # Pinned to v2.0.0 to match the version pilot_ws uses
+        # (verified: `git -C pilot_ws/src/Fields2Cover describe --tags`).
+        # Bump only after testing, since F2C has had breaking API
+        # changes between 1.x and 2.x.
+        #
+        # USE_ORTOOLS_VENDOR=ON makes F2C resolve OR-Tools from
+        # /opt/ros/humble/opt/ortools_vendor/lib (provided by
+        # ros-humble-ortools-vendor, declared as a runtime Depends in
+        # cpp/create_deb.sh so the operator's OCU has it too).
+        #
+        # BUILD_TUTORIALS / BUILD_PYTHON disabled to skip extras the
+        # OCU doesn't use; saves ~2 min of build time.
+        run: |
+          source /opt/ros/humble/setup.bash
+          git clone --depth 1 --branch v2.0.0 \
+            https://github.com/Fields2Cover/Fields2Cover.git _f2c_src
+          cmake -S _f2c_src -B _f2c_build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TUTORIALS=OFF \
+            -DBUILD_PYTHON=OFF \
+            -DBUILD_DOC=OFF \
+            -DUSE_ORTOOLS_VENDOR=ON
+          cmake --build _f2c_build -j$(nproc)
+          sudo cmake --install _f2c_build
+          sudo ldconfig
 
       - name: Build OCU
         working-directory: cpp

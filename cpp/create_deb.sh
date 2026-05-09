@@ -64,7 +64,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $ARCH
-Depends: libqt5core5a (>= 5.9.5), libqt5widgets5 (>= 5.9.5), libqt5gui5 (>= 5.9.5), libc6 (>= 2.27), libstdc++6 (>= 6.0), libgcc-s1 (>= 3.0), ros-humble-rclcpp, ros-humble-std-msgs, ros-humble-std-srvs, ros-humble-geometry-msgs, ros-humble-sensor-msgs, ros-humble-nav-msgs, ros-humble-tf2, ros-humble-tf2-geometry-msgs, ros-humble-rmw-cyclonedds-cpp
+Depends: libqt5core5a (>= 5.9.5), libqt5widgets5 (>= 5.9.5), libqt5gui5 (>= 5.9.5), libc6 (>= 2.27), libstdc++6 (>= 6.0), libgcc-s1 (>= 3.0), libgdal30, libgeos-c1v5, libtinyxml2-9, ros-humble-rclcpp, ros-humble-std-msgs, ros-humble-std-srvs, ros-humble-geometry-msgs, ros-humble-sensor-msgs, ros-humble-nav-msgs, ros-humble-tf2, ros-humble-tf2-geometry-msgs, ros-humble-rmw-cyclonedds-cpp, ros-humble-ortools-vendor
 Maintainer: Andrew Dave <andrew.dave@bdx-robotics.com>
 Description: BDR Operator Control Unit (OCU) for autonomous roof scanning
  Operator GUI for "Roofus," an autonomous mobile robot that performs
@@ -279,17 +279,65 @@ done
 # This avoids conflicts and reduces package size
 # The launcher script will find and use system Qt plugins
 
-# Copy Fields2Cover and related libraries (required for functionality)
-echo "Copying Fields2Cover libraries..."
-if [ -d "/home/avenblake/pilot_ws/install/fields2cover/lib" ]; then
-    cp -r /home/avenblake/pilot_ws/install/fields2cover/lib/* "$DEB_DIR/usr/lib/bdr-coverage-planner/" 2>/dev/null || true
+# Bundle Fields2Cover runtime libraries.
+#
+# F2C has no upstream apt package — it's source-only — so we MUST ship
+# the .so files inside the .deb. CI builds F2C from a pinned tag and
+# installs to /usr/local; local devs typically have it under
+# pilot_ws/install. Companion libs (libsteering_functions, libmatplot)
+# are built and installed alongside libFields2Cover by F2C itself, so a
+# single glob over each candidate dir picks them all up.
+#
+# Hard fail if no candidate produces libs: shipping a coverage-planner
+# .deb with HAVE_FIELDS2COVER undefined is a silent feature regression
+# that should never reach a release.
+#
+# F2C_LIB_DIR env var lets devs point at a custom prefix without
+# editing this file.
+echo "Bundling Fields2Cover libraries..."
+F2C_LIB_CANDIDATES=(
+    "${F2C_LIB_DIR:-}"
+    "/usr/local/lib"
+    "${HOME}/pilot_ws/install/fields2cover/lib"
+    "${SCRIPT_DIR}/../_f2c_install/lib"
+)
+F2C_LIB_PATTERNS=(
+    "libFields2Cover"
+    "libsteering_functions"
+    "libmatplot"
+)
+F2C_BUNDLED=0
+for F2C_DIR in "${F2C_LIB_CANDIDATES[@]}"; do
+    [ -z "$F2C_DIR" ] && continue
+    [ ! -d "$F2C_DIR" ] && continue
+    F2C_DIR_HIT=0
+    for pattern in "${F2C_LIB_PATTERNS[@]}"; do
+        if compgen -G "$F2C_DIR/${pattern}*.so*" > /dev/null; then
+            cp -P "$F2C_DIR/${pattern}"*.so* \
+                  "$DEB_DIR/usr/lib/bdr-coverage-planner/"
+            F2C_DIR_HIT=1
+        fi
+    done
+    if [ "$F2C_DIR_HIT" = 1 ]; then
+        echo "  bundled Fields2Cover libs from: $F2C_DIR"
+        F2C_BUNDLED=1
+        break
+    fi
+done
+if [ "$F2C_BUNDLED" = 0 ]; then
+    echo "Error: failed to bundle Fields2Cover libs."
+    echo "       Looked under: ${F2C_LIB_CANDIDATES[*]}"
+    echo "       In CI: the 'Build and install Fields2Cover' step must run before this."
+    echo "       Locally: build F2C v2.0.0 to /usr/local (sudo make install) or"
+    echo "                set F2C_LIB_DIR=<path-to-libFields2Cover.so-dir> before running."
+    exit 1
 fi
 
-# Copy OR-Tools library
-echo "Copying OR-Tools library..."
-if [ -f "/opt/ros/humble/opt/ortools_vendor/lib/libortools.so.9" ]; then
-    cp "/opt/ros/humble/opt/ortools_vendor/lib/libortools.so.9" "$DEB_DIR/usr/lib/bdr-coverage-planner/"
-fi
+# Note: libortools.so.9 is intentionally NOT bundled. The .deb declares
+# ros-humble-ortools-vendor as a runtime Depends, which apt installs
+# into /opt/ros/humble/opt/ortools_vendor/lib/ — the launcher already
+# adds that path to LD_LIBRARY_PATH (see the launcher heredoc above).
+# Bundling would just duplicate ~150 MB.
 
 # Bundle the vendored odrive_can interface libs.
 #
