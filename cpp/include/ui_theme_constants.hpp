@@ -23,6 +23,7 @@ struct UiThemeTokens {
     QString accent_hover;
     QString danger;
     QString log_bg;  // for log viewers, FPV placeholder backgrounds
+    QString warning; // amber for non-blocking advisory callouts (OTA modal etc.)
 };
 
 inline UiThemeTokens uiThemeTokens(bool dark_mode) {
@@ -37,6 +38,7 @@ inline UiThemeTokens uiThemeTokens(bool dark_mode) {
             QStringLiteral("#00cc66"),   // accent_hover
             QStringLiteral("#ff6b6b"),   // danger (red)
             QStringLiteral("#0f172a"),   // log_bg
+            QStringLiteral("#F59E0B"),   // warning (amber)
         };
     } else {
         return {
@@ -49,6 +51,7 @@ inline UiThemeTokens uiThemeTokens(bool dark_mode) {
             QStringLiteral("#1D4ED8"),   // accent_hover
             QStringLiteral("#EF4444"),   // danger
             QStringLiteral("#F1F5F9"),   // log_bg
+            QStringLiteral("#D97706"),   // warning (amber, deeper for light bg)
         };
     }
 }

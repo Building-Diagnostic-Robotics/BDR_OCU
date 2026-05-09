@@ -1,0 +1,136 @@
+#!/bin/bash
+# bdr-apply-update — privileged wrapper invoked by bdr-update-runner via
+# sudo with NOPASSWD. The sudoers drop-in
+# (/etc/sudoers.d/bdr-coverage-planner) grants %sudo group members
+# permission to run THIS exact path with no password.
+#
+# Subcommands:
+#   install <abs-deb-path>
+#       Validate that the path is an existing regular file ending in
+#       .deb and run dpkg -i with non-interactive flags. Streams output
+#       to /var/log/bdr-apply-update.log AND stdout/stderr (so the runner
+#       can capture it via QProcess and tee into update.log).
+#
+#   recover
+#       Invoked on next OCU launch by Phase 9's marker-on-startup check
+#       when the prior install was interrupted. Runs dpkg --configure -a
+#       to repair any half-configured packages. Idempotent on a clean
+#       system. Phase 8 ships this subcommand pre-wired so the sudoers
+#       entry doesn't have to change in Phase 9.
+#
+# Exit codes:
+#   0   success
+#   64  usage / bad arguments
+#   65  invalid .deb path (not a regular file, or wrong suffix)
+#   66  dpkg returned non-zero
+#   67  invoked without root (should be impossible via sudo; defense)
+#
+# Security notes:
+#   - We are root here. The wrapper is the ONLY thing the operator can
+#     run as root via sudo. The operator is already a sudo user, so the
+#     wrapper is not a security boundary against them — they could run
+#     `sudo dpkg -i` directly. The path check below is a typo guardrail
+#     ("don't accidentally dpkg something that isn't a .deb"), not a
+#     defense against malicious input.
+
+set -e
+set -u
+
+readonly LOG_FILE="/var/log/bdr-apply-update.log"
+
+# Ensure we're root. sudoers is supposed to ensure this, but defending
+# against a future misconfiguration is cheap.
+if [ "$(id -u)" -ne 0 ]; then
+    echo "bdr-apply-update: must run as root (use sudo)" >&2
+    exit 67
+fi
+
+# Best-effort log file setup. /var/log is root-writable by default.
+# Touch first so tee never sees a missing file.
+touch "$LOG_FILE" 2>/dev/null || true
+chmod 0644 "$LOG_FILE" 2>/dev/null || true
+
+# Tee everything we say to the log AND to the calling QProcess so the
+# runner's update.log gets the same lines.
+log() {
+    local stamp
+    stamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+    local msg="$stamp $* "
+    printf '%s\n' "$msg" | tee -a "$LOG_FILE" >&2
+}
+
+usage() {
+    cat <<EOF >&2
+Usage:
+  bdr-apply-update install <abs-deb-path>
+  bdr-apply-update recover
+
+Phase 8 OTA installer wrapper. Invoked by bdr-update-runner via
+NOPASSWD sudoers drop-in.
+EOF
+}
+
+if [ "$#" -lt 1 ]; then
+    usage
+    exit 64
+fi
+
+readonly SUBCMD="$1"
+shift
+
+case "$SUBCMD" in
+    install)
+        if [ "$#" -ne 1 ]; then
+            log "ERROR install: expected 1 arg, got $#"
+            usage
+            exit 64
+        fi
+        DEB="$1"
+        if [ ! -f "$DEB" ]; then
+            log "ERROR install: not a regular file: $DEB"
+            exit 65
+        fi
+        case "$DEB" in
+            *.deb) ;;
+            *)
+                log "ERROR install: not a .deb file: $DEB"
+                exit 65
+                ;;
+        esac
+
+        log "install: starting dpkg -i $DEB"
+        # --force-confdef --force-confold: never prompt about config files;
+        # always keep the locally-modified version. We don't ship config
+        # files today, but the flags are defensive against future packages
+        # that might.
+        export DEBIAN_FRONTEND=noninteractive
+        if dpkg -i --force-confdef --force-confold "$DEB" 2>&1 \
+             | tee -a "$LOG_FILE"; then
+            log "install: dpkg -i SUCCESS"
+            exit 0
+        else
+            rc=${PIPESTATUS[0]}
+            log "install: dpkg -i FAILED rc=$rc"
+            exit 66
+        fi
+        ;;
+
+    recover)
+        log "recover: running dpkg --configure -a"
+        export DEBIAN_FRONTEND=noninteractive
+        if dpkg --configure -a 2>&1 | tee -a "$LOG_FILE"; then
+            log "recover: dpkg --configure -a SUCCESS"
+            exit 0
+        else
+            rc=${PIPESTATUS[0]}
+            log "recover: dpkg --configure -a FAILED rc=$rc"
+            exit 66
+        fi
+        ;;
+
+    *)
+        log "ERROR unknown subcommand: $SUBCMD"
+        usage
+        exit 64
+        ;;
+esac

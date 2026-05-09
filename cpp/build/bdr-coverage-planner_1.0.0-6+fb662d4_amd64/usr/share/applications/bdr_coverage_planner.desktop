@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=BDR Coverage Planner
+Comment=Coverage path planning GUI (Fields2Cover)
+Exec=/usr/bin/bdr_coverage_planner_launcher
+Icon=bdr_coverage_planner
+Terminal=false
+Categories=Development;Engineering;
+StartupWMClass=bdr_coverage_planner

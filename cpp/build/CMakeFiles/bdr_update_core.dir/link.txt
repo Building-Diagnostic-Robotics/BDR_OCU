@@ -1,0 +1,2 @@
+/usr/bin/ar qc libbdr_update_core.a CMakeFiles/bdr_update_core.dir/bdr_update_core_autogen/mocs_compilation.cpp.o CMakeFiles/bdr_update_core.dir/src/update/update_log.cpp.o CMakeFiles/bdr_update_core.dir/src/update/update_lockfile.cpp.o CMakeFiles/bdr_update_core.dir/src/update/update_state.cpp.o CMakeFiles/bdr_update_core.dir/src/update/update_downloader.cpp.o
+/usr/bin/ranlib libbdr_update_core.a

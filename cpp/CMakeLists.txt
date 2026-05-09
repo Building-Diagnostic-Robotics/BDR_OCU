@@ -7,6 +7,38 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
+# --- OTA / version stamping ---
+# Renders include/version_info.hpp.in -> ${CMAKE_BINARY_DIR}/generated/version_info.hpp.
+# Carries semver + git short SHA + repo coordinates for the OTA UpdateChecker.
+set(APP_SEMVER       "${PROJECT_VERSION}")
+set(APP_REPO_OWNER   "Building-Diagnostic-Robotics")
+set(APP_REPO_NAME    "BDR_OCU")
+
+# First run at configure time so the first compile finds the header.
+execute_process(
+    COMMAND ${CMAKE_COMMAND}
+        -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DBIN_DIR=${CMAKE_BINARY_DIR}
+        -DAPP_SEMVER=${APP_SEMVER}
+        -DAPP_REPO_OWNER=${APP_REPO_OWNER}
+        -DAPP_REPO_NAME=${APP_REPO_NAME}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenVersionInfo.cmake
+)
+
+# Re-run on every build so the SHA tracks HEAD without manual cmake re-config.
+add_custom_target(version_info_stamp ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DBIN_DIR=${CMAKE_BINARY_DIR}
+        -DAPP_SEMVER=${APP_SEMVER}
+        -DAPP_REPO_OWNER=${APP_REPO_OWNER}
+        -DAPP_REPO_NAME=${APP_REPO_NAME}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenVersionInfo.cmake
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/version_info.hpp
+    COMMENT "Stamping version_info.hpp with current git SHA"
+    VERBATIM
+)
+
 # Build type
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -22,11 +54,15 @@ if(Qt5_FOUND)
     set(QT_VERSION 5)
     find_package(Qt5 REQUIRED COMPONENTS Core Widgets Concurrent Network Svg)
     set(QT_LIBS Qt5::Core Qt5::Widgets Qt5::Concurrent Qt5::Network Qt5::Svg)
+    set(QT_CORE_LIBS Qt5::Core Qt5::Network)
+    set(QT_GUI_LIBS Qt5::Core Qt5::Widgets Qt5::Network)
     message(STATUS "Using Qt5: ${Qt5Core_VERSION}")
 else()
     find_package(Qt6 REQUIRED COMPONENTS Core Widgets Concurrent Network Svg)
     set(QT_VERSION 6)
     set(QT_LIBS Qt6::Core Qt6::Widgets Qt6::Concurrent Qt6::Network Qt6::Svg)
+    set(QT_CORE_LIBS Qt6::Core Qt6::Network)
+    set(QT_GUI_LIBS Qt6::Core Qt6::Widgets Qt6::Network)
     message(STATUS "Using Qt6: ${Qt6Core_VERSION}")
 endif()
 
@@ -48,6 +84,7 @@ include_directories(${GST_INCLUDE_DIRS})
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include/components
+    ${CMAKE_BINARY_DIR}/generated
     ${PCL_INCLUDE_DIRS}
     ${EIGEN3_INCLUDE_DIR}
 )
@@ -96,7 +133,39 @@ set(HEADERS
     include/components/fpv_camera_view.hpp
     include/components/auto_hide_scroll_bar.hpp
     include/components/svg_icon_button.hpp
+    include/components/rollback_banner.hpp
+    include/components/update_banner.hpp
+    include/components/update_modal.hpp
+    include/update/update_settings.hpp
+    include/update/update_checker.hpp
 )
+
+# ---------------------------------------------------------------------------
+# bdr_update_core — static library shared by the OCU and bdr-update-runner.
+# Contains everything needed to download a release and append to the OTA
+# log, but NOT the GUI pieces (UpdateModal, UpdateBanner) or the polling
+# UpdateChecker (OCU only). Phase 7 locked Q2=B.
+# ---------------------------------------------------------------------------
+add_library(bdr_update_core STATIC
+    include/update/update_types.hpp
+    include/update/update_log.hpp
+    include/update/update_lockfile.hpp
+    include/update/update_state.hpp
+    include/update/update_downloader.hpp
+    src/update/update_log.cpp
+    src/update/update_lockfile.cpp
+    src/update/update_state.cpp
+    src/update/update_downloader.cpp
+)
+target_include_directories(bdr_update_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_BINARY_DIR}/generated
+)
+target_link_libraries(bdr_update_core PUBLIC
+    ${QT_CORE_LIBS}
+)
+# fPIC required because the OCU exe is built with PIE on most distros.
+set_target_properties(bdr_update_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Source files
 set(PIPELINE_SOURCES
@@ -131,6 +200,10 @@ set(GUI_SOURCES
     src/components/fpv_camera_view.cpp
     src/components/auto_hide_scroll_bar.cpp
     src/components/svg_icon_button.cpp
+    src/components/rollback_banner.cpp
+    src/components/update_banner.cpp
+    src/components/update_modal.cpp
+    src/update/update_checker.cpp
     src/main.cpp
     resources.qrc
 )
@@ -148,6 +221,9 @@ add_executable(bdr_coverage_planner
     ${GUI_SOURCES}
 )
 
+# Ensure version_info.hpp is regenerated before compiling anything that includes it.
+add_dependencies(bdr_coverage_planner version_info_stamp)
+
 # Link libraries - PCL libs (no visualization to avoid VTK conflicts)
 set(PCL_FILTERED_LIBS
     ${PCL_COMMON_LIBRARIES}
@@ -156,6 +232,7 @@ set(PCL_FILTERED_LIBS
 )
 
 target_link_libraries(bdr_coverage_planner
+    bdr_update_core
     ${QT_LIBS}
     ${PCL_FILTERED_LIBS}
     Eigen3::Eigen
@@ -211,8 +288,30 @@ include_directories(${rclcpp_INCLUDE_DIRS})
 target_link_libraries(bdr_coverage_planner ${rclcpp_LIBRARIES})
 ament_target_dependencies(bdr_coverage_planner rclcpp std_msgs std_srvs geometry_msgs sensor_msgs nav_msgs odrive_can tf2 tf2_geometry_msgs)
 
+# ---------------------------------------------------------------------------
+# bdr-update-runner — external Qt binary that owns the OTA download +
+# install lifecycle. Lean Qt5 Core/Widgets/Network only; no ROS, no PCL,
+# no Fields2Cover. Phase 7 locked Q1=A (CLI args), Q3=B (lockfile-gated
+# handoff). Spawned by the OCU and replaces it via execv on completion.
+# ---------------------------------------------------------------------------
+add_executable(bdr-update-runner
+    include/runner/update_runner_window.hpp
+    src/runner/update_runner_window.cpp
+    src/runner/main.cpp
+)
+add_dependencies(bdr-update-runner version_info_stamp)
+target_include_directories(bdr-update-runner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/runner
+    ${CMAKE_BINARY_DIR}/generated
+)
+target_link_libraries(bdr-update-runner PRIVATE
+    bdr_update_core
+    ${QT_GUI_LIBS}
+)
+
 # Install
-install(TARGETS bdr_coverage_planner
+install(TARGETS bdr_coverage_planner bdr-update-runner
     RUNTIME DESTINATION bin
 )
 

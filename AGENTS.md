@@ -74,10 +74,90 @@ The legacy `CoverageGUI` (`cpp/src/coverage_gui.cpp`, ~6,874 LOC) still
 compiles but is not instantiated from `main.cpp`. Treat it as reference-only
 until a decision is made on deletion vs. CMake-guard.
 
+## OTA update pipeline (Phases 1-9, complete and production-wired)
+
+Operator-driven over-the-air updater. The OCU polls GitHub Releases
+(`latest` tag), shows a non-intrusive banner when a new commit SHA
+appears, and on operator confirmation hands off to an external
+`bdr-update-runner` binary that downloads, verifies SHA256, dpkg-installs
+the new `.deb`, and `execv`s the OCU back. A 60 s health-probe watchdog
+in the OCU's `main()` automatically rolls back to the previous `.deb` if
+the new OCU fails to fire `AppShellWindow::bootHealthy` in time.
+
+### Key entry points
+
+- `cpp/src/main.cpp` — startup-time marker dispatch + watchdog wiring.
+- `cpp/include/update/update_state.hpp` — JSON marker schema (the bridge
+  between OCU and runner).
+- `cpp/src/update/update_checker.cpp` — GitHub Releases poller.
+- `cpp/src/update/update_downloader.cpp` — resilient download with
+  retries, ETag caching, stall detection, total-time ceiling.
+- `cpp/src/components/{update_banner,update_modal,rollback_banner}.cpp`
+  — the three operator-facing surfaces.
+- `cpp/src/runner/` — the external installer binary (build target
+  `bdr-update-runner`).
+- `cpp/scripts/bdr-apply-update` — privileged dpkg wrapper, invoked via
+  NOPASSWD sudo. Subcommands: `install <deb>`, `recover`.
+- `cpp/scripts/bdr-coverage-planner.sudoers` — sudoers drop-in,
+  validated by `visudo -c` in the postinst before being moved into
+  `/etc/sudoers.d/`.
+- `.github/workflows/release.yml` — CI publishes `.deb` + `.sha256`
+  sidecar to both the rolling `latest` tag and an immutable `v-<sha>`
+  tag on every push to `main`.
+
+### Deployment artifacts
+
+The `.deb` ships:
+
+- `/usr/bin/bdr_coverage_planner` (OCU)
+- `/usr/bin/bdr_coverage_planner_launcher` (env-setup wrapper)
+- `/usr/bin/bdr-update-runner` (external installer)
+- `/usr/bin/bdr-apply-update` (privileged dpkg wrapper)
+- `/usr/share/bdr-coverage-planner/sudoers/bdr-coverage-planner` (staged
+  sudoers source; postinst moves it to `/etc/sudoers.d/` after
+  `visudo -c` validation)
+
+### Marker file states
+
+`<CacheLocation>/update_state.json` (atomic writes via `QSaveFile`) carries
+exactly one of seven states. The full state-transition diagram lives in
+`docs/OTA.md`.
+
+### Rules for agents touching the OTA path
+
+- **Do NOT remove or "simplify"** any of the following — they are
+  load-bearing:
+  - `bdr-update-runner` binary or its CMake target.
+  - `bdr_update_core` static library (shared between OCU and runner).
+  - `bdr-apply-update` wrapper or the sudoers drop-in.
+  - The marker schema (`update_state.{hpp,cpp}`) including
+    `InstalledPendingProbe` (the crash-loop-detection seam).
+  - `AppShellWindow::bootHealthy()` signal — the watchdog's healthy
+    completion gate.
+  - The lockfile dance in `update_lockfile.{hpp,cpp}` and the OCU's
+    `handoffToUpdateRunner` polling loop.
+- The `applicationName` MUST be `"BDR Coverage Planner"` (with spaces)
+  in **both** `cpp/src/main.cpp` and `cpp/src/runner/main.cpp`. They
+  share `QStandardPaths::CacheLocation` for the marker, log, and cache.
+  Diverging the strings silently breaks the entire handoff.
+- Settings code that uses `QSettings(kSettingsOrgName, kSettingsAppName)`
+  passes those names explicitly and is unaffected by the QApplication
+  name above. Don't conflate the two.
+- Phase 9 watchdog only attaches in the
+  `StartupAction::NormalWithProbe` branch. Do not add unconditional
+  `done`-marker writes in `AppShellWindow` — that would mask real
+  ctor-crash failures from triggering rollback.
+
+### Docs
+
+- `docs/OTA.md` — state-transition diagram, runner UX, wrapper exit
+  codes, field-test recipe.
+
 ## Docs worth reading
 
 - `cpp/CLAUDE.md` — authoritative architecture overview and build notes.
 - `docs/DEV_BYPASSES.md` — the re-wiring checklist (see above).
+- `docs/OTA.md` — OTA state machine, runner UX, field-test recipe.
 - `docs/TILT_CALIBRATION_PLAN.md` — tilt calibration design + TODO list.
 - `architecture_overview.md` and `revamped_architecture_blueprint.md` —
   **out of date** (still describe a 3-stage flow). Prefer `cpp/CLAUDE.md`.

@@ -6,16 +6,37 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 PACKAGE_NAME="bdr-coverage-planner"
-VERSION="1.0.0"
 ARCH="amd64"
+
+# Version composition (CMake project semver + build number + git short SHA).
+# Build number = git commit count; gives dpkg a monotonically increasing
+# upstream version so OTA `dpkg -i` always treats a new push as an upgrade.
+# Override any piece via env (CI uses BDR_VERSION_SHA / BDR_BUILD_NUMBER).
+SEMVER="${BDR_VERSION_SEMVER:-1.0.0}"
+GIT_SHA_FALLBACK="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GIT_COUNT_FALLBACK="$(git -C "$SCRIPT_DIR" rev-list --count HEAD 2>/dev/null || echo 0)"
+SHORT_SHA="${BDR_VERSION_SHA:-$GIT_SHA_FALLBACK}"
+BUILD_NUMBER="${BDR_BUILD_NUMBER:-$GIT_COUNT_FALLBACK}"
+
+if [ "$SHORT_SHA" = "unknown" ] || [ -z "$SHORT_SHA" ]; then
+    VERSION="$SEMVER"
+else
+    VERSION="${SEMVER}-${BUILD_NUMBER}+${SHORT_SHA}"
+fi
+
 DEB_DIR="${BUILD_DIR}/${PACKAGE_NAME}_${VERSION}_${ARCH}"
 DEB_FILE="${BUILD_DIR}/${PACKAGE_NAME}_${VERSION}_${ARCH}.deb"
 
 echo "=== Creating Debian Package for BDR Coverage Planner ==="
 
-# Check if executable exists
+# Check if executables exist
 if [ ! -f "${BUILD_DIR}/bdr_coverage_planner" ]; then
     echo "Error: Executable not found at ${BUILD_DIR}/bdr_coverage_planner"
+    echo "Please build the application first: ./build.sh"
+    exit 1
+fi
+if [ ! -f "${BUILD_DIR}/bdr-update-runner" ]; then
+    echo "Error: OTA runner not found at ${BUILD_DIR}/bdr-update-runner"
     echo "Please build the application first: ./build.sh"
     exit 1
 fi
@@ -71,6 +92,31 @@ fi
 # Set executable permissions
 chmod +x /usr/bin/bdr_coverage_planner
 chmod +x /usr/bin/bdr_coverage_planner_launcher
+chmod +x /usr/bin/bdr-update-runner
+chmod +x /usr/bin/bdr-apply-update
+
+# Phase 8 OTA sudoers drop-in. The wrapper /usr/bin/bdr-apply-update is
+# the only binary granted NOPASSWD via this drop-in. Validation via
+# `visudo -c` BEFORE we let the file land in /etc/sudoers.d/ — a broken
+# sudoers file there can lock the operator out of `sudo` entirely, so we
+# stage in /tmp first, validate, then atomically move into place.
+SUDOERS_SRC="/usr/share/bdr-coverage-planner/sudoers/bdr-coverage-planner"
+SUDOERS_DST="/etc/sudoers.d/bdr-coverage-planner"
+if [ -f "$SUDOERS_SRC" ]; then
+    SUDOERS_TMP="$(mktemp /tmp/bdr-coverage-planner.sudoers.XXXXXX)"
+    cp "$SUDOERS_SRC" "$SUDOERS_TMP"
+    chmod 0440 "$SUDOERS_TMP"
+    chown root:root "$SUDOERS_TMP"
+    if visudo -c -f "$SUDOERS_TMP" >/dev/null 2>&1; then
+        mv "$SUDOERS_TMP" "$SUDOERS_DST"
+        chmod 0440 "$SUDOERS_DST"
+        chown root:root "$SUDOERS_DST"
+        echo "[bdr-coverage-planner] OTA sudoers drop-in installed at $SUDOERS_DST"
+    else
+        rm -f "$SUDOERS_TMP"
+        echo "[bdr-coverage-planner] WARNING: sudoers drop-in failed visudo -c; OTA installs will require an interactive sudo password."
+    fi
+fi
 
 echo "BDR Coverage Planner has been installed successfully!"
 echo "You can find it in your applications menu or run 'bdr_coverage_planner_launcher' from the terminal."
@@ -87,12 +133,50 @@ set -e
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi
+
+# Phase 8 OTA sudoers drop-in cleanup. We remove the file regardless of
+# uninstall reason ("remove" or "purge") because leaving a sudoers entry
+# pointing at a now-missing wrapper is harmless but misleading. The
+# wrapper itself is owned by this package so dpkg removes it before
+# prerm runs (actually dpkg removes after prerm — no matter, the file
+# still gets deleted either way).
+SUDOERS_DST="/etc/sudoers.d/bdr-coverage-planner"
+if [ -f "$SUDOERS_DST" ]; then
+    rm -f "$SUDOERS_DST"
+    echo "[bdr-coverage-planner] removed OTA sudoers drop-in $SUDOERS_DST"
+fi
 EOF
 chmod +x "$DEB_DIR/DEBIAN/prerm"
 
-# Copy executable
-echo "Copying executable..."
+# Copy executables
+echo "Copying executables..."
 cp "${BUILD_DIR}/bdr_coverage_planner" "$DEB_DIR/usr/bin/"
+# bdr-update-runner sits next to the OCU; the OCU spawns it via its
+# applicationDirPath() during the OTA "Install Now" handoff. Phase 7
+# locked Q1=A: runner consumes OCU args via CLI flags.
+cp "${BUILD_DIR}/bdr-update-runner" "$DEB_DIR/usr/bin/"
+
+# Phase 8: privileged installer wrapper (invoked by the runner via
+# `sudo -n /usr/bin/bdr-apply-update install <deb>`). Source lives in
+# cpp/scripts/.
+SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)/scripts"
+if [ ! -f "${SCRIPTS_DIR}/bdr-apply-update" ]; then
+    echo "Error: OTA installer wrapper missing at ${SCRIPTS_DIR}/bdr-apply-update"
+    exit 1
+fi
+cp "${SCRIPTS_DIR}/bdr-apply-update" "$DEB_DIR/usr/bin/"
+
+# Phase 8: stage the sudoers drop-in source under /usr/share/. The
+# postinst validates it via `visudo -c` before atomically moving it to
+# /etc/sudoers.d/bdr-coverage-planner. Validating in /tmp first prevents
+# a corrupt drop-in from breaking sudo system-wide.
+if [ ! -f "${SCRIPTS_DIR}/bdr-coverage-planner.sudoers" ]; then
+    echo "Error: sudoers source missing at ${SCRIPTS_DIR}/bdr-coverage-planner.sudoers"
+    exit 1
+fi
+mkdir -p "$DEB_DIR/usr/share/bdr-coverage-planner/sudoers"
+cp "${SCRIPTS_DIR}/bdr-coverage-planner.sudoers" \
+   "$DEB_DIR/usr/share/bdr-coverage-planner/sudoers/bdr-coverage-planner"
 
 # Create launcher script
 echo "Creating launcher script..."
