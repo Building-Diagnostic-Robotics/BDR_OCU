@@ -379,13 +379,18 @@ if ! ls "$DEB_DIR/usr/lib/bdr-coverage-planner/"libodrive_can*.so* >/dev/null 2>
     exit 1
 fi
 
-# Copy other required libraries (only non-standard ones)
+# Catch-all bundling pass: walk `ldd` of the OCU binary and copy any
+# .so resolved from non-system prefixes (/usr/local, /opt). This is a
+# safety net for dynamic deps that the dedicated F2C / odrive_can /
+# Qt blocks above might miss. The previous dev-only `/home/avenblake/
+# pilot_ws/*` branch is intentionally dropped now that F2C is built
+# into /usr/local in CI and bundled explicitly above — keeping it
+# would just bake one developer's home path into the .deb manifest.
 REQUIRED_LIBS=$(ldd "${BUILD_DIR}/bdr_coverage_planner" | grep -v "=>" | grep -v "linux-vdso" | grep -v "ld-linux" | awk '{print $1}')
 for lib in $REQUIRED_LIBS; do
     LIB_PATH=$(ldd "${BUILD_DIR}/bdr_coverage_planner" | grep "$lib" | awk '{print $3}')
     if [ -f "$LIB_PATH" ] && [ "$LIB_PATH" != "" ]; then
-        # Only copy non-standard libraries
-        if [[ "$LIB_PATH" == /usr/local/* ]] || [[ "$LIB_PATH" == /opt/* ]] || [[ "$LIB_PATH" == /home/avenblake/pilot_ws/* ]]; then
+        if [[ "$LIB_PATH" == /usr/local/* ]] || [[ "$LIB_PATH" == /opt/* ]]; then
             cp "$LIB_PATH" "$DEB_DIR/usr/lib/bdr-coverage-planner/"
         fi
     fi
