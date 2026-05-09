@@ -65,12 +65,12 @@ Section: utils
 Priority: optional
 Architecture: $ARCH
 Depends: libqt5core5a (>= 5.9.5), libqt5widgets5 (>= 5.9.5), libqt5gui5 (>= 5.9.5), libc6 (>= 2.27), libstdc++6 (>= 6.0), libgcc-s1 (>= 3.0), ros-humble-rclcpp, ros-humble-std-msgs, ros-humble-std-srvs, ros-humble-geometry-msgs, ros-humble-sensor-msgs, ros-humble-nav-msgs, ros-humble-tf2, ros-humble-tf2-geometry-msgs, ros-humble-rmw-cyclonedds-cpp
-Maintainer: Your Name <your.email@example.com>
-Description: Coverage Path Planning GUI with ROS2 Integration
- Fields2Cover Coverage Path Planning GUI application with ROS2 waypoint publishing (BDR Coverage Planner).
- This application provides a graphical interface for planning coverage paths
- using the Fields2Cover library and can directly publish waypoints to ROS2
- pose controllers for autonomous robot navigation.
+Maintainer: Andrew Dave <andrew.dave@bdx-robotics.com>
+Description: BDR Operator Control Unit (OCU) for autonomous roof scanning
+ Operator GUI for "Roofus," an autonomous mobile robot that performs
+ building roof scanning. Provides setup, calibration, dashboard, exploration
+ and coverage-planning views, and ships an in-app OTA update pipeline.
+ Proprietary software of Building Diagnostic Robotics (BDR).
 EOF
 
 # Create postinst script
@@ -396,24 +396,21 @@ echo "Creating copyright file..."
 cat > "$DEB_DIR/usr/share/doc/bdr-coverage-planner/copyright" << EOF
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: bdr-coverage-planner
-Upstream-Contact: Your Name <your.email@example.com>
-Source: https://github.com/your-repo/bdr-coverage-planner
+Upstream-Contact: Andrew Dave <andrew.dave@bdx-robotics.com>
+Source: https://github.com/Building-Diagnostic-Robotics/BDR_OCU
 
 Files: *
-Copyright: $(date +%Y) Your Name <your.email@example.com>
-License: GPL-3+
- This program is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
+Copyright: $(date +%Y) Building Diagnostic Robotics. All rights reserved.
+License: Proprietary
+ This software is proprietary to Building Diagnostic Robotics (BDR).
  .
- This program is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
+ All rights reserved. Unauthorized reproduction, distribution, or
+ modification of this software, in whole or in part, is strictly
+ prohibited. This software is licensed solely for use within BDR
+ operations. No license, express or implied, is granted to any third
+ party.
  .
- You should have received a copy of the GNU General Public License
- along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ For licensing inquiries, contact: andrew.dave@bdx-robotics.com
 EOF
 
 # Create changelog
@@ -423,7 +420,7 @@ bdr-coverage-planner ($VERSION) unstable; urgency=medium
 
   * Initial release
 
- -- Your Name <your.email@example.com>  $(date -R)
+ -- Andrew Dave <andrew.dave@bdx-robotics.com>  $(date -R)
 EOF
 gzip "$DEB_DIR/usr/share/doc/bdr-coverage-planner/changelog.Debian"
 
