@@ -13,6 +13,13 @@ name: Release
 on:
   push:
     branches: [main]
+    # Skip CI for doc-only commits. CHANGELOG.md is intentionally NOT in this
+    # list because the release-notes step reads it.
+    paths-ignore:
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'docs/**'
+      - '.cursor/**'
   workflow_dispatch:
 
 permissions:
@@ -21,6 +28,15 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-22.04
+
+    # Job-level env so both the colcon build (odrive_can) and the OCU CMake
+    # configure pick up ccache automatically. CCACHE_BASEDIR makes hashes
+    # path-relative so cache hits survive across runners with different
+    # workspace paths.
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
 
     steps:
       - name: Checkout
@@ -50,23 +66,33 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
           sudo apt update
 
-      - name: Install build deps
-        run: |
-          sudo apt install -y \
-            build-essential cmake pkg-config git \
-            python3-colcon-common-extensions python3-rosdep \
-            qtbase5-dev libqt5widgets5 libqt5gui5 libqt5network5 \
-            libqt5concurrent5 libqt5svg5-dev \
-            libpcl-dev libeigen3-dev \
-            libunwind-dev \
-            libopenmpi-dev libmpich-dev \
-            libcgal-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            ros-humble-ros-base ros-humble-rclcpp ros-humble-std-msgs \
-            ros-humble-std-srvs ros-humble-geometry-msgs ros-humble-sensor-msgs \
-            ros-humble-nav-msgs ros-humble-tf2 ros-humble-tf2-geometry-msgs \
-            ros-humble-ament-cmake ros-humble-rosidl-default-generators \
+      - name: Install build deps (cached)
+        uses: awalsh128/cache-apt-pkgs-action@v1.4.3
+        with:
+          # Single-line, space-separated. Bumping `version` invalidates the
+          # cache (use after meaningful package list changes).
+          packages: >-
+            build-essential cmake pkg-config git
+            python3-colcon-common-extensions python3-rosdep
+            qtbase5-dev libqt5widgets5 libqt5gui5 libqt5network5
+            libqt5concurrent5 libqt5svg5-dev
+            libpcl-dev libeigen3-dev
+            libunwind-dev
+            libopenmpi-dev libmpich-dev
+            libcgal-dev
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+            ros-humble-ros-base ros-humble-rclcpp ros-humble-std-msgs
+            ros-humble-std-srvs ros-humble-geometry-msgs ros-humble-sensor-msgs
+            ros-humble-nav-msgs ros-humble-tf2 ros-humble-tf2-geometry-msgs
+            ros-humble-ament-cmake ros-humble-rosidl-default-generators
             ros-humble-rosidl-default-runtime
+          version: "1"
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ github.workflow }}-${{ runner.os }}
+          max-size: "500M"
 
       - name: Build vendored ROS2 interface packages
         run: |
