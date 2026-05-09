@@ -110,11 +110,6 @@ jobs:
         run: |
           source /opt/ros/humble/setup.bash
           source "${GITHUB_WORKSPACE}/_ros_ws/install/setup.bash"
-          # cpp/build/ is currently tracked in git; the committed CMakeCache.txt
-          # bakes in the dev machine's absolute paths and CMake refuses to
-          # reconfigure with a mismatched source dir. Wipe it before configure.
-          # TODO(cleanup): gitignore cpp/build/ and untrack to remove this hack.
-          rm -rf build
           ./build.sh Release
 
       - name: Package .deb

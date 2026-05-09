@@ -159,5 +159,3 @@ exactly one of seven states. The full state-transition diagram lives in
 - `docs/DEV_BYPASSES.md` — the re-wiring checklist (see above).
 - `docs/OTA.md` — OTA state machine, runner UX, field-test recipe.
 - `docs/TILT_CALIBRATION_PLAN.md` — tilt calibration design + TODO list.
-- `architecture_overview.md` and `revamped_architecture_blueprint.md` —
-  **out of date** (still describe a 3-stage flow). Prefer `cpp/CLAUDE.md`.
