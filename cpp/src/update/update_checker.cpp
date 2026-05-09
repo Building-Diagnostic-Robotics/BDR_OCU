@@ -43,6 +43,19 @@ void UpdateChecker::start() {
     started_ = true;
     current_backoff_ms_ = kPollIntervalMs;
     consecutive_failures_ = 0;
+
+    // Replay any persisted release before kicking off the network poll.
+    // This re-surfaces a banner the operator dismissed without acting on
+    // in a previous session — the ETag-cached 304 fast-path would
+    // otherwise emit noUpdateAvailable on every poll until a fresh
+    // release lands upstream, silently swallowing the pending offer.
+    //
+    // Single-shot from the event loop so the emission happens AFTER any
+    // UI consumer has had a chance to connect to updateAvailable. Direct
+    // emission from start() would race with QObject::connect calls in
+    // AppShellWindow's ctor.
+    QTimer::singleShot(0, this, &UpdateChecker::replayPersistedRelease);
+
     QTimer::singleShot(kFirstCheckDelayMs, this, &UpdateChecker::performCheck);
 }
 
@@ -250,14 +263,23 @@ void UpdateChecker::onReplyFinished() {
         return;
     }
 
-    // Persist the ETag for the next request so we can earn 304s.
+    // Persist the ETag and the raw response body atomically so the next
+    // launch can replay a still-pending offer without needing the network.
+    // We write the body even before parsing — if it's malformed, the
+    // replay path's parseReleaseJson call will simply skip emission.
+    const QByteArray response_body = reply->readAll();
     const QByteArray new_etag = reply->rawHeader("ETag");
-    if (!new_etag.isEmpty()) {
-        settings().setValue(QString::fromLatin1(kKeyLastEtag),
-                            QString::fromLatin1(new_etag));
-    }
 
-    handleSuccess(reply->readAll());
+    QSettings s = settings();
+    if (!new_etag.isEmpty()) {
+        s.setValue(QString::fromLatin1(kKeyLastEtag),
+                   QString::fromLatin1(new_etag));
+    }
+    s.setValue(QString::fromLatin1(kKeyLastReleaseJson),
+               QString::fromUtf8(response_body));
+    s.sync();
+
+    handleSuccess(response_body);
 }
 
 void UpdateChecker::onRequestTimeout() {
@@ -322,6 +344,49 @@ void UpdateChecker::handleSuccess(const QByteArray& payload) {
         return;
     }
 
+    emit updateAvailable(info);
+}
+
+void UpdateChecker::replayPersistedRelease() {
+    const QString persisted =
+        settings().value(QString::fromLatin1(kKeyLastReleaseJson)).toString();
+    if (persisted.isEmpty()) {
+        return;  // Fresh OCU install / cleared QSettings — nothing to replay.
+    }
+
+    QString err;
+    const VersionInfo info =
+        parseReleaseJson(persisted.toUtf8(), &err);
+    if (info.downloadUrl.isEmpty()) {
+        log::warn("checker",
+                  QStringLiteral("replay: persisted release JSON unparseable "
+                                 "(%1) — discarding").arg(err));
+        settings().remove(QString::fromLatin1(kKeyLastReleaseJson));
+        return;
+    }
+
+    // Apply the same gates the live-poll path applies. We deliberately
+    // do NOT bypass these — operator-driven snooze and rollback denylist
+    // are the whole reason this seam exists.
+    if (!isUpdateNewer(currentSha(), info.commitSha)) {
+        // Operator has installed this release since we last persisted
+        // it. Self-correcting: clear it so future replays are no-ops.
+        settings().remove(QString::fromLatin1(kKeyLastReleaseJson));
+        return;
+    }
+    if (isDenylisted(info.commitSha)) {
+        log::info("checker",
+                  QStringLiteral("replay: persisted SHA %1 is denylisted, "
+                                 "skipping").arg(info.commitSha.left(7)));
+        return;
+    }
+    if (isSnoozed()) {
+        return;  // Stay quiet until snooze expires; persisted info still valid.
+    }
+
+    log::info("checker",
+              QStringLiteral("replay: re-offering persisted release %1")
+                  .arg(info.commitSha.left(7)));
     emit updateAvailable(info);
 }
 

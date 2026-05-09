@@ -112,6 +112,13 @@ private slots:
     void onReplyFinished();
     void onRequestTimeout();
 
+    /// Re-emit updateAvailable from the persisted release JSON if one
+    /// exists and still represents an upgrade. Invoked from start() on
+    /// the next event-loop tick so UI consumers have time to connect
+    /// signals first. Silent (no signal at all) when no replay applies —
+    /// the regular poll path takes over from there.
+    void replayPersistedRelease();
+
 private:
     void scheduleNextPoll(int delayMs);
     void abortInFlight();

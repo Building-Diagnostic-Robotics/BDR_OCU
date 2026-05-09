@@ -19,10 +19,6 @@ namespace f2c_cpp::update {
 /// Epoch-ms timestamp until which banner+modal must stay hidden. 0 = no snooze.
 inline constexpr const char* kKeySnoozeUntilMs = "update/snooze_until_ms";
 
-/// Last commit SHA the user has acknowledged seeing in a banner (used to
-/// suppress duplicate notifications for the same release).
-inline constexpr const char* kKeyLastSeenSha = "update/last_seen_sha";
-
 /// Master toggle for auto-checking. Default true. Reserved for a future
 /// Settings UI — no UI consumer in phase 3.
 inline constexpr const char* kKeyAutoCheckEnabled = "update/auto_check_enabled";
@@ -31,6 +27,17 @@ inline constexpr const char* kKeyAutoCheckEnabled = "update/auto_check_enabled";
 /// back as `If-None-Match` to opt into 304 Not Modified responses, which
 /// don't count against the GitHub API rate limit.
 inline constexpr const char* kKeyLastEtag = "update/last_etag";
+
+/// Raw GitHub Releases JSON payload from the most recent successful
+/// 200 OK response. Persisted so the OCU can re-surface the banner on
+/// the next launch even if the operator dismissed it without acting —
+/// the ETag-cached 304 path would otherwise silently swallow the
+/// pending offer until a fresh release pushed a new ETag.
+///
+/// Stored together with kKeyLastEtag in handleSuccess; both are cleared
+/// only when the OCU is rebuilt at a SHA that matches the persisted
+/// release (handled implicitly by isUpdateNewer at replay time).
+inline constexpr const char* kKeyLastReleaseJson = "update/last_release_json";
 
 /// Persisted FIFO list of short SHAs that the OCU rolled back from. The
 /// UpdateChecker filters incoming releases against this list so a
