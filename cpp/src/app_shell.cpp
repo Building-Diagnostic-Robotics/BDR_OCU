@@ -660,18 +660,11 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     // dispatching events. That makes "ctor returned but app is wedged"
     // (e.g. main thread spinning, no events processed) classify as
     // unhealthy → watchdog times out → rollback. Cost: ~1 ms.
-    //
-    // ROLLBACK_TEST: bootHealthy intentionally suppressed below to
-    // exercise the Phase 9 watchdog end-to-end on a real OCU. Once
-    // the rollback path has been validated, revert this commit (the
-    // QTimer::singleShot block is the only behavioural change).
-    update::log::info("appshell",
-                      QStringLiteral("ROLLBACK_TEST: bootHealthy suppressed"));
-    // QTimer::singleShot(0, this, [this]() {
-    //     update::log::info("appshell",
-    //                       QStringLiteral("bootHealthy: emitted"));
-    //     emit bootHealthy();
-    // });
+    QTimer::singleShot(0, this, [this]() {
+        update::log::info("appshell",
+                          QStringLiteral("bootHealthy: emitted"));
+        emit bootHealthy();
+    });
 }
 
 void AppShellWindow::showRolledBackBanner(const QString& message) {
