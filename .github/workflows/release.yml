@@ -66,28 +66,30 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
           sudo apt update
 
-      - name: Install build deps (cached)
-        uses: awalsh128/cache-apt-pkgs-action@v1.4.3
-        with:
-          # Single-line, space-separated. Bumping `version` invalidates the
-          # cache (use after meaningful package list changes).
-          packages: >-
-            build-essential cmake pkg-config git
-            python3-colcon-common-extensions python3-rosdep
-            qtbase5-dev libqt5widgets5 libqt5gui5 libqt5network5
-            libqt5concurrent5 libqt5svg5-dev
-            libpcl-dev libeigen3-dev
-            libboost-all-dev
-            libunwind-dev
-            libopenmpi-dev libmpich-dev
-            libcgal-dev
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-            ros-humble-ros-base ros-humble-rclcpp ros-humble-std-msgs
-            ros-humble-std-srvs ros-humble-geometry-msgs ros-humble-sensor-msgs
-            ros-humble-nav-msgs ros-humble-tf2 ros-humble-tf2-geometry-msgs
-            ros-humble-ament-cmake ros-humble-rosidl-default-generators
+      - name: Install build deps
+        # Plain apt install. We tried awalsh128/cache-apt-pkgs-action for
+        # apt-level caching but it dropped transitive deps from meta-
+        # packages (libboost-all-dev → libboost1.74-dev), causing PCL
+        # builds to fail with "boost/mpl/assert.hpp: No such file".
+        # ccache below is the bigger speedup anyway; the ~60s saved by
+        # apt caching isn't worth the reliability cost.
+        run: |
+          sudo apt install -y \
+            build-essential cmake pkg-config git \
+            python3-colcon-common-extensions python3-rosdep \
+            qtbase5-dev libqt5widgets5 libqt5gui5 libqt5network5 \
+            libqt5concurrent5 libqt5svg5-dev \
+            libpcl-dev libeigen3-dev \
+            libboost-all-dev \
+            libunwind-dev \
+            libopenmpi-dev libmpich-dev \
+            libcgal-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            ros-humble-ros-base ros-humble-rclcpp ros-humble-std-msgs \
+            ros-humble-std-srvs ros-humble-geometry-msgs ros-humble-sensor-msgs \
+            ros-humble-nav-msgs ros-humble-tf2 ros-humble-tf2-geometry-msgs \
+            ros-humble-ament-cmake ros-humble-rosidl-default-generators \
             ros-humble-rosidl-default-runtime
-          version: "2"
 
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2
