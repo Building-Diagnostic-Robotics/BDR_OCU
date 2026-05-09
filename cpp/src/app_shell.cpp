@@ -38,7 +38,11 @@
 #include <QtSvg/QSvgRenderer>
 #endif
 
+#include "cloud_upload_manager.hpp"
 #include "components/bdr_message_box.hpp"
+#include "components/rollback_banner.hpp"
+#include "components/update_banner.hpp"
+#include "components/update_modal.hpp"
 #include "dashboard_screen.hpp"
 #include "exploration_screen.hpp"
 #include "planner_screen.hpp"
@@ -46,6 +50,12 @@
 #include "setup_screen.hpp"
 #include "settings_constants.hpp"
 #include "startup_screen.hpp"
+#include "transfer_manager.hpp"
+#include "update/update_checker.hpp"
+#include "update/update_lockfile.hpp"
+#include "update/update_state.hpp"
+#include "update/update_log.hpp"
+#include "update/update_types.hpp"
 
 namespace f2c_cpp {
 
@@ -288,9 +298,53 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     root_layout->setContentsMargins(0, 0, 0, 0);
     root_layout->setSpacing(0);
 
+    // OTA banner sits above the stage stack so it persists across stage
+    // transitions. Hidden by default; UpdateChecker drives visibility.
+    update_banner_ = new UpdateBanner(central_root_);
+    update_banner_->setDarkMode(dark_mode_);
+    update_banner_->hide();
+    {
+        // Wrap the banner in a thin margin row so it doesn't hug the window
+        // edge — keeps it readable at the top of the central root.
+        auto* banner_host = new QWidget(central_root_);
+        auto* banner_lay = new QHBoxLayout(banner_host);
+        banner_lay->setContentsMargins(12, 8, 12, 0);
+        banner_lay->setSpacing(0);
+        banner_lay->addWidget(update_banner_);
+        root_layout->addWidget(banner_host);
+    }
+
     stack_ = new QStackedWidget(central_root_);
     root_layout->addWidget(stack_);
     setCentralWidget(central_root_);
+
+    // OTA checker — polls GitHub Releases for new builds (locked spec Q2=A:
+    // start at app startup, before Stage 1 even completes login).
+    update_checker_ = new update::UpdateChecker(this);
+    connect(update_checker_, &update::UpdateChecker::updateAvailable,
+            this, [this](const update::VersionInfo& info) {
+                update::log::info("appshell",
+                                  QStringLiteral("update available: tag=%1 sha=%2")
+                                      .arg(info.tag).arg(info.commitSha));
+                update_banner_->setVersionInfo(info);
+                update_banner_->show();
+            });
+    connect(update_checker_, &update::UpdateChecker::noUpdateAvailable,
+            this, [this]() { update_banner_->hide(); });
+    connect(update_checker_, &update::UpdateChecker::checkFailed,
+            this, [](const QString& reason) {
+                update::log::warn("appshell",
+                                  QStringLiteral("update check failed: %1")
+                                      .arg(reason));
+            });
+    connect(update_banner_, &UpdateBanner::viewDetailsRequested,
+            this, [this](const update::VersionInfo& info) {
+                update::log::info("appshell",
+                                  QStringLiteral("view details: tag=%1 sha=%2")
+                                      .arg(info.tag).arg(info.commitSha));
+                showUpdateModal(info);
+            });
+    update_checker_->start();
 
     stage1_ = new SetupScreen(this);
     stack_->addWidget(stage1_);
@@ -599,6 +653,66 @@ AppShellWindow::AppShellWindow(QWidget* parent)
         });
     }
     qApp->installEventFilter(this);
+
+    // Phase 9: emit bootHealthy on the next event-loop tick. Using
+    // QTimer::singleShot(0, ...) instead of an immediate emit means the
+    // signal only fires after the event loop has at least started
+    // dispatching events. That makes "ctor returned but app is wedged"
+    // (e.g. main thread spinning, no events processed) classify as
+    // unhealthy → watchdog times out → rollback. Cost: ~1 ms.
+    QTimer::singleShot(0, this, [this]() {
+        update::log::info("appshell",
+                          QStringLiteral("bootHealthy: emitted"));
+        emit bootHealthy();
+    });
+}
+
+void AppShellWindow::showRolledBackBanner(const QString& message) {
+    if (!central_root_) {
+        update::log::warn(
+            "appshell",
+            QStringLiteral("showRolledBackBanner: central_root_ null, ignoring"));
+        return;
+    }
+    if (!rollback_banner_) {
+        rollback_banner_ = new RollbackBanner(central_root_);
+        rollback_banner_->setDarkMode(dark_mode_);
+
+        // Insert as the FIRST child of the central root layout so it
+        // sits above both the OTA "update available" banner (when both
+        // are visible — rare but possible) and the stage stack.
+        auto* root_layout =
+            qobject_cast<QVBoxLayout*>(central_root_->layout());
+        if (root_layout) {
+            auto* host = new QWidget(central_root_);
+            auto* host_lay = new QHBoxLayout(host);
+            host_lay->setContentsMargins(12, 8, 12, 0);
+            host_lay->setSpacing(0);
+            host_lay->addWidget(rollback_banner_);
+            root_layout->insertWidget(0, host);
+        }
+
+        connect(rollback_banner_, &RollbackBanner::dismissRequested,
+                this, [this]() {
+                    update::log::info(
+                        "appshell",
+                        QStringLiteral("rollback banner: dismissed"));
+                    update::clearUpdateState();
+                    if (rollback_banner_ && rollback_banner_->parentWidget()) {
+                        // Hide the host wrapper so it doesn't keep
+                        // taking layout space after dismiss.
+                        rollback_banner_->parentWidget()->hide();
+                    }
+                });
+    }
+    rollback_banner_->setMessage(message);
+    rollback_banner_->setDarkMode(dark_mode_);
+    if (rollback_banner_->parentWidget()) {
+        rollback_banner_->parentWidget()->show();
+    }
+    rollback_banner_->show();
+    update::log::info("appshell",
+                      QStringLiteral("rollback banner: shown"));
 }
 
 AppShellWindow::~AppShellWindow() {
@@ -736,6 +850,12 @@ void AppShellWindow::onThemeToggleChanged(bool dark_mode) {
 
 void AppShellWindow::setDarkMode(bool dark_mode) {
     dark_mode_ = dark_mode;
+    if (update_banner_) {
+        update_banner_->setDarkMode(dark_mode_);
+    }
+    if (rollback_banner_) {
+        rollback_banner_->setDarkMode(dark_mode_);
+    }
     if (stage1_) {
         stage1_->setDarkMode(dark_mode_);
     }
@@ -756,6 +876,179 @@ void AppShellWindow::setDarkMode(bool dark_mode) {
     if (stage5_) {
         stage5_->setDarkMode(dark_mode_);
     }
+}
+
+void AppShellWindow::showUpdateModal(const update::VersionInfo& info) {
+    UpdateModal::GateState gate;
+    // Active mission proxy: the operator is on Stage 5 (PlannerScreen).
+    // Phase 6 has no granular `isMissionActive()` accessor on PlannerScreen
+    // yet — using stage equality is intentionally conservative: the modal
+    // refuses Install Now whenever the planner is foregrounded, which is
+    // exactly what the locked spec ("update will only pop up when there is
+    // internet — if any other process is happening the update wont start")
+    // demands. Phase 7 can tighten this once PlannerScreen exposes a real
+    // mission-state predicate.
+    gate.has_active_mission = (stack_ && stage5_ &&
+                               stack_->currentWidget() == stage5_);
+    gate.has_active_transfer = TransferManager::instance().hasActiveTransfer();
+    gate.has_active_upload = CloudUploadManager::instance().hasActiveUpload();
+    gate.battery_pct = UpdateModal::readBatteryPercent();
+
+    auto* modal = new UpdateModal(info, gate, dark_mode_, this);
+    modal->setAttribute(Qt::WA_DeleteOnClose);
+
+    connect(modal, &UpdateModal::remindMeLaterRequested, this,
+            [this](const update::VersionInfo& vi) {
+                Q_UNUSED(vi);
+                if (!update_checker_) return;
+                const qint64 until_ms =
+                    QDateTime::currentMSecsSinceEpoch() +
+                    update::kSnoozeDurationMs;
+                update_checker_->setSnoozedUntil(until_ms);
+                update::log::info(
+                    "appshell",
+                    QStringLiteral("snooze 4h: until_ms=%1")
+                        .arg(until_ms));
+                if (update_banner_) {
+                    update_banner_->hide();
+                }
+            });
+
+    // Phase 7: spawn the external bdr-update-runner, wait for it to
+    // acquire its lockfile (proves the runner window is up — Q3=B), then
+    // quit the OCU. Locked Q1=A: CLI args; Q2=B: shared bdr_update_core
+    // lib backs both processes; concern #2: runner takes flock on startup;
+    // concern #3: OCU polls for the lockfile being held before quitting.
+    connect(modal, &UpdateModal::installRequested, this,
+            [this, modal](const update::VersionInfo& vi) {
+                update::log::info(
+                    "appshell",
+                    QStringLiteral("install requested: tag=%1 sha=%2 "
+                                   "size=%3")
+                        .arg(vi.tag).arg(vi.commitSha).arg(vi.sizeBytes));
+                handoffToUpdateRunner(vi, modal);
+            });
+
+    modal->show();
+    modal->raise();
+    modal->activateWindow();
+}
+
+void AppShellWindow::handoffToUpdateRunner(const update::VersionInfo& info,
+                                           QWidget* modal_window) {
+    // Resolve runner binary path. In a deployed install the runner lives
+    // next to the OCU at /usr/bin/bdr-update-runner (.deb staging in Phase
+    // 7 places it there). For dev builds we accept it sitting in the same
+    // directory as the OCU's argv[0]; main.cpp captures applicationDirPath
+    // via QCoreApplication. Fall back to PATH lookup if neither exists.
+    const QString ocu_binary = QCoreApplication::applicationFilePath();
+    const QString ocu_dir = QFileInfo(ocu_binary).absolutePath();
+
+    QString runner_path = ocu_dir + QStringLiteral("/bdr-update-runner");
+    if (!QFileInfo::exists(runner_path)) {
+        // Fall back to the .deb-installed location.
+        runner_path = QStringLiteral("/usr/bin/bdr-update-runner");
+    }
+    if (!QFileInfo::exists(runner_path)) {
+        update::log::error(
+            "appshell",
+            QStringLiteral("bdr-update-runner not found at %1 or /usr/bin")
+                .arg(ocu_dir));
+        BdrMessageBox::warning(
+            modal_window ? modal_window : this,
+            QStringLiteral("Update unavailable"),
+            QStringLiteral(
+                "The update installer (bdr-update-runner) is missing from "
+                "this build. Please rebuild and try again."));
+        return;
+    }
+
+    // Build CLI args (locked Q1=A).
+    QStringList runner_args = {
+        QStringLiteral("--deb-url"),     info.downloadUrl,
+        QStringLiteral("--sha256-url"),  info.sha256Url,
+        QStringLiteral("--asset-name"),  info.assetName,
+        QStringLiteral("--tag"),         info.tag,
+        QStringLiteral("--commit-sha"),  info.commitSha,
+        QStringLiteral("--size-bytes"),  QString::number(info.sizeBytes),
+        QStringLiteral("--ocu-binary"),  ocu_binary,
+    };
+    if (dark_mode_) runner_args << QStringLiteral("--dark");
+
+    update::log::info(
+        "appshell",
+        QStringLiteral("spawning runner: %1 (theme=%2)")
+            .arg(runner_path).arg(dark_mode_ ? "dark" : "light"));
+
+    qint64 runner_pid = 0;
+    const bool spawned =
+        QProcess::startDetached(runner_path, runner_args,
+                                ocu_dir, &runner_pid);
+    if (!spawned) {
+        update::log::error(
+            "appshell",
+            QStringLiteral("QProcess::startDetached failed for %1")
+                .arg(runner_path));
+        BdrMessageBox::warning(
+            modal_window ? modal_window : this,
+            QStringLiteral("Update could not start"),
+            QStringLiteral(
+                "Failed to launch the update installer. Check that "
+                "bdr-update-runner is installed and try again."));
+        return;
+    }
+    update::log::info(
+        "appshell",
+        QStringLiteral("runner spawned, pid=%1; waiting for lockfile")
+            .arg(runner_pid));
+
+    // Lockfile poll loop (Q3=B, concern #3). 50 ms cadence, 2 s ceiling.
+    // We use a single-shot timer chain rather than a busy loop so the OCU
+    // event loop keeps draining (banner styling, modal close, etc).
+    auto* poll = new QTimer(this);
+    poll->setInterval(50);
+    auto* deadline = new QTimer(this);
+    deadline->setSingleShot(true);
+    deadline->setInterval(2000);
+
+    auto cleanup = [poll, deadline]() {
+        poll->stop();
+        deadline->stop();
+        poll->deleteLater();
+        deadline->deleteLater();
+    };
+
+    connect(poll, &QTimer::timeout, this,
+            [this, cleanup, runner_pid]() {
+                if (!update::isRunnerLockfileHeld()) return;
+                update::log::info(
+                    "appshell",
+                    QStringLiteral(
+                        "runner lockfile held by pid=%1 — quitting OCU")
+                        .arg(runner_pid));
+                cleanup();
+                qApp->quit();
+            });
+    connect(deadline, &QTimer::timeout, this,
+            [this, cleanup, modal_window]() {
+                cleanup();
+                update::log::error(
+                    "appshell",
+                    QStringLiteral(
+                        "runner did not acquire lockfile within 2s; "
+                        "aborting handoff"));
+                if (modal_window) {
+                    BdrMessageBox::warning(
+                        modal_window,
+                        QStringLiteral("Updater failed to start"),
+                        QStringLiteral(
+                            "The update installer launched but did not "
+                            "respond. Please try again later."));
+                }
+            });
+
+    poll->start();
+    deadline->start();
 }
 
 void AppShellWindow::ensureStage2() {

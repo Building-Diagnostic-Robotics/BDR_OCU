@@ -1666,6 +1666,12 @@
 			null
 		],
 		[
+			"/home/avenblake/BDR_CP/cpp/include/components/rollback_banner.hpp",
+			"MU",
+			"B37CIN4C3K/moc_rollback_banner.cpp",
+			null
+		],
+		[
 			"/home/avenblake/BDR_CP/cpp/include/components/svg_icon_button.hpp",
 			"MU",
 			"B37CIN4C3K/moc_svg_icon_button.cpp",
@@ -1675,6 +1681,18 @@
 			"/home/avenblake/BDR_CP/cpp/include/components/tilt_calibration_dialog.hpp",
 			"MU",
 			"B37CIN4C3K/moc_tilt_calibration_dialog.cpp",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/include/components/update_banner.hpp",
+			"MU",
+			"B37CIN4C3K/moc_update_banner.cpp",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/include/components/update_modal.hpp",
+			"MU",
+			"B37CIN4C3K/moc_update_modal.cpp",
 			null
 		],
 		[
@@ -1772,6 +1790,18 @@
 			"MU",
 			"6YEA5652QU/moc_ui_theme_constants.cpp",
 			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/include/update/update_checker.hpp",
+			"MU",
+			"CWU2TZT6XS/moc_update_checker.cpp",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/include/update/update_settings.hpp",
+			"MU",
+			"CWU2TZT6XS/moc_update_settings.cpp",
+			null
 		]
 	],
 	"HEADER_EXTENSIONS" : [ "h", "hh", "h++", "hm", "hpp", "hxx", "in", "txx" ],
@@ -1819,6 +1849,7 @@
 		"/usr/lib/x86_64-linux-gnu/glib-2.0/include",
 		"/home/avenblake/BDR_CP/cpp/include",
 		"/home/avenblake/BDR_CP/cpp/include/components",
+		"/home/avenblake/BDR_CP/cpp/build/generated",
 		"/usr/include/pcl-1.12",
 		"/usr/include/eigen3",
 		"/usr/include/ni",
@@ -1849,10 +1880,10 @@
 		"/usr/include/x86_64-linux-gnu/qt5",
 		"/usr/include/x86_64-linux-gnu/qt5/QtCore",
 		"/usr/lib/x86_64-linux-gnu/qt5/mkspecs/linux-g++",
+		"/usr/include/x86_64-linux-gnu/qt5/QtNetwork",
 		"/usr/include/x86_64-linux-gnu/qt5/QtWidgets",
 		"/usr/include/x86_64-linux-gnu/qt5/QtGui",
 		"/usr/include/x86_64-linux-gnu/qt5/QtConcurrent",
-		"/usr/include/x86_64-linux-gnu/qt5/QtNetwork",
 		"/usr/include/x86_64-linux-gnu/qt5/QtSvg",
 		"/usr/include/vtk-9.1",
 		"/usr/include/jsoncpp",
@@ -1899,7 +1930,10 @@
 	],
 	"MOC_PREDEFS_FILE" : "/home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/moc_predefs.h",
 	"MOC_RELAXED_MODE" : false,
-	"MOC_SKIP" : [],
+	"MOC_SKIP" : 
+	[
+		"/home/avenblake/BDR_CP/cpp/build/bdr_update_core_autogen/mocs_compilation.cpp"
+	],
 	"MULTI_CONFIG" : false,
 	"PARALLEL" : 6,
 	"PARSE_CACHE_FILE" : "/home/avenblake/BDR_CP/cpp/build/CMakeFiles/bdr_coverage_planner_autogen.dir/ParseCache.txt",
@@ -1949,12 +1983,27 @@
 			null
 		],
 		[
+			"/home/avenblake/BDR_CP/cpp/src/components/rollback_banner.cpp",
+			"MU",
+			null
+		],
+		[
 			"/home/avenblake/BDR_CP/cpp/src/components/svg_icon_button.cpp",
 			"MU",
 			null
 		],
 		[
 			"/home/avenblake/BDR_CP/cpp/src/components/tilt_calibration_dialog.cpp",
+			"MU",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/src/components/update_banner.cpp",
+			"MU",
+			null
+		],
+		[
+			"/home/avenblake/BDR_CP/cpp/src/components/update_modal.cpp",
 			"MU",
 			null
 		],
@@ -1974,11 +2023,19 @@
 		[ "/home/avenblake/BDR_CP/cpp/src/setup_screen.cpp", "MU", null ],
 		[ "/home/avenblake/BDR_CP/cpp/src/startup_screen.cpp", "MU", null ],
 		[ "/home/avenblake/BDR_CP/cpp/src/teleop_widget.cpp", "MU", null ],
-		[ "/home/avenblake/BDR_CP/cpp/src/transfer_manager.cpp", "MU", null ]
+		[ "/home/avenblake/BDR_CP/cpp/src/transfer_manager.cpp", "MU", null ],
+		[
+			"/home/avenblake/BDR_CP/cpp/src/update/update_checker.cpp",
+			"MU",
+			null
+		]
 	],
 	"UIC_OPTIONS" : [],
 	"UIC_SEARCH_PATHS" : [],
-	"UIC_SKIP" : [],
+	"UIC_SKIP" : 
+	[
+		"/home/avenblake/BDR_CP/cpp/build/bdr_update_core_autogen/mocs_compilation.cpp"
+	],
 	"UIC_UI_FILES" : [],
 	"VERBOSITY" : 0
 }

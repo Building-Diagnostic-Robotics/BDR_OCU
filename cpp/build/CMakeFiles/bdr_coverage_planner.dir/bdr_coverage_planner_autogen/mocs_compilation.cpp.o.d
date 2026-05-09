@@ -968,6 +968,8 @@ CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/mocs_compilatio
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/fpv_camera_view.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_pre_scan_checklist_dialog.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/pre_scan_checklist_dialog.hpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_rollback_banner.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/rollback_banner.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_svg_icon_button.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/svg_icon_button.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtGui/QColor \
@@ -980,6 +982,11 @@ CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/mocs_compilatio
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qframe.h \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QStackedWidget \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/qstackedwidget.h \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_update_banner.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/update_banner.hpp \
+ /home/avenblake/BDR_CP/cpp/include/update/update_types.hpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/moc_update_modal.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/B37CIN4C3K/../../../include/components/update_modal.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_coverage_gui.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/coverage_gui.hpp \
  /usr/include/x86_64-linux-gnu/qt5/QtWidgets/QDoubleSpinBox \
@@ -1959,4 +1966,6 @@ CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/mocs_compilatio
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/startup_screen.hpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_teleop_widget.cpp \
  /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/../../../include/teleop_widget.hpp \
- /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_transfer_manager.cpp
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/6YEA5652QU/moc_transfer_manager.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/CWU2TZT6XS/moc_update_checker.cpp \
+ /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/CWU2TZT6XS/../../../include/update/update_checker.hpp

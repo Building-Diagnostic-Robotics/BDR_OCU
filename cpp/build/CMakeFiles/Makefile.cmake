@@ -1043,15 +1043,22 @@ set(CMAKE_MAKEFILE_OUTPUTS
 set(CMAKE_MAKEFILE_PRODUCTS
   "ament_cmake_core/stamps/templates_2_cmake.py.stamp"
   "ament_cmake_uninstall_target/ament_cmake_uninstall_target.cmake"
+  "CMakeFiles/bdr_update_core_autogen.dir/AutogenInfo.json"
   "CMakeFiles/bdr_coverage_planner_autogen.dir/AutogenInfo.json"
   "CMakeFiles/bdr_coverage_planner_autogen.dir/AutoRcc_resources_EWIEGA46WW_Info.json"
+  "CMakeFiles/bdr-update-runner_autogen.dir/AutogenInfo.json"
   "CMakeFiles/CMakeDirectoryInformation.cmake"
   )
 
 # Dependency information for all targets:
 set(CMAKE_DEPEND_INFO_FILES
+  "CMakeFiles/version_info_stamp.dir/DependInfo.cmake"
+  "CMakeFiles/bdr_update_core.dir/DependInfo.cmake"
   "CMakeFiles/bdr_coverage_planner.dir/DependInfo.cmake"
   "CMakeFiles/uninstall.dir/DependInfo.cmake"
   "CMakeFiles/bdr_coverage_planner_uninstall.dir/DependInfo.cmake"
+  "CMakeFiles/bdr-update-runner.dir/DependInfo.cmake"
+  "CMakeFiles/bdr_update_core_autogen.dir/DependInfo.cmake"
   "CMakeFiles/bdr_coverage_planner_autogen.dir/DependInfo.cmake"
+  "CMakeFiles/bdr-update-runner_autogen.dir/DependInfo.cmake"
   )

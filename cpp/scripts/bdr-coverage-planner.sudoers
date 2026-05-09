@@ -1,0 +1,15 @@
+# /etc/sudoers.d/bdr-coverage-planner
+# Installed by the bdr-coverage-planner Debian package's postinst (Phase 8).
+# Removed by the prerm script.
+#
+# Purpose: allow members of the `sudo` group on this laptop to invoke the
+# OTA installer wrapper without an interactive password prompt. Phase 7
+# Q1=A locked %sudo as the principal: standard Ubuntu pattern, works for
+# shared/swapped operator accounts.
+#
+# The wrapper itself (/usr/bin/bdr-apply-update) validates input paths
+# and only supports the `install <deb>` and `recover` subcommands.
+#
+# This file MUST end with a newline; sudoers is line-oriented and
+# rejects files without trailing newlines.
+%sudo ALL=(root) NOPASSWD: /usr/bin/bdr-apply-update

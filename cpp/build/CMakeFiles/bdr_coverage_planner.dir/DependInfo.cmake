@@ -20,8 +20,11 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/avenblake/BDR_CP/cpp/src/components/bdr_progress_dialog.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/components/bdr_progress_dialog.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/components/bdr_progress_dialog.cpp.o.d"
   "/home/avenblake/BDR_CP/cpp/src/components/fpv_camera_view.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/components/fpv_camera_view.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/components/fpv_camera_view.cpp.o.d"
   "/home/avenblake/BDR_CP/cpp/src/components/pre_scan_checklist_dialog.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/components/pre_scan_checklist_dialog.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/components/pre_scan_checklist_dialog.cpp.o.d"
+  "/home/avenblake/BDR_CP/cpp/src/components/rollback_banner.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o.d"
   "/home/avenblake/BDR_CP/cpp/src/components/svg_icon_button.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.o.d"
   "/home/avenblake/BDR_CP/cpp/src/components/tilt_calibration_dialog.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/components/tilt_calibration_dialog.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/components/tilt_calibration_dialog.cpp.o.d"
+  "/home/avenblake/BDR_CP/cpp/src/components/update_banner.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o.d"
+  "/home/avenblake/BDR_CP/cpp/src/components/update_modal.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o.d"
   "/home/avenblake/BDR_CP/cpp/src/coverage_gui.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/coverage_gui.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/coverage_gui.cpp.o.d"
   "/home/avenblake/BDR_CP/cpp/src/coverage_pipeline.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/coverage_pipeline.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/coverage_pipeline.cpp.o.d"
   "/home/avenblake/BDR_CP/cpp/src/dashboard_screen.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/dashboard_screen.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/dashboard_screen.cpp.o.d"
@@ -39,10 +42,12 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/avenblake/BDR_CP/cpp/src/startup_screen.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/startup_screen.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/startup_screen.cpp.o.d"
   "/home/avenblake/BDR_CP/cpp/src/teleop_widget.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/teleop_widget.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/teleop_widget.cpp.o.d"
   "/home/avenblake/BDR_CP/cpp/src/transfer_manager.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/transfer_manager.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/transfer_manager.cpp.o.d"
+  "/home/avenblake/BDR_CP/cpp/src/update/update_checker.cpp" "CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o" "gcc" "CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o.d"
   )
 
 # Targets to which this target links.
 set(CMAKE_TARGET_LINKED_INFO_FILES
+  "/home/avenblake/BDR_CP/cpp/build/CMakeFiles/bdr_update_core.dir/DependInfo.cmake"
   )
 
 # Fortran module output directory.

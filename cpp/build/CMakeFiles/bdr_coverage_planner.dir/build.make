@@ -565,10 +565,66 @@ CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.s: cmake_
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/avenblake/BDR_CP/cpp/src/components/svg_icon_button.cpp -o CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.s
 
+CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o: CMakeFiles/bdr_coverage_planner.dir/flags.make
+CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o: ../src/components/rollback_banner.cpp
+CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o: CMakeFiles/bdr_coverage_planner.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_31) "Building CXX object CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o -MF CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o.d -o CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o -c /home/avenblake/BDR_CP/cpp/src/components/rollback_banner.cpp
+
+CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/avenblake/BDR_CP/cpp/src/components/rollback_banner.cpp > CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.i
+
+CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/avenblake/BDR_CP/cpp/src/components/rollback_banner.cpp -o CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.s
+
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o: CMakeFiles/bdr_coverage_planner.dir/flags.make
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o: ../src/components/update_banner.cpp
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o: CMakeFiles/bdr_coverage_planner.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_32) "Building CXX object CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o -MF CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o.d -o CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o -c /home/avenblake/BDR_CP/cpp/src/components/update_banner.cpp
+
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/avenblake/BDR_CP/cpp/src/components/update_banner.cpp > CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.i
+
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/avenblake/BDR_CP/cpp/src/components/update_banner.cpp -o CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.s
+
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o: CMakeFiles/bdr_coverage_planner.dir/flags.make
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o: ../src/components/update_modal.cpp
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o: CMakeFiles/bdr_coverage_planner.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_33) "Building CXX object CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o -MF CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o.d -o CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o -c /home/avenblake/BDR_CP/cpp/src/components/update_modal.cpp
+
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/avenblake/BDR_CP/cpp/src/components/update_modal.cpp > CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.i
+
+CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/avenblake/BDR_CP/cpp/src/components/update_modal.cpp -o CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.s
+
+CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o: CMakeFiles/bdr_coverage_planner.dir/flags.make
+CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o: ../src/update/update_checker.cpp
+CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o: CMakeFiles/bdr_coverage_planner.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_34) "Building CXX object CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o -MF CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o.d -o CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o -c /home/avenblake/BDR_CP/cpp/src/update/update_checker.cpp
+
+CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/avenblake/BDR_CP/cpp/src/update/update_checker.cpp > CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.i
+
+CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/avenblake/BDR_CP/cpp/src/update/update_checker.cpp -o CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.s
+
 CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o: CMakeFiles/bdr_coverage_planner.dir/flags.make
 CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o: ../src/main.cpp
 CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o: CMakeFiles/bdr_coverage_planner.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_31) "Building CXX object CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_35) "Building CXX object CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o -MF CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o.d -o CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o -c /home/avenblake/BDR_CP/cpp/src/main.cpp
 
 CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.i: cmake_force
@@ -582,7 +638,7 @@ CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.s: cmake_force
 CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o: CMakeFiles/bdr_coverage_planner.dir/flags.make
 CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o: bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp
 CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o: CMakeFiles/bdr_coverage_planner.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_32) "Building CXX object CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_36) "Building CXX object CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o -MF CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o.d -o CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o -c /home/avenblake/BDR_CP/cpp/build/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp
 
 CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.i: cmake_force
@@ -624,6 +680,10 @@ bdr_coverage_planner_OBJECTS = \
 "CMakeFiles/bdr_coverage_planner.dir/src/components/fpv_camera_view.cpp.o" \
 "CMakeFiles/bdr_coverage_planner.dir/src/components/auto_hide_scroll_bar.cpp.o" \
 "CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.o" \
+"CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o" \
+"CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o" \
+"CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o" \
+"CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o" \
 "CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o" \
 "CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o"
 
@@ -659,9 +719,14 @@ bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/src/components/pre_sca
 bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/src/components/fpv_camera_view.cpp.o
 bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/src/components/auto_hide_scroll_bar.cpp.o
 bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/src/components/svg_icon_button.cpp.o
+bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o
+bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o
+bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o
+bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o
 bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/src/main.cpp.o
 bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o
 bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/build.make
+bdr_coverage_planner: libbdr_update_core.a
 bdr_coverage_planner: /usr/lib/x86_64-linux-gnu/libQt5Concurrent.so.5.15.3
 bdr_coverage_planner: /usr/lib/x86_64-linux-gnu/libQt5Network.so.5.15.3
 bdr_coverage_planner: /usr/lib/x86_64-linux-gnu/libQt5Svg.so.5.15.3
@@ -1231,7 +1296,7 @@ bdr_coverage_planner: /opt/ros/humble/lib/libunique_identifier_msgs__rosidl_gene
 bdr_coverage_planner: /opt/ros/humble/lib/librosidl_runtime_c.so
 bdr_coverage_planner: /opt/ros/humble/lib/librcutils.so
 bdr_coverage_planner: CMakeFiles/bdr_coverage_planner.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_33) "Linking CXX executable bdr_coverage_planner"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/home/avenblake/BDR_CP/cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_37) "Linking CXX executable bdr_coverage_planner"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/bdr_coverage_planner.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

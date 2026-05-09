@@ -39,6 +39,13 @@ class ExplorationScreen;
 class PlannerScreen;
 class SetupScreen;
 class StartupScreen;
+class UpdateBanner;
+class RollbackBanner;
+
+namespace update {
+class UpdateChecker;
+struct VersionInfo;
+}
 
 class AppShellWindow : public QMainWindow {
     Q_OBJECT
@@ -46,6 +53,22 @@ class AppShellWindow : public QMainWindow {
 public:
     explicit AppShellWindow(QWidget* parent = nullptr);
     ~AppShellWindow() override;
+
+    /// Show the Phase 9 rollback advisory banner. Driven by the
+    /// startup-time marker dispatch in `main.cpp` when the previous OCU
+    /// session ended in a rolled-back update. Idempotent.
+    /// @param message Optional custom subtitle. Empty falls back to the
+    ///                generic "previous version restored" copy.
+    void showRolledBackBanner(const QString& message = {});
+
+signals:
+    /// Emitted once after construction completes and the Qt event loop
+    /// has processed at least one tick. Phase 9's startup watchdog
+    /// connects to this to mark `update_state.json` as `done` and stop
+    /// the 60 s rollback timer. Firing is gated on the event loop being
+    /// alive so that "ctor returns but app is wedged" is correctly
+    /// classified as unhealthy.
+    void bootHealthy();
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -92,6 +115,23 @@ private slots:
 
 private:
     void setDarkMode(bool dark_mode);
+    /// Build a fresh GateState (battery, transfers, uploads, mission) and
+    /// open the OTA "What's New" modal centered on this window. Called
+    /// from the UpdateBanner::viewDetailsRequested handler. The modal is
+    /// app-modal but parented to `this` so it tracks dark-mode at open
+    /// time. Phase 6 = signal-only Install Now (Q3=A).
+    void showUpdateModal(const update::VersionInfo& info);
+
+    /// Phase 7 OCU→runner handoff (locked Q1=A CLI args, Q3=B lockfile-
+    /// gated wait, concerns #2 + #3). Spawns bdr-update-runner detached
+    /// with the version info encoded as CLI flags, polls for the runner's
+    /// lockfile to be held, then qApp->quit(). On spawn failure or wait
+    /// timeout the modal stays open with an error message and the OCU
+    /// keeps running (Install Now stays disabled until reopened).
+    /// `modal_window` is the still-open UpdateModal — used to surface
+    /// errors back to the operator if the handoff fails.
+    void handoffToUpdateRunner(const update::VersionInfo& info,
+                               QWidget* modal_window);
     void ensureStage2();
     void ensureStage3();
     void ensureStage4();
@@ -206,6 +246,15 @@ private:
     DashboardScreen* stage3_ = nullptr;
     ExplorationScreen* stage4_ = nullptr;
     PlannerScreen* stage5_ = nullptr;
+
+    // OTA update plumbing. Banner sits above the stage stack so it persists
+    // across stage transitions; checker polls GitHub Releases on a 5-min
+    // cadence and toggles banner visibility.
+    UpdateBanner* update_banner_ = nullptr;
+    /// Phase 9 advisory banner. Created lazily in `showRolledBackBanner`
+    /// because the typical operator session never sees it.
+    RollbackBanner* rollback_banner_ = nullptr;
+    update::UpdateChecker* update_checker_ = nullptr;
 
     QWidget* central_root_ = nullptr;
     QWidget* window_controls_ = nullptr;

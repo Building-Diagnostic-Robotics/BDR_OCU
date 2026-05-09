@@ -172,6 +172,32 @@ depend:
 .PHONY : depend
 
 #=============================================================================
+# Target rules for targets named version_info_stamp
+
+# Build rule for target.
+version_info_stamp: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 version_info_stamp
+.PHONY : version_info_stamp
+
+# fast build rule for target.
+version_info_stamp/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/version_info_stamp.dir/build.make CMakeFiles/version_info_stamp.dir/build
+.PHONY : version_info_stamp/fast
+
+#=============================================================================
+# Target rules for targets named bdr_update_core
+
+# Build rule for target.
+bdr_update_core: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bdr_update_core
+.PHONY : bdr_update_core
+
+# fast build rule for target.
+bdr_update_core/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/build
+.PHONY : bdr_update_core/fast
+
+#=============================================================================
 # Target rules for targets named bdr_coverage_planner
 
 # Build rule for target.
@@ -211,6 +237,32 @@ bdr_coverage_planner_uninstall/fast:
 .PHONY : bdr_coverage_planner_uninstall/fast
 
 #=============================================================================
+# Target rules for targets named bdr-update-runner
+
+# Build rule for target.
+bdr-update-runner: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bdr-update-runner
+.PHONY : bdr-update-runner
+
+# fast build rule for target.
+bdr-update-runner/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/build
+.PHONY : bdr-update-runner/fast
+
+#=============================================================================
+# Target rules for targets named bdr_update_core_autogen
+
+# Build rule for target.
+bdr_update_core_autogen: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bdr_update_core_autogen
+.PHONY : bdr_update_core_autogen
+
+# fast build rule for target.
+bdr_update_core_autogen/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core_autogen.dir/build.make CMakeFiles/bdr_update_core_autogen.dir/build
+.PHONY : bdr_update_core_autogen/fast
+
+#=============================================================================
 # Target rules for targets named bdr_coverage_planner_autogen
 
 # Build rule for target.
@@ -222,6 +274,43 @@ bdr_coverage_planner_autogen: cmake_check_build_system
 bdr_coverage_planner_autogen/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner_autogen.dir/build.make CMakeFiles/bdr_coverage_planner_autogen.dir/build
 .PHONY : bdr_coverage_planner_autogen/fast
+
+#=============================================================================
+# Target rules for targets named bdr-update-runner_autogen
+
+# Build rule for target.
+bdr-update-runner_autogen: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bdr-update-runner_autogen
+.PHONY : bdr-update-runner_autogen
+
+# fast build rule for target.
+bdr-update-runner_autogen/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner_autogen.dir/build.make CMakeFiles/bdr-update-runner_autogen.dir/build
+.PHONY : bdr-update-runner_autogen/fast
+
+bdr-update-runner_autogen/mocs_compilation.o: bdr-update-runner_autogen/mocs_compilation.cpp.o
+.PHONY : bdr-update-runner_autogen/mocs_compilation.o
+
+# target to build an object file
+bdr-update-runner_autogen/mocs_compilation.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/bdr-update-runner_autogen/mocs_compilation.cpp.o
+.PHONY : bdr-update-runner_autogen/mocs_compilation.cpp.o
+
+bdr-update-runner_autogen/mocs_compilation.i: bdr-update-runner_autogen/mocs_compilation.cpp.i
+.PHONY : bdr-update-runner_autogen/mocs_compilation.i
+
+# target to preprocess a source file
+bdr-update-runner_autogen/mocs_compilation.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/bdr-update-runner_autogen/mocs_compilation.cpp.i
+.PHONY : bdr-update-runner_autogen/mocs_compilation.cpp.i
+
+bdr-update-runner_autogen/mocs_compilation.s: bdr-update-runner_autogen/mocs_compilation.cpp.s
+.PHONY : bdr-update-runner_autogen/mocs_compilation.s
+
+# target to generate assembly for a file
+bdr-update-runner_autogen/mocs_compilation.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/bdr-update-runner_autogen/mocs_compilation.cpp.s
+.PHONY : bdr-update-runner_autogen/mocs_compilation.cpp.s
 
 bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.o: bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.cpp.o
 .PHONY : bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.o
@@ -270,6 +359,30 @@ bdr_coverage_planner_autogen/mocs_compilation.s: bdr_coverage_planner_autogen/mo
 bdr_coverage_planner_autogen/mocs_compilation.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/bdr_coverage_planner_autogen/mocs_compilation.cpp.s
 .PHONY : bdr_coverage_planner_autogen/mocs_compilation.cpp.s
+
+bdr_update_core_autogen/mocs_compilation.o: bdr_update_core_autogen/mocs_compilation.cpp.o
+.PHONY : bdr_update_core_autogen/mocs_compilation.o
+
+# target to build an object file
+bdr_update_core_autogen/mocs_compilation.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/bdr_update_core_autogen/mocs_compilation.cpp.o
+.PHONY : bdr_update_core_autogen/mocs_compilation.cpp.o
+
+bdr_update_core_autogen/mocs_compilation.i: bdr_update_core_autogen/mocs_compilation.cpp.i
+.PHONY : bdr_update_core_autogen/mocs_compilation.i
+
+# target to preprocess a source file
+bdr_update_core_autogen/mocs_compilation.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/bdr_update_core_autogen/mocs_compilation.cpp.i
+.PHONY : bdr_update_core_autogen/mocs_compilation.cpp.i
+
+bdr_update_core_autogen/mocs_compilation.s: bdr_update_core_autogen/mocs_compilation.cpp.s
+.PHONY : bdr_update_core_autogen/mocs_compilation.s
+
+# target to generate assembly for a file
+bdr_update_core_autogen/mocs_compilation.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/bdr_update_core_autogen/mocs_compilation.cpp.s
+.PHONY : bdr_update_core_autogen/mocs_compilation.cpp.s
 
 src/app_shell.o: src/app_shell.cpp.o
 .PHONY : src/app_shell.o
@@ -511,6 +624,30 @@ src/components/pre_scan_checklist_dialog.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/pre_scan_checklist_dialog.cpp.s
 .PHONY : src/components/pre_scan_checklist_dialog.cpp.s
 
+src/components/rollback_banner.o: src/components/rollback_banner.cpp.o
+.PHONY : src/components/rollback_banner.o
+
+# target to build an object file
+src/components/rollback_banner.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.o
+.PHONY : src/components/rollback_banner.cpp.o
+
+src/components/rollback_banner.i: src/components/rollback_banner.cpp.i
+.PHONY : src/components/rollback_banner.i
+
+# target to preprocess a source file
+src/components/rollback_banner.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.i
+.PHONY : src/components/rollback_banner.cpp.i
+
+src/components/rollback_banner.s: src/components/rollback_banner.cpp.s
+.PHONY : src/components/rollback_banner.s
+
+# target to generate assembly for a file
+src/components/rollback_banner.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/rollback_banner.cpp.s
+.PHONY : src/components/rollback_banner.cpp.s
+
 src/components/svg_icon_button.o: src/components/svg_icon_button.cpp.o
 .PHONY : src/components/svg_icon_button.o
 
@@ -558,6 +695,54 @@ src/components/tilt_calibration_dialog.s: src/components/tilt_calibration_dialog
 src/components/tilt_calibration_dialog.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/tilt_calibration_dialog.cpp.s
 .PHONY : src/components/tilt_calibration_dialog.cpp.s
+
+src/components/update_banner.o: src/components/update_banner.cpp.o
+.PHONY : src/components/update_banner.o
+
+# target to build an object file
+src/components/update_banner.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.o
+.PHONY : src/components/update_banner.cpp.o
+
+src/components/update_banner.i: src/components/update_banner.cpp.i
+.PHONY : src/components/update_banner.i
+
+# target to preprocess a source file
+src/components/update_banner.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.i
+.PHONY : src/components/update_banner.cpp.i
+
+src/components/update_banner.s: src/components/update_banner.cpp.s
+.PHONY : src/components/update_banner.s
+
+# target to generate assembly for a file
+src/components/update_banner.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/update_banner.cpp.s
+.PHONY : src/components/update_banner.cpp.s
+
+src/components/update_modal.o: src/components/update_modal.cpp.o
+.PHONY : src/components/update_modal.o
+
+# target to build an object file
+src/components/update_modal.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.o
+.PHONY : src/components/update_modal.cpp.o
+
+src/components/update_modal.i: src/components/update_modal.cpp.i
+.PHONY : src/components/update_modal.i
+
+# target to preprocess a source file
+src/components/update_modal.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.i
+.PHONY : src/components/update_modal.cpp.i
+
+src/components/update_modal.s: src/components/update_modal.cpp.s
+.PHONY : src/components/update_modal.s
+
+# target to generate assembly for a file
+src/components/update_modal.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/components/update_modal.cpp.s
+.PHONY : src/components/update_modal.cpp.s
 
 src/coverage_gui.o: src/coverage_gui.cpp.o
 .PHONY : src/coverage_gui.o
@@ -847,6 +1032,54 @@ src/robot_registry.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/robot_registry.cpp.s
 .PHONY : src/robot_registry.cpp.s
 
+src/runner/main.o: src/runner/main.cpp.o
+.PHONY : src/runner/main.o
+
+# target to build an object file
+src/runner/main.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/src/runner/main.cpp.o
+.PHONY : src/runner/main.cpp.o
+
+src/runner/main.i: src/runner/main.cpp.i
+.PHONY : src/runner/main.i
+
+# target to preprocess a source file
+src/runner/main.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/src/runner/main.cpp.i
+.PHONY : src/runner/main.cpp.i
+
+src/runner/main.s: src/runner/main.cpp.s
+.PHONY : src/runner/main.s
+
+# target to generate assembly for a file
+src/runner/main.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/src/runner/main.cpp.s
+.PHONY : src/runner/main.cpp.s
+
+src/runner/update_runner_window.o: src/runner/update_runner_window.cpp.o
+.PHONY : src/runner/update_runner_window.o
+
+# target to build an object file
+src/runner/update_runner_window.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/src/runner/update_runner_window.cpp.o
+.PHONY : src/runner/update_runner_window.cpp.o
+
+src/runner/update_runner_window.i: src/runner/update_runner_window.cpp.i
+.PHONY : src/runner/update_runner_window.i
+
+# target to preprocess a source file
+src/runner/update_runner_window.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/src/runner/update_runner_window.cpp.i
+.PHONY : src/runner/update_runner_window.cpp.i
+
+src/runner/update_runner_window.s: src/runner/update_runner_window.cpp.s
+.PHONY : src/runner/update_runner_window.s
+
+# target to generate assembly for a file
+src/runner/update_runner_window.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr-update-runner.dir/build.make CMakeFiles/bdr-update-runner.dir/src/runner/update_runner_window.cpp.s
+.PHONY : src/runner/update_runner_window.cpp.s
+
 src/scan_session_tracker.o: src/scan_session_tracker.cpp.o
 .PHONY : src/scan_session_tracker.o
 
@@ -967,6 +1200,126 @@ src/transfer_manager.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/transfer_manager.cpp.s
 .PHONY : src/transfer_manager.cpp.s
 
+src/update/update_checker.o: src/update/update_checker.cpp.o
+.PHONY : src/update/update_checker.o
+
+# target to build an object file
+src/update/update_checker.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.o
+.PHONY : src/update/update_checker.cpp.o
+
+src/update/update_checker.i: src/update/update_checker.cpp.i
+.PHONY : src/update/update_checker.i
+
+# target to preprocess a source file
+src/update/update_checker.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.i
+.PHONY : src/update/update_checker.cpp.i
+
+src/update/update_checker.s: src/update/update_checker.cpp.s
+.PHONY : src/update/update_checker.s
+
+# target to generate assembly for a file
+src/update/update_checker.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_coverage_planner.dir/build.make CMakeFiles/bdr_coverage_planner.dir/src/update/update_checker.cpp.s
+.PHONY : src/update/update_checker.cpp.s
+
+src/update/update_downloader.o: src/update/update_downloader.cpp.o
+.PHONY : src/update/update_downloader.o
+
+# target to build an object file
+src/update/update_downloader.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_downloader.cpp.o
+.PHONY : src/update/update_downloader.cpp.o
+
+src/update/update_downloader.i: src/update/update_downloader.cpp.i
+.PHONY : src/update/update_downloader.i
+
+# target to preprocess a source file
+src/update/update_downloader.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_downloader.cpp.i
+.PHONY : src/update/update_downloader.cpp.i
+
+src/update/update_downloader.s: src/update/update_downloader.cpp.s
+.PHONY : src/update/update_downloader.s
+
+# target to generate assembly for a file
+src/update/update_downloader.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_downloader.cpp.s
+.PHONY : src/update/update_downloader.cpp.s
+
+src/update/update_lockfile.o: src/update/update_lockfile.cpp.o
+.PHONY : src/update/update_lockfile.o
+
+# target to build an object file
+src/update/update_lockfile.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_lockfile.cpp.o
+.PHONY : src/update/update_lockfile.cpp.o
+
+src/update/update_lockfile.i: src/update/update_lockfile.cpp.i
+.PHONY : src/update/update_lockfile.i
+
+# target to preprocess a source file
+src/update/update_lockfile.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_lockfile.cpp.i
+.PHONY : src/update/update_lockfile.cpp.i
+
+src/update/update_lockfile.s: src/update/update_lockfile.cpp.s
+.PHONY : src/update/update_lockfile.s
+
+# target to generate assembly for a file
+src/update/update_lockfile.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_lockfile.cpp.s
+.PHONY : src/update/update_lockfile.cpp.s
+
+src/update/update_log.o: src/update/update_log.cpp.o
+.PHONY : src/update/update_log.o
+
+# target to build an object file
+src/update/update_log.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_log.cpp.o
+.PHONY : src/update/update_log.cpp.o
+
+src/update/update_log.i: src/update/update_log.cpp.i
+.PHONY : src/update/update_log.i
+
+# target to preprocess a source file
+src/update/update_log.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_log.cpp.i
+.PHONY : src/update/update_log.cpp.i
+
+src/update/update_log.s: src/update/update_log.cpp.s
+.PHONY : src/update/update_log.s
+
+# target to generate assembly for a file
+src/update/update_log.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_log.cpp.s
+.PHONY : src/update/update_log.cpp.s
+
+src/update/update_state.o: src/update/update_state.cpp.o
+.PHONY : src/update/update_state.o
+
+# target to build an object file
+src/update/update_state.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_state.cpp.o
+.PHONY : src/update/update_state.cpp.o
+
+src/update/update_state.i: src/update/update_state.cpp.i
+.PHONY : src/update/update_state.i
+
+# target to preprocess a source file
+src/update/update_state.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_state.cpp.i
+.PHONY : src/update/update_state.cpp.i
+
+src/update/update_state.s: src/update/update_state.cpp.s
+.PHONY : src/update/update_state.s
+
+# target to generate assembly for a file
+src/update/update_state.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bdr_update_core.dir/build.make CMakeFiles/bdr_update_core.dir/src/update/update_state.cpp.s
+.PHONY : src/update/update_state.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -980,16 +1333,27 @@ help:
 	@echo "... list_install_components"
 	@echo "... rebuild_cache"
 	@echo "... test"
+	@echo "... bdr-update-runner_autogen"
 	@echo "... bdr_coverage_planner_autogen"
 	@echo "... bdr_coverage_planner_uninstall"
+	@echo "... bdr_update_core_autogen"
 	@echo "... uninstall"
+	@echo "... version_info_stamp"
+	@echo "... bdr-update-runner"
 	@echo "... bdr_coverage_planner"
+	@echo "... bdr_update_core"
+	@echo "... bdr-update-runner_autogen/mocs_compilation.o"
+	@echo "... bdr-update-runner_autogen/mocs_compilation.i"
+	@echo "... bdr-update-runner_autogen/mocs_compilation.s"
 	@echo "... bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.o"
 	@echo "... bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.i"
 	@echo "... bdr_coverage_planner_autogen/EWIEGA46WW/qrc_resources.s"
 	@echo "... bdr_coverage_planner_autogen/mocs_compilation.o"
 	@echo "... bdr_coverage_planner_autogen/mocs_compilation.i"
 	@echo "... bdr_coverage_planner_autogen/mocs_compilation.s"
+	@echo "... bdr_update_core_autogen/mocs_compilation.o"
+	@echo "... bdr_update_core_autogen/mocs_compilation.i"
+	@echo "... bdr_update_core_autogen/mocs_compilation.s"
 	@echo "... src/app_shell.o"
 	@echo "... src/app_shell.i"
 	@echo "... src/app_shell.s"
@@ -1020,12 +1384,21 @@ help:
 	@echo "... src/components/pre_scan_checklist_dialog.o"
 	@echo "... src/components/pre_scan_checklist_dialog.i"
 	@echo "... src/components/pre_scan_checklist_dialog.s"
+	@echo "... src/components/rollback_banner.o"
+	@echo "... src/components/rollback_banner.i"
+	@echo "... src/components/rollback_banner.s"
 	@echo "... src/components/svg_icon_button.o"
 	@echo "... src/components/svg_icon_button.i"
 	@echo "... src/components/svg_icon_button.s"
 	@echo "... src/components/tilt_calibration_dialog.o"
 	@echo "... src/components/tilt_calibration_dialog.i"
 	@echo "... src/components/tilt_calibration_dialog.s"
+	@echo "... src/components/update_banner.o"
+	@echo "... src/components/update_banner.i"
+	@echo "... src/components/update_banner.s"
+	@echo "... src/components/update_modal.o"
+	@echo "... src/components/update_modal.i"
+	@echo "... src/components/update_modal.s"
 	@echo "... src/coverage_gui.o"
 	@echo "... src/coverage_gui.i"
 	@echo "... src/coverage_gui.s"
@@ -1062,6 +1435,12 @@ help:
 	@echo "... src/robot_registry.o"
 	@echo "... src/robot_registry.i"
 	@echo "... src/robot_registry.s"
+	@echo "... src/runner/main.o"
+	@echo "... src/runner/main.i"
+	@echo "... src/runner/main.s"
+	@echo "... src/runner/update_runner_window.o"
+	@echo "... src/runner/update_runner_window.i"
+	@echo "... src/runner/update_runner_window.s"
 	@echo "... src/scan_session_tracker.o"
 	@echo "... src/scan_session_tracker.i"
 	@echo "... src/scan_session_tracker.s"
@@ -1077,6 +1456,21 @@ help:
 	@echo "... src/transfer_manager.o"
 	@echo "... src/transfer_manager.i"
 	@echo "... src/transfer_manager.s"
+	@echo "... src/update/update_checker.o"
+	@echo "... src/update/update_checker.i"
+	@echo "... src/update/update_checker.s"
+	@echo "... src/update/update_downloader.o"
+	@echo "... src/update/update_downloader.i"
+	@echo "... src/update/update_downloader.s"
+	@echo "... src/update/update_lockfile.o"
+	@echo "... src/update/update_lockfile.i"
+	@echo "... src/update/update_lockfile.s"
+	@echo "... src/update/update_log.o"
+	@echo "... src/update/update_log.i"
+	@echo "... src/update/update_log.s"
+	@echo "... src/update/update_state.o"
+	@echo "... src/update/update_state.i"
+	@echo "... src/update/update_state.s"
 .PHONY : help
 
 

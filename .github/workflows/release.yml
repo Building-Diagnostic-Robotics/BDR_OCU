@@ -1,0 +1,148 @@
+name: Release
+
+# Builds the OCU on every push to main, packages a .deb (with embedded git SHA),
+# computes a SHA256 sidecar, and publishes:
+#   - rolling tag `latest`            (overwrites each push, OTA polls this)
+#   - immutable tag `v-<short-sha>`   (per-build artifact for rollback)
+#
+# odrive_can: interface-only msg/srv pkg vendored in-tree at vendor/odrive_can/.
+# We colcon-build it into a side workspace before the OCU build so
+# `find_package(odrive_can REQUIRED)` in cpp/CMakeLists.txt resolves.
+# Upstream lives in pilot_ws; the vendor copy is the contract snapshot.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version metadata
+        id: meta
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          BUILD_NUMBER="$(git rev-list --count HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%d)"
+          {
+            echo "sha=${SHORT_SHA}"
+            echo "build_number=${BUILD_NUMBER}"
+            echo "build_date=${BUILD_DATE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Add ROS2 apt repository
+        run: |
+          sudo apt update
+          sudo apt install -y curl gnupg lsb-release software-properties-common
+          sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+            -o /usr/share/keyrings/ros-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+          sudo apt update
+
+      - name: Install build deps
+        run: |
+          sudo apt install -y \
+            build-essential cmake pkg-config git \
+            python3-colcon-common-extensions python3-rosdep \
+            qtbase5-dev libqt5widgets5 libqt5gui5 libqt5network5 \
+            libqt5concurrent5 libqt5svg5-dev \
+            libpcl-dev libeigen3-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            ros-humble-ros-base ros-humble-rclcpp ros-humble-std-msgs \
+            ros-humble-std-srvs ros-humble-geometry-msgs ros-humble-sensor-msgs \
+            ros-humble-nav-msgs ros-humble-tf2 ros-humble-tf2-geometry-msgs \
+            ros-humble-ament-cmake ros-humble-rosidl-default-generators \
+            ros-humble-rosidl-default-runtime
+
+      - name: Build vendored ROS2 interface packages
+        run: |
+          source /opt/ros/humble/setup.bash
+          mkdir -p _ros_ws/src
+          ln -sfn "${GITHUB_WORKSPACE}/vendor/odrive_can" _ros_ws/src/odrive_can
+          cd _ros_ws
+          colcon build --packages-select odrive_can --merge-install
+
+      - name: Build OCU
+        working-directory: cpp
+        run: |
+          source /opt/ros/humble/setup.bash
+          source "${GITHUB_WORKSPACE}/_ros_ws/install/setup.bash"
+          ./build.sh Release
+
+      - name: Package .deb
+        working-directory: cpp
+        env:
+          BDR_VERSION_SEMVER: "1.0.0"
+          BDR_VERSION_SHA: ${{ steps.meta.outputs.sha }}
+          BDR_BUILD_NUMBER: ${{ steps.meta.outputs.build_number }}
+        run: |
+          source /opt/ros/humble/setup.bash
+          source "${GITHUB_WORKSPACE}/_ros_ws/install/setup.bash"
+          ./create_deb.sh
+          ls -la build/*.deb
+
+      - name: Locate .deb + compute SHA256 sidecar
+        id: artifacts
+        working-directory: cpp/build
+        run: |
+          DEB_FILE="$(ls bdr-coverage-planner_*_amd64.deb | head -n1)"
+          if [ -z "$DEB_FILE" ]; then
+            echo "::error::No .deb produced by create_deb.sh"
+            exit 1
+          fi
+          sha256sum "$DEB_FILE" > "${DEB_FILE}.sha256"
+          echo "deb_path=cpp/build/${DEB_FILE}" >> "$GITHUB_OUTPUT"
+          echo "sha256_path=cpp/build/${DEB_FILE}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          # Print everything from after the first `## ` heading to (but not
+          # including) the next `## ` heading. Leading/trailing blank lines
+          # trimmed. Falls back to "No release notes" if extraction yields
+          # nothing.
+          NOTES="$(awk '/^## /{if(p)exit;p=1;next}p' CHANGELOG.md \
+                    | sed -e '/./,$!d' -e ':a;/^\n*$/{$d;N;ba;}' || true)"
+          if [ -z "$NOTES" ]; then
+            NOTES="No release notes provided."
+          fi
+          {
+            echo 'body<<EOF'
+            echo "$NOTES"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish rolling 'latest' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest (${{ steps.meta.outputs.sha }})"
+          body: ${{ steps.notes.outputs.body }}
+          target_commitish: ${{ github.sha }}
+          prerelease: false
+          files: |
+            ${{ steps.artifacts.outputs.deb_path }}
+            ${{ steps.artifacts.outputs.sha256_path }}
+
+      - name: Publish immutable per-SHA release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v-${{ steps.meta.outputs.sha }}
+          name: "v-${{ steps.meta.outputs.sha }}"
+          body: ${{ steps.notes.outputs.body }}
+          target_commitish: ${{ github.sha }}
+          prerelease: false
+          files: |
+            ${{ steps.artifacts.outputs.deb_path }}
+            ${{ steps.artifacts.outputs.sha256_path }}
