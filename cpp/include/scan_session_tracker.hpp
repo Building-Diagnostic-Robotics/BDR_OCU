@@ -23,10 +23,9 @@
 
 #include "cloud_upload_manager.hpp"  // For ScanMetadata
 
-namespace f2c_cpp {
+#include "coverage_stats.hpp"
 
-// Forward declare
-struct CoverageStats;
+namespace f2c_cpp {
 
 /**
  * @brief GPS accumulator that averages fixes during a scan session

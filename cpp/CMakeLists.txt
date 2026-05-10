@@ -115,23 +115,20 @@ endif()
 # Header files (for MOC processing)
 set(HEADERS
     include/coverage_pipeline.hpp
-    include/coverage_gui.hpp
+    include/coverage_geometry.hpp
+    include/coverage_stats.hpp
     include/setup_screen.hpp
     include/app_shell.hpp
     include/startup_screen.hpp
     include/dashboard_screen.hpp
     include/exploration_screen.hpp
     include/planner_screen.hpp
+    include/plot_widget.hpp
     include/obstacle_detector.hpp
     include/transfer_manager.hpp
-    include/data_transfer_dialog.hpp
     include/preset_manager.hpp
-    include/teleop_widget.hpp
     include/ui_theme_constants.hpp
-    include/network_monitor.hpp
     include/cloud_upload_manager.hpp
-    include/scan_session_tracker.hpp
-    include/cloud_upload_dialog.hpp
     include/robot_registry.hpp
     include/components/bdr_message_box.hpp
     include/components/bdr_input_dialog.hpp
@@ -147,6 +144,7 @@ set(HEADERS
     include/components/update_modal.hpp
     include/update/update_settings.hpp
     include/update/update_checker.hpp
+    include/video_stream_widget.hpp
 )
 
 # ---------------------------------------------------------------------------
@@ -181,8 +179,18 @@ set(PIPELINE_SOURCES
     src/coverage_pipeline.cpp
 )
 
+# Legacy-only sources (recordings / cloud tab UX, teleop dock, session JSON)
+# kept on disk for Dashboard rewiring — add back to GUI_SOURCES when wired:
+#   src/data_transfer_dialog.cpp  src/cloud_upload_dialog.cpp
+#   src/scan_session_tracker.cpp  src/teleop_widget.cpp
+#   src/network_monitor.cpp
+# and matching HEADERS for Qt AUTOMOC:
+#   include/data_transfer_dialog.hpp  include/cloud_upload_dialog.hpp
+#   include/scan_session_tracker.hpp  include/teleop_widget.hpp
+#   include/network_monitor.hpp
+
 set(GUI_SOURCES
-    src/coverage_gui.cpp
+    src/plot_widget.cpp
     src/setup_screen.cpp
     src/app_shell.cpp
     src/startup_screen.cpp
@@ -191,13 +199,9 @@ set(GUI_SOURCES
     src/planner_screen.cpp
     src/obstacle_detector.cpp
     src/transfer_manager.cpp
-    src/data_transfer_dialog.cpp
     src/preset_manager.cpp
-    src/teleop_widget.cpp
-    src/network_monitor.cpp
     src/cloud_upload_manager.cpp
-    src/scan_session_tracker.cpp
-    src/cloud_upload_dialog.cpp
+    src/video_stream_widget.cpp
     src/robot_registry.cpp
     src/robot_login.cpp
     src/components/bdr_message_box.cpp

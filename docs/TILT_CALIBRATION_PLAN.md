@@ -28,7 +28,7 @@ tilt_correction_matrices_<index>.npz  →  robot_complete.launch.py (picks lates
        ↓
 odom_tilt_corrector  →  /Odometry_tilt_corrected_diff
        ↓
-pose_controller, unified_data_collector, raw_map_saver, coverage_gui
+pose_controller, unified_data_collector, raw_map_saver, OCU (`bdr_coverage_planner` / dashboard & planner stages)
 ```
 
 - **odom_tilt_corrector**: Loads `R_map`, transforms Fast-LIO2 odometry from tilted LiDAR frame to ground-aligned robot body frame.

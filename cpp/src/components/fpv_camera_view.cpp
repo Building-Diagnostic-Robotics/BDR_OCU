@@ -1,6 +1,6 @@
 #include "components/fpv_camera_view.hpp"
 
-#include "coverage_gui.hpp"
+#include "video_stream_widget.hpp"
 
 #include <QLabel>
 #include <QSizePolicy>

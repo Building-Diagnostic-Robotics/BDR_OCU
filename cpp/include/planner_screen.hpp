@@ -220,7 +220,6 @@ private:
         int scan_active_segment_index = -1;
         double scan_total_coverage_pct = 0.0;
         double scan_avg_quality_pct = 0.0;
-        double scan_total_points_m = 0.0;
         double scan_distance_traveled_m = 0.0;
         qint64 scan_elapsed_ms = 0;
         qint64 scan_estimated_ms_left = -1;
@@ -358,6 +357,11 @@ private:
     void rebuildScanSegments();
     void refreshScanSegmentList();
     void pushScanSegmentsToPlot();
+    // Lightweight refresh of the Stage 4 status-driven plot overlay.
+    // Called from `setLiveRobotTelemetry` on every odom tick so the
+    // active-segment split point follows the robot smoothly without
+    // rebuilding the full segment geometry. No-op outside the Scan step.
+    void refreshScanSegmentOverlay();
     void updateScanSplittingUi();
     std::vector<int> selectedScanSegmentIndices() const;
     PathStateList buildPublishPathFromSegments(const std::vector<int>& indices) const;
@@ -682,7 +686,6 @@ private:
     QTimer* scan_segment_spinner_timer_ = nullptr;
     int scan_segment_spinner_angle_ = 0;
     QLabel* lbl_scan_stats_distance_ = nullptr;
-    QLabel* lbl_scan_stats_points_ = nullptr;
     QLabel* lbl_scan_stats_avg_quality_ = nullptr;
     QLabel* lbl_scan_stats_eta_ = nullptr;
     QLabel* lbl_scan_status_pill_dot_ = nullptr;

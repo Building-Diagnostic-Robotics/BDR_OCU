@@ -797,6 +797,13 @@ void AppShellWindow::goToStage3() {
         stage4_->stopFpvStream();
     }
     stage3_->setRobotId(robot_id_);
+    // Forward the latest Stage 2 preflight rollup so the Stage 3 System
+    // Status card can fold it into its READY / WARNING / NOT READY
+    // calculation. Empty string when no report has been parsed yet
+    // (DashboardScreen treats this as neutral, not a degrade).
+    if (stage2_) {
+        stage3_->setPreflightResult(stage2_->preflightResult());
+    }
     stack_->setCurrentWidget(stage3_);
 }
 

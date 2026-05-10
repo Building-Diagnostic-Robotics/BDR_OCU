@@ -1071,6 +1071,7 @@ void StartupScreen::updateUiState() {
     const QString overall = trimmed(overall_status_).toUpper();
     const bool have_report = preflight_completed_;
     const bool has_fail = (overall == "FAIL");
+    const bool has_warn = (overall == "WARN");
     // Continue/Launch enabled only when report exists and no FAIL state (PASS + WARN allowed),
     // unless temporary passthrough is enabled.
     const bool ready_to_launch =
@@ -1086,8 +1087,12 @@ void StartupScreen::updateUiState() {
             applyStatusBadge(lbl_overall_icon_, lbl_overall_status_, "RUNNING");
         } else if (!have_report) {
             applyStatusBadge(lbl_overall_icon_, lbl_overall_status_, "INITIALIZING");
+        } else if (has_fail) {
+            applyStatusBadge(lbl_overall_icon_, lbl_overall_status_, "NOT READY");
+        } else if (has_warn) {
+            applyStatusBadge(lbl_overall_icon_, lbl_overall_status_, "WARNING");
         } else {
-            applyStatusBadge(lbl_overall_icon_, lbl_overall_status_, has_fail ? "NOT READY" : "READY");
+            applyStatusBadge(lbl_overall_icon_, lbl_overall_status_, "READY");
         }
     }
 }
@@ -1244,6 +1249,7 @@ void StartupScreen::onReportFetchFinished(int exitCode, QProcess::ExitStatus exi
     };
 
     bool has_any_fail = false;
+    bool has_any_warn = false;
 
     // RF Link: rf_dbm (negative dBm; higher = stronger). Fallback to status if no metric.
     const QJsonObject rf_check = checks.value("rf").toObject();
@@ -1265,6 +1271,7 @@ void StartupScreen::onReportFetchFinished(int exitCode, QProcess::ExitStatus exi
         if (rf_status.isEmpty()) rf_status = "PENDING";
     }
     if (rf_status == "FAIL") has_any_fail = true;
+    if (rf_status == "WARN") has_any_warn = true;
     applyStatusBadge(lbl_rf_icon_, lbl_rf_status_, rf_status, lbl_rf_subtitle_, rf_subtitle);
 
     // GPS Signal: SKIP (indoor mode), or gps_satellites thresholds. When skipped, hide the row.
@@ -1294,6 +1301,7 @@ void StartupScreen::onReportFetchFinished(int exitCode, QProcess::ExitStatus exi
         }
     }
     if (gps_status == "FAIL") has_any_fail = true;
+    if (gps_status == "WARN") has_any_warn = true;
     applyStatusBadge(lbl_gps_icon_, lbl_gps_status_, gps_status, lbl_gps_subtitle_, gps_subtitle);
 
     // Cameras / Thermal: camera_occlusion (from checks.thermal, checks.cameras, or top-level)
@@ -1317,9 +1325,12 @@ void StartupScreen::onReportFetchFinished(int exitCode, QProcess::ExitStatus exi
             thermal_subtitle = "Major occlusion detected";
         }
         if (thermal_status == "FAIL") has_any_fail = true;
+        if (thermal_status == "WARN") has_any_warn = true;
         applyStatusBadge(lbl_thermal_icon_, lbl_thermal_status_, thermal_status, lbl_thermal_subtitle_, thermal_subtitle);
     } else {
-        applyStatusBadge(lbl_thermal_icon_, lbl_thermal_status_, statusOf("thermal"));
+        const QString th = statusOf("thermal");
+        if (th == "WARN") has_any_warn = true;
+        applyStatusBadge(lbl_thermal_icon_, lbl_thermal_status_, th);
     }
 
     // RGB, LiDAR, Motors: use status from JSON (no threshold logic)
@@ -1327,13 +1338,30 @@ void StartupScreen::onReportFetchFinished(int exitCode, QProcess::ExitStatus exi
     right_rgb_status_ = statusOf("right_rgb");
     updateCombinedRgbStatus();
     if (left_rgb_status_ == "FAIL" || right_rgb_status_ == "FAIL") has_any_fail = true;
-    applyStatusBadge(lbl_lidar_icon_, lbl_lidar_status_, statusOf("lidar"));
-    if (statusOf("lidar") == "FAIL") has_any_fail = true;
-    applyStatusBadge(lbl_motors_icon_, lbl_motors_status_, statusOf("motors"));
-    if (statusOf("motors") == "FAIL") has_any_fail = true;
+    if (left_rgb_status_ == "WARN" || right_rgb_status_ == "WARN") has_any_warn = true;
+    const QString lidar_s = statusOf("lidar");
+    applyStatusBadge(lbl_lidar_icon_, lbl_lidar_status_, lidar_s);
+    if (lidar_s == "FAIL") has_any_fail = true;
+    if (lidar_s == "WARN") has_any_warn = true;
+    const QString motors_s = statusOf("motors");
+    applyStatusBadge(lbl_motors_icon_, lbl_motors_status_, motors_s);
+    if (motors_s == "FAIL") has_any_fail = true;
+    if (motors_s == "WARN") has_any_warn = true;
 
-    overall_status_ = has_any_fail ? "FAIL" : "READY";
-    applyStatusBadge(lbl_overall_icon_, lbl_overall_status_, has_any_fail ? "NOT READY" : "READY");
+    // Three-state preflight result. FAIL beats WARN; WARN beats READY.
+    // Downstream consumers (e.g. DashboardScreen's System Status card)
+    // fold this into a broader robot-health rollup, so preserving the
+    // WARN distinction here matters.
+    overall_status_ = has_any_fail ? "FAIL" : (has_any_warn ? "WARN" : "READY");
+    QString badge_text;
+    if (has_any_fail) {
+        badge_text = QStringLiteral("NOT READY");
+    } else if (has_any_warn) {
+        badge_text = QStringLiteral("WARNING");
+    } else {
+        badge_text = QStringLiteral("READY");
+    }
+    applyStatusBadge(lbl_overall_icon_, lbl_overall_status_, badge_text);
 
     preflight_completed_ = true;
     if (btn_retry_report_) {
@@ -1495,6 +1523,10 @@ void StartupScreen::applyStatusBadge(QLabel* icon, QLabel* text, const QString& 
         glyph = "×";
         color = "#E74C3C";
         display = "NOT READY";
+    } else if (s == "WARNING") {
+        glyph = "!";
+        color = "#FFB020";
+        display = "WARNING";
     } else if (s == "RUNNING" || s == "INITIALIZING" || s == "PENDING") {
         glyph = " ";
         color = "#9F9FA9";

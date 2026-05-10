@@ -28,13 +28,35 @@ Quick inventory of current bypass sites:
 
 - `cpp/src/startup_screen.cpp` — `kEnableLaunchDashboardPassthrough = true`
  forces Stage 2 Continue always-enabled regardless of preflight result.
+- `cpp/src/planner_screen.cpp` — `kBypassPlannerStageGates = true` lets
+  the operator click into Scan Splitting / Scan stages without a saved
+  map, completed plan, or published waypoints. Intentionally open during
+  field testing; close before customer delivery.
 - `cpp/src/app_shell.cpp` — `DashboardScreen::viewRecordingsRequested`
-  signal is emitted but intentionally not connected yet.
-- `cpp/src/planner_screen.cpp` — Manual progression mode on the Scan
-  Splitting stage is a "coming soon" stub; Automatic mode is wired through
-  `/f2c_waypoints` (Stage 4 execution screen still TODO).
-- `cpp/src/dashboard_screen.cpp` — info-card values (firmware, last
-  calibration, battery) are placeholders with no live data source.
+  signal is emitted but intentionally not connected yet. Dialog `.cpp`
+  files are present but excluded from `GUI_SOURCES` until this lands —
+  see `cpp/CMakeLists.txt`.
+- `cpp/src/dashboard_screen.cpp` — Top-row cards are all live now.
+  System Status rolls up
+  {preflight, battery, MQTT-freshness reachability proxy} into
+  INITIALIZING/READY/WARNING/NOT READY. Battery card mirrors the
+  live MQTT subscriber. Total Scans + Next Calibration share a
+  single combined SSH probe with Last Calibration that returns
+  `<cal_mtime> <total_scans> <scans_since_cal>`; the calibration
+  card blinks (`QGraphicsOpacityEffect`) and becomes clickable once
+  `kCalibrationDueAfterScans = 3` scans have passed since the last
+  tilt calibration.   The lower System Information row is fully wired,
+  including Uptime (elapsed since `main()` stamped
+  `kOcuStartEpochMsProperty` on `QApplication`, refreshed
+  every second while Stage 3 is visible).
+- `cpp/src/planner_screen.cpp` — Stage 4 is fully wired: progress +
+  quality from live odometry and reprojection, per-segment
+  completion from real controller `segment_complete` /
+  `segment_saved` payloads, per-segment plot colors via a
+  status-driven `PlotWidget` overlay (Figma-spec), and the active
+  segment spinner is animated via a 30 ms `QTimer` rotating the
+  `scan_segment_active.svg` icon. No remaining Stage 4 dev
+  short-circuits worth tracking. See `docs/DEV_BYPASSES.md`.
 
 ### Rules for agents touching these sites
 
@@ -66,9 +88,14 @@ Quick inventory of current bypass sites:
 | 4 | `ExplorationScreen` | `cpp/src/exploration_screen.cpp` |
 | 5 | `PlannerScreen` | `cpp/src/planner_screen.cpp` |
 
-The legacy `CoverageGUI` (`cpp/src/coverage_gui.cpp`, ~6,874 LOC) still
-compiles but is not instantiated from `main.cpp`. Treat it as reference-only
-until a decision is made on deletion vs. CMake-guard.
+The monolithic legacy window **`CoverageGUI`** has been **removed** from the
+tree (`coverage_gui.hpp/.cpp` deleted). Live UI is `AppShellWindow` + staged
+screens; map/video/widgets live in `plot_widget.*`, `video_stream_widget.*`,
+`coverage_geometry.hpp`, `coverage_stats.hpp`. Recordings/cloud-tab sources
+(`data_transfer_dialog`, `cloud_upload_dialog`, `scan_session_tracker`,
+`teleop_widget`, `network_monitor`) remain **on disk** but are **not** linked
+into `bdr_coverage_planner` — see the comment above `GUI_SOURCES` in
+`cpp/CMakeLists.txt` when rewiring `DashboardScreen::viewRecordingsRequested`.
 
 ## OTA update pipeline (Phases 1-9, complete and production-wired)
 

@@ -2,7 +2,7 @@
 
 #include "components/auto_hide_scroll_bar.hpp"
 
-#include "coverage_gui.hpp"
+#include "video_stream_widget.hpp"
 
 #include <algorithm>
 #include <array>

@@ -33,5 +33,8 @@ You are an expert C++ Software Architect and Qt/ROS2 Developer. This project is 
 
 # Reference Context
 Always reference our specific architectural patterns when building new features:
-- `@revamped_architecture_blueprint.md`
-- `@TILT_CALIBRATION_PLAN.md`
+- `@cpp/CLAUDE.md` — authoritative architecture overview and build notes.
+- `@docs/TILT_CALIBRATION_PLAN.md`
+- `@docs/OTA.md` — OTA state machine and runner UX.
+- `@docs/DEV_BYPASSES.md` — re-wiring checklist before release.
+- `@AGENTS.md` — bypass inventory and rules for agents touching them.

@@ -4,7 +4,7 @@
  */
 
 #include "scan_session_tracker.hpp"
-#include "coverage_gui.hpp"  // For CoverageStats
+#include "coverage_stats.hpp"
 
 #include <QDir>
 #include <QDirIterator>

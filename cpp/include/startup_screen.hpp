@@ -22,6 +22,11 @@ public:
     void resetState();
     void setDarkMode(bool dark_mode);
 
+    // Latest preflight rollup. Returns one of "READY" / "WARN" / "FAIL" /
+    // "" (empty = no report parsed yet). The DashboardScreen System
+    // Status card folds this into a broader robot-health rollup.
+    QString preflightResult() const { return overall_status_; }
+
 protected:
     void showEvent(QShowEvent* event) override;
 

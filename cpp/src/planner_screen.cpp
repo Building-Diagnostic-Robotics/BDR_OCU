@@ -6,7 +6,8 @@
 #include "components/fpv_camera_view.hpp"
 #include "components/pre_scan_checklist_dialog.hpp"
 #include "components/svg_icon_button.hpp"
-#include "coverage_gui.hpp"
+#include "plot_widget.hpp"
+#include "video_stream_widget.hpp"
 #include "settings_constants.hpp"
 
 #include <algorithm>
@@ -1747,6 +1748,10 @@ void PlannerScreen::setLiveRobotTelemetry(const std::optional<PathState>& pose,
 
         maybeScheduleScanQualityUpdate();
         recomputeScanAggregateStats();
+        // Smoothly slide the active-segment split point on the plot to
+        // follow the robot. Cheap: no segment geometry is rebuilt, only
+        // the statuses + progress fraction are pushed to PlotWidget.
+        refreshScanSegmentOverlay();
     }
 
     updateScanRunUi();
@@ -5064,7 +5069,43 @@ void PlannerScreen::pushScanSegmentsToPlot() {
     plot_->setScanSegments(seg_paths, labels, lengths, turns, true, selected);
     if (current_step_ == PlannerStep::Scan) {
         plot_->setActiveScanSegment(cache->scan_active_segment_index);
+        refreshScanSegmentOverlay();
+    } else {
+        // Outside the Scan step (planning views) — clear overlay so we
+        // revert to the planning-stage palette.
+        plot_->setScanSegmentsOverlay({}, 0.0);
     }
+}
+
+void PlannerScreen::refreshScanSegmentOverlay() {
+    if (!plot_ || current_step_ != PlannerStep::Scan) {
+        return;
+    }
+    const SessionCache* cache = activeSessionPtr();
+    if (!cache || cache->scan_segments.empty()) {
+        plot_->setScanSegmentsOverlay({}, 0.0);
+        return;
+    }
+    std::vector<PlotWidget::ScanSegmentStatus> statuses;
+    statuses.reserve(cache->scan_segments.size());
+    const int active_idx = cache->scan_active_segment_index;
+    for (size_t i = 0; i < cache->scan_segments.size(); ++i) {
+        const auto& seg = cache->scan_segments[i];
+        if (seg.completed) {
+            statuses.push_back(PlotWidget::ScanSegmentStatus::Completed);
+        } else if (static_cast<int>(i) == active_idx &&
+                   cache->scan_run_state == ScanRunState::Running) {
+            statuses.push_back(PlotWidget::ScanSegmentStatus::Active);
+        } else {
+            statuses.push_back(PlotWidget::ScanSegmentStatus::Pending);
+        }
+    }
+    const double active_progress =
+        (active_idx >= 0 &&
+         active_idx < static_cast<int>(cache->scan_segments.size()))
+            ? cache->scan_segments[static_cast<size_t>(active_idx)].progress_pct
+            : 0.0;
+    plot_->setScanSegmentsOverlay(statuses, active_progress);
 }
 
 std::vector<int> PlannerScreen::selectedScanSegmentIndices() const {
@@ -8432,7 +8473,8 @@ QWidget* PlannerScreen::buildScanSegmentStatusCard(QWidget* parent) {
 
 QWidget* PlannerScreen::buildScanStatisticsCard(QWidget* parent) {
     auto* card = makeScanCardShell(parent);
-    card->setFixedHeight(170);
+    // Height fits header + three stat rows (Points row removed — heuristic was not trustworthy).
+    card->setFixedHeight(134);
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(12);
@@ -8445,10 +8487,6 @@ QWidget* PlannerScreen::buildScanStatisticsCard(QWidget* parent) {
                                       QStringLiteral("Distance"),
                                       QStringLiteral("0.0 m"),
                                       &lbl_scan_stats_distance_));
-    layout->addWidget(makeKeyValueRow(card,
-                                      QStringLiteral("Points"),
-                                      QStringLiteral("0.00M"),
-                                      &lbl_scan_stats_points_));
     layout->addWidget(makeKeyValueRow(card,
                                       QStringLiteral("Avg Quality"),
                                       QStringLiteral("0.0%"),
@@ -8713,7 +8751,6 @@ void PlannerScreen::enterScanStage() {
     cache.scan_distance_traveled_m = 0.0;
     cache.scan_total_coverage_pct = 0.0;
     cache.scan_avg_quality_pct = 0.0;
-    cache.scan_total_points_m = 0.0;
     cache.scan_estimated_ms_left = -1;
     // Auto-split when the operator skipped the Splitting stage entirely.
     // Treats the whole planned path as a single "complete scan" segment so
@@ -9163,10 +9200,6 @@ void PlannerScreen::updateScanRunUi() {
     if (cache && lbl_scan_stats_distance_) {
         lbl_scan_stats_distance_->setText(
             QString::number(cache->scan_distance_traveled_m, 'f', 1) + QStringLiteral(" m"));
-    }
-    if (cache && lbl_scan_stats_points_) {
-        lbl_scan_stats_points_->setText(
-            QString::number(cache->scan_total_points_m, 'f', 2) + QStringLiteral("M"));
     }
     if (cache && lbl_scan_stats_avg_quality_) {
         lbl_scan_stats_avg_quality_->setText(
@@ -9662,7 +9695,6 @@ void PlannerScreen::notifyScanCancelled(bool success) {
     cache.scan_active_segment_index = -1;
     cache.scan_total_coverage_pct = 0.0;
     cache.scan_avg_quality_pct = 0.0;
-    cache.scan_total_points_m = 0.0;
     cache.scan_distance_traveled_m = 0.0;
     cache.scan_elapsed_ms = 0;
     cache.scan_estimated_ms_left = -1;
@@ -9780,7 +9812,6 @@ void PlannerScreen::notifyScanDiscarded(bool success) {
     cache.scan_active_segment_index = -1;
     cache.scan_total_coverage_pct = 0.0;
     cache.scan_avg_quality_pct = 0.0;
-    cache.scan_total_points_m = 0.0;
     cache.scan_distance_traveled_m = 0.0;
     cache.scan_elapsed_ms = 0;
     cache.scan_estimated_ms_left = -1;
@@ -9872,7 +9903,6 @@ void PlannerScreen::recomputeScanAggregateStats() {
         total_selected > 0 ? (total_coverage / static_cast<double>(total_selected)) : 0.0;
     cache.scan_avg_quality_pct =
         quality_count > 0 ? (quality_sum / static_cast<double>(quality_count)) : 0.0;
-    cache.scan_total_points_m = cache.scan_distance_traveled_m * 0.28;
 
     if (cache.scan_run_state == ScanRunState::Running &&
         cache.scan_total_coverage_pct > 0.1) {
@@ -10004,9 +10034,8 @@ void PlannerScreen::devForceJumpToScanStep() {
         cache.scan_active_segment_index = 1;
         cache.scan_run_state = ScanRunState::Idle;
         cache.scan_total_coverage_pct = 0.0;
-        cache.scan_avg_quality_pct = 0.0;
-        cache.scan_total_points_m = 0.0;
-        cache.scan_distance_traveled_m = 0.0;
+    cache.scan_avg_quality_pct = 0.0;
+    cache.scan_distance_traveled_m = 0.0;
         cache.scan_elapsed_ms = 0;
         cache.scan_estimated_ms_left = -1;
         live_robot_pose_ = PathState(Point2D{2.0, 2.0}, 1.57079632679);

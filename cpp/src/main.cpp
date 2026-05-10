@@ -7,6 +7,7 @@
  */
 
 #include <QApplication>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QFont>
 #include <QFontDatabase>
@@ -251,7 +252,10 @@ int main(int argc, char* argv[])
 
     // Create Qt application
     QApplication app(argc, argv);
-    
+    app.setProperty(
+        f2c_cpp::kOcuStartEpochMsProperty,
+        QVariant::fromValue(QDateTime::currentMSecsSinceEpoch()));
+
     // Set application metadata
     app.setApplicationName("BDR Coverage Planner");
     app.setApplicationDisplayName("BDR Coverage Planner");
