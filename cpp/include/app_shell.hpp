@@ -197,6 +197,10 @@ private:
     QString detectLocalIP() const;
     ResolvedRobotSshTarget resolveRobotSshForRemoteOps() const;
     bool isLocalProcessRunning(const QString& process_name) const;
+    /// True if the laptop-side Zenoh daemon from `laptop_teleop.launch.py` is running
+    /// (`zenohd -c /tmp/zenohd_laptop_<robot_ip>.json5`). Uses `pgrep -f` so we don't rely
+    /// on `/proc/*/comm` being exactly `zenohd` (that made `pgrep -x zenohd` false negatives).
+    bool localZenohLaptopBridgeRunning() const;
     bool isRobotPipelineRunning(const ResolvedRobotSshTarget& ssh_target) const;
     void onExplorationStreamStatus(const std_msgs::msg::String::SharedPtr msg);
     void onExplorationOdom(const nav_msgs::msg::Odometry::SharedPtr msg);

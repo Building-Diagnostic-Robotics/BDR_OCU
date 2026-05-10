@@ -2289,7 +2289,7 @@ void AppShellWindow::onExplorationLaunchPoll() {
         rclcpp::spin_some(exploration_ros_node_);
     }
 
-    local_zenoh_ready_ = isLocalProcessRunning("zenohd");
+    local_zenoh_ready_ = localZenohLaptopBridgeRunning();
     if (exploration_video_record_client_) {
         video_service_ready_ = exploration_video_record_client_->service_is_ready();
     }
@@ -3177,6 +3177,16 @@ ResolvedRobotSshTarget AppShellWindow::resolveRobotSshForRemoteOps() const {
 bool AppShellWindow::isLocalProcessRunning(const QString& process_name) const {
     QProcess proc;
     proc.start("pgrep", QStringList() << "-x" << process_name);
+    if (!proc.waitForFinished(1200)) {
+        return false;
+    }
+    return proc.exitCode() == 0;
+}
+
+bool AppShellWindow::localZenohLaptopBridgeRunning() const {
+    QProcess proc;
+    // Must stay in sync with pilot_control/launch/laptop_teleop.launch.py temp config path prefix.
+    proc.start("pgrep", QStringList() << "-f" << "zenohd_laptop_");
     if (!proc.waitForFinished(1200)) {
         return false;
     }
