@@ -233,15 +233,23 @@ void UpdateChecker::onReplyFinished() {
     const int http_status =
         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
-    // 304 Not Modified: cached ETag matched, nothing to do. Reset failure
-    // counters and schedule the next normal poll. Costs ~0 of our hourly
-    // budget so this is the desired steady state.
+    // 304 Not Modified: cached ETag matched, nothing new on the server.
+    // Reset failure counters and schedule the next normal poll. Costs ~0
+    // of our hourly budget so this is the desired steady state.
+    //
+    // Crucially, 304 means "no change since last ETag" — NOT "no update
+    // available". If a pending offer exists in persisted state it remains
+    // valid across 304s, so route through replayPersistedRelease() to
+    // re-evaluate the four banner-visibility gates (newer / denylisted /
+    // snoozed / installed) and emit the right signal. This also makes
+    // mid-session snooze expiry self-heal: the banner reappears on the
+    // next 304 once the snooze deadline passes.
     if (http_status == 304) {
         log::info("checker", QStringLiteral("304 Not Modified (etag hit)"));
         consecutive_failures_ = 0;
         current_backoff_ms_ = kPollIntervalMs;
         scheduleNextPoll(kPollIntervalMs);
-        emit noUpdateAvailable();
+        replayPersistedRelease();
         return;
     }
 
