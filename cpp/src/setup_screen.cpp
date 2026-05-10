@@ -2,9 +2,12 @@
 #include "robot_login.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
+#include "update/update_log.hpp"
 
 #include <algorithm>
+#include <QApplication>
 #include <QColor>
+#include <QEventLoop>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -213,6 +216,38 @@ SetupScreen::SetupScreen(QWidget* parent)
     root->addWidget(panel, 0, Qt::AlignHCenter);
     root->addStretch(2);
 
+    // Resolve the connection-monitor ping target from the robot registry
+    // (robots.json). The indicator reflects radio-link reachability — a
+    // single per-laptop concern, not tied to the typed Robot ID — so we
+    // pick the first profile and cache its host. If the registry is
+    // missing, we skip the ping rather than fall back to a hardcoded
+    // IP, which would silently mask real configuration problems.
+    {
+        RobotRegistry registry;
+        QString reg_err;
+        if (registry.load(&reg_err)) {
+            const auto profiles = registry.robots();
+            if (!profiles.isEmpty()) {
+                connection_target_host_ = profiles.first().host.trimmed();
+                update::log::info(
+                    "setup",
+                    QStringLiteral("registry loaded: %1 robot(s), ping target=%2 (from %3)")
+                        .arg(profiles.size())
+                        .arg(connection_target_host_)
+                        .arg(registry.sourcePath()));
+            } else {
+                update::log::warn(
+                    "setup",
+                    QStringLiteral("registry loaded but contains no robots: %1")
+                        .arg(registry.sourcePath()));
+            }
+        } else {
+            update::log::warn(
+                "setup",
+                QStringLiteral("registry load failed: %1").arg(reg_err));
+        }
+    }
+
     applyLocalStyle();
     startConnectionMonitor();
 
@@ -269,9 +304,17 @@ void SetupScreen::checkConnection() {
         return;
     }
 
+    // Priority: optional QSettings override > registry-cached host. No
+    // hardcoded fallback by design — if no host can be resolved, we leave
+    // the indicator in DISCONNECTED rather than silently ping a random IP.
     QSettings settings(kSettingsOrgName, kSettingsAppName);
-    const QString robot_ip = settings.value("robot_ip", "").toString().trimmed();
-    const QString target = robot_ip.isEmpty() ? "192.168.168.101" : robot_ip;
+    const QString override_ip = settings.value("robot_ip", "").toString().trimmed();
+    const QString target = !override_ip.isEmpty() ? override_ip : connection_target_host_;
+
+    if (target.isEmpty()) {
+        updateConnectionUi(false);
+        return;
+    }
 
     ping_proc_->setProgram("ping");
     ping_proc_->setArguments(QStringList() << "-c" << "1" << "-W" << "1" << target);
@@ -487,6 +530,86 @@ void SetupScreen::updateUiState() {
     }
 }
 
+namespace {
+
+/**
+ * Translates raw error strings from `loginToRobot()` (or the upstream
+ * `pilot_control_auth` CLI / OpenSSH) into operator-facing copy.
+ *
+ * The raw strings are kept in the application log for support diagnostics;
+ * what's returned here is what the operator sees in the red error label
+ * under the LOGIN button. Unknown errors fall through verbatim so we
+ * never lose information in the field — better an awkward error than a
+ * silent one.
+ */
+QString mapLoginErrorForOperator(const QString& raw) {
+    const QString s = raw.trimmed();
+    if (s.isEmpty()) {
+        return QStringLiteral("Login failed. Try again.");
+    }
+
+    // Robot-side errors emitted by pilot_control_auth (robot_auth_cli.py).
+    if (s.contains(QStringLiteral("Too many failed attempts"), Qt::CaseInsensitive)) {
+        return s;  // Already operator-friendly, includes the retry-after delay.
+    }
+    if (s.contains(QStringLiteral("Invalid PIN"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("PIN must be exactly 6 digits"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Incorrect access code.");
+    }
+    if (s.contains(QStringLiteral("robot_id does not match"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Robot ID is incorrect for this robot.");
+    }
+    if (s.contains(QStringLiteral("Auth state file is unreadable"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("Cannot create auth state"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("Cannot write auth state"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("Unsupported PIN hash format"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("Invalid PIN hash parameters"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Robot authentication is misconfigured. Contact support.");
+    }
+
+    // Client-side errors from loginToRobot itself.
+    if (s.contains(QStringLiteral("not found in registry"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Robot ID not in registry. Contact support.");
+    }
+    if (s.contains(QStringLiteral("Robot profile has no host"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Robot configuration is incomplete. Contact support.");
+    }
+    if (s.contains(QStringLiteral("Failed to start ssh"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Could not start network client.");
+    }
+    if (s.contains(QStringLiteral("Login timed out"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Robot unreachable. Check that the robot is powered on and the radio link is connected.");
+    }
+    if (s.contains(QStringLiteral("Robot auth response missing token"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("Invalid JSON from robot auth"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Robot returned an invalid response. Try again.");
+    }
+
+    // OpenSSH-level errors surfaced via stderr.
+    if (s.contains(QStringLiteral("Permission denied"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("publickey"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Laptop is not authorized to connect to this robot. Contact support.");
+    }
+    if (s.contains(QStringLiteral("No route to host"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("Connection refused"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("Connection timed out"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("Connection closed"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("Network is unreachable"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Robot unreachable. Check that the robot is powered on and the radio link is connected.");
+    }
+    if (s.contains(QStringLiteral("Host key verification failed"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Robot host key changed. Contact support.");
+    }
+    if (s.contains(QStringLiteral("command not found"), Qt::CaseInsensitive)
+        || s.contains(QStringLiteral("pilot_control_auth"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Robot is missing authentication tooling. Contact support.");
+    }
+
+    return s;
+}
+
+}  // namespace
+
 void SetupScreen::submit() {
     const auto [robot_id, access_code] = getTrimmedCredentials();
 
@@ -498,7 +621,75 @@ void SetupScreen::submit() {
         return;
     }
 
-    // Dev bypass: just proceed to next screen (no SSH/auth). Re-enable real login later.
+    // Visual feedback: disable inputs and flip the button label so the
+    // operator knows the click registered. We force a synchronous repaint
+    // via processEvents (excluding user input to avoid re-entrancy from a
+    // double-click) before the blocking SSH call so the new state is
+    // visible during the typical sub-second login round-trip.
+    if (btn_login_) {
+        btn_login_->setEnabled(false);
+        btn_login_->setText(QStringLiteral("LOGGING IN…"));
+    }
+    if (txt_robot_id_) txt_robot_id_->setEnabled(false);
+    if (txt_access_code_) txt_access_code_->setEnabled(false);
+    if (lbl_error_) {
+        lbl_error_->setVisible(false);
+        lbl_error_->clear();
+    }
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+    // SSHes to the robot and runs `pilot_control_auth login --pin-stdin
+    // --json`, returning true iff the robot returned a signed token.
+    // robot_login.cpp owns ConnectTimeout=8s and a 12s wall-clock cap on
+    // the whole exchange, so worst-case UI freeze is ~12s on a fully
+    // unreachable robot.
+    RobotRegistry registry;
+    QString registry_error;
+    QString login_error;
+    bool ok = false;
+    QString resolved_host;
+
+    if (!registry.load(&registry_error)) {
+        login_error = registry_error.isEmpty()
+            ? QStringLiteral("Robot registry not configured.")
+            : registry_error;
+        update::log::warn(
+            "setup",
+            QStringLiteral("login: registry load failed: %1").arg(registry_error));
+    } else {
+        ok = loginToRobot(robot_id, access_code, registry, &login_error, &resolved_host);
+    }
+
+    // Restore inputs regardless of outcome — on success they're moot
+    // (we transition stages immediately) but on failure the operator
+    // needs to retry.
+    if (btn_login_) {
+        btn_login_->setText(QStringLiteral("LOGIN"));
+        btn_login_->setEnabled(true);
+    }
+    if (txt_robot_id_) txt_robot_id_->setEnabled(true);
+    if (txt_access_code_) txt_access_code_->setEnabled(true);
+
+    if (!ok) {
+        update::log::warn(
+            "setup",
+            QStringLiteral("login failed for robot_id=%1 host=%2: %3")
+                .arg(robot_id)
+                .arg(resolved_host.isEmpty() ? QStringLiteral("?") : resolved_host)
+                .arg(login_error));
+        if (lbl_error_) {
+            lbl_error_->setText(mapLoginErrorForOperator(login_error));
+            lbl_error_->setVisible(true);
+        }
+        return;
+    }
+
+    update::log::info(
+        "setup",
+        QStringLiteral("login ok: robot_id=%1 host=%2").arg(robot_id).arg(resolved_host));
+
+    // Persist the Robot ID only after a successful login so we don't
+    // pre-populate the field with a value that never authenticated.
     QSettings settings(kSettingsOrgName, kSettingsAppName);
     settings.setValue("setup/robot_id", robot_id);
 

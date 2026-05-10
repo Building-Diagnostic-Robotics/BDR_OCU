@@ -13,20 +13,34 @@ a live robot connection. Each item below must be rewired (or guarded behind a
 
 ## Stage 1 — Setup / Login (`cpp/src/setup_screen.cpp`)
 
-- [ ] **Real authentication.** `SetupScreen::submit()` currently emits
-      `loginSubmitted(...)` after only checking that both fields are
-      non-empty (see the `// Dev bypass:` comment). Replace with a call to
-      `loginToRobot()` from `cpp/src/robot_login.cpp` (already implemented:
-      SSH → `pilot_control_auth login --pin-stdin --json`, with pinned
-      `known_hosts` via `RobotRegistry`). Surface errors in `lbl_error_`.
-- [ ] **Robot-aware connection monitor.** `SetupScreen::checkConnection()`
-      falls back to the hardcoded string `"192.168.168.101"`. Resolve the
-      ping target from `RobotRegistry::findById(robot_id).host` for the
-      currently entered Robot ID, falling back only when the registry has no
-      match.
-- [ ] **Registry bootstrap.** No call site currently loads `robots.json`.
-      Load `RobotRegistry` in `AppShellWindow` construction and inject it
-      into `SetupScreen` (and any other stage that needs profile data).
+- [x] **Real authentication.** `SetupScreen::submit()` now calls
+      `loginToRobot()` (`cpp/src/robot_login.cpp`), which SSHes to the
+      robot and runs `pilot_control_auth login --pin-stdin --json`. On
+      failure, raw errors are recorded via `update::log::warn` and a
+      mapped operator-friendly message is shown in `lbl_error_` (see
+      `mapLoginErrorForOperator` in `setup_screen.cpp`). The button is
+      disabled and relabeled `LOGGING IN…` during the SSH round-trip.
+      `setup/robot_id` is persisted to QSettings only after a successful
+      login. The session token returned by the robot is parsed and
+      verified inside `loginToRobot` but discarded — see
+      `TODO(BDR_REWIRE)` in `robot_login.hpp` for the follow-up to plumb
+      it into the planner mission-upload path.
+- [x] **Robot-aware connection monitor.** `SetupScreen::checkConnection()`
+      now pings the host of the first robot in `robots.json`, cached at
+      construction. The indicator reflects radio-link reachability — a
+      single per-laptop concern, independent of whatever Robot ID the
+      operator types. If the registry is missing or empty the indicator
+      stays in DISCONNECTED rather than silently pinging a hardcoded
+      address. The `robot_ip` QSettings key is preserved as an
+      undocumented per-machine override.
+- [x] **Registry bootstrap.** `SetupScreen` constructs and loads a
+      `RobotRegistry` directly via `RobotRegistry::load()`, which probes
+      `~/.config/PilotControl/BDRCoveragePlanner/robots.json` first and
+      falls back to alongside-binary locations. `submit()` reloads the
+      registry on each login click (matches the existing pattern in
+      `AppShellWindow::loadExplorationRfConfigForActiveRobot`). No
+      injection seam needed for now since the registry file is ~hundreds
+      of bytes and load latency is negligible.
 
 ## Stage 2 — Pre-flight Diagnostics (`cpp/src/startup_screen.cpp`)
 

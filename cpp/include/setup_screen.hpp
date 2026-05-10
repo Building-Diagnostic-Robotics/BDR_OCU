@@ -53,6 +53,12 @@ private:
     QPixmap wireframe_connected_;
     QPixmap wireframe_disconnected_;
 
+    /// Cached host IP of the first robot in robots.json, resolved once at
+    /// construction. Drives the connection-status indicator (top-left
+    /// CONNECTED/DISCONNECTED) which reflects radio-link reachability —
+    /// independent of whatever Robot ID the operator has typed.
+    QString connection_target_host_;
+
     bool dark_mode_ = false;
     bool last_connection_state_valid_ = false;
     bool last_connection_state_ = false;

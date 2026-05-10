@@ -26,12 +26,8 @@ release. The full, tickable checklist lives in `docs/DEV_BYPASSES.md`.
 
 Quick inventory of current bypass sites:
 
-- `cpp/src/setup_screen.cpp` — Stage 1 login is a dev bypass (no SSH/auth);
-  `robot_login.cpp` is implemented but unused.
-- `cpp/src/setup_screen.cpp` — ping target is a hardcoded
-  `192.168.168.101`; not resolved from `RobotRegistry`.
 - `cpp/src/startup_screen.cpp` — `kEnableLaunchDashboardPassthrough = true`
-  forces Stage 2 Continue always-enabled regardless of preflight result.
+ forces Stage 2 Continue always-enabled regardless of preflight result.
 - `cpp/src/app_shell.cpp` — `DashboardScreen::viewRecordingsRequested`
   signal is emitted but intentionally not connected yet.
 - `cpp/src/planner_screen.cpp` — Manual progression mode on the Scan
