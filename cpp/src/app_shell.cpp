@@ -72,6 +72,12 @@ constexpr int kCorrectedMapRetryDelayMs = 750;
 constexpr int kOdriveAxisStateIdle = 1;
 constexpr int kOdriveAxisStateClosedLoopControl = 8;
 
+QString sshUserHostSpec(const ResolvedRobotSshTarget& t) {
+    const QString user =
+        t.ssh_user.trimmed().isEmpty() ? QStringLiteral("roofus") : t.ssh_user.trimmed();
+    return QStringLiteral("%1@%2").arg(user, t.host);
+}
+
 QPixmap loadSvgPixmap(const QString& resource_path, int width, int height, const QString& color = QString()) {
     QFile file(resource_path);
     if (!file.open(QIODevice::ReadOnly)) {
@@ -1472,6 +1478,7 @@ void AppShellWindow::onExplorationStartScanRequested() {
     exploration_last_storage_probe_at_ms_ = 0;
     loadExplorationRfConfigForActiveRobot();
     active_robot_host_.clear();
+    active_robot_ssh_user_.clear();
     laptop_launch_last_output_.clear();
     robot_launch_last_output_.clear();
     exploration_launch_started_at_ms_ = QDateTime::currentMSecsSinceEpoch();
@@ -1479,10 +1486,20 @@ void AppShellWindow::onExplorationStartScanRequested() {
 
     ensureExplorationRosInterfaces();
 
-    const QString robot_host = robotHostFromSettings();
-    active_robot_host_ = robot_host;
-    startLaptopTeleopLaunch(robot_host);
-    startRobotCompleteLaunch(robot_host);
+    ResolvedRobotSshTarget ssh_target;
+    QString resolve_err;
+    if (!resolveRobotSshTargetFromSettings(&ssh_target, &resolve_err)) {
+        setExplorationLaunchFailed(
+            resolve_err.isEmpty()
+                ? QStringLiteral(
+                      "Could not resolve robot SSH target (complete setup login or set robot_ip).")
+                : resolve_err);
+        return;
+    }
+    active_robot_host_ = ssh_target.host;
+    active_robot_ssh_user_ = ssh_target.ssh_user;
+    startLaptopTeleopLaunch(ssh_target.host);
+    startRobotCompleteLaunch(ssh_target);
 
     if (exploration_launch_poll_timer_ && !exploration_launch_poll_timer_->isActive()) {
         exploration_launch_poll_timer_->start();
@@ -2077,9 +2094,11 @@ void AppShellWindow::discardCompletedScanDataCollection(std::function<void(bool)
 }
 
 void AppShellWindow::performExplorationPipelineTeardownPreamble() {
-    const QString robot_host =
-        active_robot_host_.trimmed().isEmpty() ? robotHostFromSettings() : active_robot_host_.trimmed();
-    active_robot_host_ = robot_host;
+    const ResolvedRobotSshTarget t = resolveRobotSshForRemoteOps();
+    if (!t.host.isEmpty()) {
+        active_robot_host_ = t.host;
+        active_robot_ssh_user_ = t.ssh_user;
+    }
 
     if (exploration_launch_poll_timer_) {
         exploration_launch_poll_timer_->stop();
@@ -2091,8 +2110,8 @@ void AppShellWindow::performExplorationPipelineTeardownPreamble() {
 }
 
 void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
-    const QString robot_host =
-        active_robot_host_.trimmed().isEmpty() ? robotHostFromSettings() : active_robot_host_.trimmed();
+    const ResolvedRobotSshTarget ssh_target = resolveRobotSshForRemoteOps();
+    const QString robot_host = ssh_target.host;
 
     auto stopProcess = [](QProcess* proc, int terminate_wait_ms, int kill_wait_ms) {
         if (!proc || proc->state() == QProcess::NotRunning) {
@@ -2153,7 +2172,7 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
              << "UserKnownHostsFile=/dev/null"
              << "-o"
              << "BatchMode=yes"
-             << QString("roofus@%1").arg(robot_host)
+             << sshUserHostSpec(ssh_target)
              << remote_cmd;
         remote_cleanup_proc.start("ssh", args);
         if (!remote_cleanup_proc.waitForFinished(9000)) {
@@ -2453,8 +2472,13 @@ void AppShellWindow::startLaptopTeleopLaunch(const QString& robot_host) {
     laptop_launch_started_ = true;
 }
 
-void AppShellWindow::startRobotCompleteLaunch(const QString& robot_host) {
+void AppShellWindow::startRobotCompleteLaunch(const ResolvedRobotSshTarget& ssh_target) {
     if (!robot_launch_proc_) {
+        return;
+    }
+    const QString robot_host = ssh_target.host;
+    if (robot_host.trimmed().isEmpty()) {
+        setExplorationLaunchFailed(QStringLiteral("Robot host is empty; cannot start robot launch."));
         return;
     }
     if (robot_launch_proc_->state() != QProcess::NotRunning) {
@@ -2490,7 +2514,7 @@ void AppShellWindow::startRobotCompleteLaunch(const QString& robot_host) {
          << "UserKnownHostsFile=/dev/null"
          << "-o"
          << "BatchMode=yes"
-         << QString("roofus@%1").arg(robot_host)
+         << sshUserHostSpec(ssh_target)
          << remote_cmd;
 
     robot_launch_proc_->start("ssh", args);
@@ -2637,10 +2661,9 @@ bool AppShellWindow::requestSavedMapPathWithRetry(QString* saved_remote_path,
 }
 
 QString AppShellWindow::resolveLatestCorrectedMapUnderDataRoot(QString* error_message) const {
-    const QString robot_host =
-        active_robot_host_.trimmed().isEmpty() ? robotHostFromSettings() : active_robot_host_.trimmed();
+    const ResolvedRobotSshTarget ssh_target = resolveRobotSshForRemoteOps();
     const QString cleaned_root = QStringLiteral("/R_DATA");
-    if (robot_host.isEmpty()) {
+    if (ssh_target.host.isEmpty()) {
         if (error_message) {
             *error_message = QStringLiteral("Robot host unavailable for corrected-map lookup");
         }
@@ -2688,7 +2711,7 @@ QString AppShellWindow::resolveLatestCorrectedMapUnderDataRoot(QString* error_me
          << "UserKnownHostsFile=/dev/null"
          << "-o"
          << "BatchMode=yes"
-         << QString("roofus@%1").arg(robot_host)
+         << sshUserHostSpec(ssh_target)
          << remote_cmd;
     proc.start("ssh", args);
     if (!proc.waitForFinished(15000)) {
@@ -2882,10 +2905,10 @@ void AppShellWindow::startSavedMapDownload(const QString& remote_map_path,
         return;
     }
 
-    const QString robot_host =
-        active_robot_host_.trimmed().isEmpty() ? robotHostFromSettings() : active_robot_host_.trimmed();
-    active_robot_host_ = robot_host;
-    if (robot_host.isEmpty()) {
+    const ResolvedRobotSshTarget ssh_target = resolveRobotSshForRemoteOps();
+    active_robot_host_ = ssh_target.host;
+    active_robot_ssh_user_ = ssh_target.ssh_user;
+    if (ssh_target.host.isEmpty()) {
         failSavedMapWorkflow("Robot host unavailable for download.",
                              "Download failed: robot host is empty");
         return;
@@ -2908,7 +2931,7 @@ void AppShellWindow::startSavedMapDownload(const QString& remote_map_path,
     }
 
     const QString remote_spec =
-        QString("roofus@%1:%2").arg(robot_host, cleaned_remote_path);
+        QStringLiteral("%1:%2").arg(sshUserHostSpec(ssh_target), cleaned_remote_path);
     QStringList args;
     args << "-o"
          << "ConnectTimeout=10"
@@ -3136,10 +3159,19 @@ QString AppShellWindow::detectLocalIP() const {
     return QString();
 }
 
-QString AppShellWindow::robotHostFromSettings() const {
-    QSettings settings(f2c_cpp::kSettingsOrgName, f2c_cpp::kSettingsAppName);
-    const QString from_settings = settings.value("robot_ip", "").toString().trimmed();
-    return from_settings.isEmpty() ? QStringLiteral("192.168.168.101") : from_settings;
+ResolvedRobotSshTarget AppShellWindow::resolveRobotSshForRemoteOps() const {
+    ResolvedRobotSshTarget t;
+    if (!active_robot_host_.trimmed().isEmpty()) {
+        t.host = active_robot_host_.trimmed();
+        t.ssh_user = active_robot_ssh_user_.trimmed().isEmpty() ? QStringLiteral("roofus")
+                                                                 : active_robot_ssh_user_.trimmed();
+        return t;
+    }
+    QString err;
+    if (resolveRobotSshTargetFromSettings(&t, &err)) {
+        return t;
+    }
+    return {};
 }
 
 bool AppShellWindow::isLocalProcessRunning(const QString& process_name) const {
@@ -3151,7 +3183,10 @@ bool AppShellWindow::isLocalProcessRunning(const QString& process_name) const {
     return proc.exitCode() == 0;
 }
 
-bool AppShellWindow::isRobotPipelineRunning(const QString& robot_host) const {
+bool AppShellWindow::isRobotPipelineRunning(const ResolvedRobotSshTarget& ssh_target) const {
+    if (ssh_target.host.trimmed().isEmpty()) {
+        return false;
+    }
     QProcess proc;
     const QString remote_cmd =
         "bash -lc \"pgrep -f 'unified_data_collector|fastlio_mapping|diff_drive_controller' >/dev/null\"";
@@ -3164,7 +3199,7 @@ bool AppShellWindow::isRobotPipelineRunning(const QString& robot_host) const {
          << "UserKnownHostsFile=/dev/null"
          << "-o"
          << "BatchMode=yes"
-         << QString("roofus@%1").arg(robot_host)
+         << sshUserHostSpec(ssh_target)
          << remote_cmd;
     proc.start("ssh", args);
     if (!proc.waitForFinished(7000)) {
@@ -3762,9 +3797,8 @@ void AppShellWindow::requestExplorationStorageProbe() {
         return;
     }
 
-    const QString robot_host =
-        active_robot_host_.trimmed().isEmpty() ? robotHostFromSettings() : active_robot_host_.trimmed();
-    if (robot_host.trimmed().isEmpty()) {
+    const ResolvedRobotSshTarget ssh_target = resolveRobotSshForRemoteOps();
+    if (ssh_target.host.trimmed().isEmpty()) {
         return;
     }
 
@@ -3779,7 +3813,7 @@ void AppShellWindow::requestExplorationStorageProbe() {
          << "UserKnownHostsFile=/dev/null"
          << "-o"
          << "BatchMode=yes"
-         << QString("roofus@%1").arg(robot_host)
+         << sshUserHostSpec(ssh_target)
          << "df -h /R_DATA/";
 
     exploration_storage_probe_in_flight_ = true;

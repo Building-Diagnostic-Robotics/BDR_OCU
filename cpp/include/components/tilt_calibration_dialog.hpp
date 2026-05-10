@@ -20,7 +20,9 @@ class TiltCalibrationDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit TiltCalibrationDialog(const QString& robotHost, QWidget* parent = nullptr);
+    explicit TiltCalibrationDialog(const QString& robotHost,
+                                   const QString& sshUser = QString(),
+                                   QWidget* parent = nullptr);
 
 private slots:
     void onStartCalibrationClicked();
@@ -42,6 +44,7 @@ private:
     QStringList sshBaseArgs() const;
 
     QString robot_host_;
+    QString ssh_user_;
     QStackedWidget* stack_ = nullptr;
 
     QProcess* proc_ = nullptr;

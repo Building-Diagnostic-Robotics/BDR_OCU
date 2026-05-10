@@ -16,6 +16,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QLabel>
+#include "components/bdr_message_box.hpp"
 #include "components/tilt_calibration_dialog.hpp"
 #include <QMouseEvent>
 #include <QPainter>
@@ -289,11 +290,13 @@ DashboardScreen::DashboardScreen(QWidget* parent)
         "font-family: 'Arimo'; font-weight: 700; font-size: 24px; line-height: 32px; color: #1E2939;");
     cardsRow->addWidget(card_scans_, 1);
 
+    // Icon tint matches other status cards; applyStyle() reapplies accent pixmap/bg.
     card_battery_top_ = makeStatusCard(content, "DashboardCardBatteryTop",
-        "#F3E8FF", ":/assets/dashboard/battery.svg", "#9810FA", "Battery", lbl_battery_card_value_);
+        "rgba(0, 188, 125, 0.1)", ":/assets/dashboard/battery.svg", "#00BC7D", "Battery",
+        lbl_battery_card_value_);
     lbl_battery_card_value_->setText("—");
     lbl_battery_card_value_->setStyleSheet(
-        "font-family: 'Arimo'; font-weight: 700; font-size: 24px; line-height: 32px; color: #9810FA;");
+        "font-family: 'Arimo'; font-weight: 700; font-size: 24px; line-height: 32px; color: #1E2939;");
     cardsRow->addWidget(card_battery_top_, 1);
 
     card_calibration_ = makeStatusCard(content, "DashboardCardCalibration",
@@ -463,6 +466,7 @@ void DashboardScreen::setRobotId(const QString& robotId) {
     if (lbl_robot_id_value_) {
         lbl_robot_id_value_->setText(robot_id_.isEmpty() ? "—" : robot_id_.toUpper());
     }
+    loadRobotProfileFromRegistry();
 }
 
 void DashboardScreen::setDarkMode(bool dark_mode) {
@@ -490,42 +494,35 @@ void DashboardScreen::onViewRecordingsClicked() {
 }
 
 void DashboardScreen::onCalibrateTiltRequested() {
-    TiltCalibrationDialog dlg(robotHostFromSettings(), this);
+    ResolvedRobotSshTarget target;
+    QString err;
+    if (!resolveRobotSshTargetFromSettings(&target, &err)) {
+        BdrMessageBox::warning(
+            this,
+            QStringLiteral("Calibration"),
+            err.isEmpty() ? QStringLiteral("Could not resolve robot SSH connection.") : err);
+        return;
+    }
+    TiltCalibrationDialog dlg(target.host, target.ssh_user, this);
     dlg.exec();
 }
 
-QString DashboardScreen::robotHostFromSettings() const {
-    if (!robot_host_.isEmpty()) {
-        return robot_host_;
-    }
-    QSettings settings(kSettingsOrgName, kSettingsAppName);
-    const QString from_settings = settings.value("robot_ip", "").toString().trimmed();
-    return from_settings.isEmpty() ? QStringLiteral("192.168.168.101") : from_settings;
-}
-
 void DashboardScreen::loadRobotProfileFromRegistry() {
-    RobotRegistry registry;
-    QString reg_err;
-    if (!registry.load(&reg_err)) {
+    ResolvedRobotSshTarget target;
+    QString err;
+    robot_host_.clear();
+    robot_ssh_user_.clear();
+    if (!resolveRobotSshTargetFromSettings(&target, &err)) {
         update::log::warn("dashboard",
-                          QStringLiteral("registry load failed: %1").arg(reg_err));
+                          QStringLiteral("robot SSH target unresolved: %1").arg(err));
         return;
     }
-    const auto profiles = registry.robots();
-    if (profiles.isEmpty()) {
-        update::log::warn(
-            "dashboard",
-            QStringLiteral("registry has no robots: %1").arg(registry.sourcePath()));
-        return;
-    }
-    robot_host_ = profiles.first().host.trimmed();
-    robot_ssh_user_ = profiles.first().ssh_user.trimmed();
-    update::log::info(
-        "dashboard",
-        QStringLiteral("registry resolved host=%1 ssh_user=%2 (from %3)")
-            .arg(robot_host_)
-            .arg(robot_ssh_user_)
-            .arg(registry.sourcePath()));
+    robot_host_ = target.host;
+    robot_ssh_user_ = target.ssh_user;
+    update::log::info("dashboard",
+                      QStringLiteral("SSH target host=%1 ssh_user=%2")
+                          .arg(robot_host_)
+                          .arg(robot_ssh_user_));
 }
 
 DashboardScreen::~DashboardScreen() {
@@ -828,38 +825,18 @@ void DashboardScreen::setBatteryDisplay(const QString& valueText,
         // the color when battery state is non-nominal. Nominal (green)
         // leaves the default light/dark theme color so the card
         // doesn't shout at the operator for healthy batteries.
+        const QString card_value_font =
+            QStringLiteral("font-family: 'Arimo'; font-weight: 700; font-size: 24px; "
+                           "line-height: 32px; color: %1;");
         const bool nominal = (color == QStringLiteral("green"));
         if (!nominal) {
-            const QString existing = lbl_battery_card_value_->styleSheet();
-            // Replace `color: #...;` if present, otherwise append.
-            QString patched = existing;
-            const int color_idx = patched.indexOf(QStringLiteral("color:"));
-            if (color_idx >= 0) {
-                const int semicolon =
-                    patched.indexOf(QChar(';'), color_idx);
-                if (semicolon > color_idx) {
-                    patched.replace(color_idx, semicolon - color_idx,
-                                    QStringLiteral("color: %1").arg(color));
-                }
-            } else {
-                patched += QStringLiteral(" color: %1;").arg(color);
-            }
-            lbl_battery_card_value_->setStyleSheet(patched);
+            lbl_battery_card_value_->setStyleSheet(QString(card_value_font).arg(color));
         } else {
-            // Reset to theme-driven color by re-running applyStyle on
-            // next paint cycle; cheaper to just clear the inline color
-            // override here.
-            QString existing = lbl_battery_card_value_->styleSheet();
-            const int color_idx = existing.indexOf(QStringLiteral("color:"));
-            if (color_idx >= 0) {
-                const int semicolon =
-                    existing.indexOf(QChar(';'), color_idx);
-                if (semicolon > color_idx) {
-                    existing.remove(color_idx,
-                                    semicolon - color_idx + 1);
-                    lbl_battery_card_value_->setStyleSheet(existing.trimmed());
-                }
-            }
+            // Same readable value color as Total Scans — never strip `color:` or the
+            // label inherits the palette (unreadable on dark theme).
+            lbl_battery_card_value_->setStyleSheet(
+                QString(card_value_font).arg(dark_mode_ ? QStringLiteral("#FFFFFF")
+                                                       : QStringLiteral("#18181B")));
         }
     }
     // Status rollup may flip when battery state changes.
@@ -1073,7 +1050,7 @@ void DashboardScreen::startCalibrationProbe() {
         setCalibrationDisplay(
             QStringLiteral("—"),
             QStringLiteral(
-                "No robot host / ssh_user configured (robots.json)."));
+                "No SSH target: complete setup login, or set robot_ip / robots.json."));
         return;
     }
 
@@ -1417,7 +1394,7 @@ void DashboardScreen::applyStyle() {
         #DashboardContent {
             background-color: #FAFAFA;
         }
-        #DashboardCardStatus, #DashboardCardScans, #DashboardCardCameras, #DashboardCardCalibration {
+        #DashboardCardStatus, #DashboardCardScans, #DashboardCardBatteryTop, #DashboardCardCalibration {
             background: #FFFFFF;
             border: 1px solid #E4E4E7;
             border-radius: 10px;
@@ -1460,7 +1437,7 @@ void DashboardScreen::applyStyle() {
         }
         #DashboardRoot[theme="dark"] #DashboardCardStatus,
         #DashboardRoot[theme="dark"] #DashboardCardScans,
-        #DashboardRoot[theme="dark"] #DashboardCardCameras,
+        #DashboardRoot[theme="dark"] #DashboardCardBatteryTop,
         #DashboardRoot[theme="dark"] #DashboardCardCalibration,
         #DashboardRoot[theme="dark"] #DashboardActionsCard {
             background: #18181B;
@@ -1505,7 +1482,7 @@ void DashboardScreen::applyStyle() {
 
     setCardLabelStyle("DashboardCardStatusLabel");
     setCardLabelStyle("DashboardCardScansLabel");
-    setCardLabelStyle("DashboardCardCamerasLabel");
+    setCardLabelStyle("DashboardCardBatteryTopLabel");
     setCardLabelStyle("DashboardCardCalibrationLabel");
 
     const QString value_style =
@@ -1596,7 +1573,7 @@ void DashboardScreen::applyStyle() {
                    icon_bg, accent);
     updateCardIcon("DashboardCardScans", ":/assets/dashboard/location_pin.svg",
                    icon_bg, accent);
-    updateCardIcon("DashboardCardCameras", ":/assets/dashboard/battery.svg",
+    updateCardIcon("DashboardCardBatteryTop", ":/assets/dashboard/battery.svg",
                    icon_bg, accent);
     updateCardIcon("DashboardCardCalibration", ":/assets/dashboard/settings.svg",
                    icon_bg, accent);

@@ -29,9 +29,12 @@ const int PAGE_SUCCESS = 2;
 
 }  // namespace
 
-TiltCalibrationDialog::TiltCalibrationDialog(const QString& robotHost, QWidget* parent)
+TiltCalibrationDialog::TiltCalibrationDialog(const QString& robotHost,
+                                               const QString& sshUser,
+                                               QWidget* parent)
     : QDialog(parent)
-    , robot_host_(robotHost) {
+    , robot_host_(robotHost)
+    , ssh_user_(sshUser.trimmed().isEmpty() ? QStringLiteral("roofus") : sshUser.trimmed()) {
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground);
     setWindowModality(Qt::ApplicationModal);
@@ -314,7 +317,7 @@ QStringList TiltCalibrationDialog::sshBaseArgs() const {
         << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=no")
         << QStringLiteral("-o") << QStringLiteral("UserKnownHostsFile=/dev/null")
         << QStringLiteral("-o") << QStringLiteral("BatchMode=yes")
-        << QString("roofus@%1").arg(robot_host_);
+        << QStringLiteral("%1@%2").arg(ssh_user_, robot_host_);
 }
 
 void TiltCalibrationDialog::onStartCalibrationClicked() {

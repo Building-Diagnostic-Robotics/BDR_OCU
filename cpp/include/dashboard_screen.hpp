@@ -62,7 +62,6 @@ private slots:
 
 private:
     void applyStyle();
-    QString robotHostFromSettings() const;
     void loadRobotProfileFromRegistry();
 
     // --- Battery (MQTT via mosquitto_sub) ---

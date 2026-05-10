@@ -1,4 +1,5 @@
 #include "startup_screen.hpp"
+#include "robot_registry.hpp"
 #include "settings_constants.hpp"
 
 #include <QHBoxLayout>
@@ -540,6 +541,18 @@ void StartupScreen::startDiagnostics(bool scroll_to_results) {
         return;
     }
 
+    ResolvedRobotSshTarget ssh_target;
+    QString resolve_err;
+    if (!resolveRobotSshTargetFromSettings(&ssh_target, &resolve_err)) {
+        BdrMessageBox::warning(
+            this,
+            QStringLiteral("Diagnostics"),
+            resolve_err.isEmpty()
+                ? QStringLiteral("Could not resolve robot SSH connection.")
+                : resolve_err);
+        return;
+    }
+
     if (scroll_to_results) {
         setLiveResultsActive(true);
         scrollToLiveResults();
@@ -557,7 +570,7 @@ void StartupScreen::startDiagnostics(bool scroll_to_results) {
         txt_log_->clear();
     }
 
-    const QString robot_host = robotHostFromSettings();
+    const QString robot_host = ssh_target.host;
     QString local_ip = detectLocalIP();
     if (local_ip.isEmpty()) {
         // Fallback to script default target (still passed explicitly for visibility).
@@ -568,7 +581,8 @@ void StartupScreen::startDiagnostics(bool scroll_to_results) {
     const bool indoor = btn_indoor_ && btn_indoor_->isChecked();
 
     updateUiState();
-    appendLog(QString("[info] Robot: roofus@%1").arg(robot_host));
+    appendLog(QStringLiteral("[info] Robot: %1@%2")
+                  .arg(ssh_target.ssh_user, robot_host));
     appendLog(QString("[info] Starting system diagnostics (rf_target_ip=%1%2)…")
         .arg(local_ip, indoor ? ", indoor mode (skip GPS)" : ""));
     appendLog("[info] Command: ros2 run pilot_control startup_preflight");
@@ -592,7 +606,7 @@ void StartupScreen::startDiagnostics(bool scroll_to_results) {
 
     if (preflight_proc_) {
         preflight_proc_->setProgram("ssh");
-        QStringList args = sshBaseArgs(robot_host);
+        QStringList args = sshBaseArgs(ssh_target.ssh_user, robot_host);
         args << remote_cmd;
         preflight_proc_->setArguments(args);
         preflight_proc_->start();
@@ -1178,7 +1192,21 @@ void StartupScreen::onPreflightError(QProcess::ProcessError error) {
 }
 
 void StartupScreen::fetchLatestReport() {
-    const QString robot_host = robotHostFromSettings();
+    ResolvedRobotSshTarget ssh_target;
+    QString resolve_err;
+    if (!resolveRobotSshTargetFromSettings(&ssh_target, &resolve_err)) {
+        appendLog(QStringLiteral("[error] %1")
+                        .arg(resolve_err.isEmpty()
+                                 ? QStringLiteral("Could not resolve robot SSH target.")
+                                 : resolve_err));
+        if (btn_retry_report_) {
+            btn_retry_report_->setVisible(true);
+        }
+        preflight_completed_ = false;
+        updateUiState();
+        return;
+    }
+    const QString robot_host = ssh_target.host;
     // Avoid login shells here so stdout is clean JSON.
     const QString remote_cmd = "cat /R_DATA/startup_check/latest/preflight_report.json";
 
@@ -1193,7 +1221,7 @@ void StartupScreen::fetchLatestReport() {
 
     appendLog("[info] Fetching latest diagnostic report JSON…");
     report_proc_->setProgram("ssh");
-    QStringList args = sshBaseArgs(robot_host);
+    QStringList args = sshBaseArgs(ssh_target.ssh_user, robot_host);
     args << remote_cmd;
     report_proc_->setArguments(args);
     report_proc_->start();
@@ -1582,13 +1610,9 @@ QString StartupScreen::detectLocalIP() const {
     return QString();
 }
 
-QString StartupScreen::robotHostFromSettings() const {
-    QSettings settings(kSettingsOrgName, kSettingsAppName);
-    const QString from_settings = settings.value("robot_ip", "").toString().trimmed();
-    return from_settings.isEmpty() ? "192.168.168.101" : from_settings;
-}
-
-QStringList StartupScreen::sshBaseArgs(const QString& robotHost) const {
+QStringList StartupScreen::sshBaseArgs(const QString& sshUser, const QString& robotHost) const {
+    const QString user =
+        sshUser.trimmed().isEmpty() ? QStringLiteral("roofus") : sshUser.trimmed();
     // Force pseudo-tty so sudo (CAN up/down) works if configured NOPASSWD.
     return QStringList()
         << "-tt"
@@ -1596,7 +1620,7 @@ QStringList StartupScreen::sshBaseArgs(const QString& robotHost) const {
         << "-o" << "StrictHostKeyChecking=no"
         << "-o" << "UserKnownHostsFile=/dev/null"
         << "-o" << "BatchMode=yes"
-        << QString("roofus@%1").arg(robotHost);
+        << QStringLiteral("%1@%2").arg(user, robotHost);
 }
 
 }  // namespace f2c_cpp

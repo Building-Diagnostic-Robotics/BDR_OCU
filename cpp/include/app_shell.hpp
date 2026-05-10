@@ -22,6 +22,8 @@
 #include <std_srvs/srv/set_bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
+#include "robot_registry.hpp"
+
 class QResizeEvent;
 
 class QLabel;
@@ -146,7 +148,7 @@ private:
     void onWindowCloseClicked();
     void ensureExplorationRosInterfaces();
     void startLaptopTeleopLaunch(const QString& robot_host);
-    void startRobotCompleteLaunch(const QString& robot_host);
+    void startRobotCompleteLaunch(const ResolvedRobotSshTarget& ssh_target);
     void setExplorationLaunchFailed(const QString& reason);
     void publishExplorationStreamTarget();
     bool requestSavedMapPathWithRetry(QString* saved_remote_path, QString* error_message);
@@ -193,9 +195,9 @@ private:
     // `done(success)` always invoked exactly once on the Qt thread.
     void discardCompletedScanDataCollection(std::function<void(bool)> done);
     QString detectLocalIP() const;
-    QString robotHostFromSettings() const;
+    ResolvedRobotSshTarget resolveRobotSshForRemoteOps() const;
     bool isLocalProcessRunning(const QString& process_name) const;
-    bool isRobotPipelineRunning(const QString& robot_host) const;
+    bool isRobotPipelineRunning(const ResolvedRobotSshTarget& ssh_target) const;
     void onExplorationStreamStatus(const std_msgs::msg::String::SharedPtr msg);
     void onExplorationOdom(const nav_msgs::msg::Odometry::SharedPtr msg);
     void onExplorationLocalNavGrid(const std_msgs::msg::UInt8MultiArray::SharedPtr msg);
@@ -351,6 +353,7 @@ private:
     qint64 last_launch_probe_at_ms_ = 0;
     qint64 last_stream_target_publish_at_ms_ = 0;
     QString active_robot_host_;
+    QString active_robot_ssh_user_;
     QString laptop_launch_last_output_;
     QString robot_launch_last_output_;
     QString latest_saved_map_local_path_;

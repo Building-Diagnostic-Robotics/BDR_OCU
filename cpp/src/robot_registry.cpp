@@ -13,6 +13,9 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QRegularExpression>
+#include <QSettings>
+
+#include "settings_constants.hpp"
 
 namespace f2c_cpp {
 
@@ -202,6 +205,68 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
     robots_ = parsed;
     source_path_ = path;
     loaded_ = true;
+    return true;
+}
+
+bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* error_out) {
+    if (!out) {
+        return false;
+    }
+    *out = ResolvedRobotSshTarget{};
+
+    QSettings settings(kSettingsOrgName, kSettingsAppName);
+    const QString override_ip =
+        settings.value(QStringLiteral("robot_ip"), QString()).toString().trimmed();
+    if (!override_ip.isEmpty()) {
+        out->host = override_ip;
+        out->ssh_user = QStringLiteral("roofus");
+        return true;
+    }
+
+    const QString robot_id =
+        settings.value(QStringLiteral("setup/robot_id"), QString()).toString().trimmed();
+    if (robot_id.isEmpty()) {
+        if (error_out) {
+            *error_out = QStringLiteral(
+                "No robot is logged in. Complete setup login, or set the robot_ip "
+                "setting for development overrides.");
+        }
+        return false;
+    }
+
+    RobotRegistry registry;
+    QString load_err;
+    if (!registry.load(&load_err)) {
+        if (error_out) {
+            *error_out = load_err.isEmpty()
+                ? QStringLiteral("Robot registry could not be loaded.")
+                : load_err;
+        }
+        return false;
+    }
+
+    const auto profile = registry.findById(robot_id);
+    if (!profile.has_value()) {
+        if (error_out) {
+            *error_out =
+                QStringLiteral("Robot \"%1\" not found in registry (%2).")
+                    .arg(robot_id, registry.sourcePath());
+        }
+        return false;
+    }
+
+    out->host = profile->host.trimmed();
+    out->ssh_user = profile->ssh_user.trimmed();
+    if (out->ssh_user.isEmpty()) {
+        out->ssh_user = QStringLiteral("roofus");
+    }
+    if (out->host.isEmpty()) {
+        if (error_out) {
+            *error_out =
+                QStringLiteral("Registry entry for \"%1\" has an empty host.").arg(robot_id);
+        }
+        return false;
+    }
     return true;
 }
 

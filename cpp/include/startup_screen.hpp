@@ -123,8 +123,7 @@ private:
     bool dark_mode_ = false;
 
     QString detectLocalIP() const;
-    QString robotHostFromSettings() const;
-    QStringList sshBaseArgs(const QString& robotHost) const;
+    QStringList sshBaseArgs(const QString& sshUser, const QString& robotHost) const;
 };
 
 }  // namespace f2c_cpp

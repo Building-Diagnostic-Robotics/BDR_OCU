@@ -62,4 +62,17 @@ private:
     bool loaded_ = false;
 };
 
+/** SSH target for operator-initiated remote commands (preflight, exploration, tilt cal). */
+struct ResolvedRobotSshTarget {
+    QString host;
+    QString ssh_user;
+};
+
+/**
+ * Resolve robot SSH host/user from QSettings + robots.json.
+ * Priority: non-empty `robot_ip` (dev override) → registry entry for `setup/robot_id`.
+ * On success, `ssh_user` is never empty (defaults to "roofus").
+ */
+bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* error_out = nullptr);
+
 }  // namespace f2c_cpp
