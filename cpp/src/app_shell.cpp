@@ -2233,6 +2233,19 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
     // Best-effort cleanup on robot side for the full exploration stack.
     if (!robot_host.isEmpty()) {
         QProcess remote_cleanup_proc;
+        // Send SIGTERM (default) first to the whole stack, then BLOCK
+        // up to 5s for unified_data_collector to actually exit, then
+        // escalate to SIGKILL on anything still alive. The wait is
+        // critical: UDC's destructor calls seekcamera_manager_destroy()
+        // which releases the Seek thermal SDK's libusb claim. If we
+        // race past the SIGTERM here and the OCU starts a new launch
+        // before the prior UDC has finished its destructor, the new
+        // UDC opens the USB device against a half-released SDK and
+        // never receives SEEKCAMERA_MANAGER_EVENT_CONNECT — visual
+        // frames silently stop being recorded for the rest of the OCU
+        // session until the operator physically replugs the camera.
+        // See ~UnifiedDataCollector and the connect-watchdog WARN in
+        // unified_data_collector.cpp for the matching robot-side guards.
         QString remote_script =
             "set +e; "
             "pkill -f '[r]os2 launch pilot_control robot_complete.launch.py' >/dev/null 2>&1 || true; "
@@ -2243,7 +2256,13 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
             "pkill -f '[m]pc_accel_autonomous_controller' >/dev/null 2>&1 || true; "
             "pkill -f '[f]astlio_mapping' >/dev/null 2>&1 || true; "
             "pkill -f '[d]iff_drive_controller' >/dev/null 2>&1 || true; "
-            "pkill -f '[z]enohd -c /tmp/zenohd_robot.json5' >/dev/null 2>&1 || true";
+            "pkill -f '[z]enohd -c /tmp/zenohd_robot.json5' >/dev/null 2>&1 || true; "
+            "for i in $(seq 1 50); do "
+            "  pgrep -f '[/]pilot_control/unified_data_collector' >/dev/null 2>&1 || break; "
+            "  sleep 0.1; "
+            "done; "
+            "pkill -9 -f '[/]pilot_control/unified_data_collector' >/dev/null 2>&1 || true; "
+            "pkill -9 -f '[r]os2 launch pilot_control robot_complete.launch.py' >/dev/null 2>&1 || true";
         const QString remote_cmd = QString("bash -lc \"%1\"").arg(remote_script.replace("\"", "\\\""));
 
         QStringList args;
@@ -2258,7 +2277,9 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
              << sshUserHostSpec(ssh_target)
              << remote_cmd;
         remote_cleanup_proc.start("ssh", args);
-        if (!remote_cleanup_proc.waitForFinished(9000)) {
+        // 15s = 8s ConnectTimeout headroom + 5s graceful UDC exit poll
+        // + 2s slack for SIGKILL escalation and SSH framing overhead.
+        if (!remote_cleanup_proc.waitForFinished(15000)) {
             remote_cleanup_proc.kill();
             remote_cleanup_proc.waitForFinished(500);
         }
