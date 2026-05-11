@@ -81,10 +81,11 @@ QMetaObject::invokeMethod(target, [=]() { /* UI update */ }, Qt::QueuedConnectio
 - `BdrProgressDialog` — frameless progress dialog
 - `BanterLoaderWidget` — animated loading indicator
 - `TiltCalibrationDialog` — 3-page (Setup → Progress → Success) dialog that SSHs into the robot and runs tilt calibration
+- `MissionMetadataDialog` — frameless "New Scan Information" modal shown when the operator clicks **Start New Scan** on Stage 3 Dashboard. Collects building name, operator name, and a Metric/ANSI units toggle, persists them to `QSettings`, and gates the transition to Stage 4. See **Mission Metadata + Units** below.
 
 ## ROS2 Integration
 
-The ROS2 node (`exploration_ros_node_`) is owned by `AppShellWindow` and spins in a background thread. Subscriptions cover: odometry, ODrive motor controller status, thermal thumbnails, local nav grid, and stream status. Publishers: `cmd_vel` (teleop), stream target. Service clients: save map, axis state (arm/disarm), GPR power-off, video record.
+The ROS2 node (`exploration_ros_node_`) is owned by `AppShellWindow` and spins in a background thread. Subscriptions cover: odometry, ODrive motor controller status, thermal thumbnails, local nav grid, and stream status. Publishers: `cmd_vel` (teleop), stream target. Service clients: save map, axis state (arm/disarm), GPR power-off, video record, **`/data_collection_coordinator/set_parameters`** (mission metadata push — see below).
 
 `CYCLONEDDS_URI` is cleared at startup if it references `rf_cyclonedds.xml` (which would break zenoh-ros2dds discovery). The app expects `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` and a loopback CycloneDDS config at `~/cyclone_loopback.xml` when run manually.
 
@@ -94,4 +95,28 @@ User settings are stored via `QSettings` under org `"PilotControl"`, app `"BDRCo
 
 ## Data Layout on Robot
 
-Scan data lives at `/R_DATA/<Month_DD_YYYY>/Section_<N>_<HHMMSS>/` with sub-folders: `Visual_data/`, `GPR_scan_data/`, and map files. `TransferManager` mirrors this structure locally.
+Scan data lives at `/R_DATA/<Month_DD_YYYY>/<building_slug>/Section_<N>_<HHMMSS>/` with sub-folders: `Visual_data/`, `GPR_scan_data/`, and map files. The `<building_slug>` parent (e.g., `Acme_HQ`) is derived from the operator-entered building name via the New-Scan-Information modal — see **Mission Metadata + Units** below. Sibling `Mission_<HHMMSS>/mission_config.json` and per-section `session_config.json` carry the operator name, units preference, and building slug for downstream AWS-per-client tracking.
+
+`TransferManager` (SSH/rsync) and `CloudUploadManager` (AWS S3) mirror this structure both locally and in the cloud — `s3://bucket/prefix/<date>/<building>/<section>/...`. Path consumers that walk `/R_DATA` (`DashboardScreen` Total Scans probe, `TransferManager::fetchSectionsForDate`, `CloudUploadManager::scanLocalData`) all expect depth-3 (`<day>/<building>/<section>`) — pre-modal depth-2 sections are not surfaced.
+
+## Mission Metadata + Units
+
+The **New Scan Information** modal (`MissionMetadataDialog`) intercepts `DashboardScreen::startNewScanRequested` in `AppShellWindow::onStartNewScan` *before* advancing to Stage 4. It collects three pieces of session-wide state, persists them to `QSettings` (keys in `settings_constants.hpp`: `kSettingsBuildingNameKey`, `kSettingsOperatorNameKey`, `kSettingsUnitsKey`), and applies a `QGraphicsBlurEffect` to the Dashboard underneath while open.
+
+| Field | Purpose | Used by |
+|-------|---------|---------|
+| Building name | Slugified to `<building_slug>` for the data layout above | Robot-side `data_collection_coordinator.py` |
+| Operator name | Audit / metadata.json | Cloud upload metadata |
+| Units (Metric / ANSI) | **Display-only** preference | `UnitsProvider` singleton |
+
+**`UnitsProvider`** (`units_system.hpp/cpp`) is a `QObject` singleton that owns the current `Units` selection, persists it to `QSettings`, and emits `unitsChanged()`. The `units::` namespace provides static formatting helpers — `units::formatLength(meters)`, `units::formatSpeed(mps)`, `units::formatArea(sqm)`, `units::lengthUnitSuffix()`, etc. — that produce the right text (`"1.50 m"` vs `"4.92 ft"`) based on the current selection. **All ROS payloads, internal state, and persisted scan data remain SI** — the toggle only swaps display strings. New display sites should always go through these helpers; never concatenate a hardcoded unit suffix.
+
+UI surfaces wired through `UnitsProvider`:
+
+- `ExplorationScreen` — telemetry cards (Speed, Position, Altitude).
+- `PlannerScreen` — value labels and slider min/max badges (re-rendered live via `relabelUnitEndpointBadges()` when the operator backs out and re-toggles between missions). The "Distance per scan" `QLineEdit` keeps its meters value but shows a `(≈ X.XX ft)` hint in ANSI mode (`refreshScanDistanceAnsiHint()`); the resulting scan segment list formats lengths via `units::formatLength`.
+- `PlotWidget` — ROI rectangle dimensions, scan-segment hover tooltip, cursor coordinate tooltip.
+
+**Metadata push to robot:** `AppShellWindow::sendDataCollectorSessionMetadata()` calls `rcl_interfaces/srv/SetParameters` on `/data_collection_coordinator` to push `building_name`, `operator_name`, `units_preference` as ROS string parameters. It is invoked from `onPlannerScanStartRequested()` (Stage 5 **Start Scan**) *before* `sendControllerMaxLinearVelocity` and the `mpc_autonomy_enable=true` publish — if the push fails (service unreachable within 1.5 s, response missing/partial, any param rejected), the function shows a `BdrMessageBox` and **hard-blocks** the scan from arming. The autonomous controller (`mpc_accel_autonomous_controller.py`) fires `/dc/start` a few hundred ms after `autonomy_enable=true`, by which point the coordinator's `ensure_mission_session()` has the metadata it needs to land the section folder under `/R_DATA/<day>/<building_slug>/Section_*/`.
+
+**Zenoh allowlist:** `pilot_control/config/zenoh/zenohd_robot.json5` `service_servers` must include `^/data_collection_coordinator/set_parameters$` and `^/data_collection_coordinator/set_parameters_atomically$` for the push to reach the robot — both are present.

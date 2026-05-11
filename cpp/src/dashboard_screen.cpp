@@ -1081,11 +1081,17 @@ void DashboardScreen::startCalibrationProbe() {
                 "if [ -n \"$LATEST_CAL\" ]; then "
                 "  CAL_M=$(stat -c '%Y' \"$LATEST_CAL\" 2>/dev/null || echo 0); "
                 "fi; "
-                "TOTAL=$(find /R_DATA -maxdepth 2 -type d -name 'Section_*' "
+                // Section folders live under
+                //   /R_DATA/<day>/<building_slug>/Section_*  (depth 3)
+                // since the New-Scan-Information modal landed
+                // (Stage 3 of the units / metadata feature). Pre-modal data
+                // at depth 2 (/R_DATA/<day>/Section_*) is intentionally
+                // ignored — the operator wiped /R_DATA in the changeover.
+                "TOTAL=$(find /R_DATA -mindepth 3 -maxdepth 3 -type d -name 'Section_*' "
                 "2>/dev/null | wc -l); "
                 "SINCE=0; "
                 "if [ -n \"$LATEST_CAL\" ]; then "
-                "  SINCE=$(find /R_DATA -maxdepth 2 -type d -name 'Section_*' "
+                "  SINCE=$(find /R_DATA -mindepth 3 -maxdepth 3 -type d -name 'Section_*' "
                 "-newer \"$LATEST_CAL\" 2>/dev/null | wc -l); "
                 "else "
                 "  SINCE=$TOTAL; "
@@ -1221,7 +1227,8 @@ void DashboardScreen::setScansAndCalibrationDisplays(int totalScans,
         } else {
             lbl_scans_value_->setText(QString::number(totalScans));
             lbl_scans_value_->setToolTip(
-                QStringLiteral("Total Section_* folders under /R_DATA/."));
+                QStringLiteral(
+                    "Total Section_* folders under /R_DATA/<day>/<building>/."));
         }
     }
 

@@ -174,7 +174,97 @@ exactly one of seven states. The full state-transition diagram lives in
 ### Docs
 
 - `docs/OTA.md` — state-transition diagram, runner UX, wrapper exit
-  codes, field-test recipe.
+ codes, field-test recipe.
+
+## Mission metadata + units (production-wired)
+
+Operator-driven session metadata captured via the **New Scan
+Information** modal (`MissionMetadataDialog`) on Stage 3 Dashboard
+**Start New Scan**. Building name, operator name, and a Metric/ANSI
+units toggle are persisted to `QSettings` and pushed to the robot's
+`/data_collection_coordinator` as ROS string parameters before
+autonomy arms.
+
+### Key entry points
+
+- `cpp/include/components/mission_metadata_dialog.{hpp,cpp}` — the
+ frameless modal (slugifies building name, persists to `QSettings`,
+ styled to match `TiltCalibrationDialog`).
+- `cpp/src/app_shell.cpp` — `onStartNewScan` (intercept point,
+ applies `QGraphicsBlurEffect` to Stage 3) and
+ `sendDataCollectorSessionMetadata` (the `SetParameters` push).
+- `cpp/include/units_system.hpp` + `cpp/src/units_system.cpp` —
+ `UnitsProvider` singleton + `units::format{Length,Speed,Area}`
+ namespace helpers. **Display-only**; SI everywhere else.
+- `cpp/include/settings_constants.hpp` — `kSettingsBuildingNameKey`,
+ `kSettingsOperatorNameKey`, `kSettingsUnitsKey`.
+- `pilot_ws/src/pilot_control/scripts/data_collection_coordinator.py`
+ — robot-side consumer of the three ROS params; mirrors slugify
+ logic in Python.
+- `pilot_ws/src/pilot_control/config/zenoh/zenohd_robot.json5` —
+ `service_servers` allowlist must contain
+ `^/data_collection_coordinator/set_parameters{,_atomically}$`.
+
+### Data layout (current)
+
+```
+/R_DATA/<Month_DD_YYYY>/<building_slug>/Section_<N>_<HHMMSS>/
+                                       ├── Visual_data/
+                                       ├── GPR_scan_data/
+                                       ├── rosbag_*/
+                                       ├── *_map_*.pcd
+                                       └── session_config.json
+/R_DATA/<Month_DD_YYYY>/<building_slug>/Mission_<HHMMSS>/
+                                       ├── GNSS_data/rover_*.ubx
+                                       └── mission_config.json
+```
+
+`session_config.json` and `mission_config.json` carry
+`building_name`, `building_slug`, `operator_name`, `units_preference`.
+
+### Path consumers updated for the building tier
+
+- `cpp/src/dashboard_screen.cpp` — Total Scans / Next Calibration
+ SSH probe uses `find /R_DATA -mindepth 3 -maxdepth 3 -type d
+ -name 'Section_*'`. Pre-modal depth-2 sections are not counted.
+- `cpp/src/transfer_manager.cpp` — `fetchSectionsForDate` SSH
+ script walks `for b in */; do for d in "$b"Section_*/`,
+ populates `SectionInfo.buildingSlug`. Per-row format is
+ 11 fields (`building|name|size|count|mtime|...`).
+- `cpp/src/cloud_upload_manager.cpp` — `scanLocalData` recognizes
+ three layouts (Flat, Dated, DatedBuilding) via two helper
+ lambdas (`looksLikeSection`, `buildSection`).
+ `verifyUploadedSections` builds the matching S3 URL shape
+ (`s3://bucket/prefix/<date>/<building>/<section>/`).
+ `ScanMetadata::toJson` emits a `"building"` field (omitted when
+ empty so legacy uploads stay clean).
+
+### Rules for agents touching this path
+
+- **Never concatenate a hardcoded unit suffix** (`" m"`, `" m/s"`,
+ `" m²"`, `" ft"`) in display strings. Always go through
+ `units::formatLength` / `formatSpeed` / `formatArea` /
+ `lengthUnitSuffix`. The toggle is global and operators flip it
+ between missions without restarting the OCU.
+- **Never convert units before sending to the robot.** Only the
+ display layer is unit-aware; ROS payloads, `QSettings` values,
+ scan plan data, and the autonomy stack remain SI.
+- For widgets that hold static endpoint labels (e.g.
+ `PlannerScreen` slider min/max badges), capture the `QLabel*`
+ in a member vector and connect to `UnitsProvider::unitsChanged`
+ to re-render — the screen is constructed once per OCU run and
+ reused across missions, so static text set in the constructor
+ will go stale after a toggle.
+- The `building_slug` Python helper in
+ `data_collection_coordinator.py` and the C++ `slugify` in
+ `MissionMetadataDialog` MUST stay byte-for-byte equivalent.
+ If you change one, change both — the OCU and robot agree on
+ the path purely by convention.
+- `sendDataCollectorSessionMetadata` is the **arming gate**.
+ Anything new that fires after Stage 5 Start Scan should hang
+ off the `on_complete(true)` callback in
+ `onPlannerScanStartRequested`, never in parallel — a failed
+ push must hard-block autonomy.
 
 ## Docs worth reading
 

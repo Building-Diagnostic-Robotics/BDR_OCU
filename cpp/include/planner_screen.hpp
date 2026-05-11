@@ -124,6 +124,23 @@ private slots:
     void onBackClicked();
     void onNextClicked();
 
+    // Re-renders the static slider min/max endpoint badges (Voxel /
+    // Z-Min / Z-Max / Path Spacing / Headland / Robot Speed) when the
+    // operator flips the units toggle in MissionMetadataDialog. The
+    // badges are constructed once in buildUi() with strings baked from
+    // the current units; without this connection a Metric → Complete →
+    // ANSI mission cycle would leave them stale (e.g. "0.30 m/s" next
+    // to a slider whose value reads "0.98 ft/s"). Connected to
+    // UnitsProvider::unitsChanged in the ctor.
+    void relabelUnitEndpointBadges();
+
+    // Shows / hides + re-computes the small "(≈ X.XX ft)" hint next
+    // to the scan distance QLineEdit. Visible iff UnitsProvider is in
+    // ANSI mode. Triggered by (a) text edits in the field, (b)
+    // updateScanSplittingUi() reflowing the field, (c) the
+    // UnitsProvider::unitsChanged signal connection in the ctor.
+    void refreshScanDistanceAnsiHint();
+
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void showEvent(QShowEvent* event) override;
@@ -547,6 +564,35 @@ private:
     PlannerTrackSlider* slider_coverage_path_spacing_ = nullptr;
     PlannerTrackSlider* slider_coverage_headland_ = nullptr;
     PlannerTrackSlider* slider_coverage_scan_speed_ = nullptr;
+
+    // Scan-splitting "Distance per scan" QLineEdit always stores +
+    // displays meters (operator's chosen splits live in SI on the wire
+    // and in QSettings). When the operator selects ANSI in the New
+    // Scan Information modal, lbl_scan_distance_ansi_hint_ becomes
+    // visible right next to the field with the live "(\u2248 X.XX ft)"
+    // conversion of the typed value. Hidden in Metric. Refreshed in
+    // refreshScanDistanceAnsiHint(), called from
+    // updateScanSplittingUi(), the field's textEdited signal, and the
+    // UnitsProvider::unitsChanged connection.
+    QLabel* lbl_scan_distance_ansi_hint_ = nullptr;
+
+    // Tracks every slider min/max endpoint badge whose displayed
+    // string depends on the units toggle. Populated during buildUi()
+    // for each unit-bearing range block (Voxel / Z-Min / Z-Max / Path
+    // Spacing / Headland / Robot Speed). relabelUnitEndpointBadges()
+    // walks this vector on UnitsProvider::unitsChanged and rewrites
+    // each label using units::formatLength or units::formatSpeed
+    // according to `kind`.
+    struct UnitEndpointBadge {
+        enum class Kind { Length, Speed };
+        QLabel* min_label = nullptr;
+        QLabel* max_label = nullptr;
+        double min_value = 0.0;
+        double max_value = 0.0;
+        Kind kind = Kind::Length;
+        int decimals = 2;
+    };
+    std::vector<UnitEndpointBadge> unit_endpoint_badges_;
     QLabel* lbl_voxel_value_ = nullptr;
     QLabel* lbl_z_min_value_ = nullptr;
     QLabel* lbl_z_max_value_ = nullptr;

@@ -82,6 +82,9 @@ QJsonObject ScanMetadata::toJson() const {
     // Section info
     root["section"] = sectionName;
     root["date"] = dateFolder;
+    if (!buildingSlug.isEmpty()) {
+        root["building"] = buildingSlug;
+    }
     root["operator"] = operatorName;
     root["robot"] = "Roofus";
     root["scan_timestamp"] = scanTimestamp.toString(Qt::ISODate);
@@ -691,13 +694,22 @@ void CloudUploadManager::verifyUploadedSections(const QList<LocalSection>& secti
     for (const auto& sec : sections) {
         if (!sec.alreadyUploaded) continue;
         
+        // S3 URL mirrors the on-disk layout so a future audit can match
+        // local sections to cloud objects 1:1.
+        //   Flat:           s3://bucket/prefix/<section>/
+        //   Dated:          s3://bucket/prefix/<date>/<section>/
+        //   DatedBuilding:  s3://bucket/prefix/<date>/<building>/<section>/
         QString s3Dest;
         if (sec.dateFolder.isEmpty()) {
             s3Dest = QString("s3://%1/%2/%3/")
                 .arg(config_.bucketName, config_.prefix, sec.name);
-        } else {
+        } else if (sec.buildingSlug.isEmpty()) {
             s3Dest = QString("s3://%1/%2/%3/%4/")
                 .arg(config_.bucketName, config_.prefix, sec.dateFolder, sec.name);
+        } else {
+            s3Dest = QString("s3://%1/%2/%3/%4/%5/")
+                .arg(config_.bucketName, config_.prefix,
+                     sec.dateFolder, sec.buildingSlug, sec.name);
         }
         toVerify.append({sec.path, s3Dest});
     }
@@ -753,82 +765,94 @@ QList<CloudUploadManager::LocalSection> CloudUploadManager::scanLocalData(const 
     
     if (!baseDir.exists()) return sections;
     
-    // Supports two layouts:
-    //   Flat:   basePath/{section_name}/          (e.g., Roofus/Section_1_130222/)
-    //   Dated:  basePath/{date_folder}/{section_name}/
+    // Supports three layouts:
+    //   Flat:           basePath/{section_name}/
+    //   Dated:          basePath/{date_folder}/{section_name}/                  (legacy, pre-modal)
+    //   DatedBuilding:  basePath/{date_folder}/{building_slug}/{section_name}/  (current)
     //
-    // Detect flat layout: if any top-level dir contains files or known sub-folders
-    // (GPR_scan_data, Visual_data, rosbag, etc.), treat it as a section directly.
+    // Layout is detected per top-level dir by walking down until we hit a
+    // dir that "looks like a section" (has files in it OR contains a known
+    // data sub-folder like Visual_data / GPR_scan_data / rosbag_*).
     
-    QStringList topDirs = baseDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    auto looksLikeSection = [](const QDir& dir) -> bool {
+        if (!dir.entryList(QDir::Files).isEmpty()) return true;
+        static const QStringList knownSubs = {
+            "GPR_scan_data", "Visual_data", "rosbag",
+            "rosbag_data", "thermal_data", "map_data"};
+        const QStringList subs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString& sub : subs) {
+            if (knownSubs.contains(sub, Qt::CaseInsensitive) ||
+                sub.startsWith("GPR", Qt::CaseInsensitive) ||
+                sub.startsWith("Visual", Qt::CaseInsensitive) ||
+                sub.startsWith("rosbag", Qt::CaseInsensitive)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    
+    auto buildSection = [this](const QString& path,
+                               const QString& name,
+                               const QString& date,
+                               const QString& building) {
+        LocalSection sec;
+        sec.name = name;
+        sec.path = path;
+        sec.dateFolder = date;
+        sec.buildingSlug = building;
+        sec.alreadyUploaded = isUploaded(sec.path);
+        QDirIterator it(sec.path, QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            it.next();
+            sec.fileCount++;
+            sec.totalSize += it.fileInfo().size();
+        }
+        QDir secDir(sec.path);
+        sec.subFolders = secDir.entryList(
+            QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        return sec;
+    };
+    
+    const QStringList topDirs = baseDir.entryList(
+        QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
     
     for (const QString& topDir : topDirs) {
-        QString topPath = baseDir.filePath(topDir);
-        QDir topFolder(topPath);
+        const QString topPath = baseDir.filePath(topDir);
+        const QDir topFolder(topPath);
         
-        // Check if this directory is itself a section (has files or known data sub-folders)
-        bool isSection = false;
-        
-        // Has files directly in it?
-        QStringList files = topFolder.entryList(QDir::Files);
-        if (!files.isEmpty()) {
-            isSection = true;
+        if (looksLikeSection(topFolder)) {
+            // Flat: topDir IS a section
+            sections.append(buildSection(
+                topPath, /*name=*/topDir, /*date=*/QString(), /*building=*/QString()));
+            continue;
         }
         
-        // Has known data sub-folders?
-        if (!isSection) {
-            QStringList knownSubs = {"GPR_scan_data", "Visual_data", "rosbag", 
-                                      "rosbag_data", "thermal_data", "map_data"};
-            QStringList subs = topFolder.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-            for (const QString& sub : subs) {
-                if (knownSubs.contains(sub, Qt::CaseInsensitive) ||
-                    sub.startsWith("GPR", Qt::CaseInsensitive) ||
-                    sub.startsWith("Visual", Qt::CaseInsensitive) ||
-                    sub.startsWith("rosbag", Qt::CaseInsensitive)) {
-                    isSection = true;
-                    break;
-                }
-            }
-        }
+        // topDir is at least one level above sections. Walk children.
+        const QStringList childDirs = topFolder.entryList(
+            QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
         
-        if (isSection) {
-            // Flat layout: topDir IS a section
-            LocalSection sec;
-            sec.name = topDir;
-            sec.path = topPath;
-            sec.dateFolder = "";  // No date folder
-            sec.alreadyUploaded = isUploaded(sec.path);
+        for (const QString& childDir : childDirs) {
+            const QString childPath = topFolder.filePath(childDir);
+            const QDir childFolder(childPath);
             
-            QDirIterator it(sec.path, QDir::Files, QDirIterator::Subdirectories);
-            while (it.hasNext()) {
-                it.next();
-                sec.fileCount++;
-                sec.totalSize += it.fileInfo().size();
-            }
-            
-            sec.subFolders = topFolder.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-            sections.append(sec);
-        } else {
-            // Dated layout: topDir is a date folder containing sections
-            QStringList sectionDirs = topFolder.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-            
-            for (const QString& sectionDir : sectionDirs) {
-                LocalSection sec;
-                sec.name = sectionDir;
-                sec.path = topFolder.filePath(sectionDir);
-                sec.dateFolder = topDir;
-                sec.alreadyUploaded = isUploaded(sec.path);
-                
-                QDirIterator it(sec.path, QDir::Files, QDirIterator::Subdirectories);
-                while (it.hasNext()) {
-                    it.next();
-                    sec.fileCount++;
-                    sec.totalSize += it.fileInfo().size();
+            if (looksLikeSection(childFolder)) {
+                // Dated (legacy): topDir is date, childDir is section
+                sections.append(buildSection(
+                    childPath, /*name=*/childDir, /*date=*/topDir,
+                    /*building=*/QString()));
+            } else {
+                // DatedBuilding (current): topDir is date, childDir is
+                // building, grandchildren are sections.
+                const QStringList grandDirs = childFolder.entryList(
+                    QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+                for (const QString& grandDir : grandDirs) {
+                    const QString grandPath = childFolder.filePath(grandDir);
+                    const QDir grandFolder(grandPath);
+                    if (!looksLikeSection(grandFolder)) continue;
+                    sections.append(buildSection(
+                        grandPath, /*name=*/grandDir, /*date=*/topDir,
+                        /*building=*/childDir));
                 }
-                
-                QDir secDir(sec.path);
-                sec.subFolders = secDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-                sections.append(sec);
             }
         }
     }

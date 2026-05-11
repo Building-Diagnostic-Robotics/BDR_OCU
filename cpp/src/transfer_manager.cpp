@@ -873,23 +873,32 @@ void TransferManager::fetchSectionsForDate(const QString& dataPath, const QStrin
     
     QString dayPath = QString("%1/%2").arg(dataPath, date);
     
-    // Get detailed listing of sections with sizes
-    // Use a simpler, more robust script
+    // Sections live at /R_DATA/<day>/<building_slug>/Section_* since the
+    // New-Scan-Information modal landed (Stage 3 of the units / metadata
+    // feature). Walk one extra level: outer loop over building dirs,
+    // inner loop over Section_* under each. Each row is prefixed with
+    // the building slug so the parser below can populate
+    // SectionInfo.buildingSlug. Pre-modal (depth-2) sections are
+    // intentionally not surfaced — operator wiped /R_DATA at changeover.
     QString remoteScript = QString(
         "cd '%1' 2>/dev/null || exit 1; "
-        "for d in Section_*/; do "
-        "  [ -d \"$d\" ] || continue; "
-        "  name=$(basename \"$d\"); "
-        "  size=$(du -sb \"$d\" 2>/dev/null | cut -f1 || echo 0); "
-        "  count=$(find \"$d\" -type f 2>/dev/null | wc -l || echo 0); "
-        "  mtime=$(stat -c %%Y \"$d\" 2>/dev/null || echo 0); "
-        "  hasVisual=0; [ -d \"${d}Visual_data\" ] && hasVisual=1; "
-        "  hasGpr=0; [ -d \"${d}GPR_scan_data\" ] && hasGpr=1; "
-        "  hasMap=0; ls \"$d\"*_map_*.pcd >/dev/null 2>&1 && hasMap=1; "
-        "  hasBag=0; ls -d \"${d}\"rosbag_*/ >/dev/null 2>&1 && hasBag=1; "
-        "  hasTilt=0; ls \"$d\"tilt_correction_*.npz >/dev/null 2>&1 && hasTilt=1; "
-        "  inProgress=0; "
-        "  echo \"$name|$size|$count|$mtime|$hasVisual|$hasGpr|$hasMap|$hasBag|$hasTilt|$inProgress\"; "
+        "for b in */; do "
+        "  [ -d \"$b\" ] || continue; "
+        "  building=$(basename \"$b\"); "
+        "  for d in \"$b\"Section_*/; do "
+        "    [ -d \"$d\" ] || continue; "
+        "    name=$(basename \"$d\"); "
+        "    size=$(du -sb \"$d\" 2>/dev/null | cut -f1 || echo 0); "
+        "    count=$(find \"$d\" -type f 2>/dev/null | wc -l || echo 0); "
+        "    mtime=$(stat -c %%Y \"$d\" 2>/dev/null || echo 0); "
+        "    hasVisual=0; [ -d \"${d}Visual_data\" ] && hasVisual=1; "
+        "    hasGpr=0; [ -d \"${d}GPR_scan_data\" ] && hasGpr=1; "
+        "    hasMap=0; ls \"$d\"*_map_*.pcd >/dev/null 2>&1 && hasMap=1; "
+        "    hasBag=0; ls -d \"${d}\"rosbag_*/ >/dev/null 2>&1 && hasBag=1; "
+        "    hasTilt=0; ls \"$d\"tilt_correction_*.npz >/dev/null 2>&1 && hasTilt=1; "
+        "    inProgress=0; "
+        "    echo \"$building|$name|$size|$count|$mtime|$hasVisual|$hasGpr|$hasMap|$hasBag|$hasTilt|$inProgress\"; "
+        "  done; "
         "done"
     ).arg(dayPath);
     
@@ -913,20 +922,26 @@ void TransferManager::fetchSectionsForDate(const QString& dataPath, const QStrin
             QList<SectionInfo> sections;
             for (const QString& line : lines) {
                 QStringList parts = line.split('|');
-                if (parts.size() >= 10) {
+                // Row format (11 fields):
+                //   building|name|size|count|mtime|hasVisual|hasGpr|hasMap|hasBag|hasTilt|inProgress
+                if (parts.size() >= 11) {
                     SectionInfo info;
-                    info.name = parts[0];
-                    info.fullPath = QString("%1/%2/%3").arg(dataPath, date, info.name);
+                    info.buildingSlug = parts[0];
+                    info.name = parts[1];
+                    info.fullPath = info.buildingSlug.isEmpty()
+                        ? QString("%1/%2/%3").arg(dataPath, date, info.name)
+                        : QString("%1/%2/%3/%4").arg(
+                              dataPath, date, info.buildingSlug, info.name);
                     info.dayFolder = date;
-                    info.totalSizeBytes = parts[1].toLongLong();
-                    info.fileCount = parts[2].toInt();
-                    info.timestamp = QDateTime::fromSecsSinceEpoch(parts[3].toLongLong());
-                    info.hasVisualData = (parts[4] == "1");
-                    info.hasGprData = (parts[5] == "1");
-                    info.hasMap = (parts[6] == "1");
-                    info.hasRosbag = (parts[7] == "1");
-                    info.hasTiltCalib = (parts[8] == "1");
-                    info.isRecordingInProgress = (parts[9] == "1");
+                    info.totalSizeBytes = parts[2].toLongLong();
+                    info.fileCount = parts[3].toInt();
+                    info.timestamp = QDateTime::fromSecsSinceEpoch(parts[4].toLongLong());
+                    info.hasVisualData = (parts[5] == "1");
+                    info.hasGprData = (parts[6] == "1");
+                    info.hasMap = (parts[7] == "1");
+                    info.hasRosbag = (parts[8] == "1");
+                    info.hasTiltCalib = (parts[9] == "1");
+                    info.isRecordingInProgress = (parts[10] == "1");
                     info.previouslyDownloaded = isDownloaded(info.fullPath);
                     
                     sections.append(info);

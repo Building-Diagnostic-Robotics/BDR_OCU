@@ -48,8 +48,11 @@ struct SubFolderInfo {
  */
 struct SectionInfo {
     QString name;               // e.g., "Section_1_093045"
-    QString fullPath;           // e.g., "/R_DATA/January_27_2026/Section_1_093045"
+    QString fullPath;           // e.g., "/R_DATA/January_27_2026/Acme_HQ/Section_1_093045"
     QString dayFolder;          // e.g., "January_27_2026"
+    QString buildingSlug;       // e.g., "Acme_HQ" — empty for legacy
+                                // (pre-modal) layout where sections lived
+                                // at /R_DATA/<day>/Section_*.
     qint64 totalSizeBytes = 0;
     int fileCount = 0;
     QDateTime timestamp;

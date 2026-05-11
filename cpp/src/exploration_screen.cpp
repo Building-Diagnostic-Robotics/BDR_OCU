@@ -2,6 +2,7 @@
 
 #include "components/auto_hide_scroll_bar.hpp"
 
+#include "units_system.hpp"
 #include "video_stream_widget.hpp"
 
 #include <algorithm>
@@ -1340,22 +1341,26 @@ void ExplorationScreen::setTelemetrySpeedMps(double speed_mps) {
     if (!lbl_telemetry_speed_) {
         return;
     }
-    lbl_telemetry_speed_->setText(QString("%1 m/s").arg(std::max(0.0, speed_mps), 0, 'f', 2));
+    lbl_telemetry_speed_->setText(units::formatSpeed(std::max(0.0, speed_mps), 2));
 }
 
 void ExplorationScreen::setTelemetryPositionMeters(double x_m, double y_m) {
     if (!lbl_telemetry_position_) {
         return;
     }
+    // Two-line "x: <val>\ny: <val>" — units::formatLength handles the
+    // unit suffix per UnitsProvider, so ANSI mode shows " ft".
     lbl_telemetry_position_->setText(
-        QString("x: %1 m\ny: %2 m").arg(x_m, 0, 'f', 2).arg(y_m, 0, 'f', 2));
+        QStringLiteral("x: %1\ny: %2")
+            .arg(units::formatLength(x_m, 2),
+                 units::formatLength(y_m, 2)));
 }
 
 void ExplorationScreen::setTelemetryAltitudeMeters(double z_m) {
     if (!lbl_telemetry_altitude_) {
         return;
     }
-    lbl_telemetry_altitude_->setText(QString("%1 m").arg(z_m, 0, 'f', 2));
+    lbl_telemetry_altitude_->setText(units::formatLength(z_m, 2));
 }
 
 void ExplorationScreen::setTelemetryScanTimeSeconds(int elapsed_seconds) {
@@ -2338,11 +2343,15 @@ void ExplorationScreen::buildUi() {
     telemetry_layout->setSpacing(12);
     telemetry_layout->addWidget(makeHeadingRow(":/assets/exploration/telemetry.svg", "Telemetry", telemetry_card));
     telemetry_layout->addWidget(
-        makeMetricRow("Speed", "0.00 m/s", "ExplMetricValueMono", telemetry_card, &lbl_telemetry_speed_));
+        makeMetricRow("Speed", units::formatSpeed(0.0, 2), "ExplMetricValueMono", telemetry_card, &lbl_telemetry_speed_));
     telemetry_layout->addWidget(
-        makeMetricRow("Position", "x: 0.00 m\ny: 0.00 m", "ExplMetricValueTinyMono", telemetry_card, &lbl_telemetry_position_));
+        makeMetricRow("Position",
+                      QStringLiteral("x: %1\ny: %2")
+                          .arg(units::formatLength(0.0, 2),
+                               units::formatLength(0.0, 2)),
+                      "ExplMetricValueTinyMono", telemetry_card, &lbl_telemetry_position_));
     telemetry_layout->addWidget(
-        makeMetricRow("Altitude", "0.00 m", "ExplMetricValueMono", telemetry_card, &lbl_telemetry_altitude_));
+        makeMetricRow("Altitude", units::formatLength(0.0, 2), "ExplMetricValueMono", telemetry_card, &lbl_telemetry_altitude_));
     telemetry_layout->addWidget(
         makeMetricRow("Scan Time", "00:00", "ExplMetricValueMono", telemetry_card, &lbl_telemetry_scan_time_));
     telemetry_layout->addStretch(1);

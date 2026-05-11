@@ -66,7 +66,8 @@ re-organized and lifted into a published operator manual.
   re-plan from scratch on the same map + hull (point cloud + hull are
   preserved — only planning-and-after is cleared). Pipeline keeps running.
 - After failure (both retries exhausted): a warning dialog surfaces that
-  mission data may still be on the robot under `/R_DATA/<today>/` and the
+  mission data may still be on the robot under
+  `/R_DATA/<today>/<building_slug>/` and the
   GNSS log may still be open; the operator should SSH in and clean up
   before starting another mission. After dismissing the warning, the OCU
   navigates back to Map Processing anyway — pinning the operator to a

@@ -1,5 +1,6 @@
 #include "plot_widget.hpp"
 #include "coverage_geometry.hpp"
+#include "units_system.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1054,8 +1055,8 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
                 painter.setFont(QFont("Sans Serif", 9, QFont::Bold));
                 QPointF mid1 = (worldToScreen(c1) + worldToScreen(c2)) / 2;
                 QPointF mid2 = (worldToScreen(c1) + worldToScreen(c4)) / 2;
-                painter.drawText(mid1 + QPointF(5, -5), QString("%1 m").arg(len, 0, 'f', 2));
-                painter.drawText(mid2 + QPointF(5, -5), QString("%1 m").arg(std::abs(width), 0, 'f', 2));
+                painter.drawText(mid1 + QPointF(5, -5), units::formatLength(len, 2));
+                painter.drawText(mid2 + QPointF(5, -5), units::formatLength(std::abs(width), 2));
             }
             
             // Draw corner points
@@ -1298,7 +1299,10 @@ void PlotWidget::mouseMoveEvent(QMouseEvent* event) {
                     ? scan_segment_lengths_[hovered_scan_segment_] : 0.0;
                 int turns = (hovered_scan_segment_ < scan_segment_turns_.size())
                     ? scan_segment_turns_[hovered_scan_segment_] : 0;
-                QString tip = QString("%1 — %2 m, %3 turns").arg(label).arg(len, 0, 'f', 1).arg(turns);
+                QString tip = QString("%1 — %2, %3 turns")
+                                  .arg(label)
+                                  .arg(units::formatLength(len, 1))
+                                  .arg(turns);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
                 QToolTip::showText(event->globalPosition().toPoint(), tip, this);
 #else
@@ -1356,14 +1360,17 @@ void PlotWidget::mouseMoveEvent(QMouseEvent* event) {
         }
     }
     
-    // Show coordinates in tooltip
+    // Show coordinates in tooltip. Both axes pass through
+    // units::formatLength so ANSI mode renders feet with the explicit
+    // unit suffix (operator can never confuse the two).
     Point2D world = screenToWorld(event->pos());
+    const QString coord_tip = QStringLiteral("(%1, %2)")
+                                  .arg(units::formatLength(world.x, 2),
+                                       units::formatLength(world.y, 2));
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    QToolTip::showText(event->globalPosition().toPoint(), 
-                      QString("(%1, %2)").arg(world.x, 0, 'f', 2).arg(world.y, 0, 'f', 2));
+    QToolTip::showText(event->globalPosition().toPoint(), coord_tip);
 #else
-    QToolTip::showText(event->globalPos(), 
-                      QString("(%1, %2)").arg(world.x, 0, 'f', 2).arg(world.y, 0, 'f', 2));
+    QToolTip::showText(event->globalPos(), coord_tip);
 #endif
 }
 

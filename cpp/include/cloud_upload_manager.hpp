@@ -93,6 +93,9 @@ struct ScanMetadata {
     // Session info
     QString sectionName;
     QString dateFolder;
+    QString buildingSlug;           // e.g., "Acme_HQ" — empty if section
+                                    // pre-dates the New-Scan-Information
+                                    // modal (legacy <day>/Section_* layout).
     QDateTime scanTimestamp;
     QString operatorName;
     
@@ -126,9 +129,12 @@ enum class UploadState {
 struct UploadJob {
     int jobId = 0;
     QString localPath;          // Local folder path
-    QString s3Destination;      // s3://bucket/prefix/date/section/
+    QString s3Destination;      // s3://bucket/prefix/date/<building>/section/
+                                // (building segment is omitted for legacy
+                                // pre-modal sections — empty buildingSlug.)
     QString sectionName;        // Display name
     QString dateFolder;         // Date folder name
+    QString buildingSlug;       // e.g., "Acme_HQ" — empty for legacy layout
     
     qint64 totalBytes = 0;
     qint64 uploadedBytes = 0;
@@ -197,6 +203,10 @@ public:
         QString name;
         QString path;
         QString dateFolder;
+        QString buildingSlug;       // e.g., "Acme_HQ" — empty for the
+                                    // pre-modal Flat or Dated layouts; set
+                                    // only for the new
+                                    // <date>/<building>/<section> layout.
         qint64 totalSize = 0;
         int fileCount = 0;
         bool alreadyUploaded = false;

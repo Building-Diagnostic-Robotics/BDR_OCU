@@ -103,6 +103,13 @@
          the second alias keeps call-site grep semantically clean. -->
     <file alias="missionplanner/preset_rename.svg">../App resource/icons/mission_planner_preset_rename.svg</file>
     <file alias="missionplanner/preset_delete.svg">../App resource/icons/mission_planner_scan_discard.svg</file>
+
+    <!-- New Scan Information modal (MissionMetadataDialog, Figma node 194:152).
+         Lucide-style 16/20px stroked icons in design-system green (#00BC7D). -->
+    <file alias="dialog/location_pin.svg">../App resource/icons/dialog_location_pin.svg</file>
+    <file alias="dialog/user.svg">../App resource/icons/dialog_user.svg</file>
+    <file alias="dialog/ruler.svg">../App resource/icons/dialog_ruler.svg</file>
+    <file alias="dialog/close.svg">../App resource/icons/dialog_close.svg</file>
   </qresource>
 </RCC>
 

@@ -11,6 +11,7 @@
 #include <QAbstractButton>
 #include <QAbstractSocket>
 #include <QDate>
+#include <QGraphicsBlurEffect>
 #include <QHBoxLayout>
 #include <QFile>
 #include <QLabel>
@@ -21,6 +22,7 @@
 #include <QFileInfo>
 #include <QNetworkInterface>
 #include <QPainter>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -40,6 +42,7 @@
 
 #include "cloud_upload_manager.hpp"
 #include "components/bdr_message_box.hpp"
+#include "components/mission_metadata_dialog.hpp"
 #include "components/rollback_banner.hpp"
 #include "components/update_banner.hpp"
 #include "components/update_modal.hpp"
@@ -51,6 +54,7 @@
 #include "settings_constants.hpp"
 #include "startup_screen.hpp"
 #include "transfer_manager.hpp"
+#include "units_system.hpp"
 #include "update/update_checker.hpp"
 #include "update/update_lockfile.hpp"
 #include "update/update_state.hpp"
@@ -1147,6 +1151,57 @@ void AppShellWindow::ensureStage5() {
 // ---------------------------------------------------------------------------
 
 void AppShellWindow::onStartNewScan() {
+    // Intercept the Dashboard "Start New Scan" CTA with the New Scan
+    // Information modal (Building / Operator / Units). On Cancel or X
+    // close, the operator stays on the Dashboard with no transition and
+    // no robot contact. On Proceed, MissionMetadataDialog has already
+    // persisted the values to QSettings and updated UnitsProvider — we
+    // just advance to Stage 4. The OCU never calls /dc/start itself —
+    // the autonomous controller fires it after Stage 5 Planner Start
+    // Scan publishes autonomy_enable=true. The metadata is pushed to
+    // /data_collection_coordinator/set_parameters by
+    // sendDataCollectorSessionMetadata in onPlannerScanStartRequested,
+    // gated so autonomy_enable cannot fire if the push fails.
+    //
+    // Backdrop blur on the Dashboard mirrors the
+    // PlannerScreen::showScanPreflightDialog pattern in
+    // planner_screen.cpp:5202 so the operator's eye is drawn to the
+    // modal.
+    QWidget* backdrop = nullptr;
+    if (stage3_) {
+        backdrop = stage3_;
+    } else if (stack_) {
+        backdrop = stack_->currentWidget();
+    }
+
+    QGraphicsBlurEffect* blur = nullptr;
+    if (backdrop) {
+        blur = new QGraphicsBlurEffect(backdrop);
+        blur->setBlurRadius(14.0);
+        backdrop->setGraphicsEffect(blur);
+    }
+
+    auto* dialog = new MissionMetadataDialog(this);
+    QPointer<MissionMetadataDialog> guard(dialog);
+    QTimer::singleShot(0, dialog, [this, guard]() {
+        if (!guard) return;
+        const QPoint top_left = mapToGlobal(QPoint(
+            (width() - guard->width()) / 2,
+            (height() - guard->height()) / 2));
+        guard->move(top_left);
+    });
+
+    const int rc = dialog->exec();
+
+    if (backdrop) {
+        backdrop->setGraphicsEffect(nullptr);
+    }
+    dialog->deleteLater();
+
+    if (rc != QDialog::Accepted) {
+        return;
+    }
+
     goToStage4();
 }
 
@@ -1653,17 +1708,45 @@ void AppShellWindow::callPlannerTriggerService(
 }
 
 void AppShellWindow::onPlannerScanStartRequested(double speed_mps) {
-    // Push the operator-selected cruise speed to the controller BEFORE
-    // arming autonomy. set_parameters mutates max_linear_velocity
-    // synchronously inside the controller, so the autonomy-enable that
-    // follows will see the new cap.
-    sendControllerMaxLinearVelocity(speed_mps);
-    if (planner_estop_active_) {
-        callPlannerTriggerService(planner_dc_resume_client_);
-        sendExplorationAxisStateRequest(kOdriveAxisStateClosedLoopControl);
-        planner_estop_active_ = false;
-    }
-    publishPlannerAutonomyEnable(true);
+    // Order of operations on planner Start Scan:
+    //   1. Push New-Scan-Information metadata (building / operator /
+    //      units) to /data_collection_coordinator via SetParameters,
+    //      and HARD-BLOCK on its success. The controller's /dc/start
+    //      fires shortly after publishPlannerAutonomyEnable(true)
+    //      below; the coordinator re-reads these params on every
+    //      ensure_mission_session(), so they MUST be live before
+    //      autonomy is armed or the section folder lands under the
+    //      BDR_test fallback (polluting the per-building AWS layout).
+    //   2. On metadata success: push the operator-selected cruise
+    //      speed (mutates the controller's max_linear_velocity
+    //      synchronously inside its on_parameter_change), clear E-Stop
+    //      if engaged, then publish autonomy_enable=true.
+    //   3. On metadata failure: BdrMessageBox::warning was already
+    //      shown by the helper; do NOT arm autonomy. Operator can
+    //      retry by re-pressing Start Scan once the coordinator is
+    //      reachable.
+    QSettings settings(kSettingsOrgName, kSettingsAppName);
+    const QString building_name =
+        settings.value(kSettingsBuildingNameKey).toString();
+    const QString operator_name =
+        settings.value(kSettingsOperatorNameKey).toString();
+    const QString units_preference =
+        units::toString(UnitsProvider::instance()->units());
+
+    sendDataCollectorSessionMetadata(
+        building_name, operator_name, units_preference,
+        [this, speed_mps](bool ok) {
+            if (!ok) {
+                return;
+            }
+            sendControllerMaxLinearVelocity(speed_mps);
+            if (planner_estop_active_) {
+                callPlannerTriggerService(planner_dc_resume_client_);
+                sendExplorationAxisStateRequest(kOdriveAxisStateClosedLoopControl);
+                planner_estop_active_ = false;
+            }
+            publishPlannerAutonomyEnable(true);
+        });
 }
 
 void AppShellWindow::onPlannerScanPauseRequested() {
@@ -3428,9 +3511,9 @@ bool AppShellWindow::sendControllerMaxLinearVelocity(double max_linear_velocity_
                 "Could not reach the autonomous controller's parameter "
                 "service within 1.5 s. The robot will use its current "
                 "cruise speed (most likely the launch-time default, not "
-                "the %1 m/s you selected). Verify the robot stack is up "
+                "the %1 you selected). Verify the robot stack is up "
                 "and re-press Start Scan to retry.")
-                .arg(max_linear_velocity_mps, 0, 'f', 2));
+                .arg(units::formatSpeed(max_linear_velocity_mps, 2)));
         return false;
     }
 
@@ -3517,6 +3600,157 @@ bool AppShellWindow::sendControllerMaxLinearVelocity(double max_linear_velocity_
     // Any failure surfaces asynchronously via BdrMessageBox in the
     // response callback above.
     return true;
+}
+
+void AppShellWindow::sendDataCollectorSessionMetadata(
+    const QString& building_name,
+    const QString& operator_name,
+    const QString& units_preference,
+    std::function<void(bool ok)> on_complete) {
+    // Mirrors the design of sendControllerMaxLinearVelocity above:
+    // a freshly-built SetParameters client captured by value into the
+    // response lambda so it outlives this function, and a Qt main
+    // thread hop via QMetaObject::invokeMethod before any UI work.
+    //
+    // Service name comes from the coordinator node name in
+    // pilot_control/scripts/data_collection_coordinator.py
+    // (`super().__init__('data_collection_coordinator')`).
+    //
+    // Push raw strings — coordinator owns the slugifier
+    // (slugify_building_name in the same file). Pushing both raw and
+    // slug here would just create a divergence vector if the two
+    // slug implementations ever drift. The C++ slugifier in
+    // MissionMetadataDialog::slugify is QSettings/UI-preview only.
+    //
+    // Per Stage 4 plan: caller hard-blocks autonomy_enable on
+    // on_complete(false) so the operator can retry, rather than
+    // letting the section land under BDR_test/.
+    auto invoke_complete = [this, on_complete](bool ok) {
+        if (!on_complete) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            this,
+            [on_complete, ok]() { on_complete(ok); },
+            Qt::QueuedConnection);
+    };
+
+    if (!exploration_ros_node_) {
+        ensureExplorationRosInterfaces();
+    }
+    if (!exploration_ros_node_ || !rclcpp::ok()) {
+        BdrMessageBox::warning(
+            this,
+            QStringLiteral("Session metadata update failed"),
+            QStringLiteral(
+                "ROS interfaces are not initialized; the building / "
+                "operator / units selection cannot be sent to the robot. "
+                "Re-press Start Scan to retry."));
+        invoke_complete(false);
+        return;
+    }
+
+    auto set_params_client =
+        exploration_ros_node_->create_client<rcl_interfaces::srv::SetParameters>(
+            "/data_collection_coordinator/set_parameters");
+
+    if (!set_params_client->wait_for_service(std::chrono::milliseconds(1500))) {
+        RCLCPP_WARN(rclcpp::get_logger("AppShellWindow"),
+                    "/data_collection_coordinator/set_parameters not "
+                    "available after 1.5 s; session metadata push skipped.");
+        BdrMessageBox::warning(
+            this,
+            QStringLiteral("Session metadata update failed"),
+            QStringLiteral(
+                "Could not reach the data collection coordinator's "
+                "parameter service within 1.5 s. The robot stack is "
+                "probably not fully up. Verify the launch sequence "
+                "completed and re-press Start Scan to retry."));
+        invoke_complete(false);
+        return;
+    }
+
+    auto make_string_param = [](const char* name, const QString& value) {
+        rcl_interfaces::msg::Parameter p;
+        p.name = name;
+        p.value.type = rcl_interfaces::msg::ParameterType::PARAMETER_STRING;
+        p.value.string_value = value.toStdString();
+        return p;
+    };
+
+    auto request = std::make_shared<rcl_interfaces::srv::SetParameters::Request>();
+    request->parameters.reserve(3);
+    request->parameters.push_back(make_string_param("building_name", building_name));
+    request->parameters.push_back(make_string_param("operator_name", operator_name));
+    request->parameters.push_back(make_string_param("units_preference", units_preference));
+
+    set_params_client->async_send_request(
+        request,
+        [this, set_params_client, request, invoke_complete](
+            rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedFuture future) {
+            QMetaObject::invokeMethod(
+                this,
+                [this, future, request, invoke_complete]() mutable {
+                    rcl_interfaces::srv::SetParameters::Response::SharedPtr response;
+                    try {
+                        response = future.get();
+                    } catch (const std::exception& ex) {
+                        RCLCPP_WARN(rclcpp::get_logger("AppShellWindow"),
+                                    "Coordinator SetParameters future threw: %s",
+                                    ex.what());
+                        BdrMessageBox::warning(
+                            this,
+                            QStringLiteral("Session metadata update failed"),
+                            QString::fromUtf8(
+                                "The session metadata update raised an "
+                                "exception: %1.")
+                                .arg(QString::fromUtf8(ex.what())));
+                        invoke_complete(false);
+                        return;
+                    }
+
+                    if (!response ||
+                        response->results.size() != request->parameters.size()) {
+                        BdrMessageBox::warning(
+                            this,
+                            QStringLiteral("Session metadata update failed"),
+                            QStringLiteral(
+                                "The data collection coordinator returned "
+                                "an unexpected response to the session "
+                                "metadata update."));
+                        invoke_complete(false);
+                        return;
+                    }
+
+                    QStringList rejected;
+                    for (size_t i = 0; i < response->results.size(); ++i) {
+                        if (!response->results[i].successful) {
+                            const std::string& name = request->parameters[i].name;
+                            const std::string& reason = response->results[i].reason;
+                            RCLCPP_WARN(
+                                rclcpp::get_logger("AppShellWindow"),
+                                "data_collection_coordinator rejected %s: %s",
+                                name.c_str(), reason.c_str());
+                            rejected << QString::fromStdString(name + ": " + reason);
+                        }
+                    }
+                    if (!rejected.isEmpty()) {
+                        BdrMessageBox::warning(
+                            this,
+                            QStringLiteral("Session metadata update rejected"),
+                            QString::fromUtf8(
+                                "The data collection coordinator rejected "
+                                "the following session metadata "
+                                "parameters:\n\n%1")
+                                .arg(rejected.join(QStringLiteral("\n"))));
+                        invoke_complete(false);
+                        return;
+                    }
+
+                    invoke_complete(true);
+                },
+                Qt::QueuedConnection);
+        });
 }
 
 void AppShellWindow::onExplorationLocalNavGrid(

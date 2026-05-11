@@ -240,6 +240,32 @@ private:
     // start-scan based on that.
     bool sendControllerMaxLinearVelocity(double max_linear_velocity_mps);
 
+    // Push the operator's New-Scan-Information modal payload (building
+    // name, operator name, units preference) to the robot's
+    // /data_collection_coordinator as ROS string parameters, so the
+    // coordinator's next ensure_mission_session() (driven by the
+    // controller's /dc/start a few hundred ms later) lands the
+    // section folder under /R_DATA/<day>/<building_slug>/Section_*/
+    // instead of the BDR_test fallback.
+    //
+    // Async: dispatches a SetParameters request and invokes
+    // `on_complete(true)` on the Qt main thread when ALL three params
+    // are accepted, or `on_complete(false)` (with a BdrMessageBox
+    // already shown to the operator) on any failure path:
+    //   - exploration node not initialized
+    //   - /data_collection_coordinator/set_parameters not reachable
+    //     within 1.5 s (coordinator probably not launched yet)
+    //   - response missing / partial / any param rejected
+    //
+    // Caller MUST gate downstream side-effects (autonomy_enable,
+    // /dc/start chain) on `ok == true` — see
+    // onPlannerScanStartRequested for the canonical wiring.
+    void sendDataCollectorSessionMetadata(
+        const QString& building_name,
+        const QString& operator_name,
+        const QString& units_preference,
+        std::function<void(bool ok)> on_complete);
+
     struct ExplorationOdomSample {
         double x = 0.0;
         double y = 0.0;

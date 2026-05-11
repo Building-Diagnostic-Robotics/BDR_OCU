@@ -9,6 +9,7 @@
 #include "plot_widget.hpp"
 #include "video_stream_widget.hpp"
 #include "settings_constants.hpp"
+#include "units_system.hpp"
 
 #include <algorithm>
 #include <QApplication>
@@ -401,7 +402,12 @@ QString formatCount(qsizetype value) {
 }
 
 QString formatMeters(double value) {
-    return QStringLiteral("%1m").arg(value, 0, 'f', 2);
+    // Display-only routing through UnitsProvider: when the operator
+    // selects ANSI in the New Scan Information modal this returns
+    // "X.XX ft"; otherwise "X.XX m". The stored value remains SI in
+    // CoverageConfig, QSettings, and the JSON exports — only the
+    // label changes. See units_system.hpp.
+    return units::formatLength(value, 2);
 }
 
 QString formatParameter(double value) {
@@ -417,7 +423,8 @@ QString formatFileSize(double value_mb) {
 }
 
 QString formatArea(double value_m2) {
-    return QStringLiteral("%1 m²").arg(value_m2, 0, 'f', 1);
+    // Routes through UnitsProvider — see formatMeters above.
+    return units::formatArea(value_m2, 1);
 }
 
 double clampValue(double value, double minimum, double maximum) {
@@ -1054,6 +1061,30 @@ private:
 PlannerScreen::PlannerScreen(QWidget* parent) : QWidget(parent) {
     setFocusPolicy(Qt::StrongFocus);
     buildUi();
+
+    // Repaint unit-bearing slider min/max badges whenever the operator
+    // flips Metric ↔ ANSI in the New Scan Information modal between
+    // missions. Without this, a Metric → Complete → ANSI cycle leaves
+    // the badges stuck at "0.30 m/s" / "0.60 m/s" next to a slider
+    // value that already reads "0.98 ft/s". buildUi() must have run
+    // first so unit_endpoint_badges_ is populated. UniqueConnection
+    // guards against any future refactor that calls buildUi() twice.
+    connect(UnitsProvider::instance(),
+            &UnitsProvider::unitsChanged,
+            this,
+            &PlannerScreen::relabelUnitEndpointBadges,
+            Qt::UniqueConnection);
+    // Same trigger fans out to the scan-splitting "Distance per scan"
+    // ANSI hint and the segment list (rebuilt on every change so its
+    // displayed lengths flip Metric ↔ ANSI alongside the badges).
+    connect(UnitsProvider::instance(),
+            &UnitsProvider::unitsChanged,
+            this,
+            [this](Units) {
+                refreshScanDistanceAnsiHint();
+                refreshScanSegmentList();
+            },
+            Qt::UniqueConnection);
     autotest_enabled_ = qEnvironmentVariableIsSet("BDR_PLANNER_AUTOTEST_MAP");
     autotest_mode_ = qEnvironmentVariable("BDR_PLANNER_AUTOTEST_MODE", QStringLiteral("full"));
 
@@ -1074,6 +1105,58 @@ PlannerScreen::PlannerScreen(QWidget* parent) : QWidget(parent) {
     });
 
     setMapPath(QString());
+}
+
+void PlannerScreen::refreshScanDistanceAnsiHint() {
+    // Hint is purely informational — visible only when the operator
+    // is in ANSI mode. The field itself always stores/displays meters
+    // (single source of truth); we just compute the equivalent feet
+    // value from the typed text and parade it in grey alongside.
+    if (!lbl_scan_distance_ansi_hint_) {
+        return;
+    }
+    const bool ansi = !UnitsProvider::instance()->isMetric();
+    if (!ansi) {
+        lbl_scan_distance_ansi_hint_->setVisible(false);
+        lbl_scan_distance_ansi_hint_->clear();
+        return;
+    }
+    bool ok = false;
+    double meters = 0.0;
+    if (edit_scan_distance_) {
+        meters = edit_scan_distance_->text().toDouble(&ok);
+    }
+    if (!ok || meters <= 0.0) {
+        lbl_scan_distance_ansi_hint_->setVisible(false);
+        lbl_scan_distance_ansi_hint_->clear();
+        return;
+    }
+    lbl_scan_distance_ansi_hint_->setText(
+        QStringLiteral("(\u2248 %1)")
+            .arg(units::formatLength(meters, 2)));
+    lbl_scan_distance_ansi_hint_->setVisible(true);
+}
+
+void PlannerScreen::relabelUnitEndpointBadges() {
+    // Walk every (min_label, max_label, min_value, max_value, kind)
+    // tuple captured in buildUi() and repaint the strings using the
+    // formatter that matches the current UnitsProvider selection. The
+    // numeric ranges themselves never change — sliders stay in SI
+    // internally; only the displayed unit suffix flips.
+    for (const auto& badge : unit_endpoint_badges_) {
+        if (badge.min_label) {
+            badge.min_label->setText(
+                badge.kind == UnitEndpointBadge::Kind::Speed
+                    ? units::formatSpeed(badge.min_value, badge.decimals)
+                    : units::formatLength(badge.min_value, badge.decimals));
+        }
+        if (badge.max_label) {
+            badge.max_label->setText(
+                badge.kind == UnitEndpointBadge::Kind::Speed
+                    ? units::formatSpeed(badge.max_value, badge.decimals)
+                    : units::formatLength(badge.max_value, badge.decimals));
+        }
+    }
 }
 
 void PlannerScreen::setDarkMode(bool dark_mode) {
@@ -2429,7 +2512,7 @@ void PlannerScreen::updateValueLabels() {
     }
     if (lbl_coverage_scan_speed_value_) {
         lbl_coverage_scan_speed_value_->setText(
-            QString::asprintf("%.2f m/s", cache.coverage_scan_speed_mps));
+            units::formatSpeed(cache.coverage_scan_speed_mps, 2));
     }
 }
 
@@ -5017,9 +5100,9 @@ void PlannerScreen::refreshScanSegmentList() {
     size_t done = 0;
     for (const auto& seg : cache->scan_segments) {
         auto* item = new QListWidgetItem(
-            QString("%1  %2 m, %3 turns")
+            QString("%1  %2, %3 turns")
                 .arg(seg.name)
-                .arg(seg.length_m, 0, 'f', 1)
+                .arg(units::formatLength(seg.length_m, 1))
                 .arg(seg.turns));
         item->setData(kScanSegmentCompletedRole, seg.completed);
         if (seg.completed) {
@@ -5310,6 +5393,10 @@ void PlannerScreen::updateScanSplittingUi() {
         if (edit_scan_distance_->text() != want) {
             edit_scan_distance_->setText(want);
         }
+        // QSignalBlocker above suppresses textEdited, so refresh the
+        // ANSI hint explicitly here to track programmatic resets
+        // (preset switch, QSettings restore, scan distance defaulting).
+        refreshScanDistanceAnsiHint();
     }
 
     auto styleToggle = [&](QPushButton* btn, bool active) {
@@ -5828,7 +5915,9 @@ void PlannerScreen::buildUi() {
                                       double step,
                                       int decimals,
                                       PlannerTrackSlider** out_slider,
-                                      QLabel** out_value_label) -> QWidget* {
+                                      QLabel** out_value_label,
+                                      QLabel** out_min_label = nullptr,
+                                      QLabel** out_max_label = nullptr) -> QWidget* {
         auto* block = new QWidget(parent);
         block->setFixedHeight(100);
         auto* layout = new QVBoxLayout(block);
@@ -5898,14 +5987,22 @@ void PlannerScreen::buildUi() {
         auto* range_row = new QHBoxLayout();
         range_row->setContentsMargins(0, 0, 0, 0);
         range_row->setSpacing(0);
-        range_row->addWidget(makeTrackedLabel(block, min_text, kInitialMono9Muted, &mono9_labels_));
+        QLabel* min_lbl = makeTrackedLabel(block, min_text, kInitialMono9Muted, &mono9_labels_);
+        range_row->addWidget(min_lbl);
         range_row->addStretch(1);
-        range_row->addWidget(makeTrackedLabel(block,
-                                              max_text,
-                                              kInitialMono9Muted,
-                                              &mono9_labels_,
-                                              Qt::AlignRight | Qt::AlignVCenter));
+        QLabel* max_lbl = makeTrackedLabel(block,
+                                           max_text,
+                                           kInitialMono9Muted,
+                                           &mono9_labels_,
+                                           Qt::AlignRight | Qt::AlignVCenter);
+        range_row->addWidget(max_lbl);
         layout->addLayout(range_row);
+        if (out_min_label) {
+            *out_min_label = min_lbl;
+        }
+        if (out_max_label) {
+            *out_max_label = max_lbl;
+        }
         return block;
     };
 
@@ -5916,17 +6013,24 @@ void PlannerScreen::buildUi() {
     downsampling_layout->setSpacing(8);
     downsampling_layout->addWidget(makeTrackedLabel(
         downsampling_section, QStringLiteral("DOWNSAMPLING"), kInitialHeading10, &heading10_labels_));
+    QLabel* lbl_voxel_min = nullptr;
+    QLabel* lbl_voxel_max = nullptr;
     downsampling_layout->addWidget(make_range_block(downsampling_section,
                                                     QStringLiteral("Voxel Size"),
                                                     QStringLiteral("Grid resolution for downsampling"),
-                                                    QStringLiteral("0.01m"),
-                                                    QStringLiteral("0.20m"),
+                                                    units::formatLength(0.01, 2),
+                                                    units::formatLength(0.20, 2),
                                                     0.01,
                                                     0.20,
                                                     0.01,
                                                     2,
                                                     &slider_voxel_,
-                                                    &lbl_voxel_value_));
+                                                    &lbl_voxel_value_,
+                                                    &lbl_voxel_min,
+                                                    &lbl_voxel_max));
+    unit_endpoint_badges_.push_back(
+        UnitEndpointBadge{lbl_voxel_min, lbl_voxel_max, 0.01, 0.20,
+                          UnitEndpointBadge::Kind::Length, 2});
     left_content_layout->addWidget(downsampling_section);
     left_content_layout->addSpacing(12);
 
@@ -5944,28 +6048,42 @@ void PlannerScreen::buildUi() {
     auto* height_blocks_layout = new QVBoxLayout(height_blocks);
     height_blocks_layout->setContentsMargins(0, 0, 0, 0);
     height_blocks_layout->setSpacing(10);
+    QLabel* lbl_z_min_min = nullptr;
+    QLabel* lbl_z_min_max = nullptr;
     height_blocks_layout->addWidget(make_range_block(height_section,
                                                      QStringLiteral("Z Min"),
                                                      QStringLiteral("Minimum height threshold"),
-                                                     QStringLiteral("-0.50m"),
-                                                     QStringLiteral("0.50m"),
+                                                     units::formatLength(-0.50, 2),
+                                                     units::formatLength(0.50, 2),
                                                      -0.50,
                                                      0.50,
                                                      0.01,
                                                      2,
                                                      &slider_z_min_,
-                                                     &lbl_z_min_value_));
+                                                     &lbl_z_min_value_,
+                                                     &lbl_z_min_min,
+                                                     &lbl_z_min_max));
+    unit_endpoint_badges_.push_back(
+        UnitEndpointBadge{lbl_z_min_min, lbl_z_min_max, -0.50, 0.50,
+                          UnitEndpointBadge::Kind::Length, 2});
+    QLabel* lbl_z_max_min = nullptr;
+    QLabel* lbl_z_max_max = nullptr;
     height_blocks_layout->addWidget(make_range_block(height_section,
                                                      QStringLiteral("Z Max"),
                                                      QStringLiteral("Maximum height threshold"),
-                                                     QStringLiteral("-0.50m"),
-                                                     QStringLiteral("0.50m"),
+                                                     units::formatLength(-0.50, 2),
+                                                     units::formatLength(0.50, 2),
                                                      -0.50,
                                                      0.50,
                                                      0.01,
                                                      2,
                                                      &slider_z_max_,
-                                                     &lbl_z_max_value_));
+                                                     &lbl_z_max_value_,
+                                                     &lbl_z_max_min,
+                                                     &lbl_z_max_max));
+    unit_endpoint_badges_.push_back(
+        UnitEndpointBadge{lbl_z_max_min, lbl_z_max_max, -0.50, 0.50,
+                          UnitEndpointBadge::Kind::Length, 2});
     height_layout->addWidget(height_blocks);
     left_content_layout->addWidget(height_section);
 
@@ -6424,42 +6542,71 @@ void PlannerScreen::buildUi() {
     auto* path_blocks_layout = new QVBoxLayout(path_blocks);
     path_blocks_layout->setContentsMargins(0, 0, 0, 0);
     path_blocks_layout->setSpacing(10);
+    // Endpoint labels routed through units::format* so ANSI mode shows
+    // ft / ft/s. Sliders themselves stay in SI internally — endpoint
+    // strings are display-only. The QLabel pointers are stashed in
+    // unit_endpoint_badges_ so relabelUnitEndpointBadges() can rewrite
+    // them when the operator flips the units toggle between missions.
+    QLabel* lbl_path_spacing_min = nullptr;
+    QLabel* lbl_path_spacing_max = nullptr;
     path_blocks_layout->addWidget(make_range_block(path_section,
                                                    QStringLiteral("Path Spacing"),
                                                    QStringLiteral("Distance between paths"),
-                                                   QStringLiteral("0.20m"),
-                                                   QStringLiteral("1.00m"),
+                                                   units::formatLength(kCoveragePathSpacingMin, 2),
+                                                   units::formatLength(kCoveragePathSpacingMax, 2),
                                                    kCoveragePathSpacingMin,
                                                    kCoveragePathSpacingMax,
                                                    0.05,
                                                    2,
                                                    &slider_coverage_path_spacing_,
-                                                   &lbl_coverage_path_spacing_value_));
+                                                   &lbl_coverage_path_spacing_value_,
+                                                   &lbl_path_spacing_min,
+                                                   &lbl_path_spacing_max));
+    unit_endpoint_badges_.push_back(
+        UnitEndpointBadge{lbl_path_spacing_min, lbl_path_spacing_max,
+                          kCoveragePathSpacingMin, kCoveragePathSpacingMax,
+                          UnitEndpointBadge::Kind::Length, 2});
+    QLabel* lbl_headland_min = nullptr;
+    QLabel* lbl_headland_max = nullptr;
     path_blocks_layout->addWidget(make_range_block(path_section,
                                                    QStringLiteral("Headland Width"),
                                                    QStringLiteral("Border clearance width"),
-                                                   QStringLiteral("0.10m"),
-                                                   QStringLiteral("1.00m"),
+                                                   units::formatLength(kCoverageHeadlandMin, 2),
+                                                   units::formatLength(kCoverageHeadlandMax, 2),
                                                    kCoverageHeadlandMin,
                                                    kCoverageHeadlandMax,
                                                    0.05,
                                                    2,
                                                    &slider_coverage_headland_,
-                                                   &lbl_coverage_headland_value_));
+                                                   &lbl_coverage_headland_value_,
+                                                   &lbl_headland_min,
+                                                   &lbl_headland_max));
+    unit_endpoint_badges_.push_back(
+        UnitEndpointBadge{lbl_headland_min, lbl_headland_max,
+                          kCoverageHeadlandMin, kCoverageHeadlandMax,
+                          UnitEndpointBadge::Kind::Length, 2});
     // Robot cruise speed (m/s). Slider is config-only; the value gets pushed
     // to mpc_accel_autonomous_controller's `max_linear_velocity` ROS param at scan-
     // start. Range matches the safe envelope of the current MPC tune.
+    QLabel* lbl_scan_speed_min = nullptr;
+    QLabel* lbl_scan_speed_max = nullptr;
     path_blocks_layout->addWidget(make_range_block(path_section,
                                                    QStringLiteral("Robot Speed"),
                                                    QStringLiteral("Cruise speed during scan"),
-                                                   QStringLiteral("0.30 m/s"),
-                                                   QStringLiteral("0.60 m/s"),
+                                                   units::formatSpeed(kCoverageScanSpeedMin, 2),
+                                                   units::formatSpeed(kCoverageScanSpeedMax, 2),
                                                    kCoverageScanSpeedMin,
                                                    kCoverageScanSpeedMax,
                                                    kCoverageScanSpeedStep,
                                                    2,
                                                    &slider_coverage_scan_speed_,
-                                                   &lbl_coverage_scan_speed_value_));
+                                                   &lbl_coverage_scan_speed_value_,
+                                                   &lbl_scan_speed_min,
+                                                   &lbl_scan_speed_max));
+    unit_endpoint_badges_.push_back(
+        UnitEndpointBadge{lbl_scan_speed_min, lbl_scan_speed_max,
+                          kCoverageScanSpeedMin, kCoverageScanSpeedMax,
+                          UnitEndpointBadge::Kind::Speed, 2});
     path_section_layout->addWidget(path_blocks);
     coverage_content_layout->addWidget(path_section);
     coverage_content_layout->addSpacing(12);
@@ -6702,6 +6849,18 @@ void PlannerScreen::buildUi() {
         edit_scan_distance_->setValidator(validator);
     }
     scan_distance_layout->addWidget(edit_scan_distance_);
+    // ANSI hint: small grey "(≈ X.XX ft)" rendered next to the field
+    // when the operator selects ANSI in the New Scan Information modal.
+    // Field value itself stays in meters (single source of truth on
+    // the wire and in QSettings); the hint is purely informational.
+    lbl_scan_distance_ansi_hint_ = makeTextLabel(
+        scan_distance_row,
+        QString(),
+        QStringLiteral("font-family: 'Arimo'; font-size: 12px; font-weight: 400; color: #71717B;"));
+    lbl_scan_distance_ansi_hint_->setVisible(false);
+    scan_distance_layout->addWidget(lbl_scan_distance_ansi_hint_);
+    connect(edit_scan_distance_, &QLineEdit::textEdited, this,
+            [this](const QString&) { refreshScanDistanceAnsiHint(); });
     scan_content_layout->addWidget(scan_distance_row);
 
     auto* scan_progression_section = new QWidget(scan_content);
@@ -8268,7 +8427,7 @@ QWidget* PlannerScreen::buildScanTelemetryCard(QWidget* parent) {
         QStringLiteral("font-family: 'Arimo'; font-size: 16px; font-weight: 400; color: #9F9FA9;")));
     lbl_scan_telemetry_speed_ = makeTextLabel(
         speed_section,
-        QStringLiteral("0.00 m/s"),
+        units::formatSpeed(0.0, 2),
         QStringLiteral("font-family: 'Liberation Mono'; font-size: 16px; font-weight: 400; color: #FFFFFF;"));
     speed_layout->addWidget(lbl_scan_telemetry_speed_);
     content_layout->addWidget(speed_section);
@@ -9199,7 +9358,7 @@ void PlannerScreen::updateScanRunUi() {
     // Statistics card.
     if (cache && lbl_scan_stats_distance_) {
         lbl_scan_stats_distance_->setText(
-            QString::number(cache->scan_distance_traveled_m, 'f', 1) + QStringLiteral(" m"));
+            units::formatLength(cache->scan_distance_traveled_m, 1));
     }
     if (cache && lbl_scan_stats_avg_quality_) {
         lbl_scan_stats_avg_quality_->setText(
@@ -9496,7 +9655,7 @@ void PlannerScreen::updateScanLiveTelemetry() {
     const SessionCache* cache = activeSessionPtr();
     if (!cache || cache->scan_run_state != ScanRunState::Running) {
         if (lbl_scan_telemetry_speed_) {
-            lbl_scan_telemetry_speed_->setText(QStringLiteral("0.00 m/s"));
+            lbl_scan_telemetry_speed_->setText(units::formatSpeed(0.0, 2));
         }
         last_telemetry_valid_ = false;
     }
@@ -9505,12 +9664,10 @@ void PlannerScreen::updateScanLiveTelemetry() {
     }
     const PathState& p = *live_robot_pose_;
     if (lbl_scan_telemetry_pos_x_) {
-        lbl_scan_telemetry_pos_x_->setText(
-            QString::number(p.point.x, 'f', 2) + QStringLiteral(" m"));
+        lbl_scan_telemetry_pos_x_->setText(units::formatLength(p.point.x, 2));
     }
     if (lbl_scan_telemetry_pos_y_) {
-        lbl_scan_telemetry_pos_y_->setText(
-            QString::number(p.point.y, 'f', 2) + QStringLiteral(" m"));
+        lbl_scan_telemetry_pos_y_->setText(units::formatLength(p.point.y, 2));
     }
     if (lbl_scan_telemetry_heading_) {
         const double deg = p.heading * 180.0 / M_PI;
@@ -9526,8 +9683,7 @@ void PlannerScreen::updateScanLiveTelemetry() {
         const double dx = p.point.x - last_telemetry_xy_.x;
         const double dy = p.point.y - last_telemetry_xy_.y;
         const double v = std::sqrt(dx * dx + dy * dy) / dt;
-        lbl_scan_telemetry_speed_->setText(
-            QString::number(v, 'f', 2) + QStringLiteral(" m/s"));
+        lbl_scan_telemetry_speed_->setText(units::formatSpeed(v, 2));
     }
     last_telemetry_ts_ = now;
     last_telemetry_xy_ = p.point;
