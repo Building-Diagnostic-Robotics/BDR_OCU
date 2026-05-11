@@ -75,6 +75,18 @@ signals:
 protected:
     void resizeEvent(QResizeEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
+    // closeEvent: gated shutdown for the OCU's main window.
+    // If the exploration launch tree is alive on the robot (operator
+    // already pressed Start Mapping / past Stage 4), the close is
+    // intercepted and a confirmation dialog is shown.  Acceptance runs
+    // the same SYNCHRONOUS teardown as Complete Mission so the robot's
+    // unified_data_collector gets a chance to call
+    // seekcamera_manager_destroy() before the OCU process exits.
+    // Without this, hitting the window X mid-scan would leave UDC alive
+    // on the robot AND the Seek SDK in a wedged state for the next OCU
+    // session (the bug we fixed in commit 283ac26 — but the fix only
+    // applied to the Complete Mission teardown path).
+    void closeEvent(QCloseEvent* event) override;
 
 private slots:
     void onLoginSubmitted(const QString& robotId, const QString& accessCode);
@@ -226,6 +238,9 @@ private:
     void pushPlannerTelemetrySnapshot();
     void pushExplorationTopMotorsChipState();
     void pushPlannerMotorsChipState();
+    void onUdcHealthMessage(const std_msgs::msg::String::SharedPtr msg);
+    void pushUdcRecPillState();
+    bool isUdcDeadOrWedged() const;
 
     // Push the operator-selected cruise speed to
     // mpc_accel_autonomous_controller's `max_linear_velocity` /
@@ -399,6 +414,17 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr exploration_thermal_summary_sub_;
     rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr exploration_local_nav_grid_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr planner_scan_status_sub_;
+    // /udc/health subscriber + cached payload.  Drives the new "REC"
+    // pill on Stage 4 + Stage 5 top bars and gates Start Scan when
+    // state == "DEAD_MAX_RESTARTS".  The supervisor publishes the DEAD
+    // state with TRANSIENT_LOCAL durability, so subscribing late still
+    // catches it.
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr udc_health_sub_;
+    QString udc_health_state_ = QStringLiteral("UNKNOWN");
+    qint64 udc_health_last_msg_ms_ = 0;
+    quint64 udc_health_total_rows_ = 0;
+    qint64 udc_health_last_row_advance_ms_ = 0;
+    quint64 udc_health_last_seen_total_rows_ = 0;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr exploration_odom_sub_;
     rclcpp::Subscription<odrive_can::msg::ControllerStatus>::SharedPtr exploration_left_status_sub_;
     rclcpp::Subscription<odrive_can::msg::ControllerStatus>::SharedPtr exploration_right_status_sub_;

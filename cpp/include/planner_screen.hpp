@@ -60,6 +60,7 @@ public:
     // odometry pipe. Used by effectiveScanSpeedMps() while a scan is running.
     void setLiveRobotSpeedMps(double speed_mps);
     void setTopSignalState(const QString& text, ValueTone tone);
+    void setTopRecPillState(const QString& text, ValueTone tone);
     void setTopLockChipState(const QString& text, ValueTone tone);
     void setTopMotorsChipState(const QString& text, ValueTone tone);
     void notifyScanSegmentCompleted();
@@ -471,9 +472,11 @@ private:
     QString robot_id_;
     QString map_path_;
     QString top_signal_text_ = QStringLiteral("Signal unavailable");
+    QString top_rec_text_ = QStringLiteral("REC \xE2\x80\x94");
     QString top_lock_text_ = QStringLiteral("Not Ready");
     QString top_motors_text_ = QStringLiteral("DISARMED");
     ValueTone top_signal_tone_ = ValueTone::Muted;
+    ValueTone top_rec_tone_ = ValueTone::Muted;
     ValueTone top_lock_tone_ = ValueTone::Error;
     ValueTone top_motors_tone_ = ValueTone::Muted;
     std::optional<PathState> live_robot_pose_;
@@ -512,6 +515,7 @@ private:
     QLabel* lbl_title_ = nullptr;
     QLabel* lbl_top_battery_ = nullptr;
     QLabel* lbl_top_signal_ = nullptr;
+    QLabel* lbl_top_rec_ = nullptr;
     QLabel* lbl_top_lock_chip_ = nullptr;
     QLabel* lbl_top_motors_dot_ = nullptr;
     QLabel* lbl_top_motors_text_ = nullptr;

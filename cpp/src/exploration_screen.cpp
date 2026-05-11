@@ -1071,6 +1071,7 @@ ExplorationScreen::ExplorationScreen(QWidget* parent)
     setPlanningEnabled(false);
     setLoadingOverlayVisible(false);
     setTopSignalState(top_signal_text_, top_signal_tone_);
+    setTopRecPillState(top_rec_text_, top_rec_tone_);
     setTopLockChipState(top_lock_text_, top_lock_tone_);
     setTopMotorsChipState(top_motors_text_, top_motors_tone_);
     setTelemetrySpeedMps(0.0);
@@ -1259,6 +1260,38 @@ void ExplorationScreen::setTopSignalState(const QString& text, ValueTone tone) {
                 host->adjustSize();
             }
         }
+    }
+}
+
+void ExplorationScreen::setTopRecPillState(const QString& text, ValueTone tone) {
+    // Mirror of setTopSignalState — same dot+text pattern.  Driven by
+    // AppShellWindow::onUdcHealthMessage.
+    top_rec_text_ = text;
+    top_rec_tone_ = tone;
+    if (!lbl_top_rec_) {
+        return;
+    }
+    lbl_top_rec_->setText(text);
+    applyTopStatusToneToLabel(lbl_top_rec_, tone, false);
+
+    QString icon_color = dark_mode_ ? QStringLiteral("#9F9FA9") : QStringLiteral("#6B7280");
+    switch (tone) {
+        case ValueTone::Good:    icon_color = QStringLiteral("#10B981"); break;
+        case ValueTone::Warning: icon_color = QStringLiteral("#F59E0B"); break;
+        case ValueTone::Error:   icon_color = QStringLiteral("#EF4444"); break;
+        case ValueTone::Muted:   break;
+    }
+    if (QWidget* item = lbl_top_rec_->parentWidget()) {
+        const auto icons = item->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+        for (QLabel* icon_label : icons) {
+            if (icon_label && icon_label != lbl_top_rec_) {
+                icon_label->setPixmap(loadSvgPixmap(
+                    QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8, icon_color));
+                break;
+            }
+        }
+        item->updateGeometry();
+        item->adjustSize();
     }
 }
 
@@ -2237,6 +2270,18 @@ void ExplorationScreen::buildUi() {
                                                    kInitialStatus14,
                                                    QString(),
                                                    &lbl_top_signal_));
+    // REC pill: drives off /udc/health (subscribed in
+    // AppShellWindow::onUdcHealthMessage).  Same dot+text pattern
+    // as the Signal pill above.  Default text "REC \u2014" / Muted
+    // tone is shown until the first /udc/health message arrives.
+    status_layout->addWidget(makePlannerStatusItem(status_bar,
+                                                   QStringLiteral(":/assets/missionplanner/status_dot.svg"),
+                                                   8,
+                                                   top_rec_text_,
+                                                   kTopStatusSignalMinWidth,
+                                                   kInitialStatus14,
+                                                   QString(),
+                                                   &lbl_top_rec_));
     auto* lock_item = new QWidget(status_bar);
     lock_item->setObjectName("ExplTopStatusItem");
     lock_item->setFixedHeight(kTopStatusItemHeight);
@@ -3082,6 +3127,7 @@ void ExplorationScreen::applyStyle() {
                 .arg(battery_text));
     }
     setTopSignalState(top_signal_text_, top_signal_tone_);
+    setTopRecPillState(top_rec_text_, top_rec_tone_);
     setTopLockChipState(top_lock_text_, top_lock_tone_);
     setTopMotorsChipState(top_motors_text_, top_motors_tone_);
 }

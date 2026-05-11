@@ -10,10 +10,12 @@
 #include <QApplication>
 #include <QAbstractButton>
 #include <QAbstractSocket>
+#include <QCloseEvent>
 #include <QDate>
 #include <QGraphicsBlurEffect>
 #include <QHBoxLayout>
 #include <QFile>
+#include <QMessageBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
@@ -1210,6 +1212,51 @@ void AppShellWindow::resizeEvent(QResizeEvent* event) {
     updateWindowControlsPosition();
 }
 
+void AppShellWindow::closeEvent(QCloseEvent* event) {
+    // Are we mid-launch?  Only gate close if the launch has been started
+    // (Stage 4 entered and Start Mapping clicked, OR Stage 5 entered with
+    // active scan).  Stage 1-3 close paths skip the dialog: there is
+    // nothing on the robot to tear down.  Per operator: "after Start
+    // Mapping the close must be gated".
+    const bool launch_active =
+        exploration_launch_in_progress_ ||
+        exploration_launch_ready_ ||
+        laptop_launch_started_ ||
+        robot_launch_started_;
+    if (!launch_active) {
+        QMainWindow::closeEvent(event);
+        return;
+    }
+
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("Close BDR Coverage Planner?"));
+    box.setIcon(QMessageBox::Warning);
+    box.setText(QStringLiteral("A scan/launch is currently active on the robot."));
+    box.setInformativeText(QStringLiteral(
+        "Closing the OCU will tear down the robot launch (data collector, "
+        "controllers, mapping). Any unfinished scan section will be lost.\n\n"
+        "Continue?"));
+    auto* close_btn = box.addButton(QStringLiteral("Close OCU"), QMessageBox::AcceptRole);
+    auto* cancel_btn = box.addButton(QStringLiteral("Cancel"), QMessageBox::RejectRole);
+    box.setDefaultButton(cancel_btn);
+    box.exec();
+
+    if (box.clickedButton() != close_btn) {
+        event->ignore();
+        return;
+    }
+
+    // SYNCHRONOUS teardown — same path as Complete Mission.  The new
+    // teardown script polls for unified_data_collector PID exit before
+    // returning (commit 283ac26), so by the time this returns the
+    // robot's UDC has had a chance to call seekcamera_manager_destroy()
+    // and we won't wedge the Seek SDK across OCU restarts.
+    qInfo("[AppShell] closeEvent accepted: running synchronous launch teardown before quit");
+    performExplorationPipelineTeardown();
+
+    QMainWindow::closeEvent(event);
+}
+
 bool AppShellWindow::eventFilter(QObject* obj, QEvent* event) {
     auto* widget = qobject_cast<QWidget*>(obj);
     if (!widget || widget->window() != this) {
@@ -1708,6 +1755,42 @@ void AppShellWindow::callPlannerTriggerService(
 }
 
 void AppShellWindow::onPlannerScanStartRequested(double speed_mps) {
+    // GATE 0: refuse to arm a scan if the unified_data_collector is
+    // dead or wedged.  isUdcDeadOrWedged() returns true ONLY for
+    // DEAD_MAX_RESTARTS (supervisor gave up after 3 crashes in 60s)
+    // or ERROR_THERMAL_WEDGED (Seek SDK never connected).  All other
+    // states — STARTING / RECORDING / PAUSED / STOPPED / UNKNOWN —
+    // are allowed (no false positives: per operator "very expensive").
+    // If we don't gate here the operator gets a scan that records GPR
+    // + rosbag + odom but ZERO visual frames, and won't notice until
+    // post-mission inspection.
+    if (isUdcDeadOrWedged()) {
+        QMessageBox box(this);
+        box.setWindowTitle(QStringLiteral("Cannot start scan"));
+        box.setIcon(QMessageBox::Critical);
+        if (udc_health_state_ == QStringLiteral("DEAD_MAX_RESTARTS")) {
+            box.setText(QStringLiteral("Visual data collector failed to start."));
+            box.setInformativeText(QStringLiteral(
+                "unified_data_collector crashed 3 times in 60s on the robot. "
+                "The supervisor has stopped trying to restart it.\n\n"
+                "Required action: close the OCU, restart the robot launch, "
+                "and reopen the OCU. If it crashes again, check the "
+                "unified_data_collector logs on the robot."));
+        } else {
+            box.setText(QStringLiteral("Thermal camera SDK is wedged."));
+            box.setInformativeText(QStringLiteral(
+                "The Seek thermal SDK never connected after the last UDC "
+                "start. Visual frames will be empty.\n\n"
+                "Required action: physically unplug+replug the Seek "
+                "thermal USB cable on the robot, then reopen the OCU."));
+        }
+        box.addButton(QStringLiteral("OK"), QMessageBox::AcceptRole);
+        box.exec();
+        qWarning("[AppShell] Start Scan blocked by /udc/health gate (state=%s)",
+                 udc_health_state_.toUtf8().constData());
+        return;
+    }
+
     // Order of operations on planner Start Scan:
     //   1. Push New-Scan-Information metadata (building / operator /
     //      units) to /data_collection_coordinator via SetParameters,
@@ -2249,6 +2332,7 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
         QString remote_script =
             "set +e; "
             "pkill -f '[r]os2 launch pilot_control robot_complete.launch.py' >/dev/null 2>&1 || true; "
+            "pkill -f '[/]pilot_control/udc_supervisor' >/dev/null 2>&1 || true; "
             "pkill -f '[/]pilot_control/unified_data_collector' >/dev/null 2>&1 || true; "
             "pkill -f '[/]pilot_control/raw_map_saver' >/dev/null 2>&1 || true; "
             "pkill -f '[/]pilot_control/local_nav_grid_publisher' >/dev/null 2>&1 || true; "
@@ -2262,6 +2346,7 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
             "  sleep 0.1; "
             "done; "
             "pkill -9 -f '[/]pilot_control/unified_data_collector' >/dev/null 2>&1 || true; "
+            "pkill -9 -f '[/]pilot_control/udc_supervisor' >/dev/null 2>&1 || true; "
             "pkill -9 -f '[r]os2 launch pilot_control robot_complete.launch.py' >/dev/null 2>&1 || true";
         const QString remote_cmd = QString("bash -lc \"%1\"").arg(remote_script.replace("\"", "\\\""));
 
@@ -2472,6 +2557,14 @@ void AppShellWindow::ensureExplorationRosInterfaces() {
         "/scan_segment_status",
         rclcpp::QoS(rclcpp::KeepLast(20)).reliable(),
         std::bind(&AppShellWindow::onPlannerScanExecutionStatus, this, std::placeholders::_1));
+    // /udc/health: TRANSIENT_LOCAL so we catch the latched
+    // DEAD_MAX_RESTARTS message even if we subscribe AFTER the
+    // supervisor publishes it (e.g., operator restarts the OCU after
+    // a UDC crash storm without restarting the launch).
+    udc_health_sub_ = exploration_ros_node_->create_subscription<std_msgs::msg::String>(
+        "/udc/health",
+        rclcpp::QoS(1).transient_local(),
+        std::bind(&AppShellWindow::onUdcHealthMessage, this, std::placeholders::_1));
     rclcpp::QoS thermal_thumb_qos(rclcpp::KeepLast(1));
     thermal_thumb_qos.best_effort();
     exploration_thermal_thumb_sub_ =
@@ -3451,6 +3544,130 @@ void AppShellWindow::pushPlannerMotorsChipState() {
                                                 : PlannerScreen::ValueTone::Muted);
 }
 
+// ---------- /udc/health: REC pill ----------
+
+void AppShellWindow::onUdcHealthMessage(const std_msgs::msg::String::SharedPtr msg) {
+    // Naive JSON state extractor — we only consume two fields
+    // ("state" + "total_rows_enqueued"), so a real JSON dependency
+    // is overkill.  The robot-side schema is owned by us
+    // (UnifiedDataCollector::publishHealth + udc_supervisor.py) so the
+    // exact byte format is stable.
+    const QString payload = QString::fromStdString(msg->data);
+    QString new_state = QStringLiteral("UNKNOWN");
+    const int state_idx = payload.indexOf(QStringLiteral("\"state\":\""));
+    if (state_idx >= 0) {
+        const int start = state_idx + 9;
+        const int end = payload.indexOf('"', start);
+        if (end > start) {
+            new_state = payload.mid(start, end - start);
+        }
+    }
+
+    quint64 new_total_rows = 0;
+    const int rows_idx = payload.indexOf(QStringLiteral("\"total_rows_enqueued\":"));
+    if (rows_idx >= 0) {
+        const int start = rows_idx + 22;
+        int end = start;
+        while (end < payload.size() && (payload[end].isDigit() || payload[end] == '-')) {
+            ++end;
+        }
+        new_total_rows = payload.mid(start, end - start).toULongLong();
+    }
+
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    if (new_total_rows != udc_health_last_seen_total_rows_) {
+        udc_health_last_row_advance_ms_ = now_ms;
+        udc_health_last_seen_total_rows_ = new_total_rows;
+    } else if (udc_health_last_row_advance_ms_ == 0) {
+        udc_health_last_row_advance_ms_ = now_ms;
+    }
+    udc_health_total_rows_ = new_total_rows;
+    udc_health_state_ = new_state;
+    udc_health_last_msg_ms_ = now_ms;
+
+    pushUdcRecPillState();
+}
+
+bool AppShellWindow::isUdcDeadOrWedged() const {
+    // Used by Start Scan gate.  Be conservative: only block on the
+    // two unambiguously-bad states.  STARTING/UNKNOWN must NOT block
+    // (false positives are very expensive — operator's words).
+    return udc_health_state_ == QStringLiteral("DEAD_MAX_RESTARTS") ||
+           udc_health_state_ == QStringLiteral("ERROR_THERMAL_WEDGED");
+}
+
+void AppShellWindow::pushUdcRecPillState() {
+    if (!stage4_ && !stage5_) {
+        return;
+    }
+
+    // Map UDC health state -> (pill_text, tone).  Tone semantics match
+    // the existing top-bar Signal/Lock chips: Good=green, Warning=
+    // amber, Error=red, Muted=grey.
+    QString text;
+    enum Tone { Muted, Warning, Error, Good } tone = Muted;
+
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    const bool stale = udc_health_last_msg_ms_ > 0 &&
+                       (now_ms - udc_health_last_msg_ms_) > 3500;
+
+    if (udc_health_state_ == QStringLiteral("DEAD_MAX_RESTARTS")) {
+        text = QStringLiteral("REC FAILED");
+        tone = Error;
+    } else if (udc_health_state_ == QStringLiteral("ERROR_THERMAL_WEDGED")) {
+        text = QStringLiteral("THERMAL WEDGED");
+        tone = Error;
+    } else if (stale) {
+        text = QStringLiteral("REC STALE");
+        tone = Warning;
+    } else if (udc_health_state_ == QStringLiteral("RECORDING")) {
+        text = QStringLiteral("REC");
+        tone = Good;
+        // Sub-state: rows aren't advancing while supposedly RECORDING.
+        // 2 s window matches the per-row 1Hz drop diagnostic in UDC.
+        if (udc_health_last_row_advance_ms_ > 0 &&
+            (now_ms - udc_health_last_row_advance_ms_) > 2500) {
+            text = QStringLiteral("REC NO ROWS");
+            tone = Warning;
+        }
+    } else if (udc_health_state_ == QStringLiteral("PAUSED")) {
+        text = QStringLiteral("REC PAUSED");
+        tone = Warning;
+    } else if (udc_health_state_ == QStringLiteral("STOPPED")) {
+        text = QStringLiteral("REC IDLE");
+        tone = Muted;
+    } else if (udc_health_state_ == QStringLiteral("STARTING")) {
+        text = QStringLiteral("REC STARTING");
+        tone = Muted;
+    } else {
+        text = QStringLiteral("REC \xE2\x80\x94");  // em dash
+        tone = Muted;
+    }
+
+    auto toExplorationTone = [](Tone t) {
+        switch (t) {
+            case Good: return ExplorationScreen::ValueTone::Good;
+            case Warning: return ExplorationScreen::ValueTone::Warning;
+            case Error: return ExplorationScreen::ValueTone::Error;
+            case Muted: default: return ExplorationScreen::ValueTone::Muted;
+        }
+    };
+    auto toPlannerTone = [](Tone t) {
+        switch (t) {
+            case Good: return PlannerScreen::ValueTone::Good;
+            case Warning: return PlannerScreen::ValueTone::Warning;
+            case Error: return PlannerScreen::ValueTone::Error;
+            case Muted: default: return PlannerScreen::ValueTone::Muted;
+        }
+    };
+    if (stage4_) {
+        stage4_->setTopRecPillState(text, toExplorationTone(tone));
+    }
+    if (stage5_) {
+        stage5_->setTopRecPillState(text, toPlannerTone(tone));
+    }
+}
+
 bool AppShellWindow::sendControllerMaxLinearVelocity(double max_linear_velocity_mps) {
     // Push the operator-selected cruise speed to the MPC controller's
     // `max_linear_velocity` AND `desired_linear_speed` ROS params. The
@@ -4232,6 +4449,10 @@ void AppShellWindow::pushExplorationTelemetryToUiSlow() {
         stage5_->setTopSignalState(top_status.signal_text, toPlannerTone(top_status.signal_tone));
         pushPlannerMotorsChipState();
     }
+    // Re-evaluate REC pill on every telemetry tick so STALE/NO ROWS
+    // detection (driven by wall-clock deltas in pushUdcRecPillState)
+    // updates even when /udc/health stops arriving.
+    pushUdcRecPillState();
 
     if (!stage4_) {
         return;

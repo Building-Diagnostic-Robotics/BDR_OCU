@@ -51,6 +51,7 @@ public:
     void setPlanningEnabled(bool enabled);
     void setTopLockChipState(const QString& text, ValueTone tone);
     void setTopSignalState(const QString& text, ValueTone tone);
+    void setTopRecPillState(const QString& text, ValueTone tone);
     void setTopMotorsChipState(const QString& text, ValueTone tone);
     void setTelemetrySpeedMps(double speed_mps);
     void setTelemetryPositionMeters(double x_m, double y_m);
@@ -151,12 +152,14 @@ private:
     int launch_progress_percent_ = 0;
     QString launch_status_text_ = QStringLiteral("Waiting for Start Scan");
     QString top_signal_text_ = QStringLiteral("Signal unavailable");
+    QString top_rec_text_ = QStringLiteral("REC \xE2\x80\x94");
     QString top_lock_text_ = QStringLiteral("Standby");
     QString top_motors_text_ = QStringLiteral("DISARMED");
     PrimaryActionState primary_action_state_ = PrimaryActionState::StartMapping;
     qint64 mapping_lock_started_at_ms_ = 0;
     int mapping_lock_duration_sec_ = 60;
     ValueTone top_signal_tone_ = ValueTone::Muted;
+    ValueTone top_rec_tone_ = ValueTone::Muted;
     ValueTone top_lock_tone_ = ValueTone::Muted;
     ValueTone top_motors_tone_ = ValueTone::Muted;
 
@@ -167,6 +170,7 @@ private:
     QLabel* btn_start_planning_text_ = nullptr;
     QLabel* lbl_top_battery_ = nullptr;
     QLabel* lbl_top_signal_ = nullptr;
+    QLabel* lbl_top_rec_ = nullptr;
     QLabel* lbl_top_lock_chip_ = nullptr;
     QLabel* lbl_top_motors_dot_ = nullptr;
     QLabel* lbl_top_motors_text_ = nullptr;
