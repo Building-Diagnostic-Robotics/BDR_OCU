@@ -3640,7 +3640,7 @@ void AppShellWindow::pushUdcRecPillState() {
         text = QStringLiteral("REC STARTING");
         tone = Muted;
     } else {
-        text = QStringLiteral("REC \xE2\x80\x94");  // em dash
+        text = QStringLiteral("REC ...");
         tone = Muted;
     }
 

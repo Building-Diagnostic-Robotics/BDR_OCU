@@ -152,7 +152,7 @@ private:
     int launch_progress_percent_ = 0;
     QString launch_status_text_ = QStringLiteral("Waiting for Start Scan");
     QString top_signal_text_ = QStringLiteral("Signal unavailable");
-    QString top_rec_text_ = QStringLiteral("REC \xE2\x80\x94");
+    QString top_rec_text_ = QStringLiteral("REC ...");
     QString top_lock_text_ = QStringLiteral("Standby");
     QString top_motors_text_ = QStringLiteral("DISARMED");
     PrimaryActionState primary_action_state_ = PrimaryActionState::StartMapping;

@@ -472,7 +472,7 @@ private:
     QString robot_id_;
     QString map_path_;
     QString top_signal_text_ = QStringLiteral("Signal unavailable");
-    QString top_rec_text_ = QStringLiteral("REC \xE2\x80\x94");
+    QString top_rec_text_ = QStringLiteral("REC ...");
     QString top_lock_text_ = QStringLiteral("Not Ready");
     QString top_motors_text_ = QStringLiteral("DISARMED");
     ValueTone top_signal_tone_ = ValueTone::Muted;
