@@ -1299,6 +1299,104 @@ void PlannerScreen::setTopRecPillState(const QString& text, ValueTone tone) {
     }
 }
 
+void PlannerScreen::setBotLinkPillState(const QString& text, ValueTone tone) {
+    // Mirror of setTopRecPillState — dot+text pill driven by
+    // AppShellWindow::onLinkStateChanged.  Tone semantics:
+    //   Good=BOT LIVE (green), Warning=BOT LAGGY (amber),
+    //   Error=BOT OFFLINE (red), Muted=BOT IDLE (grey, pre-launch).
+    if (top_bot_text_ == text && top_bot_tone_ == tone) {
+        return;
+    }
+    top_bot_text_ = text;
+    top_bot_tone_ = tone;
+    if (!lbl_top_bot_) {
+        return;
+    }
+    lbl_top_bot_->setText(text);
+    applyToneToLabel(lbl_top_bot_, tone, false);
+    QString icon_color = dark_mode_ ? QStringLiteral("#9F9FA9") : QStringLiteral("#6B7280");
+    switch (tone) {
+        case ValueTone::Good:    icon_color = QStringLiteral("#10B981"); break;
+        case ValueTone::Warning: icon_color = QStringLiteral("#F59E0B"); break;
+        case ValueTone::Error:   icon_color = QStringLiteral("#EF4444"); break;
+        case ValueTone::Muted:   break;
+    }
+    if (QWidget* item = lbl_top_bot_->parentWidget()) {
+        const auto icons = item->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+        for (QLabel* icon_label : icons) {
+            if (icon_label && icon_label != lbl_top_bot_) {
+                icon_label->setPixmap(loadSvgPixmap(
+                    QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8, icon_color));
+                break;
+            }
+        }
+    }
+}
+
+void PlannerScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
+    // Stage 4 disconnect surface.  The scan-tick timer is local; we
+    // pause it when the link drops so the elapsed clock doesn't keep
+    // ticking past the moment we last had ground truth.  When the
+    // link recovers and the run is still nominally Running we restart
+    // the timer; cache.scan_elapsed_ms is preserved across the gap so
+    // the displayed elapsed reflects only "active" time.
+    const bool was_connected = link_connected_;
+    link_connected_ = connected;
+    link_disconnected_since_ms_ = connected ? 0 : since_ms;
+
+    const SessionCache* cache = activeSessionPtr();
+    if (cache && cache->scan_run_state == ScanRunState::Running) {
+        if (!connected && scan_tick_timer_ && scan_tick_timer_->isActive()) {
+            scan_tick_timer_->stop();
+        } else if (connected && scan_tick_timer_ && !scan_tick_timer_->isActive()) {
+            scan_tick_timer_->start();
+        }
+    }
+
+    // Build / update the inline disconnect banner.  Constructed
+    // lazily on first disconnect; inserted into our top-level
+    // QVBoxLayout right after top_bar_ so it appears as a thin strip
+    // below the title bar without disturbing any existing layouts.
+    if (!connected && !link_offline_banner_ && top_bar_) {
+        if (auto* root_layout = qobject_cast<QVBoxLayout*>(this->layout())) {
+            link_offline_banner_ = new QFrame(this);
+            link_offline_banner_->setObjectName("PlannerLinkOfflineBanner");
+            link_offline_banner_->setStyleSheet(
+                QStringLiteral("QFrame#PlannerLinkOfflineBanner { background: #B45309; "
+                               "border-bottom: 1px solid #F59E0B; }"));
+            link_offline_banner_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            link_offline_banner_->setFixedHeight(32);
+            auto* banner_layout = new QHBoxLayout(link_offline_banner_);
+            banner_layout->setContentsMargins(16, 4, 16, 4);
+            banner_layout->setSpacing(8);
+            lbl_link_offline_text_ = new QLabel(link_offline_banner_);
+            lbl_link_offline_text_->setStyleSheet(
+                QStringLiteral("color: #FFFBEB; font-family: 'Arimo'; font-size: 13px; "
+                               "font-weight: 600; background: transparent;"));
+            banner_layout->addWidget(lbl_link_offline_text_, 1, Qt::AlignVCenter);
+            const int top_bar_idx = root_layout->indexOf(top_bar_);
+            root_layout->insertWidget(top_bar_idx >= 0 ? top_bar_idx + 1 : 0,
+                                      link_offline_banner_);
+        }
+    }
+    if (link_offline_banner_) {
+        link_offline_banner_->setVisible(!connected);
+    }
+    if (lbl_link_offline_text_ && !connected) {
+        const int seconds = static_cast<int>((since_ms + 500) / 1000);
+        lbl_link_offline_text_->setText(QString::fromLatin1(
+            "Robot offline for %1s \u2014 controls disabled until reconnect.").arg(seconds));
+    }
+
+    // Lock / unlock the link-dependent buttons on Stage 4 (Scan).
+    // We only touch enable() — we do NOT mutate visibility or
+    // styling so that updateScanRunUi()'s normal recomputation can
+    // re-enable them when conditions allow on link recovery.
+    if (was_connected != connected && current_step_ == PlannerStep::Scan) {
+        updateScanRunUi();
+    }
+}
+
 void PlannerScreen::setTopLockChipState(const QString& text, ValueTone tone) {
     if (top_lock_text_ == text && top_lock_tone_ == tone) {
         return;
@@ -5713,6 +5811,18 @@ void PlannerScreen::buildUi() {
                                             kInitialStatus14,
                                             QString(),
                                             &lbl_top_rec_));
+    // BOT pill: drives the LinkHealthMonitor state.  Same dot+text
+    // pattern as REC / Signal.  Defaults to "BOT ..." / Muted tone
+    // until the first odom / udc_health / scan_status / controller
+    // message arrives.  See AppShellWindow::onLinkStateChanged.
+    status_layout->addWidget(makeStatusItem(status_bar,
+                                            QStringLiteral(":/assets/missionplanner/status_dot.svg"),
+                                            8,
+                                            top_bot_text_,
+                                            kStatusSignalMinWidth,
+                                            kInitialStatus14,
+                                            QString(),
+                                            &lbl_top_bot_));
     auto* lock_item = new QWidget(status_bar);
     lock_item->setFixedHeight(kStatusItemHeight);
     lock_item->setMinimumWidth(kStatusLockMinWidth);
@@ -9259,11 +9369,26 @@ void PlannerScreen::updateScanRunUi() {
         setScanActionLabel(btn_scan_start_pause_, lbl_scan_start_pause_text_, label);
         lbl_scan_start_pause_icon_->setPixmap(
             loadSvgPixmap(icon_path, 20, 20, QStringLiteral("#FFFFFF")));
-        btn_scan_start_pause_->setEnabled(enabled);
+        // Link-offline gate: any RPC the Start/Pause button fires
+        // (autonomy_enable, /dc/pause, /dc/resume) is dropped when
+        // link is offline.  Disable so operator can't mash a button
+        // that diverges local state from the robot's truth.
+        btn_scan_start_pause_->setEnabled(enabled && link_connected_);
+        if (!link_connected_) {
+            btn_scan_start_pause_->setToolTip(
+                QStringLiteral("Robot offline — wait for reconnect."));
+        } else {
+            btn_scan_start_pause_->setToolTip(QString());
+        }
     }
     if (btn_scan_emergency_stop_) {
-        btn_scan_emergency_stop_->setEnabled(
-            run_state == ScanRunState::Running || run_state == ScanRunState::Paused);
+        const bool estop_enabled =
+            (run_state == ScanRunState::Running || run_state == ScanRunState::Paused) &&
+            link_connected_;
+        btn_scan_emergency_stop_->setEnabled(estop_enabled);
+        btn_scan_emergency_stop_->setToolTip(
+            link_connected_ ? QString()
+                            : QStringLiteral("Robot offline — wait for reconnect."));
         if (lbl_scan_emergency_stop_text_) {
             setScanActionLabel(btn_scan_emergency_stop_, lbl_scan_emergency_stop_text_,
                                scan_estop_latched_ ? QStringLiteral("Clear E-Stop")
@@ -9331,11 +9456,15 @@ void PlannerScreen::updateScanRunUi() {
                 scan_estop_latched_ || scan_manual_override_engaged_once_;
             enabled = unlocked &&
                       !scan_cancel_in_flight_ &&
-                      !scan_dc_save_in_flight_;
+                      !scan_dc_save_in_flight_ &&
+                      link_connected_;
         }
 
         btn_scan_cancel_->setStyleSheet(style);
         btn_scan_cancel_->setEnabled(enabled);
+        btn_scan_cancel_->setToolTip(
+            link_connected_ ? QString()
+                            : QStringLiteral("Robot offline — wait for reconnect."));
         if (lbl_scan_cancel_text_) {
             setScanActionLabel(btn_scan_cancel_, lbl_scan_cancel_text_, label);
         }

@@ -52,6 +52,20 @@ public:
     void setTopLockChipState(const QString& text, ValueTone tone);
     void setTopSignalState(const QString& text, ValueTone tone);
     void setTopRecPillState(const QString& text, ValueTone tone);
+    // BOT pill: drives the LinkHealthMonitor state to a top-bar chip
+    // identical in shape to the Signal / REC pills.  AppShellWindow
+    // pushes this on every linkStateChanged transition.  Tone semantics
+    // match the existing pills: Good=green LIVE, Warning=amber LAGGY,
+    // Error=red OFFLINE, Muted=grey IDLE.
+    void setBotLinkPillState(const QString& text, ValueTone tone);
+    // Disconnect surface: shows / hides the inline "Robot offline"
+    // banner above the launch progress card and gates the primary
+    // controls (Start Mapping, Finish + Save Map, Stop Pipeline) so
+    // the operator can't fire RPCs that we already know will be
+    // dropped.  When `connected` flips back to true after >= 500 ms
+    // of being false, controls re-enable on the next event-loop tick
+    // (the AppShell's reconnect handshake does the actual debounce).
+    void setLinkConnectionState(bool connected, qint64 since_ms);
     void setTopMotorsChipState(const QString& text, ValueTone tone);
     void setTelemetrySpeedMps(double speed_mps);
     void setTelemetryPositionMeters(double x_m, double y_m);
@@ -82,6 +96,12 @@ public:
     void startFpvStream(int port = 5600);
     void stopFpvStream();
     void forceTeleopStop();
+
+    // Stage 6 freeze detector: wall-clock ms of the most recent FPV
+    // frame.  0 if no frames yet OR the stream isn't running.  Polled
+    // by AppShellWindow's slow tick to stamp
+    // LinkHealthMonitor::Source::FpvFrame.
+    qint64 lastFpvFrameWallMs() const;
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -153,6 +173,7 @@ private:
     QString launch_status_text_ = QStringLiteral("Waiting for Start Scan");
     QString top_signal_text_ = QStringLiteral("Signal unavailable");
     QString top_rec_text_ = QStringLiteral("REC ...");
+    QString top_bot_text_ = QStringLiteral("BOT ...");
     QString top_lock_text_ = QStringLiteral("Standby");
     QString top_motors_text_ = QStringLiteral("DISARMED");
     PrimaryActionState primary_action_state_ = PrimaryActionState::StartMapping;
@@ -160,8 +181,11 @@ private:
     int mapping_lock_duration_sec_ = 60;
     ValueTone top_signal_tone_ = ValueTone::Muted;
     ValueTone top_rec_tone_ = ValueTone::Muted;
+    ValueTone top_bot_tone_ = ValueTone::Muted;
     ValueTone top_lock_tone_ = ValueTone::Muted;
     ValueTone top_motors_tone_ = ValueTone::Muted;
+    bool link_connected_ = true;
+    qint64 link_disconnected_since_ms_ = 0;
 
     QPushButton* btn_dashboard_ = nullptr;
     QPushButton* btn_start_scan_ = nullptr;
@@ -171,6 +195,7 @@ private:
     QLabel* lbl_top_battery_ = nullptr;
     QLabel* lbl_top_signal_ = nullptr;
     QLabel* lbl_top_rec_ = nullptr;
+    QLabel* lbl_top_bot_ = nullptr;
     QLabel* lbl_top_lock_chip_ = nullptr;
     QLabel* lbl_top_motors_dot_ = nullptr;
     QLabel* lbl_top_motors_text_ = nullptr;

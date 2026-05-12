@@ -137,6 +137,7 @@ set(HEADERS
     include/components/tilt_calibration_dialog.hpp
     include/components/pre_scan_checklist_dialog.hpp
     include/components/mission_metadata_dialog.hpp
+    include/components/offline_finalize_dialog.hpp
     include/components/fpv_camera_view.hpp
     include/components/auto_hide_scroll_bar.hpp
     include/components/svg_icon_button.hpp
@@ -144,6 +145,7 @@ set(HEADERS
     include/components/update_banner.hpp
     include/components/update_modal.hpp
     include/units_system.hpp
+    include/link_health_monitor.hpp
     include/update/update_settings.hpp
     include/update/update_checker.hpp
     include/video_stream_widget.hpp
@@ -213,6 +215,7 @@ set(GUI_SOURCES
     src/components/tilt_calibration_dialog.cpp
     src/components/pre_scan_checklist_dialog.cpp
     src/components/mission_metadata_dialog.cpp
+    src/components/offline_finalize_dialog.cpp
     src/components/fpv_camera_view.cpp
     src/components/auto_hide_scroll_bar.cpp
     src/components/svg_icon_button.cpp
@@ -221,6 +224,7 @@ set(GUI_SOURCES
     src/components/update_modal.cpp
     src/update/update_checker.cpp
     src/units_system.cpp
+    src/link_health_monitor.cpp
     src/main.cpp
     resources.qrc
 )

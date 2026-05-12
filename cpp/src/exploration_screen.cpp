@@ -1295,6 +1295,61 @@ void ExplorationScreen::setTopRecPillState(const QString& text, ValueTone tone) 
     }
 }
 
+void ExplorationScreen::setBotLinkPillState(const QString& text, ValueTone tone) {
+    // Mirror of setTopRecPillState — drives the new BOT pill from
+    // LinkHealthMonitor.  Same dot+text pattern.  See
+    // AppShellWindow::onLinkStateChanged.
+    top_bot_text_ = text;
+    top_bot_tone_ = tone;
+    if (!lbl_top_bot_) {
+        return;
+    }
+    lbl_top_bot_->setText(text);
+    applyTopStatusToneToLabel(lbl_top_bot_, tone, false);
+
+    QString icon_color = dark_mode_ ? QStringLiteral("#9F9FA9") : QStringLiteral("#6B7280");
+    switch (tone) {
+        case ValueTone::Good:    icon_color = QStringLiteral("#10B981"); break;
+        case ValueTone::Warning: icon_color = QStringLiteral("#F59E0B"); break;
+        case ValueTone::Error:   icon_color = QStringLiteral("#EF4444"); break;
+        case ValueTone::Muted:   break;
+    }
+    if (QWidget* item = lbl_top_bot_->parentWidget()) {
+        const auto icons = item->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+        for (QLabel* icon_label : icons) {
+            if (icon_label && icon_label != lbl_top_bot_) {
+                icon_label->setPixmap(loadSvgPixmap(
+                    QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8, icon_color));
+                break;
+            }
+        }
+        item->updateGeometry();
+        item->adjustSize();
+    }
+}
+
+void ExplorationScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
+    // Stage 4 disconnect surface mirror for the exploration screen.
+    // The BOT pill in the top bar is the primary visual signal; the
+    // only behavior change here is gating the primary-action and stop-
+    // pipeline buttons so the operator can't fire RPCs we know will be
+    // dropped.  No inline banner — the exploration screen has no
+    // ticking-clock display that needs a freeze callout.
+    link_connected_ = connected;
+    link_disconnected_since_ms_ = connected ? 0 : since_ms;
+
+    refreshPrimaryActionButton();
+    if (btn_stop_pipeline_) {
+        btn_stop_pipeline_->setEnabled(connected);
+        btn_stop_pipeline_->setToolTip(
+            connected ? QString()
+                      : QStringLiteral("Robot offline — wait for reconnect."));
+    }
+    if (btn_start_planning_) {
+        btn_start_planning_->setEnabled(planning_enabled_ && connected);
+    }
+}
+
 void ExplorationScreen::updateTopMotorsChipGeometry() {
     if (!top_motors_chip_ || !lbl_top_motors_text_ || !lbl_top_motors_dot_) {
         return;
@@ -2105,7 +2160,19 @@ void ExplorationScreen::refreshPrimaryActionButton() {
     }
 
     btn_start_scan_->setStyleSheet(button_style);
-    btn_start_scan_->setEnabled(primary_action_enabled_by_state_ && !launch_in_progress_);
+    // Link-offline gate (Stage 1 disconnect resilience).  None of the
+    // primary actions (Start Mapping, Finish + Save Map, Start
+    // Planning) deliver useful work when the link is down — Save Map
+    // hangs on /save_raw_map and Start Mapping needs the launch to be
+    // alive on the robot.  Disable the button while the link is dead.
+    btn_start_scan_->setEnabled(
+        primary_action_enabled_by_state_ && !launch_in_progress_ && link_connected_);
+    if (!link_connected_) {
+        btn_start_scan_->setToolTip(
+            QStringLiteral("Robot offline — wait for reconnect."));
+    } else {
+        btn_start_scan_->setToolTip(QString());
+    }
 }
 
 void ExplorationScreen::setPrimaryActionLabel(const QString& text) {
@@ -2201,6 +2268,13 @@ void ExplorationScreen::forceTeleopStop() {
     setFpvControlActive(false);
 }
 
+qint64 ExplorationScreen::lastFpvFrameWallMs() const {
+    if (!fpv_stream_widget_ || !fpv_stream_widget_->isPlaying()) {
+        return 0;
+    }
+    return fpv_stream_widget_->lastFrameWallMs();
+}
+
 void ExplorationScreen::buildUi() {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -2282,6 +2356,19 @@ void ExplorationScreen::buildUi() {
                                                    kInitialStatus14,
                                                    QString(),
                                                    &lbl_top_rec_));
+    // BOT pill: drives the LinkHealthMonitor state.  Same dot+text
+    // pattern as REC / Signal.  Defaults to "BOT ..." / Muted tone
+    // until the first ROS callback (odom / udc_health / scan_status
+    // / controller_status / stream_status) lands.  See
+    // AppShellWindow::onLinkStateChanged.
+    status_layout->addWidget(makePlannerStatusItem(status_bar,
+                                                   QStringLiteral(":/assets/missionplanner/status_dot.svg"),
+                                                   8,
+                                                   top_bot_text_,
+                                                   kTopStatusSignalMinWidth,
+                                                   kInitialStatus14,
+                                                   QString(),
+                                                   &lbl_top_bot_));
     auto* lock_item = new QWidget(status_bar);
     lock_item->setObjectName("ExplTopStatusItem");
     lock_item->setFixedHeight(kTopStatusItemHeight);

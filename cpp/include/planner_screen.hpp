@@ -61,6 +61,21 @@ public:
     void setLiveRobotSpeedMps(double speed_mps);
     void setTopSignalState(const QString& text, ValueTone tone);
     void setTopRecPillState(const QString& text, ValueTone tone);
+    // BOT pill: drives the LinkHealthMonitor state to a top-bar chip
+    // identical in shape to the Signal / REC pills. AppShellWindow
+    // pushes this on every linkStateChanged transition. Tone semantics
+    // match the existing pills: Good=green LIVE, Warning=amber LAGGY,
+    // Error=red OFFLINE, Muted=grey IDLE.
+    void setBotLinkPillState(const QString& text, ValueTone tone);
+    // Disconnect surface for Stage 4 (Scan execution): pauses the
+    // local scan-tick clock so the elapsed-time display doesn't keep
+    // ticking past the moment the radio dropped (the elapsed counter
+    // is a local QTimer, not driven by ROS), shows / hides the inline
+    // "Robot offline" banner, and disables the Pause/Resume, Cancel,
+    // Discard, and Complete Mission buttons so the operator can't fire
+    // RPCs that we know will be dropped.  AppShell calls this on every
+    // LinkHealthMonitor transition.
+    void setLinkConnectionState(bool connected, qint64 since_ms);
     void setTopLockChipState(const QString& text, ValueTone tone);
     void setTopMotorsChipState(const QString& text, ValueTone tone);
     void notifyScanSegmentCompleted();
@@ -473,12 +488,16 @@ private:
     QString map_path_;
     QString top_signal_text_ = QStringLiteral("Signal unavailable");
     QString top_rec_text_ = QStringLiteral("REC ...");
+    QString top_bot_text_ = QStringLiteral("BOT ...");
     QString top_lock_text_ = QStringLiteral("Not Ready");
     QString top_motors_text_ = QStringLiteral("DISARMED");
     ValueTone top_signal_tone_ = ValueTone::Muted;
     ValueTone top_rec_tone_ = ValueTone::Muted;
+    ValueTone top_bot_tone_ = ValueTone::Muted;
     ValueTone top_lock_tone_ = ValueTone::Error;
     ValueTone top_motors_tone_ = ValueTone::Muted;
+    bool link_connected_ = true;
+    qint64 link_disconnected_since_ms_ = 0;
     std::optional<PathState> live_robot_pose_;
     std::vector<Point2D> live_robot_trail_;
     double robot_marker_size_m_ = 0.6;
@@ -516,6 +535,9 @@ private:
     QLabel* lbl_top_battery_ = nullptr;
     QLabel* lbl_top_signal_ = nullptr;
     QLabel* lbl_top_rec_ = nullptr;
+    QLabel* lbl_top_bot_ = nullptr;
+    QWidget* link_offline_banner_ = nullptr;
+    QLabel* lbl_link_offline_text_ = nullptr;
     QLabel* lbl_top_lock_chip_ = nullptr;
     QLabel* lbl_top_motors_dot_ = nullptr;
     QLabel* lbl_top_motors_text_ = nullptr;

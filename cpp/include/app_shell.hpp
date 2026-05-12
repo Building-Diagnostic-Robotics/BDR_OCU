@@ -22,13 +22,16 @@
 #include <std_srvs/srv/set_bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
+#include "link_health_monitor.hpp"
 #include "robot_registry.hpp"
 
 class QResizeEvent;
 
 class QLabel;
 class QEvent;
+class QFrame;
 class QProcess;
+class QPropertyAnimation;
 class QStackedWidget;
 class QTimer;
 class QToolButton;
@@ -242,6 +245,56 @@ private:
     void pushUdcRecPillState();
     bool isUdcDeadOrWedged() const;
 
+    // Link-health resilience (Stages 0-3 of the disconnect-resilience
+    // feature).  link_monitor_ owns all "is the robot reachable?"
+    // truth.  AppShell stamps freshness from existing ROS callbacks and
+    // routes state-change events to:
+    //   - PlannerScreen / ExplorationScreen top-bar BOT pill + disconnect
+    //     banner + scan-tick clock pause + button lockout
+    //   - showCommandDroppedToast() when an RPC is intentionally dropped
+    //     because the link is offline (today's silent qWarning lines).
+    //   - re-sync hook on Disconnected -> Healthy transitions to
+    //     re-publish autonomy / cruise speed in case the robot rebooted.
+    // Armed when the exploration launch starts; disarmed at teardown.
+    void onLinkStateChanged(LinkHealthMonitor::State old_state,
+                            LinkHealthMonitor::State new_state,
+                            qint64 since_ms);
+    // Toast: small, auto-dismissing overlay anchored to the AppShell.
+    // Used for "command dropped" hints when RPCs are skipped because
+    // the link is offline.  Single-queue with a 1 s dedup window so a
+    // mashed E-Stop button doesn't stack toasts.
+    void showCommandDroppedToast(const QString& message);
+    void hideCommandDroppedToast();
+    // Returns true when the LinkHealthMonitor is armed and reports
+    // Disconnected.  Used as a gate by the planner RPC paths so we
+    // don't optimistically mutate local state (planner_estop_active_,
+    // etc.) when the robot can't possibly have received the command.
+    bool isRobotLinkOffline() const;
+    // Re-publish all "soft" state the robot needs to be in sync with
+    // the OCU's current model.  Called once per Disconnected -> Healthy
+    // transition so that a bot that rebooted mid-disconnect lands back
+    // in the operator-intended autonomy / cruise-speed configuration
+    // without requiring a manual click.
+    void onRobotLinkRecovered();
+
+    // Stage 4 data-first Complete Mission helpers.
+    //
+    // executeCompleteMissionNormalPath() is the existing Healthy/
+    // Degraded code path: motor-disarm wait, /dc/finalize_mission RPC,
+    // teardown, return to Stage 3.  Extracted from
+    // onPlannerCompleteMissionRequested so the offline path can call
+    // it directly when the link recovers mid-modal.
+    //
+    // executeCompleteMissionSshFallback() runs the SSH-offline finaliser
+    // (`finalize_mission_local.py` on the robot), then the existing
+    // teardown SSH script (which kills the controller -> motors disarm
+    // naturally), then returns to Stage 3.  The robot ends up with
+    // mission_finalized_at + finalized_via=ssh_offline written to disk,
+    // so post-flight tooling can flag the mission for review without
+    // confusing it for an abandoned one.
+    void executeCompleteMissionNormalPath();
+    void executeCompleteMissionSshFallback();
+
     // Push the operator-selected cruise speed to
     // mpc_accel_autonomous_controller's `max_linear_velocity` /
     // `desired_linear_speed` ROS params via a synchronous SetParameters
@@ -425,6 +478,22 @@ private:
     quint64 udc_health_total_rows_ = 0;
     qint64 udc_health_last_row_advance_ms_ = 0;
     quint64 udc_health_last_seen_total_rows_ = 0;
+
+    // Single-source-of-truth for "is the robot reachable?".  Owned by
+    // AppShell, stamped from existing ROS callbacks, consumed by
+    // PlannerScreen + ExplorationScreen via setRobotLinkState().
+    LinkHealthMonitor* link_monitor_ = nullptr;
+    // Toast widget used for "command dropped — robot offline" hints.
+    // Lazily constructed on first show; always parented to central_root_
+    // so the OTA banner / window controls stay above it.  Single
+    // instance; show queues replace the current message.
+    QFrame* command_toast_ = nullptr;
+    QLabel* command_toast_label_ = nullptr;
+    QTimer* command_toast_dismiss_timer_ = nullptr;
+    QString command_toast_last_message_;
+    qint64 command_toast_last_shown_at_ms_ = 0;
+    qint64 link_disconnect_started_at_ms_ = 0;
+    bool link_recovery_resync_pending_ = false;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr exploration_odom_sub_;
     rclcpp::Subscription<odrive_can::msg::ControllerStatus>::SharedPtr exploration_left_status_sub_;
     rclcpp::Subscription<odrive_can::msg::ControllerStatus>::SharedPtr exploration_right_status_sub_;

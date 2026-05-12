@@ -97,6 +97,123 @@ screens; map/video/widgets live in `plot_widget.*`, `video_stream_widget.*`,
 into `bdr_coverage_planner` — see the comment above `GUI_SOURCES` in
 `cpp/CMakeLists.txt` when rewiring `DashboardScreen::viewRecordingsRequested`.
 
+## Disconnect resilience (Stages 0-6, complete and production-wired)
+
+The OCU detects radio loss (Zenoh-mediated ROS topics going stale)
+within 2-5 s and surfaces it explicitly so the operator can never
+mistake a frozen UI for a working scan. The robot side has matching
+safety nets so data never gets lost when the OCU disconnects.
+
+### Single source of truth
+
+`cpp/include/link_health_monitor.hpp` (`LinkHealthMonitor`, owned by
+`AppShellWindow`).  Stamped by every existing ROS callback:
+
+- `Source::Odom` — `/Odometry_tilt_corrected_diff`
+- `Source::UdcHealth` — `/udc/health`
+- `Source::ScanStatus` — `/scan_segment_status`
+- `Source::ControllerStatus` — `/{left,right}/controller_status`
+- `Source::StreamStatus` — `/stream_status`
+- `Source::FpvFrame` — non-ROS, RTP/UDP video pipeline (the
+  `frameStampProbe` in `video_stream_widget.cpp` updates an atomic
+  every frame; `AppShellWindow::onExplorationLiveSlowTick` polls it
+  and stamps the source if a frame was delivered in the last 1 s).
+
+State derivation: any source < 2 s old → Healthy; 2-5 s → Degraded;
+all sources ≥ 5 s → Disconnected.  Armed at exploration launch start;
+disarmed at teardown.
+
+### OCU-side surfaces
+
+- Top-bar **BOT pill** in both Stage 4 + Stage 5 (next to the existing
+  Battery / Signal / REC pills).  States: BOT IDLE (grey, pre-launch),
+  BOT LIVE (green), BOT LAGGY Xs (amber), BOT OFFLINE Xs (red).
+- Inline disconnect **banner** at the top of Stage 5 (Scan).  Visible
+  only while Disconnected.
+- Stage 5 `scan_tick_timer_` is **paused** while Disconnected so the
+  elapsed clock doesn't drift past the moment the radio dropped.  The
+  cached `scan_elapsed_ms` is preserved so the displayed elapsed time
+  reflects only "active" time across the disconnect.
+- Pause/Resume, E-Stop, Cancel, Discard, Start Mapping, Finish + Save
+  Map, and Stop Pipeline buttons all hard-disable while Disconnected
+  with "Robot offline — wait for reconnect." tooltips.
+- `onPlannerEmergencyStopRequested`, `onPlannerScanPauseRequested`,
+  and `onPlannerScanResumeRequested` early-return on
+  `isRobotLinkOffline()` and surface a `showCommandDroppedToast()`
+  hint instead of optimistically mutating `planner_estop_active_`.
+- On Disconnected → Healthy transition `onRobotLinkRecovered()`
+  re-publishes `/mpc_autonomy_enable` to match the OCU's local
+  intent (paused if `planner_estop_active_`, else armed).  Cheap and
+  idempotent so the bot rebooting mid-disconnect lands back in the
+  operator-intended config without a manual click.
+
+### Data-first Complete Mission
+
+`AppShellWindow::onPlannerCompleteMissionRequested` branches:
+
+- Healthy / Degraded → `executeCompleteMissionNormalPath()` (the
+  motor-disarm wait + `/dc/finalize_mission` RPC + teardown chain that
+  has always run).
+- Disconnected → `OfflineFinalizeDialog` (frameless, parented to the
+  shell).  Three CTAs:
+  - **Wait for reconnect** (default, primary).  Polls the link
+    monitor; auto-accepts as `WaitReconnected` when it goes Healthy.
+    A 5-minute auto-fallback to SSH-offline keeps the bot from sitting
+    in `CLOSED_LOOP_CONTROL` indefinitely if the operator forgets the
+    modal.  Live countdown shown.
+  - **Finalize via SSH (offline)** runs
+    `pilot_control/scripts/finalize_mission_local.py` over SSH which
+    rescans `/R_DATA/<day>/<building>/Mission_HHMMSS/` and atomically
+    writes `mission_finalized_at` + `finalized_via=ssh_offline` into
+    `mission_config.json`.  Then runs the existing teardown SSH
+    (kills the launch tree → motors disarm via the controller's exit
+    handlers).
+  - **Cancel** keeps the operator on Stage 5; the robot-side
+    auto-finalize watchdog (10 min idle) is the safety net for an
+    abandoned mission.
+
+### Robot-side safety net (`data_collection_coordinator.py`)
+
+- `update_json_file()` is now **atomic**: tmp + `os.replace()`.
+  A power-loss / SIGKILL between write and rename leaves the previous
+  valid JSON on disk.
+- 1 Hz **heartbeat timer** stamps `last_heartbeat_at` (ISO-8601 wall
+  clock) into `mission_config.json` while a mission is open.  Lets
+  post-flight tooling and the OCU's reconnect path detect open-but-
+  stale missions deterministically.
+- **Auto-finalize watchdog**: if no `/dc/*` service activity for >=
+  `mission_idle_timeout_sec` (default 10 min), the coordinator calls
+  `finalize_mission_callback` itself and stamps `finalized_via:
+  watchdog`.  Operator-abandoned, OCU-crashed, OCU-closed-without-
+  Complete-Mission — all the same recovery path so on-disk data is
+  always properly tagged.
+- All operator-driven service handlers (`start`, `pause`, `resume`,
+  `end_and_save`, `finalize_mission`, `cancel_scan`,
+  `start_gnss_precapture`) call `mission_touch()` to bump the
+  watchdog's idle clock.
+
+### Rules for agents touching this path
+
+- **Do NOT remove or "simplify"** any of the following — they are
+  load-bearing:
+  - `LinkHealthMonitor` class.
+  - The persistent `frameStampProbe` in `video_stream_widget.cpp`
+    (every-frame atomic store; freezes are otherwise invisible).
+  - `OfflineFinalizeDialog` and the `Choice::WaitReconnected` /
+    `FinalizeOverSsh` / `Cancelled` enum.
+  - `finalize_mission_local.py` and the `finalized_via` JSON field.
+  - The `mission_heartbeat_callback` + `mission_touch` plumbing.
+- The **5-minute auto-fallback** in `OfflineFinalizeDialog::kAutoFallbackMs`
+  is the user-locked safety ceiling — don't change without operator
+  signoff.
+- The Disconnect threshold is **5 s** in `LinkHealthMonitor::kDegradedMaxMs`.
+  Tunable, but dropping below ~3 s produces false positives on Zenoh
+  reconnects after brief radio fades.
+- When adding a new ROS subscriber on the AppShell side, **always**
+  stamp the appropriate `LinkHealthMonitor::Source` from its callback
+  — otherwise the link monitor will go OFFLINE during a perfectly
+  healthy session that happens to use only that new topic.
+
 ## OTA update pipeline (Phases 1-9, complete and production-wired)
 
 Operator-driven over-the-air updater. The OCU polls GitHub Releases

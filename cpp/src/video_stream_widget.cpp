@@ -2,6 +2,7 @@
 
 #include <iostream>
 
+#include <QDateTime>
 #include <QHideEvent>
 #include <QPalette>
 #include <QResizeEvent>
@@ -42,6 +43,10 @@ void VideoStreamWidget::setupPipeline(int port) {
     destroyPipeline();
     const qulonglong generation = stream_generation_.fetch_add(1) + 1;
     first_frame_emitted_ = false;
+    // Stage 6 freeze detector: a fresh pipeline starts with "no frames
+    // yet" so AppShellWindow's slow tick doesn't read a stale value
+    // from a previous run.  Updated by frameStampProbe on every buffer.
+    last_frame_wall_ms_.store(0);
 
     QString pipelineStr = QString(
         "udpsrc port=%1 buffer-size=212992 "
@@ -80,6 +85,17 @@ void VideoStreamWidget::setupPipeline(int port) {
                 firstFrameProbe,
                 context,
                 [](gpointer data) { delete static_cast<FirstFrameProbeContext*>(data); });
+            // Stage 6: persistent buffer stamp probe.  Same pad as the
+            // first-frame probe but does NOT remove itself; fires once
+            // per delivered frame and does a single atomic store into
+            // last_frame_wall_ms_ on the streaming thread.  Safe: no
+            // Qt signal emission, no allocation, no locks.
+            gst_pad_add_probe(
+                probe_pad,
+                GST_PAD_PROBE_TYPE_BUFFER,
+                frameStampProbe,
+                this,
+                nullptr);
             gst_object_unref(probe_pad);
         }
         gst_object_unref(first_frame_probe);
@@ -145,6 +161,21 @@ void VideoStreamWidget::handleFirstFrameReady(qulonglong generation) {
     }
     first_frame_emitted_ = true;
     emit firstFrameReady();
+}
+
+GstPadProbeReturn VideoStreamWidget::frameStampProbe(GstPad* pad,
+                                                    GstPadProbeInfo* info,
+                                                    gpointer data) {
+    Q_UNUSED(pad);
+    if (!info || (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER) == 0) {
+        return GST_PAD_PROBE_OK;
+    }
+    auto* self = static_cast<VideoStreamWidget*>(data);
+    if (!self) {
+        return GST_PAD_PROBE_OK;
+    }
+    self->last_frame_wall_ms_.store(QDateTime::currentMSecsSinceEpoch());
+    return GST_PAD_PROBE_OK;  // intentionally NOT REMOVE — we want every frame
 }
 
 void VideoStreamWidget::pollBus() {

@@ -45,6 +45,7 @@
 #include "cloud_upload_manager.hpp"
 #include "components/bdr_message_box.hpp"
 #include "components/mission_metadata_dialog.hpp"
+#include "components/offline_finalize_dialog.hpp"
 #include "components/rollback_banner.hpp"
 #include "components/update_banner.hpp"
 #include "components/update_modal.hpp"
@@ -304,6 +305,15 @@ AppShellWindow::AppShellWindow(QWidget* parent)
 
     QSettings settings(f2c_cpp::kSettingsOrgName, f2c_cpp::kSettingsAppName);
     dark_mode_ = settings.value("ui/dark_mode", false).toBool();
+
+    // Single source of truth for "is the robot reachable?".  See
+    // link_health_monitor.hpp.  Armed at exploration launch start and
+    // disarmed at teardown; consumed by Stages 4/5 BOT pill, banner,
+    // and button lockout via PlannerScreen::setLinkConnectionState +
+    // ExplorationScreen::setLinkConnectionState.
+    link_monitor_ = new LinkHealthMonitor(this);
+    connect(link_monitor_, &LinkHealthMonitor::linkStateChanged,
+            this, &AppShellWindow::onLinkStateChanged);
 
     central_root_ = new QWidget(this);
     auto* root_layout = new QVBoxLayout(central_root_);
@@ -1210,6 +1220,12 @@ void AppShellWindow::onStartNewScan() {
 void AppShellWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
     updateWindowControlsPosition();
+    if (command_toast_ && command_toast_->isVisible()) {
+        if (QWidget* host = command_toast_->parentWidget()) {
+            const int x = host->width() - command_toast_->width() - 24;
+            command_toast_->move(std::max(24, x), command_toast_->y());
+        }
+    }
 }
 
 void AppShellWindow::closeEvent(QCloseEvent* event) {
@@ -1529,6 +1545,14 @@ void AppShellWindow::onExplorationStartScanRequested() {
     stream_status_ready_ = false;
     stream_target_published_ = false;
     fpv_started_ = false;
+    // Arm link monitor: from now until teardown, every ROS callback
+    // stamps freshness; staleness > 2s flips us to LAGGY, > 5s to
+    // OFFLINE.  See onLinkStateChanged.
+    if (link_monitor_) {
+        link_monitor_->arm();
+    }
+    link_disconnect_started_at_ms_ = 0;
+    link_recovery_resync_pending_ = false;
     exploration_rf_link_latched_ = false;
     exploration_rf_metric_ready_ = false;
     exploration_rf_probe_in_flight_ = false;
@@ -1833,11 +1857,21 @@ void AppShellWindow::onPlannerScanStartRequested(double speed_mps) {
 }
 
 void AppShellWindow::onPlannerScanPauseRequested() {
+    if (isRobotLinkOffline()) {
+        showCommandDroppedToast(
+            QStringLiteral("Pause not delivered — robot offline."));
+        return;
+    }
     publishPlannerAutonomyEnable(false);
     callPlannerTriggerService(planner_dc_pause_client_);
 }
 
 void AppShellWindow::onPlannerScanResumeRequested() {
+    if (isRobotLinkOffline()) {
+        showCommandDroppedToast(
+            QStringLiteral("Resume not delivered — robot offline."));
+        return;
+    }
     if (planner_estop_active_) {
         // Clear E-Stop in required order: resume data collection first, then arm.
         callPlannerTriggerService(planner_dc_resume_client_);
@@ -1850,6 +1884,16 @@ void AppShellWindow::onPlannerScanResumeRequested() {
 }
 
 void AppShellWindow::onPlannerEmergencyStopRequested() {
+    // Stage 2 disconnect-resilience guard: reject E-Stop press when we
+    // already know the link is offline.  Otherwise the operator's press
+    // would silently flip planner_estop_active_ even though the robot
+    // never received the disarm — diverging the OCU's model from the
+    // robot's real state.  See onLinkStateChanged.
+    if (isRobotLinkOffline()) {
+        showCommandDroppedToast(
+            QStringLiteral("E-Stop not delivered — robot offline. State unchanged."));
+        return;
+    }
     if (!planner_estop_active_) {
         // Engage E-Stop: disarm first, then pause mission.
         sendExplorationAxisStateRequest(kOdriveAxisStateIdle);
@@ -1867,13 +1911,47 @@ void AppShellWindow::onPlannerEmergencyStopRequested() {
 }
 
 void AppShellWindow::onPlannerCompleteMissionRequested() {
-    qInfo("[AppShell] PlannerScreen::completeMissionRequested — disarming motors before pipeline teardown");
+    // Data-first branch (Stage 4 of disconnect-resilience).  When the
+    // link is offline, the existing motor-disarm + /dc/finalize_mission
+    // RPC chain will burn ~25 s of UI time on dead RPCs and still leave
+    // the robot's mission_config.json with mission_finalized_at: null.
+    // The data IS on disk — the operator just needs a way to land the
+    // finalize metadata.  Show the OfflineFinalizeDialog and route
+    // accordingly.
+    if (isRobotLinkOffline()) {
+        qInfo("[AppShell] Complete Mission while link offline — showing OfflineFinalizeDialog");
+        OfflineFinalizeDialog dialog(link_monitor_, this);
+        if (central_root_) {
+            dialog.move(central_root_->mapToGlobal(central_root_->rect().center())
+                            - dialog.rect().center());
+        }
+        const int rc = dialog.exec();
+        switch (dialog.chosen()) {
+            case OfflineFinalizeDialog::Choice::Cancelled:
+                qInfo("[AppShell] Complete Mission cancelled by operator (link still offline)");
+                return;
+            case OfflineFinalizeDialog::Choice::WaitReconnected:
+                qInfo("[AppShell] Complete Mission: link recovered while waiting — running normal path");
+                executeCompleteMissionNormalPath();
+                return;
+            case OfflineFinalizeDialog::Choice::FinalizeOverSsh:
+                qInfo("[AppShell] Complete Mission: finalize via SSH (rc=%d)", rc);
+                executeCompleteMissionSshFallback();
+                return;
+        }
+        return;
+    }
+    executeCompleteMissionNormalPath();
+}
+
+void AppShellWindow::executeCompleteMissionNormalPath() {
+    qInfo("[AppShell] Complete Mission (normal path) \u2014 disarming motors before pipeline teardown");
 
     beginExplorationMotorsIdleWait([this](bool timed_out) {
         if (timed_out) {
-            qWarning("[AppShell] Complete Mission: motor disarm not confirmed within 2s — proceeding with finalize anyway");
+            qWarning("[AppShell] Complete Mission: motor disarm not confirmed within 2s \u2014 proceeding with finalize anyway");
         } else {
-            qInfo("[AppShell] Complete Mission: motors confirmed IDLE — finalizing mission GNSS before teardown");
+            qInfo("[AppShell] Complete Mission: motors confirmed IDLE \u2014 finalizing mission GNSS before teardown");
         }
         finalizeMissionDataCollection([this]() {
             performExplorationPipelineTeardown();
@@ -1881,6 +1959,59 @@ void AppShellWindow::onPlannerCompleteMissionRequested() {
             goToStage3();
         });
     });
+}
+
+void AppShellWindow::executeCompleteMissionSshFallback() {
+    // SSH-offline finalize.  Two phases:
+    //   1. Run finalize_mission_local.py on the robot to land
+    //      mission_finalized_at + finalized_via=ssh_offline into the
+    //      open mission's mission_config.json.  This is independent
+    //      of ROS / Zenoh; works as long as we can SSH in.
+    //   2. Run the existing pipeline teardown.  It SSHes again to
+    //      kill the launch tree (which sends ODrive IDLE on shutdown
+    //      via the controller's exit handlers, so motors disarm
+    //      naturally) and tears down the local laptop processes.
+    //
+    // Both phases are best-effort: if the SSH script fails (e.g. host
+    // unreachable), we still proceed with teardown so the OCU returns
+    // to Stage 3 and the operator isn't trapped.  The robot-side
+    // 10-min auto-finalize watchdog is the safety net for that case.
+    const ResolvedRobotSshTarget ssh_target = resolveRobotSshForRemoteOps();
+    const QString robot_host = ssh_target.host;
+
+    if (!robot_host.isEmpty()) {
+        QProcess proc;
+        QStringList args;
+        args << "-o" << "ConnectTimeout=4"
+             << "-o" << "StrictHostKeyChecking=no"
+             << "-o" << "UserKnownHostsFile=/dev/null"
+             << "-o" << "BatchMode=yes"
+             << sshUserHostSpec(ssh_target)
+             << "ros2 run pilot_control finalize_mission_local.py";
+        qInfo("[AppShell] Complete Mission SSH: invoking finalize_mission_local.py on %s",
+              robot_host.toUtf8().constData());
+        proc.start("ssh", args);
+        if (!proc.waitForFinished(8000)) {
+            proc.kill();
+            proc.waitForFinished(500);
+            qWarning("[AppShell] Complete Mission SSH: finalize_mission_local.py timed out (>8s)");
+        } else {
+            const QByteArray out = proc.readAllStandardOutput().trimmed();
+            const QByteArray err = proc.readAllStandardError().trimmed();
+            qInfo("[AppShell] Complete Mission SSH: rc=%d stdout=%s stderr=%s",
+                  proc.exitCode(),
+                  out.constData(),
+                  err.constData());
+        }
+    } else {
+        qWarning("[AppShell] Complete Mission SSH: no robot_host resolved \u2014 skipping remote finalize");
+    }
+
+    // Skip the motor-idle wait + /dc/finalize_mission RPC chain (both
+    // would just time out on a dead link).  Go straight to teardown.
+    performExplorationPipelineTeardown();
+    planner_estop_active_ = false;
+    goToStage3();
 }
 
 void AppShellWindow::beginExplorationMotorsIdleWait(std::function<void(bool timed_out)> continuation) {
@@ -2382,6 +2513,21 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
     video_service_ready_ = false;
     odom_ready_ = false;
     stream_status_ready_ = false;
+    // Disarm link monitor: scan over, no more "robot offline" UI.
+    // PlannerScreen / ExplorationScreen revert to BOT IDLE pill.
+    if (link_monitor_) {
+        link_monitor_->disarm();
+    }
+    link_disconnect_started_at_ms_ = 0;
+    link_recovery_resync_pending_ = false;
+    if (stage4_) {
+        stage4_->setBotLinkPillState(QStringLiteral("BOT ..."), ExplorationScreen::ValueTone::Muted);
+        stage4_->setLinkConnectionState(true, 0);
+    }
+    if (stage5_) {
+        stage5_->setBotLinkPillState(QStringLiteral("BOT ..."), PlannerScreen::ValueTone::Muted);
+        stage5_->setLinkConnectionState(true, 0);
+    }
     stream_target_published_ = false;
     fpv_started_ = false;
     exploration_rf_link_latched_ = false;
@@ -3418,6 +3564,9 @@ bool AppShellWindow::isRobotPipelineRunning(const ResolvedRobotSshTarget& ssh_ta
 }
 
 void AppShellWindow::onExplorationStreamStatus(const std_msgs::msg::String::SharedPtr msg) {
+    if (link_monitor_) {
+        link_monitor_->stamp(LinkHealthMonitor::Source::StreamStatus);
+    }
     if (!msg) {
         return;
     }
@@ -3428,6 +3577,9 @@ void AppShellWindow::onExplorationStreamStatus(const std_msgs::msg::String::Shar
 }
 
 void AppShellWindow::onPlannerScanExecutionStatus(const std_msgs::msg::String::SharedPtr msg) {
+    if (link_monitor_) {
+        link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+    }
     if (!msg || !stage5_) {
         return;
     }
@@ -3448,6 +3600,9 @@ void AppShellWindow::onPlannerScanExecutionStatus(const std_msgs::msg::String::S
 
 void AppShellWindow::onExplorationOdom(const nav_msgs::msg::Odometry::SharedPtr msg) {
     odom_ready_ = true;
+    if (link_monitor_) {
+        link_monitor_->stamp(LinkHealthMonitor::Source::Odom);
+    }
     if (!msg) {
         return;
     }
@@ -3585,6 +3740,9 @@ void AppShellWindow::onUdcHealthMessage(const std_msgs::msg::String::SharedPtr m
     udc_health_state_ = new_state;
     udc_health_last_msg_ms_ = now_ms;
 
+    if (link_monitor_) {
+        link_monitor_->stamp(LinkHealthMonitor::Source::UdcHealth);
+    }
     pushUdcRecPillState();
 }
 
@@ -3594,6 +3752,159 @@ bool AppShellWindow::isUdcDeadOrWedged() const {
     // (false positives are very expensive — operator's words).
     return udc_health_state_ == QStringLiteral("DEAD_MAX_RESTARTS") ||
            udc_health_state_ == QStringLiteral("ERROR_THERMAL_WEDGED");
+}
+
+bool AppShellWindow::isRobotLinkOffline() const {
+    return link_monitor_ && link_monitor_->isArmed() &&
+           link_monitor_->state() == LinkHealthMonitor::State::Disconnected;
+}
+
+void AppShellWindow::showCommandDroppedToast(const QString& message) {
+    // Dedup: same message within 1 s window collapses to a single toast.
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    if (message == command_toast_last_message_ &&
+        now_ms - command_toast_last_shown_at_ms_ < 1000) {
+        return;
+    }
+    command_toast_last_message_ = message;
+    command_toast_last_shown_at_ms_ = now_ms;
+
+    if (!command_toast_) {
+        command_toast_ = new QFrame(central_root_ ? central_root_ : this);
+        command_toast_->setObjectName("AppShellCommandToast");
+        command_toast_->setStyleSheet(
+            QStringLiteral("QFrame#AppShellCommandToast { background: rgba(220,38,38,0.95); "
+                           "border: 1px solid #FCA5A5; border-radius: 10px; }"));
+        command_toast_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        auto* layout = new QHBoxLayout(command_toast_);
+        layout->setContentsMargins(14, 8, 14, 8);
+        layout->setSpacing(0);
+        command_toast_label_ = new QLabel(command_toast_);
+        command_toast_label_->setStyleSheet(
+            QStringLiteral("color: #FFFBEB; font-family: 'Arimo'; font-size: 13px; "
+                           "font-weight: 600; background: transparent;"));
+        command_toast_label_->setWordWrap(false);
+        layout->addWidget(command_toast_label_);
+        command_toast_->raise();
+        command_toast_->hide();
+
+        command_toast_dismiss_timer_ = new QTimer(this);
+        command_toast_dismiss_timer_->setSingleShot(true);
+        command_toast_dismiss_timer_->setInterval(4000);
+        connect(command_toast_dismiss_timer_, &QTimer::timeout,
+                this, &AppShellWindow::hideCommandDroppedToast);
+    }
+
+    command_toast_label_->setText(message);
+    command_toast_->adjustSize();
+    if (QWidget* host = command_toast_->parentWidget()) {
+        const int x = host->width() - command_toast_->width() - 24;
+        const int y = 56;  // below window controls / OTA banner
+        command_toast_->move(std::max(24, x), y);
+    }
+    command_toast_->show();
+    command_toast_->raise();
+    if (command_toast_dismiss_timer_) {
+        command_toast_dismiss_timer_->start();
+    }
+}
+
+void AppShellWindow::hideCommandDroppedToast() {
+    if (command_toast_) {
+        command_toast_->hide();
+    }
+}
+
+void AppShellWindow::onLinkStateChanged(LinkHealthMonitor::State old_state,
+                                        LinkHealthMonitor::State new_state,
+                                        qint64 since_ms) {
+    using State = LinkHealthMonitor::State;
+
+    // Push the BOT pill text + tone to both stage screens.
+    QString text;
+    PlannerScreen::ValueTone planner_tone = PlannerScreen::ValueTone::Muted;
+    ExplorationScreen::ValueTone expl_tone = ExplorationScreen::ValueTone::Muted;
+    bool connected = true;
+
+    switch (new_state) {
+        case State::Idle:
+            text = QStringLiteral("BOT ...");
+            planner_tone = PlannerScreen::ValueTone::Muted;
+            expl_tone = ExplorationScreen::ValueTone::Muted;
+            connected = true;
+            break;
+        case State::Healthy:
+            text = QStringLiteral("BOT LIVE");
+            planner_tone = PlannerScreen::ValueTone::Good;
+            expl_tone = ExplorationScreen::ValueTone::Good;
+            connected = true;
+            break;
+        case State::Degraded:
+            text = QString::fromLatin1("BOT LAGGY %1s")
+                       .arg(QString::number((since_ms + 500) / 1000));
+            planner_tone = PlannerScreen::ValueTone::Warning;
+            expl_tone = ExplorationScreen::ValueTone::Warning;
+            connected = true;  // controls remain enabled in Degraded
+            break;
+        case State::Disconnected:
+            text = QString::fromLatin1("BOT OFFLINE %1s")
+                       .arg(QString::number((since_ms + 500) / 1000));
+            planner_tone = PlannerScreen::ValueTone::Error;
+            expl_tone = ExplorationScreen::ValueTone::Error;
+            connected = false;
+            break;
+    }
+
+    if (stage4_) {
+        stage4_->setBotLinkPillState(text, expl_tone);
+        stage4_->setLinkConnectionState(connected, since_ms);
+    }
+    if (stage5_) {
+        stage5_->setBotLinkPillState(text, planner_tone);
+        stage5_->setLinkConnectionState(connected, since_ms);
+    }
+
+    // Track the disconnect entry timestamp so the BOT pill in Degraded
+    // can keep counting up via pushPlannerTelemetrySnapshot's slow path
+    // without re-entering this slot 60 times a second.
+    if (new_state == State::Disconnected && old_state != State::Disconnected) {
+        link_disconnect_started_at_ms_ = QDateTime::currentMSecsSinceEpoch();
+        link_recovery_resync_pending_ = true;
+        qWarning("[AppShell] LinkHealth: state OFFLINE (%lld ms since last seen)",
+                 static_cast<long long>(since_ms));
+    } else if (new_state == State::Healthy && link_recovery_resync_pending_) {
+        link_recovery_resync_pending_ = false;
+        const qint64 down_ms = link_disconnect_started_at_ms_ > 0
+            ? QDateTime::currentMSecsSinceEpoch() - link_disconnect_started_at_ms_
+            : 0;
+        qInfo("[AppShell] LinkHealth: state HEALTHY after %lld ms offline — re-syncing soft state",
+              static_cast<long long>(down_ms));
+        onRobotLinkRecovered();
+    }
+}
+
+void AppShellWindow::onRobotLinkRecovered() {
+    // Reconnect handshake: re-publish soft state the robot might have
+    // lost track of (autonomy_enable matches our local intent, cruise
+    // speed matches the slider).  Idempotent and cheap; safe to call
+    // even when the robot didn't actually reboot.
+    //
+    // We deliberately do NOT auto-resume autonomy.  If the operator
+    // had pressed E-Stop while the link was down, planner_estop_active_
+    // is true and we keep the robot in IDLE / paused state.  If the
+    // operator's local intent was Running (no E-Stop), we re-publish
+    // autonomy_enable=true so the controller comes back armed if it
+    // restarted mid-disconnect.  Either way the operator's last
+    // explicit click wins.
+    if (planner_estop_active_) {
+        publishPlannerAutonomyEnable(false);
+    } else if (stage5_) {
+        // Best-effort autonomy resync only when scan is nominally Running.
+        // We can't easily check ScanRunState from here; the publish is
+        // cheap and idempotent so we always re-publish whatever our
+        // local intent says.
+        publishPlannerAutonomyEnable(true);
+    }
 }
 
 void AppShellWindow::pushUdcRecPillState() {
@@ -4040,6 +4351,9 @@ void AppShellWindow::onExplorationThermalSummary(const std_msgs::msg::String::Sh
 
 void AppShellWindow::onExplorationLeftControllerStatus(
     const odrive_can::msg::ControllerStatus::SharedPtr msg) {
+    if (link_monitor_) {
+        link_monitor_->stamp(LinkHealthMonitor::Source::ControllerStatus);
+    }
     if (!msg) {
         return;
     }
@@ -4054,6 +4368,9 @@ void AppShellWindow::onExplorationLeftControllerStatus(
 
 void AppShellWindow::onExplorationRightControllerStatus(
     const odrive_can::msg::ControllerStatus::SharedPtr msg) {
+    if (link_monitor_) {
+        link_monitor_->stamp(LinkHealthMonitor::Source::ControllerStatus);
+    }
     if (!msg) {
         return;
     }
@@ -4358,6 +4675,32 @@ void AppShellWindow::onExplorationLiveSlowTick() {
     requestExplorationRfProbe();
     requestExplorationStorageProbe();
     pushExplorationTelemetryToUiSlow();
+    // Stage 6 freeze detector: stamp LinkHealthMonitor::Source::FpvFrame
+    // when the FPV pipeline has delivered a frame in the last 1 s.  The
+    // FPV stream is RTP/UDP and independent of Zenoh, so when ROS dies
+    // but FPV stays alive the BOT pill should reflect "video healthy".
+    // When BOTH ROS and FPV freeze, that's the catastrophic case where
+    // the operator must use the Complete Mission / SSH-offline path.
+    if (link_monitor_ && link_monitor_->isArmed() && stage4_) {
+        const qint64 fpv_last = stage4_->lastFpvFrameWallMs();
+        if (fpv_last > 0) {
+            const qint64 age = QDateTime::currentMSecsSinceEpoch() - fpv_last;
+            if (age <= 2000) {
+                link_monitor_->stamp(LinkHealthMonitor::Source::FpvFrame);
+            }
+        }
+    }
+    // Refresh BOT pill counter while in Degraded / Disconnected so the
+    // "Xs" age ticks up.  No-op when state is Healthy/Idle (the slot
+    // early-returns once the cached text matches).
+    if (link_monitor_ && link_monitor_->isArmed()) {
+        const auto state = link_monitor_->state();
+        if (state == LinkHealthMonitor::State::Degraded ||
+            state == LinkHealthMonitor::State::Disconnected) {
+            const qint64 since = link_monitor_->msSinceLastSeen();
+            onLinkStateChanged(state, state, since >= 0 ? since : 0);
+        }
+    }
 }
 
 void AppShellWindow::pushExplorationTelemetryToUiFast() {
