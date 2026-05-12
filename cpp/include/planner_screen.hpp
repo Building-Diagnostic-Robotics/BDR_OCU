@@ -60,24 +60,53 @@ public:
     // odometry pipe. Used by effectiveScanSpeedMps() while a scan is running.
     void setLiveRobotSpeedMps(double speed_mps);
     void setTopSignalState(const QString& text, ValueTone tone);
+    // Top-bar battery pill — see ExplorationScreen::setTopBatteryState
+    // for semantics; same dashboard-mirroring behavior, identical
+    // thresholds (≤12 % red, ≤25 % amber, otherwise green; "—%"
+    // muted when stale).
+    void setTopBatteryState(double pct, bool stale);
     void setTopRecPillState(const QString& text, ValueTone tone);
     // BOT pill: drives the LinkHealthMonitor state to a top-bar chip
     // identical in shape to the Signal / REC pills. AppShellWindow
     // pushes this on every linkStateChanged transition. Tone semantics
-    // match the existing pills: Good=green LIVE, Warning=amber LAGGY,
-    // Error=red OFFLINE, Muted=grey IDLE.
+    // match the existing pills: Good=green LIVE, Warning=amber
+    // RECONNECTING, Error=red OFFLINE, Muted=grey IDLE.
     void setBotLinkPillState(const QString& text, ValueTone tone);
-    // Disconnect surface for Stage 4 (Scan execution): pauses the
-    // local scan-tick clock so the elapsed-time display doesn't keep
-    // ticking past the moment the radio dropped (the elapsed counter
-    // is a local QTimer, not driven by ROS), shows / hides the inline
-    // "Robot offline" banner, and disables the Pause/Resume, Cancel,
-    // Discard, and Complete Mission buttons so the operator can't fire
-    // RPCs that we know will be dropped.  AppShell calls this on every
-    // LinkHealthMonitor transition.
-    void setLinkConnectionState(bool connected, qint64 since_ms);
+    // Disconnect surface for Stage 4 (Scan execution).  Driven by the
+    // layered LinkHealthMonitor / RobotReachabilityProbe model:
+    //
+    //   connected=true  -> Healthy.  No grey-out, no banner, buttons
+    //                      enabled.  `reachable` ignored.
+    //   connected=false, reachable=true  -> Reconnecting.  Grey-out
+    //                      live telemetry + button lockout, but NO
+    //                      banner and NO map halo (visually soft —
+    //                      the host is still on the network so we
+    //                      avoid the "panic OFFLINE" treatment).
+    //                      Tooltip says "Robot reconnecting…".
+    //   connected=false, reachable=false -> True OFFLINE.  Grey-out,
+    //                      banner, halo, button lockout with "Robot
+    //                      offline — wait for reconnect." tooltip.
+    //
+    // AppShell calls this on every LinkHealthMonitor transition.
+    void setLinkConnectionState(bool connected, bool reachable, qint64 since_ms);
     void setTopLockChipState(const QString& text, ValueTone tone);
     void setTopMotorsChipState(const QString& text, ValueTone tone);
+
+    // Wall-clock ms timestamp of the most recently delivered RTP video
+    // frame on the Stage 5 scan camera tile.  Returns 0 when the stream
+    // isn't playing (placeholder visible) so AppShell's
+    // LinkHealthMonitor stamping logic can ignore it.  Mirrors
+    // ExplorationScreen::lastFpvFrameWallMs() — same FPV proof-of-life
+    // signal, but for the Stage 5 instance of the camera widget.
+    //
+    // Why this matters: RTP/UDP video keeps flowing through brief
+    // Microhard radio fades (it's stateless), while Zenoh ROS topics
+    // can hang for 30+ s on a stale TCP socket.  Without this signal,
+    // LinkHealthMonitor on Stage 5 would only see ROS topic age and
+    // false-positive into RECONNECTING even when the bot is verifiably
+    // alive on camera.
+    qint64 lastScanFpvFrameWallMs() const;
+
     void notifyScanSegmentCompleted();
     void notifyScanSegmentSaved();
     // Called by AppShell after /dc/cancel_scan has returned (or hit the
@@ -496,11 +525,20 @@ private:
     QString top_lock_text_ = QStringLiteral("Not Ready");
     QString top_motors_text_ = QStringLiteral("DISARMED");
     ValueTone top_signal_tone_ = ValueTone::Muted;
+    // Cached battery state — see ExplorationScreen for semantics.
+    double top_battery_pct_ = 0.0;
+    bool top_battery_stale_ = true;
     ValueTone top_rec_tone_ = ValueTone::Muted;
     ValueTone top_bot_tone_ = ValueTone::Muted;
     ValueTone top_lock_tone_ = ValueTone::Error;
     ValueTone top_motors_tone_ = ValueTone::Muted;
     bool link_connected_ = true;
+    // Network-layer reachability mirror.  Only meaningful when
+    // !link_connected_ — distinguishes Reconnecting (true) from
+    // true Offline (false).  Defaults to true so the first
+    // transition out of Healthy doesn't accidentally show the
+    // OFFLINE banner before the reachability probe has reported.
+    bool link_reachable_ = true;
     qint64 link_disconnected_since_ms_ = 0;
     std::optional<PathState> live_robot_pose_;
     std::vector<Point2D> live_robot_trail_;

@@ -315,6 +315,24 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     connect(link_monitor_, &LinkHealthMonitor::linkStateChanged,
             this, &AppShellWindow::onLinkStateChanged);
 
+    // Layered connectivity model.  The reachability probe answers
+    // "is the host on the network at all?" via ICMP -> TCP-22.  Its
+    // verdict is fed into LinkHealthMonitor::setReachability, which
+    // resolves RECONNECTING (topics stale, probe ok) vs DISCONNECTED
+    // (topics stale, probe fails).  Both probe and monitor arm/disarm
+    // together — see startRobotCompleteLaunch / teardown paths.
+    reachability_probe_ = new RobotReachabilityProbe(this);
+    connect(reachability_probe_, &RobotReachabilityProbe::reachabilityChanged,
+            this, [this](RobotReachabilityProbe::State /*old*/,
+                          RobotReachabilityProbe::State next) {
+                if (!link_monitor_) {
+                    return;
+                }
+                const bool reachable =
+                    (next == RobotReachabilityProbe::State::Reachable);
+                link_monitor_->setReachability(reachable, /*known=*/true);
+            });
+
     central_root_ = new QWidget(this);
     auto* root_layout = new QVBoxLayout(central_root_);
     root_layout->setContentsMargins(0, 0, 0, 0);
@@ -843,6 +861,11 @@ void AppShellWindow::goToStage4() {
         fpv_started_ = true;
     }
     pushExplorationTopMotorsChipState();
+    // Seed the top-bar battery pill with whatever sample we already
+    // have from the dashboard's MQTT subscriber — otherwise the pill
+    // would stay at "—%" until the dashboard's NEXT publish, which
+    // could be ≥1 s away depending on when the operator transitioned.
+    stage4_->setTopBatteryState(last_battery_pct_, last_battery_stale_);
 }
 
 void AppShellWindow::goToStage5() {
@@ -864,6 +887,10 @@ void AppShellWindow::goToStage5() {
     stage5_->setMapPath(latest_saved_map_local_path_);
     planner_estop_active_ = false;
     pushPlannerTelemetrySnapshot();
+    // Seed the Stage 5 top-bar battery pill — same reasoning as Stage
+    // 4 (avoid a "—%" gap during the transition; the dashboard's
+    // last sample is still authoritative).
+    stage5_->setTopBatteryState(last_battery_pct_, last_battery_stale_);
     stack_->setCurrentWidget(stage5_);
     pushExplorationTelemetryToUiSlow();
     // No SetParameters client warmup — sendControllerMaxLinearVelocity now
@@ -1100,6 +1127,13 @@ void AppShellWindow::ensureStage3() {
     connect(stage3_, &DashboardScreen::logoutRequested, this, &AppShellWindow::goToStage1);
     connect(stage3_, &DashboardScreen::runDiagnosticsRequested, this, &AppShellWindow::goToStage2);
     connect(stage3_, &DashboardScreen::startNewScanRequested, this, &AppShellWindow::onStartNewScan);
+    // Mirror the dashboard's MQTT battery state onto the Stage 4 /
+    // Stage 5 top-bar pills.  Dashboard owns the subprocess + JSON
+    // parsing; AppShell only caches the latest sample and pushes it
+    // to whichever stage is currently visible.  See
+    // DashboardScreen::batterySocChanged for the contract.
+    connect(stage3_, &DashboardScreen::batterySocChanged, this,
+            &AppShellWindow::onDashboardBatteryStateChanged);
     stage3_->setDarkMode(dark_mode_);
     if (!robot_id_.isEmpty()) {
         stage3_->setRobotId(robot_id_);
@@ -1121,7 +1155,19 @@ void AppShellWindow::ensureStage4() {
     connect(stage4_, &ExplorationScreen::teleopArmRequested, this, &AppShellWindow::onExplorationTeleopArmRequested);
     connect(stage4_, &ExplorationScreen::teleopDisarmRequested, this, &AppShellWindow::onExplorationTeleopDisarmRequested);
     connect(stage4_, &ExplorationScreen::teleopGprPowerOffRequested, this, &AppShellWindow::onExplorationTeleopGprPowerOffRequested);
+    connect(stage4_, &ExplorationScreen::cameraSelectRequested,
+            this, &AppShellWindow::onExplorationCameraSelectRequested);
     stage4_->setDarkMode(dark_mode_);
+    // Seed the pill from QSettings so the operator's last choice
+    // shows as active before /stream_camera_status confirms (or in
+    // the no-launch state where we have no confirmation).
+    {
+        QSettings settings(kSettingsOrgName, kSettingsAppName);
+        const QString persisted =
+            settings.value(kSettingsStreamingCameraKey,
+                           QStringLiteral("left")).toString();
+        stage4_->setStreamingCamera(persisted);
+    }
 }
 
 void AppShellWindow::ensureStage5() {
@@ -1546,8 +1592,12 @@ void AppShellWindow::onExplorationStartScanRequested() {
     stream_target_published_ = false;
     fpv_started_ = false;
     // Arm link monitor: from now until teardown, every ROS callback
-    // stamps freshness; staleness > 2s flips us to LAGGY, > 5s to
-    // OFFLINE.  See onLinkStateChanged.
+    // stamps freshness; staleness > kStaleMaxMs (10 s) combined with
+    // the reachability probe verdict resolves to RECONNECTING (probe
+    // ok, topics stale) vs DISCONNECTED (probe + topics both gone).
+    // See onLinkStateChanged.  The reachability probe is armed below,
+    // after ssh_target is resolved (we need its host to know what to
+    // probe).
     if (link_monitor_) {
         link_monitor_->arm();
     }
@@ -1624,6 +1674,14 @@ void AppShellWindow::onExplorationStartScanRequested() {
     }
     active_robot_host_ = ssh_target.host;
     active_robot_ssh_user_ = ssh_target.ssh_user;
+    // Arm the reachability probe on the same host the launch is
+    // targeting — keeps probe + monitor in lock-step.  Layered
+    // model: ICMP every 1 s with TCP-22 fallback so a Zenoh
+    // peer-rediscovery hiccup (topics stale, host still up)
+    // resolves to RECONNECTING instead of DISCONNECTED.
+    if (reachability_probe_ && !ssh_target.host.isEmpty()) {
+        reachability_probe_->arm(ssh_target.host);
+    }
     startLaptopTeleopLaunch(ssh_target.host);
     startRobotCompleteLaunch(ssh_target);
 
@@ -1885,11 +1943,18 @@ void AppShellWindow::onPlannerScanResumeRequested() {
 
 void AppShellWindow::onPlannerEmergencyStopRequested() {
     // Stage 2 disconnect-resilience guard: reject E-Stop press when we
-    // already know the link is offline.  Otherwise the operator's press
-    // would silently flip planner_estop_active_ even though the robot
-    // never received the disarm — diverging the OCU's model from the
-    // robot's real state.  See onLinkStateChanged.
-    if (isRobotLinkOffline()) {
+    // know the link is TRULY offline (probe failed AND ROS topics
+    // stale).  Otherwise the operator's press would silently flip
+    // planner_estop_active_ even though the robot never received the
+    // disarm — diverging the OCU's model from the robot's real state.
+    //
+    // E-STOP BYPASS: We deliberately use isRobotLinkUnreachable()
+    // (strict) rather than isRobotLinkOffline() — E-Stop is the one
+    // command where dropping it is unacceptable, so we let it fire in
+    // SYNCING (camera/probe say bot is alive).  Even if the RPC lands
+    // 5-10 s late after Zenoh re-handshakes, that's better than
+    // refusing to send it at all.  See onLinkStateChanged.
+    if (isRobotLinkUnreachable()) {
         showCommandDroppedToast(
             QStringLiteral("E-Stop not delivered — robot offline. State unchanged."));
         return;
@@ -1912,13 +1977,21 @@ void AppShellWindow::onPlannerEmergencyStopRequested() {
 
 void AppShellWindow::onPlannerCompleteMissionRequested() {
     // Data-first branch (Stage 4 of disconnect-resilience).  When the
-    // link is offline, the existing motor-disarm + /dc/finalize_mission
-    // RPC chain will burn ~25 s of UI time on dead RPCs and still leave
-    // the robot's mission_config.json with mission_finalized_at: null.
-    // The data IS on disk — the operator just needs a way to land the
-    // finalize metadata.  Show the OfflineFinalizeDialog and route
-    // accordingly.
-    if (isRobotLinkOffline()) {
+    // link is truly unreachable, the existing motor-disarm +
+    // /dc/finalize_mission RPC chain will burn ~25 s of UI time on
+    // dead RPCs and still leave the robot's mission_config.json with
+    // mission_finalized_at: null.  The data IS on disk — the operator
+    // just needs a way to land the finalize metadata.  Show the
+    // OfflineFinalizeDialog and route accordingly.
+    //
+    // Note: gated on isRobotLinkUnreachable() (strict), NOT
+    // isRobotLinkOffline() — RECONNECTING shouldn't pop the dialog
+    // because the link might recover in seconds and the normal path
+    // would have worked.  The Complete Mission button is itself
+    // disabled during RECONNECTING by the screen-side gating, so the
+    // operator can't actually reach this slot in that state anyway;
+    // the strict check is a defence-in-depth measure.
+    if (isRobotLinkUnreachable()) {
         qInfo("[AppShell] Complete Mission while link offline — showing OfflineFinalizeDialog");
         OfflineFinalizeDialog dialog(link_monitor_, this);
         if (central_root_) {
@@ -1982,14 +2055,26 @@ void AppShellWindow::executeCompleteMissionSshFallback() {
     if (!robot_host.isEmpty()) {
         QProcess proc;
         QStringList args;
+        // IMPORTANT: invoke the installed Python script directly via
+        // python3 — NOT via `ros2 run pilot_control ...` — because
+        // non-interactive SSH sessions don't source
+        // /opt/ros/humble/setup.bash + the workspace overlay, so
+        // `ros2` is not on PATH and the previous form failed with
+        // rc=127 ("ros2: command not found").  finalize_mission_local
+        // is pure file I/O (no rclpy import), so we don't need ROS
+        // sourcing at all.  See the script's docstring.
+        const QString script_path =
+            QStringLiteral("/home/%1/pilot_ws/install/pilot_control/lib/pilot_control/finalize_mission_local.py")
+                .arg(ssh_target.ssh_user);
         args << "-o" << "ConnectTimeout=4"
              << "-o" << "StrictHostKeyChecking=no"
              << "-o" << "UserKnownHostsFile=/dev/null"
              << "-o" << "BatchMode=yes"
              << sshUserHostSpec(ssh_target)
-             << "ros2 run pilot_control finalize_mission_local.py";
-        qInfo("[AppShell] Complete Mission SSH: invoking finalize_mission_local.py on %s",
-              robot_host.toUtf8().constData());
+             << QStringLiteral("python3 %1").arg(script_path);
+        qInfo("[AppShell] Complete Mission SSH: invoking finalize_mission_local.py on %s (path=%s)",
+              robot_host.toUtf8().constData(),
+              script_path.toUtf8().constData());
         proc.start("ssh", args);
         if (!proc.waitForFinished(8000)) {
             proc.kill();
@@ -1998,10 +2083,23 @@ void AppShellWindow::executeCompleteMissionSshFallback() {
         } else {
             const QByteArray out = proc.readAllStandardOutput().trimmed();
             const QByteArray err = proc.readAllStandardError().trimmed();
-            qInfo("[AppShell] Complete Mission SSH: rc=%d stdout=%s stderr=%s",
-                  proc.exitCode(),
-                  out.constData(),
-                  err.constData());
+            const int rc = proc.exitCode();
+            // Promote non-zero exit to a warning so failures are loud
+            // in the log and easier to grep post-flight.  The previous
+            // path silently logged rc=127 at info-level and the
+            // operator never noticed the fallback didn't actually
+            // finalize.
+            if (rc == 0) {
+                qInfo("[AppShell] Complete Mission SSH: rc=0 stdout=%s stderr=%s",
+                      out.constData(),
+                      err.constData());
+            } else {
+                qWarning("[AppShell] Complete Mission SSH: NON-ZERO rc=%d stdout=%s stderr=%s "
+                         "\u2014 falling back to robot-side auto-finalize watchdog",
+                         rc,
+                         out.constData(),
+                         err.constData());
+            }
         }
     } else {
         qWarning("[AppShell] Complete Mission SSH: no robot_host resolved \u2014 skipping remote finalize");
@@ -2513,20 +2611,24 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
     video_service_ready_ = false;
     odom_ready_ = false;
     stream_status_ready_ = false;
-    // Disarm link monitor: scan over, no more "robot offline" UI.
+    // Disarm link monitor + reachability probe: scan over, no more
+    // "robot offline" UI, no more background ICMP/TCP traffic.
     // PlannerScreen / ExplorationScreen revert to BOT IDLE pill.
     if (link_monitor_) {
         link_monitor_->disarm();
+    }
+    if (reachability_probe_) {
+        reachability_probe_->disarm();
     }
     link_disconnect_started_at_ms_ = 0;
     link_recovery_resync_pending_ = false;
     if (stage4_) {
         stage4_->setBotLinkPillState(QStringLiteral("BOT ..."), ExplorationScreen::ValueTone::Muted);
-        stage4_->setLinkConnectionState(true, 0);
+        stage4_->setLinkConnectionState(/*connected=*/true, /*reachable=*/true, 0);
     }
     if (stage5_) {
         stage5_->setBotLinkPillState(QStringLiteral("BOT ..."), PlannerScreen::ValueTone::Muted);
-        stage5_->setLinkConnectionState(true, 0);
+        stage5_->setLinkConnectionState(/*connected=*/true, /*reachable=*/true, 0);
     }
     stream_target_published_ = false;
     fpv_started_ = false;
@@ -2687,6 +2789,22 @@ void AppShellWindow::ensureExplorationRosInterfaces() {
     exploration_ros_node_ = rclcpp::Node::make_shared("bdr_exploration_orchestrator");
     exploration_stream_target_pub_ =
         exploration_ros_node_->create_publisher<std_msgs::msg::String>("/stream_target_ip", 10);
+    // Streaming-camera publisher: routes to UDC's /stream_camera_select
+    // subscriber (`unified_data_collector.cpp` ~L495).  Reliable QoS
+    // because we don't want a brief Zenoh hiccup to drop the operator's
+    // selection — UDC will rebuild the GStreamer pipeline on receipt.
+    stream_camera_select_pub_ = exploration_ros_node_->create_publisher<std_msgs::msg::String>(
+        "/stream_camera_select",
+        rclcpp::QoS(1).reliable());
+    // Streaming-camera status subscriber: UDC publishes the actual
+    // active camera here after each pipeline rebuild settles.  We
+    // forward into ExplorationScreen so the pill's active button
+    // reflects the robot's TRUTH, not the operator's last click — and
+    // so the click-debounce drops as soon as confirmation arrives.
+    stream_camera_status_sub_ = exploration_ros_node_->create_subscription<std_msgs::msg::String>(
+        "/stream_camera_status",
+        rclcpp::QoS(1).reliable(),
+        std::bind(&AppShellWindow::onStreamCameraStatus, this, std::placeholders::_1));
     exploration_cmd_vel_pub_ =
         exploration_ros_node_->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
     planner_mpc_autonomy_pub_ =
@@ -2932,6 +3050,52 @@ void AppShellWindow::publishExplorationStreamTarget() {
     exploration_stream_target_pub_->publish(msg);
     stream_target_published_ = true;
     last_stream_target_publish_at_ms_ = QDateTime::currentMSecsSinceEpoch();
+}
+
+// ---- Streaming-camera selection (Stage 4 FPV pill) ---------------------
+
+void AppShellWindow::onExplorationCameraSelectRequested(const QString& cam) {
+    if (cam != QStringLiteral("left") && cam != QStringLiteral("right")) {
+        return;
+    }
+    // Persist the request immediately so it survives an OCU restart
+    // even before UDC confirms it via /stream_camera_status.  The
+    // confirmation just locks in the visual.
+    QSettings settings(kSettingsOrgName, kSettingsAppName);
+    settings.setValue(kSettingsStreamingCameraKey, cam);
+    publishStreamCameraSelection(cam);
+}
+
+void AppShellWindow::publishStreamCameraSelection(const QString& cam) {
+    if (!stream_camera_select_pub_) {
+        return;
+    }
+    std_msgs::msg::String msg;
+    msg.data = cam.toStdString();
+    stream_camera_select_pub_->publish(msg);
+}
+
+void AppShellWindow::onStreamCameraStatus(const std_msgs::msg::String::SharedPtr msg) {
+    if (!msg) {
+        return;
+    }
+    const QString cam = QString::fromStdString(msg->data).trimmed().toLower();
+    if (cam != QStringLiteral("left") && cam != QStringLiteral("right")) {
+        return;
+    }
+    if (stage4_) {
+        // Marshal to the GUI thread — ROS callbacks land on the
+        // exploration spinner thread.  QMetaObject::invokeMethod with
+        // Qt::QueuedConnection is the standard pattern used elsewhere
+        // in this file (see onExplorationThermalSummary etc.) but
+        // since stage4_ exposes a thread-safe setter, a direct call
+        // via Qt::QueuedConnection is cheaper.
+        QMetaObject::invokeMethod(stage4_,
+            [stage = stage4_, cam]() {
+                stage->setStreamingCamera(cam);
+            },
+            Qt::QueuedConnection);
+    }
 }
 
 bool AppShellWindow::requestSavedMapPathWithRetry(QString* saved_remote_path,
@@ -3570,10 +3734,34 @@ void AppShellWindow::onExplorationStreamStatus(const std_msgs::msg::String::Shar
     if (!msg) {
         return;
     }
+    const bool first_status_this_session = !stream_status_ready_;
     stream_status_ready_ = true;
     exploration_rf_link_latched_ = true;
     stream_status_text_ = QString::fromStdString(msg->data);
     exploration_last_stream_status_at_ms_ = QDateTime::currentMSecsSinceEpoch();
+
+    // Push the operator's persisted streaming-camera preference exactly
+    // ONCE per launch session, on first /stream_status arrival (UDC's
+    // signal that it's up and ready to switch pipelines).  Pushing
+    // earlier (e.g. at launch start) racks up against UDC's startup
+    // sequence and the request gets dropped; pushing later (e.g. on
+    // Start Scan) means the operator sees the wrong camera during
+    // exploration before any scan starts.
+    //
+    // No-op when the preference matches UDC's startup default ("left")
+    // — UDC's own /stream_camera_status will arrive shortly with
+    // "left" and the pill will lock in.  When the preference is
+    // "right" we push so the operator's last choice carries across
+    // OCU restarts.
+    if (first_status_this_session) {
+        QSettings settings(kSettingsOrgName, kSettingsAppName);
+        const QString persisted =
+            settings.value(kSettingsStreamingCameraKey,
+                           QStringLiteral("left")).toString();
+        if (persisted == QStringLiteral("right")) {
+            publishStreamCameraSelection(persisted);
+        }
+    }
 }
 
 void AppShellWindow::onPlannerScanExecutionStatus(const std_msgs::msg::String::SharedPtr msg) {
@@ -3655,6 +3843,23 @@ void AppShellWindow::pushPlannerTelemetrySnapshot() {
 
     stage5_->setLiveRobotTelemetry(pose, trail);
     pushPlannerMotorsChipState();
+}
+
+void AppShellWindow::onDashboardBatteryStateChanged(double pct, bool stale) {
+    // Cache the latest sample so goToStage4()/goToStage5() can seed
+    // the top-bar pill on transition (the next dashboard publish may
+    // be ≥1 s away).  Push to whichever stage is currently visible
+    // immediately so a stale↔fresh transition is reflected without
+    // waiting for the next stage entry.
+    last_battery_pct_ = pct;
+    last_battery_stale_ = stale;
+
+    if (stage4_ && stack_ && stack_->currentWidget() == stage4_) {
+        stage4_->setTopBatteryState(pct, stale);
+    }
+    if (stage5_ && stack_ && stack_->currentWidget() == stage5_) {
+        stage5_->setTopBatteryState(pct, stale);
+    }
 }
 
 void AppShellWindow::pushExplorationTopMotorsChipState() {
@@ -3755,6 +3960,24 @@ bool AppShellWindow::isUdcDeadOrWedged() const {
 }
 
 bool AppShellWindow::isRobotLinkOffline() const {
+    // Hard-block RPCs in BOTH true OFFLINE and the RECONNECTING soft
+    // window (operator confirmed Q1=a).  An RPC fired during
+    // RECONNECTING would race with the Zenoh peer-rediscovery and
+    // either drop on the floor or land 5-10 s late, neither of which
+    // is acceptable mid-scan.
+    if (!link_monitor_ || !link_monitor_->isArmed()) {
+        return false;
+    }
+    const auto s = link_monitor_->state();
+    return s == LinkHealthMonitor::State::Disconnected ||
+           s == LinkHealthMonitor::State::Reconnecting;
+}
+
+bool AppShellWindow::isRobotLinkUnreachable() const {
+    // Strict variant — only true OFFLINE.  Used by the Complete
+    // Mission flow so RECONNECTING (probe says host is up) doesn't
+    // pop the OfflineFinalizeDialog when a few seconds of patience
+    // would have cleared the issue.
     return link_monitor_ && link_monitor_->isArmed() &&
            link_monitor_->state() == LinkHealthMonitor::State::Disconnected;
 }
@@ -3824,7 +4047,12 @@ void AppShellWindow::onLinkStateChanged(LinkHealthMonitor::State old_state,
     QString text;
     PlannerScreen::ValueTone planner_tone = PlannerScreen::ValueTone::Muted;
     ExplorationScreen::ValueTone expl_tone = ExplorationScreen::ValueTone::Muted;
+    // `connected` toggles the screens' grey-out + button gating.
+    // `reachable` toggles the heavier OFFLINE visual treatment
+    // (banner + map halo).  See PlannerScreen::setLinkConnectionState
+    // for the truth table.
     bool connected = true;
+    bool reachable = true;
 
     switch (new_state) {
         case State::Idle:
@@ -3832,19 +4060,30 @@ void AppShellWindow::onLinkStateChanged(LinkHealthMonitor::State old_state,
             planner_tone = PlannerScreen::ValueTone::Muted;
             expl_tone = ExplorationScreen::ValueTone::Muted;
             connected = true;
+            reachable = true;
             break;
         case State::Healthy:
             text = QStringLiteral("BOT LIVE");
             planner_tone = PlannerScreen::ValueTone::Good;
             expl_tone = ExplorationScreen::ValueTone::Good;
             connected = true;
+            reachable = true;
             break;
-        case State::Degraded:
-            text = QString::fromLatin1("BOT LAGGY %1s")
+        case State::Reconnecting:
+            // Topics stale but probe says host is up — and (post-FPV-
+            // stamp fix) we'd only land here if RTP video is also
+            // gone, which means we're in a fully soft fade rather
+            // than a Zenoh-only hiccup.  Pill text reflects
+            // operator-facing semantics: "BOT LIVE - SYNCING" so the
+            // operator knows the bot is believed alive (probe ok)
+            // and controls are catching up, rather than panicking
+            // them with "RECONNECTING".
+            text = QString::fromLatin1("BOT LIVE - SYNCING %1s")
                        .arg(QString::number((since_ms + 500) / 1000));
             planner_tone = PlannerScreen::ValueTone::Warning;
             expl_tone = ExplorationScreen::ValueTone::Warning;
-            connected = true;  // controls remain enabled in Degraded
+            connected = false;  // hard-block RPCs (operator answer Q1=a)
+            reachable = true;   // suppress banner/halo + allow E-Stop bypass
             break;
         case State::Disconnected:
             text = QString::fromLatin1("BOT OFFLINE %1s")
@@ -3852,26 +4091,34 @@ void AppShellWindow::onLinkStateChanged(LinkHealthMonitor::State old_state,
             planner_tone = PlannerScreen::ValueTone::Error;
             expl_tone = ExplorationScreen::ValueTone::Error;
             connected = false;
+            reachable = false;
             break;
     }
 
     if (stage4_) {
         stage4_->setBotLinkPillState(text, expl_tone);
-        stage4_->setLinkConnectionState(connected, since_ms);
+        stage4_->setLinkConnectionState(connected, reachable, since_ms);
     }
     if (stage5_) {
         stage5_->setBotLinkPillState(text, planner_tone);
-        stage5_->setLinkConnectionState(connected, since_ms);
+        stage5_->setLinkConnectionState(connected, reachable, since_ms);
     }
 
-    // Track the disconnect entry timestamp so the BOT pill in Degraded
-    // can keep counting up via pushPlannerTelemetrySnapshot's slow path
-    // without re-entering this slot 60 times a second.
+    // Track the disconnect entry timestamp.  The "soft state resync"
+    // hook only fires on true Disconnected -> Healthy transitions
+    // (passing through Reconnecting is irrelevant — the controller
+    // owns its own pause/resume across heartbeat loss; see
+    // onRobotLinkRecovered).
     if (new_state == State::Disconnected && old_state != State::Disconnected) {
         link_disconnect_started_at_ms_ = QDateTime::currentMSecsSinceEpoch();
         link_recovery_resync_pending_ = true;
         qWarning("[AppShell] LinkHealth: state OFFLINE (%lld ms since last seen)",
                  static_cast<long long>(since_ms));
+    } else if (new_state == State::Reconnecting && old_state == State::Healthy) {
+        // Informational only — no visual banner, no resync hook.
+        // Helps post-mortem grep for "we entered the soft window".
+        qInfo("[AppShell] LinkHealth: state RECONNECTING (%lld ms since last seen, probe=reachable)",
+              static_cast<long long>(since_ms));
     } else if (new_state == State::Healthy && link_recovery_resync_pending_) {
         link_recovery_resync_pending_ = false;
         const qint64 down_ms = link_disconnect_started_at_ms_ > 0
@@ -4671,8 +4918,27 @@ void AppShellWindow::onExplorationLiveSlowTick() {
     // but FPV stays alive the BOT pill should reflect "video healthy".
     // When BOTH ROS and FPV freeze, that's the catastrophic case where
     // the operator must use the Complete Mission / SSH-offline path.
-    if (link_monitor_ && link_monitor_->isArmed() && stage4_) {
-        const qint64 fpv_last = stage4_->lastFpvFrameWallMs();
+    // FPV proof-of-life stamp.  RTP/UDP video keeps flowing through
+    // brief Microhard radio fades (it's stateless), while Zenoh ROS
+    // topics can hang for 30+ s on a stale TCP socket.  As long as
+    // SOMETHING is decoding RTP frames, the bot is verifiably alive
+    // end-to-end and the link counts as Healthy regardless of Zenoh
+    // peer state.
+    //
+    // CRITICAL: read from BOTH stages.  Stage 4 (Exploration) has its
+    // own FPV widget; Stage 5 (Mission Planner / Scan) has a separate
+    // `scan_camera_view_` instance.  Pre-fix this slot only read
+    // stage4_, so once the operator advanced to Stage 5 the stamp went
+    // stale instantly even with the camera streaming live frames into
+    // stage5_'s widget — that produced the false-positive RECONNECTING
+    // flap during normal Zenoh peer-rediscovery on Stage 5 (terminal
+    // log lines 386-389, 2026-05-12 session).
+    if (link_monitor_ && link_monitor_->isArmed()) {
+        const qint64 stage4_last =
+            stage4_ ? stage4_->lastFpvFrameWallMs() : 0;
+        const qint64 stage5_last =
+            stage5_ ? stage5_->lastScanFpvFrameWallMs() : 0;
+        const qint64 fpv_last = std::max(stage4_last, stage5_last);
         if (fpv_last > 0) {
             const qint64 age = QDateTime::currentMSecsSinceEpoch() - fpv_last;
             if (age <= 2000) {
@@ -4680,13 +4946,14 @@ void AppShellWindow::onExplorationLiveSlowTick() {
             }
         }
     }
-    // Refresh BOT pill counter while in Degraded / Disconnected so the
-    // "Xs" age ticks up.  No-op when state is Healthy/Idle (the slot
-    // early-returns once the cached text matches).
+    // Refresh BOT pill counter while in Reconnecting / Disconnected
+    // so the "Xs" age in "BOT LIVE - SYNCING X s" / "BOT OFFLINE X s"
+    // ticks up.  No-op when state is Healthy / Idle (those have
+    // counter-less pill text).
     if (link_monitor_ && link_monitor_->isArmed()) {
         const auto state = link_monitor_->state();
-        if (state == LinkHealthMonitor::State::Degraded ||
-            state == LinkHealthMonitor::State::Disconnected) {
+        if (state == LinkHealthMonitor::State::Disconnected ||
+            state == LinkHealthMonitor::State::Reconnecting) {
             const qint64 since = link_monitor_->msSinceLastSeen();
             onLinkStateChanged(state, state, since >= 0 ? since : 0);
         }
@@ -4711,7 +4978,6 @@ void AppShellWindow::pushExplorationTelemetryToUiFast() {
     const double speed_mps =
         odom_fresh ? std::hypot(exploration_latest_vx_mps_, exploration_latest_vy_mps_) : 0.0;
     stage4_->setTelemetrySpeedMps(speed_mps);
-    stage4_->setFpvSpeedMps(speed_mps);
     // Stage 5 uses the same odom-derived speed for ETA when a scan is active
     // (PlannerScreen::effectiveScanSpeedMps falls back to the cached
     // controller max_linear_velocity ROS param when the robot is idle).
@@ -4762,16 +5028,51 @@ void AppShellWindow::pushExplorationTelemetryToUiSlow() {
                              (now_ms - exploration_left_iq_at_ms_) <= 1500 &&
                              (now_ms - exploration_right_iq_at_ms_) <= 1500;
 
-    const SharedTopStatusState top_status = computeSharedTopStatus(exploration_launch_ready_,
-                                                                   exploration_launch_in_progress_,
-                                                                   exploration_launch_failed_,
-                                                                   laptop_launch_confirmed_,
-                                                                   robot_launch_confirmed_,
-                                                                   laptop_launch_started_,
-                                                                   robot_launch_started_,
-                                                                   local_zenoh_ready_,
-                                                                   rf_metric_fresh,
-                                                                   exploration_rf_rssi_dbm_);
+    SharedTopStatusState top_status = computeSharedTopStatus(exploration_launch_ready_,
+                                                              exploration_launch_in_progress_,
+                                                              exploration_launch_failed_,
+                                                              laptop_launch_confirmed_,
+                                                              robot_launch_confirmed_,
+                                                              laptop_launch_started_,
+                                                              robot_launch_started_,
+                                                              local_zenoh_ready_,
+                                                              rf_metric_fresh,
+                                                              exploration_rf_rssi_dbm_);
+
+    // Layered signal fallback — when SNMP RSSI is missing (no probe
+    // result yet, snmpget binary missing, radio not responding to
+    // SNMP, etc.) but a scan is armed and we have a real
+    // LinkHealthMonitor verdict, surface that instead of the
+    // permanent "Signal unavailable" muted text.  The dBm reading is
+    // still preferred when fresh (richer info).
+    //
+    // Mapping:
+    //   Healthy      -> "Connected"   Good
+    //   Reconnecting -> "Reconnecting" Warning
+    //   Disconnected -> "Offline"     Error
+    //   Idle         -> leave as "Signal unavailable" (pre-launch)
+    if (!rf_metric_fresh && link_monitor_) {
+        const auto link_state = link_monitor_->state();
+        switch (link_state) {
+            case LinkHealthMonitor::State::Healthy:
+                top_status.signal_text = QStringLiteral("Connected");
+                top_status.signal_tone = SharedTopStatusTone::Good;
+                break;
+            case LinkHealthMonitor::State::Reconnecting:
+                top_status.signal_text = QStringLiteral("Reconnecting");
+                top_status.signal_tone = SharedTopStatusTone::Warning;
+                break;
+            case LinkHealthMonitor::State::Disconnected:
+                top_status.signal_text = QStringLiteral("Offline");
+                top_status.signal_tone = SharedTopStatusTone::Error;
+                break;
+            case LinkHealthMonitor::State::Idle:
+                // Pre-launch — keep the placeholder.  Operator hasn't
+                // armed yet, so "Signal unavailable" is honest.
+                break;
+        }
+    }
+
     if (stage4_) {
         stage4_->setTopLockChipState(top_status.lock_text, toExplorationTone(top_status.lock_tone));
         stage4_->setTopSignalState(top_status.signal_text, toExplorationTone(top_status.signal_tone));

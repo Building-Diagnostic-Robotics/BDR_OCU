@@ -219,15 +219,15 @@ void OfflineFinalizeDialog::refreshStatusLabels() {
         switch (monitor_->state()) {
             case LinkHealthMonitor::State::Healthy:
                 lbl_link_status_->setText(
-                    QString::fromLatin1("Link: LIVE (last contact %1s ago)").arg(since_sec));
+                    QStringLiteral("Link: LIVE (last contact %1s ago)").arg(since_sec));
                 break;
-            case LinkHealthMonitor::State::Degraded:
+            case LinkHealthMonitor::State::Reconnecting:
                 lbl_link_status_->setText(
-                    QString::fromLatin1("Link: LAGGY (last contact %1s ago)").arg(since_sec));
+                    QStringLiteral("Link: RECONNECTING (last contact %1s ago)").arg(since_sec));
                 break;
             case LinkHealthMonitor::State::Disconnected:
                 lbl_link_status_->setText(
-                    QString::fromLatin1("Link: OFFLINE (last contact %1s ago)").arg(since_sec));
+                    QStringLiteral("Link: OFFLINE (last contact %1s ago)").arg(since_sec));
                 break;
             case LinkHealthMonitor::State::Idle:
                 lbl_link_status_->setText(QStringLiteral("Link: IDLE"));

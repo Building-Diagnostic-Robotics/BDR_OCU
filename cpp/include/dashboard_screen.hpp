@@ -42,6 +42,17 @@ signals:
     void runDiagnosticsRequested();
     void viewRecordingsRequested();
 
+    /**
+     * Emitted on every battery state change so AppShell can mirror the
+     * percentage onto the Stage 4 / Stage 5 top-bar pill (matching the
+     * dashboard tile thresholds — see kBatteryLowPct / kBatteryCriticalPct
+     * in dashboard_screen.cpp).  `pct` is the latest SoC percent
+     * (`std::nan("")` when the dashboard has no payload yet); `stale`
+     * is true when the MQTT payload is older than its
+     * stale_after_ms threshold OR no payload has arrived at all.
+     */
+    void batterySocChanged(double pct, bool stale);
+
 protected:
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;

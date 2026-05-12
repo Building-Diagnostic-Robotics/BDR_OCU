@@ -23,6 +23,7 @@ class ExplorationLoadingOverlayWidget;
 class ExplorationNavMapWidget;
 class ExplorationThermalPixelWidget;
 class VideoStreamWidget;
+class CameraSwitchPill;
 
 class ExplorationScreen : public QWidget {
     Q_OBJECT
@@ -51,27 +52,40 @@ public:
     void setPlanningEnabled(bool enabled);
     void setTopLockChipState(const QString& text, ValueTone tone);
     void setTopSignalState(const QString& text, ValueTone tone);
+    // Top-bar battery pill — fed by AppShell from the dashboard's MQTT
+    // battery subscriber.  `pct` is the latest SoC %; `stale` is true
+    // when the dashboard has no fresh payload (no MQTT yet, broker
+    // unreachable, or payload older than its stale_after_ms).  When
+    // `stale` the pill renders as "—%" in muted color; otherwise the
+    // pill mirrors the dashboard tile thresholds (≤12 % red,
+    // ≤25 % amber, otherwise green).
+    void setTopBatteryState(double pct, bool stale);
     void setTopRecPillState(const QString& text, ValueTone tone);
     // BOT pill: drives the LinkHealthMonitor state to a top-bar chip
     // identical in shape to the Signal / REC pills.  AppShellWindow
     // pushes this on every linkStateChanged transition.  Tone semantics
-    // match the existing pills: Good=green LIVE, Warning=amber LAGGY,
-    // Error=red OFFLINE, Muted=grey IDLE.
+    // match the existing pills: Good=green LIVE, Warning=amber
+    // RECONNECTING, Error=red OFFLINE, Muted=grey IDLE.
     void setBotLinkPillState(const QString& text, ValueTone tone);
-    // Disconnect surface: shows / hides the inline "Robot offline"
-    // banner above the launch progress card and gates the primary
-    // controls (Start Mapping, Finish + Save Map, Stop Pipeline) so
-    // the operator can't fire RPCs that we already know will be
-    // dropped.  When `connected` flips back to true after >= 500 ms
-    // of being false, controls re-enable on the next event-loop tick
-    // (the AppShell's reconnect handshake does the actual debounce).
-    void setLinkConnectionState(bool connected, qint64 since_ms);
+    // Disconnect surface, layered LinkHealthMonitor model:
+    //
+    //   connected=true  -> Healthy.  No banner, no halo, controls
+    //                      enabled.  `reachable` ignored.
+    //   connected=false, reachable=true  -> Reconnecting.  Hide the
+    //                      banner + nav-map halo (the host is still
+    //                      on the network — soft visual treatment),
+    //                      but gate the primary controls so the
+    //                      operator can't fire dropped RPCs.
+    //   connected=false, reachable=false -> True OFFLINE.  Banner +
+    //                      halo + control lockout.
+    //
+    // AppShell calls this on every LinkHealthMonitor transition.
+    void setLinkConnectionState(bool connected, bool reachable, qint64 since_ms);
     void setTopMotorsChipState(const QString& text, ValueTone tone);
     void setTelemetrySpeedMps(double speed_mps);
     void setTelemetryPositionMeters(double x_m, double y_m);
     void setTelemetryAltitudeMeters(double z_m);
     void setTelemetryScanTimeSeconds(int elapsed_seconds);
-    void setFpvSpeedMps(double speed_mps);
     void setThermalSummary(double max_c,
                            double avg_c,
                            double min_c,
@@ -103,6 +117,14 @@ public:
     // LinkHealthMonitor::Source::FpvFrame.
     qint64 lastFpvFrameWallMs() const;
 
+    // CameraSwitchPill control surface — AppShell drives this via the
+    // /stream_camera_status callback so the pill's active button
+    // reflects the robot's confirmed state.  `cam` is "left" or
+    // "right"; anything else is silently ignored.  Safe to call
+    // before the pill widget is constructed (during early Stage 4
+    // build) — the value is cached and applied when the widget exists.
+    void setStreamingCamera(const QString& cam);
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -121,6 +143,10 @@ signals:
     void teleopArmRequested();
     void teleopDisarmRequested();
     void teleopGprPowerOffRequested();
+    // Operator clicked the Stage 4 FPV camera-switch pill.
+    // AppShell forwards to a /stream_camera_select publish and
+    // persists to QSettings.  `cam` is "left" or "right".
+    void cameraSelectRequested(const QString& cam);
 
 private slots:
     void onDashboardClicked();
@@ -180,11 +206,23 @@ private:
     qint64 mapping_lock_started_at_ms_ = 0;
     int mapping_lock_duration_sec_ = 60;
     ValueTone top_signal_tone_ = ValueTone::Muted;
+    // Cached battery state (driven by AppShell's mirror of the
+    // dashboard MQTT subscriber).  Initial state is "stale" so the
+    // pill shows "—%" until the first dashboard sample arrives —
+    // never the "87%" placeholder the QLabel was constructed with.
+    double top_battery_pct_ = 0.0;
+    bool top_battery_stale_ = true;
     ValueTone top_rec_tone_ = ValueTone::Muted;
     ValueTone top_bot_tone_ = ValueTone::Muted;
     ValueTone top_lock_tone_ = ValueTone::Muted;
     ValueTone top_motors_tone_ = ValueTone::Muted;
     bool link_connected_ = true;
+    // Network-layer reachability mirror.  Only meaningful when
+    // !link_connected_ — distinguishes Reconnecting (true) from
+    // true Offline (false).  Defaults to true so the first
+    // transition out of Healthy doesn't accidentally show the
+    // OFFLINE banner before the reachability probe has reported.
+    bool link_reachable_ = true;
     qint64 link_disconnected_since_ms_ = 0;
     // Top bar widget pointer kept so the disconnect banner can be
     // inserted right below it on first disconnect (lazy construction).
@@ -208,7 +246,6 @@ private:
     QLabel* lbl_telemetry_position_ = nullptr;
     QLabel* lbl_telemetry_altitude_ = nullptr;
     QLabel* lbl_telemetry_scan_time_ = nullptr;
-    QLabel* lbl_fpv_speed_overlay_ = nullptr;
     QWidget* top_motors_chip_ = nullptr;
     QWidget* thermal_summary_panel_ = nullptr;
     ExplorationNavMapWidget* nav_map_widget_ = nullptr;
@@ -239,6 +276,19 @@ private:
     QWidget* fpv_placeholder_ = nullptr;
     VideoStreamWidget* fpv_stream_widget_ = nullptr;
     QWidget* fpv_focus_target_ = nullptr;
+    // Stage 4 FPV camera-switch pill (left/right toggle).  Lives in
+    // its own dark strip BELOW the FPV widget — NOT as an overlay over
+    // the GStreamer surface.  Putting it in a sibling layout instead
+    // of QStackedLayout(StackAll) avoids the well-known Qt5 issue
+    // where overlay widgets over a native video sink composite
+    // unreliably (intermittent invisibility, repaint residue, etc.).
+    CameraSwitchPill* camera_switch_pill_ = nullptr;
+    // Container around the pill — fixed-height dark strip per Figma
+    // (rgba(24,24,27,0.95), 1 px top border #27272a, 61 px tall).
+    QWidget* camera_switch_strip_ = nullptr;
+    // Cached operator preference applied as soon as the pill exists,
+    // so AppShell can call setStreamingCamera before Stage 4 is built.
+    QString pending_streaming_camera_;
     bool fpv_control_active_ = false;
     bool key_w_down_ = false;
     bool key_a_down_ = false;

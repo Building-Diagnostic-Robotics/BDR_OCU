@@ -46,4 +46,14 @@ constexpr const char* kSettingsOperatorNameKey = "session/operator_name";
  */
 constexpr const char* kSettingsUnitsKey = "session/units";
 
+/**
+ * QSettings key: which onboard camera UDC streams to the OCU FPV pane.
+ * Stored as the lowercase string `"left"` or `"right"`.  Persisted on
+ * every CameraSwitchPill click; replayed to the robot once per launch
+ * after `/stream_status` confirms UDC is ready.  Default is `"left"`
+ * which matches UDC's own startup default — so a fresh QSettings is a
+ * no-op on the wire.
+ */
+constexpr const char* kSettingsStreamingCameraKey = "session/streaming_camera";
+
 }  // namespace f2c_cpp

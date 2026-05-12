@@ -4,6 +4,8 @@
 #include "update/update_log.hpp"
 #include "version_info.hpp"
 
+#include <cmath>
+
 #include <QApplication>
 #include <QColor>
 #include <QDateTime>
@@ -841,6 +843,29 @@ void DashboardScreen::setBatteryDisplay(const QString& valueText,
     }
     // Status rollup may flip when battery state changes.
     refreshSystemStatusCard();
+
+    // Mirror the live percentage to AppShell so the Stage 4 / Stage 5
+    // top-bar battery pill stops being a hardcoded "87%" placeholder.
+    // We pass the cached SoC + a derived stale flag so the consumers
+    // don't need to know about the MQTT subprocess at all.
+    //
+    // Stale is true in any of:
+    //   - no payload received yet (battery_has_payload_ == false)
+    //   - the most recent payload is older than its stale_after_ms
+    //     (matches refreshBatteryDisplay's own "STALE" branch)
+    //   - we've shown an error/no-data text and the cached SoC is
+    //     unset entirely.
+    const qint64 now_ms_for_emit = QDateTime::currentMSecsSinceEpoch();
+    const bool emit_stale =
+        !battery_has_payload_ ||
+        !battery_soc_pct_.has_value() ||
+        battery_payload_updated_at_ms_ <= 0 ||
+        (now_ms_for_emit - battery_payload_updated_at_ms_) >
+            battery_payload_stale_after_ms_;
+    const double emit_pct = battery_soc_pct_.has_value()
+        ? battery_soc_pct_.value()
+        : std::nan("");
+    emit batterySocChanged(emit_pct, emit_stale);
 }
 
 // =============================================================================

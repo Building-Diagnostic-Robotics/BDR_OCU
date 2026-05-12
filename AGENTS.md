@@ -123,39 +123,98 @@ State derivation: any source < 2 s old → Healthy; 2-5 s → Degraded;
 all sources ≥ 5 s → Disconnected.  Armed at exploration launch start;
 disarmed at teardown.
 
-### OCU-side surfaces
+### OCU-side surfaces (layered connectivity model)
+
+The OCU combines **three independent signals** into the link state,
+plus a Zenoh transport-layer tune so the worst-case "topics stale but
+host is up" window is short enough to not trip the operator:
+
+1. **ROS topic freshness** — `LinkHealthMonitor` stamps every
+   incoming odom / udc_health / scan_status / controller_status /
+   stream_status / fpv_frame callback. Stale-threshold is **10 s**
+   (`LinkHealthMonitor::kStaleMaxMs`).
+2. **Network reachability** — `RobotReachabilityProbe` runs ICMP
+   (`ping -c 1 -W 1 <robot_host>`) on a 1 s cadence with TCP-22
+   fallback via `QTcpSocket`. Pushed into the monitor via
+   `setReachability()` after a 2-tick debounce.
+3. **FPV proof-of-life** — RTP/UDP video frames arriving at EITHER
+   `ExplorationScreen::lastFpvFrameWallMs()` OR
+   `PlannerScreen::lastScanFpvFrameWallMs()` count as a
+   `Source::FpvFrame` stamp. Camera RTP keeps flowing through brief
+   Microhard fades (it's stateless), so as long as ANY frames are
+   decoding the bot is verifiably alive end-to-end, regardless of
+   Zenoh peer state. Stamped on every 1 Hz slow tick if the most
+   recent frame is < 2 s old. **Must read from BOTH stages** — pre-
+   fix the slot only checked Stage 4, so once the operator advanced
+   to Stage 5 the FPV stamp went stale instantly even with the camera
+   live, producing false-positive RECONNECTING flap (terminal log
+   2026-05-12T05:41).
+
+Combining them resolves four states:
+
+- `Healthy` — topics fresh (always treated as connected).
+- `Reconnecting` — topics stale **but** probe says host is reachable.
+  Operator-facing pill text is `BOT LIVE - SYNCING X s` because
+  with the FPV stamp in place we'd typically only land here when
+  RTP video has ALSO stopped — an honest "all our channels are
+  briefly out, but the network is up" signal.
+- `Disconnected` — topics stale, probe failed, FPV gone. True offline.
+- `Idle` — pre-arm.
+
+#### Surfaces
 
 - Top-bar **BOT pill** in both Stage 4 + Stage 5 (next to the existing
-  Battery / Signal / REC pills).  States: BOT IDLE (grey, pre-launch),
-  BOT LIVE (green), BOT LAGGY Xs (amber), BOT OFFLINE Xs (red).
-- Inline disconnect **banner** at the top of Stage 5 (Scan).  Visible
-  only while Disconnected.
-- Stage 5 `scan_tick_timer_` is **paused** while Disconnected so the
-  elapsed clock doesn't drift past the moment the radio dropped.  The
-  cached `scan_elapsed_ms` is preserved so the displayed elapsed time
-  reflects only "active" time across the disconnect.
-- Pause/Resume, E-Stop, Cancel, Discard, Start Mapping, Finish + Save
-  Map, and Stop Pipeline buttons all hard-disable while Disconnected
-  with "Robot offline — wait for reconnect." tooltips.
+  Battery / Signal / REC pills). States: BOT IDLE (grey, pre-launch),
+  BOT LIVE (green), BOT LIVE - SYNCING Xs (amber), BOT OFFLINE Xs
+  (red). Both SYNCING and OFFLINE tick an "Xs" counter so the
+  operator can see whether the recovery is making progress.
+- Inline disconnect **banner** at the top of Stage 5 (Scan), and the
+  amber map-halo on the `PlotWidget` / `ExplorationNavMapWidget` —
+  shown ONLY in true `Disconnected`. RECONNECTING deliberately does
+  not show banner / halo.
+- Stage 5 `scan_tick_timer_` is NOT paused on link loss — operator
+  wants the elapsed clock to keep ticking against real wall-clock.
+  Stale telemetry is communicated via the per-widget grey-out
+  (opacity 0.55) applied on every value derived from robot data.
+- Pause/Resume, Cancel, Discard, Start Mapping, Finish + Save Map,
+  Stop Pipeline, Complete Mission all hard-disable in BOTH
+  `Reconnecting` and `Disconnected`. Tooltips swap between
+  "Robot reconnecting…" and "Robot offline — wait for reconnect."
+  based on `link_reachable_`.
+- **E-STOP BYPASS**: the Emergency Stop button stays enabled in
+  `Reconnecting` and is only disabled in true `Disconnected`. E-Stop
+  is the one command where dropping it is unacceptable — even if the
+  RPC lands 5-10 s late after Zenoh re-handshakes, that's better
+  than refusing to send it. Both the screen-side gate (`updateScanRunUi`
+  in `cpp/src/planner_screen.cpp`) and the AppShell-side gate
+  (`onPlannerEmergencyStopRequested`) use `isRobotLinkUnreachable()`
+  (strict) instead of `isRobotLinkOffline()`.
+- `isRobotLinkOffline()` returns true for Reconnecting + Disconnected
+  (general RPC gate). `isRobotLinkUnreachable()` returns true ONLY for
+  Disconnected (used by the Complete Mission flow + the E-Stop bypass
+  above).
 - `onPlannerEmergencyStopRequested`, `onPlannerScanPauseRequested`,
   and `onPlannerScanResumeRequested` early-return on
   `isRobotLinkOffline()` and surface a `showCommandDroppedToast()`
   hint instead of optimistically mutating `planner_estop_active_`.
-- On Disconnected → Healthy transition `onRobotLinkRecovered()`
-  re-publishes `/mpc_autonomy_enable` to match the OCU's local
-  intent (paused if `planner_estop_active_`, else armed).  Cheap and
-  idempotent so the bot rebooting mid-disconnect lands back in the
-  operator-intended config without a manual click.
+- `onRobotLinkRecovered()` is log-only on Disconnected → Healthy —
+  the controller's heartbeat path (`mpc_accel_autonomous_controller.py`
+  `_check_heartbeat_safety` / `_maybe_resume_dc`) owns autonomy
+  resync. Re-publishing from the OCU here would race with that path
+  and could clobber operator intent.
 
 ### Data-first Complete Mission
 
-`AppShellWindow::onPlannerCompleteMissionRequested` branches:
+`AppShellWindow::onPlannerCompleteMissionRequested` branches on
+`isRobotLinkUnreachable()` (strict — only true Disconnected):
 
-- Healthy / Degraded → `executeCompleteMissionNormalPath()` (the
+- Healthy / Reconnecting → `executeCompleteMissionNormalPath()` (the
   motor-disarm wait + `/dc/finalize_mission` RPC + teardown chain that
-  has always run).
+  has always run). The screen-side button gating means the operator
+  can't actually press Complete Mission while in Reconnecting; the
+  strict check here is defence-in-depth.
 - Disconnected → `OfflineFinalizeDialog` (frameless, parented to the
-  shell).  Three CTAs:
+  shell). Three CTAs:
   - **Wait for reconnect** (default, primary).  Polls the link
     monitor; auto-accepts as `WaitReconnected` when it goes Healthy.
     A 5-minute auto-fallback to SSH-offline keeps the bot from sitting
@@ -165,9 +224,12 @@ disarmed at teardown.
     `pilot_control/scripts/finalize_mission_local.py` over SSH which
     rescans `/R_DATA/<day>/<building>/Mission_HHMMSS/` and atomically
     writes `mission_finalized_at` + `finalized_via=ssh_offline` into
-    `mission_config.json`.  Then runs the existing teardown SSH
-    (kills the launch tree → motors disarm via the controller's exit
-    handlers).
+    `mission_config.json`. Invoked **directly via `python3`** (NOT
+    `ros2 run pilot_control …`) — non-interactive SSH doesn't source
+    the ROS env so `ros2` isn't on PATH; the script is pure file I/O
+    and doesn't import `rclpy`, so direct invocation works.
+    Then runs the existing teardown SSH (kills the launch tree →
+    motors disarm via the controller's exit handlers).
   - **Cancel** keeps the operator on Stage 5; the robot-side
     auto-finalize watchdog (10 min idle) is the safety net for an
     abandoned mission.
@@ -192,27 +254,126 @@ disarmed at teardown.
   `start_gnss_precapture`) call `mission_touch()` to bump the
   watchdog's idle clock.
 
+### Programmatic Seek thermal USB reset (production-wired)
+
+Wedged-thermal-SDK recovery without operator unplug.  The Seek
+SDK locks up if the previous UDC process was killed mid-stream
+without `seekcamera_manager_destroy()`; the next UDC opens the
+device, never receives `SEEKCAMERA_MANAGER_EVENT_CONNECT`, and
+silently records empty visual frames.  Pre-fix the only recovery
+was a physical USB replug — impossible once Roofus is buttoned up.
+
+The recovery path:
+
+1. **UDC in-process detectors** (`src/unified_data_collector.cpp`).
+   Two triggers, both call `requestExitForUsbReset()` →
+   `rclcpp::shutdown()` → `main()` returns
+   `kExitThermalNeedsReset = 75`.
+   - **Connect watchdog**: 5 s timer; fires if no `CONNECT`
+     event by then. Catches the startup-wedge case.
+   - **Runtime drop-rate detector**: 5 s timer; counts as a
+     "stuck window" iff `recording_active && !paused &&
+     drops_thermal_delta >= 10 && rows_delta == 0`. Two
+     consecutive stuck windows trigger the exit. Catches the
+     *post-CONNECT* wedge that the operator originally hit
+     ("second scan in same OCU session — empty CSV").
+   - `~UnifiedDataCollector` runs synchronously in `main()`
+     (`node.reset()` before `rclcpp::shutdown()`) so
+     `seekcamera_manager_destroy()` actually fires before the
+     supervisor's reset — without it the next UDC re-wedges
+     on the same dead handle.
+
+2. **Supervisor** (`scripts/udc_supervisor.py`).
+   - On rc=75 invokes `seek_usb_reset.py`, increments
+     `_usb_resets_used`, sleeps `USB_RESET_COOLDOWN_SECONDS = 3`,
+     respawns UDC. Does **not** count toward
+     `MAX_CRASHES_IN_WINDOW` (USB-reset cycles are recoveries,
+     not crashes).
+   - Capped at `MAX_USB_RESETS_PER_LAUNCH = 2`. After that
+     publishes `DEAD_USB_RESET_FAILED` (distinct from the
+     existing `DEAD_MAX_RESTARTS`) so the OCU can show the
+     "physically inspect cable" message.
+   - Runs ONE proactive reset before first spawn, best-effort.
+     Pre-empts the post-prior-session wedge case at ~500 ms cost.
+     Does not consume the per-launch budget.
+
+3. **Reset script** (`scripts/seek_usb_reset.py`).
+   Finds Seek device by VID `289d` under `/sys/bus/usb/devices/`,
+   toggles per-device `authorized` 1→0→1, polls re-enumeration.
+   Tries direct write first, falls back to `sudo -n tee` (so the
+   path works even if udev rule isn't installed; just pays a
+   sudo NOPASSWD requirement instead).
+
+4. **Udev rule** (`udev/99-bdr-seek-thermal.rules` +
+   `scripts/install_seek_udev_rule.sh`).
+   Grants `roofus` group write to per-device `authorized` so the
+   reset script never needs sudo. One-time operator install via
+   `ros2 run pilot_control install_seek_udev_rule.sh`.
+
 ### Rules for agents touching this path
 
 - **Do NOT remove or "simplify"** any of the following — they are
   load-bearing:
-  - `LinkHealthMonitor` class.
+  - `LinkHealthMonitor` class (states: Idle / Healthy /
+    Reconnecting / Disconnected — do NOT re-introduce the dropped
+    Degraded/LAGGY tier).
+  - `RobotReachabilityProbe` and its ICMP → TCP-22 fallback chain.
+    Removing the probe regresses the OCU to single-signal freshness
+    and the false-positive offline flapping returns.
   - The persistent `frameStampProbe` in `video_stream_widget.cpp`
     (every-frame atomic store; freezes are otherwise invisible).
   - `OfflineFinalizeDialog` and the `Choice::WaitReconnected` /
     `FinalizeOverSsh` / `Cancelled` enum.
   - `finalize_mission_local.py` and the `finalized_via` JSON field.
   - The `mission_heartbeat_callback` + `mission_touch` plumbing.
+  - `seek_usb_reset.py`, the `99-bdr-seek-thermal.rules` udev rule,
+    and the `kExitThermalNeedsReset = 75` ↔
+    `EXIT_THERMAL_NEEDS_USB_RESET = 75` constant pair (UDC ↔
+    supervisor wire).
+  - The `node.reset()` BEFORE `rclcpp::shutdown()` in UDC's
+    `main()` — without it, the wedged Seek SDK is never destroyed
+    and the supervisor's reset can't recover.
 - The **5-minute auto-fallback** in `OfflineFinalizeDialog::kAutoFallbackMs`
   is the user-locked safety ceiling — don't change without operator
   signoff.
-- The Disconnect threshold is **5 s** in `LinkHealthMonitor::kDegradedMaxMs`.
-  Tunable, but dropping below ~3 s produces false positives on Zenoh
-  reconnects after brief radio fades.
+- The single freshness threshold is **10 s** in
+  `LinkHealthMonitor::kStaleMaxMs`. Tighter values bring back the
+  Zenoh-rediscovery false positives that motivated the layered model.
+- Zenoh transport-layer keepalive lives in BOTH
+  `pilot_ws/src/pilot_control/config/zenoh/zenohd_laptop.json5` AND
+  `zenohd_robot.json5` (`transport.link.tx.lease = 4000`,
+  `keep_alive = 4`). They MUST stay symmetric — if only one side runs
+  aggressive keepalive the other can leave a stale socket in
+  CLOSE_WAIT for 30-60 s and reject the laptop's reconnect. Don't
+  drop `lease` below ~3 s without a field test; Microhard jitter on
+  busy 4-channel links can swallow a single keepalive and cascade
+  into reconnect thrashing on a perfectly healthy link.
+- The laptop-side `connect.retry { period_init_ms: 1000,
+  period_max_ms: 4000, period_increase_factor: 2 }` block is what
+  brings the post-fade recovery window from ~30-60 s down to ~5-8 s.
+  `timeout_ms: -1` + `exit_on_failure: false` are load-bearing —
+  removing them lets a startup fade kill `zenohd` entirely and the
+  OCU loses ALL ROS comm with no recovery path.
+- The FPV proof-of-life stamp (slow-tick block in `app_shell.cpp`)
+  MUST read from BOTH `stage4_->lastFpvFrameWallMs()` and
+  `stage5_->lastScanFpvFrameWallMs()` — using only one stage
+  produces false-positive RECONNECTING the moment the operator
+  changes screens.
 - When adding a new ROS subscriber on the AppShell side, **always**
   stamp the appropriate `LinkHealthMonitor::Source` from its callback
   — otherwise the link monitor will go OFFLINE during a perfectly
   healthy session that happens to use only that new topic.
+- The `RobotReachabilityProbe` arms on the same host
+  `startRobotCompleteLaunch` SSHs to (resolved via
+  `RobotRegistry`/`robots.json`). If you add a new "select different
+  robot" path, make sure you re-arm the probe on the new host —
+  otherwise the layered model will forever probe the wrong IP.
+- The SSH "Finalize via SSH" path **must not** invoke
+  `ros2 run pilot_control finalize_mission_local.py` —
+  non-interactive SSH doesn't source the ROS env, so `ros2` isn't on
+  PATH and you'll get rc=127. Always invoke
+  `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/finalize_mission_local.py`
+  directly. The script has no `rclpy` imports.
 
 ## OTA update pipeline (Phases 1-9, complete and production-wired)
 

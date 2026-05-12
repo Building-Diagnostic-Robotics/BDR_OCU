@@ -17,16 +17,38 @@ namespace f2c_cpp {
 // and a 250 ms internal evaluator emits `linkStateChanged` whenever the
 // derived state crosses a threshold.
 //
-// State derivation (per `evaluate()`):
-//   - Healthy:      any source <  2000 ms old
-//   - Degraded:     any source <  5000 ms old (else)
-//   - Disconnected: all sources >= 5000 ms old (or never seen and >5s
-//                   after monitor armed)
+// Layered model (see also `RobotReachabilityProbe`):
 //
-// The monitor stays Healthy/Degraded/Disconnected until it is `arm()`ed.
-// Pre-arm (no scan running) it reports Idle so the UI doesn't false-positive
-// during the dashboard / pre-flight flow.  Call `arm()` when the
-// exploration / scan launch is up and `disarm()` when it tears down.
+//   LinkHealthMonitor combines two independent signals:
+//     1. Application-layer freshness — the timestamps stamped by ROS
+//        callbacks.  Tells us "is data flowing?".
+//     2. Network-layer reachability — pushed in via `setReachability()`
+//        from `RobotReachabilityProbe` (ICMP / TCP-22 every 1 s).
+//        Tells us "is the host on the network at all?".
+//
+//   Combining them lets us distinguish:
+//     - Healthy        → topics are fresh (always treated as
+//                        connected; reachability irrelevant).
+//     - Reconnecting   → topics stale, but probe says host is up.
+//                        Likely a Zenoh peer-rediscovery window after
+//                        a brief radio fade.  Block commands but
+//                        keep visual treatment soft (no banner / halo,
+//                        amber pill, grey-out).
+//     - Disconnected   → topics stale AND probe failed.  True offline:
+//                        red pill, banner, halo, OfflineFinalizeDialog.
+//     - Idle           → pre-arm state during dashboard / preflight.
+//
+// Threshold:
+//   `kStaleMaxMs` (10 s) is the single freshness threshold.  We dropped
+//   the old 2-5 s "Degraded/LAGGY" tier — with the layered model the
+//   intermediate state we actually care about is RECONNECTING, which
+//   is driven by the probe rather than by topic age.
+//
+// The monitor stays Healthy/Reconnecting/Disconnected until it is
+// `arm()`ed.  Pre-arm (no scan running) it reports Idle so the UI
+// doesn't false-positive during the dashboard / pre-flight flow.  Call
+// `arm()` when the exploration / scan launch is up and `disarm()` when
+// it tears down.
 class LinkHealthMonitor : public QObject {
     Q_OBJECT
 
@@ -42,10 +64,11 @@ public:
     };
 
     enum class State {
-        Idle,          // pre-arm: no scan in progress, monitor inert
-        Healthy,       // any tracked source < 2 s old
-        Degraded,      // any tracked source 2-5 s old
-        Disconnected,  // all tracked sources >= 5 s old
+        Idle,           // pre-arm: no scan in progress, monitor inert
+        Healthy,        // any tracked source < kStaleMaxMs old
+        Reconnecting,   // sources stale, but probe reports reachable
+        Disconnected,   // sources stale AND probe reports unreachable
+                        // (or no probe state available + sources stale)
     };
 
     explicit LinkHealthMonitor(QObject* parent = nullptr);
@@ -60,12 +83,22 @@ public:
     void disarm();
 
     // Stamp `now()` for the given source.  Cheap; safe to call from any
-    // ROS callback.  When transitioning out of Disconnected, the next
-    // `evaluate()` tick fires `linkStateChanged(...)`.
+    // ROS callback.  When transitioning out of Disconnected /
+    // Reconnecting, the next `evaluate()` tick fires
+    // `linkStateChanged(...)`.
     void stamp(Source source);
 
     // Force an immediate evaluation (otherwise driven by 250 ms timer).
     void evaluateNow();
+
+    // Push the latest network-layer reachability reading from
+    // `RobotReachabilityProbe`.  `reachable` flips the state machine
+    // between Reconnecting and Disconnected when topics are stale.
+    // `reachable_known=false` means "no probe data yet" — we treat
+    // unknown as not-reachable so a stale-and-unprobed link surfaces
+    // as DISCONNECTED rather than RECONNECTING (conservative).  Cheap;
+    // triggers an immediate re-evaluation if armed.
+    void setReachability(bool reachable, bool reachable_known = true);
 
     State state() const { return state_; }
     bool isArmed() const { return armed_; }
@@ -83,6 +116,13 @@ public:
 
     static const char* sourceName(Source source);
 
+    // Single freshness threshold for the layered model.  The RF /
+    // Zenoh combo can chew up 5-8 s on a peer-rediscovery cycle after
+    // a brief fade; 10 s leaves headroom for that without bleeding
+    // into the no-data-coming-back true-offline window.  Tunable here
+    // so field-test feedback can adjust without touching call sites.
+    static constexpr qint64 kStaleMaxMs = 10000;
+
 signals:
     // Fires when state transitions across one of the thresholds.
     // `since_ms` is the "ms since most-recent-stamp" at the moment of
@@ -99,10 +139,13 @@ private:
     qint64 state_entered_at_ms_ = 0;
     std::array<qint64, static_cast<size_t>(Source::kCount)> last_seen_ms_{};
 
-    // Thresholds (milliseconds).  Tunable here so field-test feedback
-    // can adjust without touching call sites.
-    static constexpr qint64 kHealthyMaxMs = 2000;
-    static constexpr qint64 kDegradedMaxMs = 5000;
+    // Network-layer reachability mirror, pushed in by AppShell from
+    // RobotReachabilityProbe.  `reachable_known_` flips to true on the
+    // first probe completion; until then we conservatively treat the
+    // host as unreachable.
+    bool reachable_ = false;
+    bool reachable_known_ = false;
+
     static constexpr int kEvaluateIntervalMs = 250;
 };
 

@@ -4,6 +4,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <limits>
 
 namespace f2c_cpp {
 
@@ -23,7 +24,12 @@ void LinkHealthMonitor::arm() {
     }
     armed_ = true;
     last_seen_ms_.fill(0);
-    state_ = State::Disconnected;  // honest starting state until first stamp
+    // Honest starting state until the first stamp + first probe land.
+    // We use Disconnected (not Reconnecting) because we have no
+    // reachability data yet — be conservative.
+    reachable_ = false;
+    reachable_known_ = false;
+    state_ = State::Disconnected;
     state_entered_at_ms_ = QDateTime::currentMSecsSinceEpoch();
     timer_->start();
     // Fire so consumers can immediately render "awaiting first contact".
@@ -40,6 +46,8 @@ void LinkHealthMonitor::disarm() {
     state_ = State::Idle;
     state_entered_at_ms_ = QDateTime::currentMSecsSinceEpoch();
     last_seen_ms_.fill(0);
+    reachable_ = false;
+    reachable_known_ = false;
     if (old != State::Idle) {
         emit linkStateChanged(old, State::Idle, 0);
     }
@@ -54,10 +62,24 @@ void LinkHealthMonitor::stamp(Source source) {
         return;
     }
     last_seen_ms_[idx] = QDateTime::currentMSecsSinceEpoch();
-    // Fast-path recovery: if we were Disconnected/Degraded and a fresh
-    // stamp lands, evaluate immediately so the UI un-freezes within ms
-    // rather than waiting up to 250 ms for the next timer tick.
-    if (state_ == State::Disconnected || state_ == State::Degraded) {
+    // Fast-path recovery: if we were in any non-Healthy state and a
+    // fresh stamp lands, evaluate immediately so the UI un-freezes
+    // within ms rather than waiting up to 250 ms for the next timer
+    // tick.
+    if (state_ != State::Healthy) {
+        evaluate();
+    }
+}
+
+void LinkHealthMonitor::setReachability(bool reachable, bool reachable_known) {
+    if (reachable_ == reachable && reachable_known_ == reachable_known) {
+        return;
+    }
+    reachable_ = reachable;
+    reachable_known_ = reachable_known;
+    // Reachability flips can change RECONNECTING <-> DISCONNECTED
+    // without any new ROS stamp, so re-derive immediately.
+    if (armed_) {
         evaluate();
     }
 }
@@ -114,14 +136,18 @@ LinkHealthMonitor::State LinkHealthMonitor::derive(qint64 now_ms) const {
             newest_age = std::min(newest_age, now_ms - t);
         }
     }
-    if (newest_age == std::numeric_limits<qint64>::max()) {
-        return State::Disconnected;
-    }
-    if (newest_age < kHealthyMaxMs) {
+    const bool fresh = (newest_age != std::numeric_limits<qint64>::max()) &&
+                       (newest_age < kStaleMaxMs);
+    if (fresh) {
+        // Topics flowing — call it healthy regardless of probe state.
+        // (Probe might still be warming up; topic flow is the gold
+        // standard for "I can talk to the robot end-to-end".)
         return State::Healthy;
     }
-    if (newest_age < kDegradedMaxMs) {
-        return State::Degraded;
+    // Topics stale (or no stamps yet).  Defer to the network probe to
+    // distinguish "Zenoh hiccup, robot still up" from "really gone".
+    if (reachable_known_ && reachable_) {
+        return State::Reconnecting;
     }
     return State::Disconnected;
 }

@@ -23,6 +23,7 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include "link_health_monitor.hpp"
+#include "robot_reachability_probe.hpp"
 #include "robot_registry.hpp"
 
 class QResizeEvent;
@@ -241,9 +242,24 @@ private:
     void pushPlannerTelemetrySnapshot();
     void pushExplorationTopMotorsChipState();
     void pushPlannerMotorsChipState();
+
+    // Mirrors the dashboard's MQTT battery state onto the Stage 4 /
+    // Stage 5 top-bar pills.  Slot connected to
+    // DashboardScreen::batterySocChanged; caches the latest sample so
+    // goToStage4()/goToStage5() can seed the pill on transition.
+    void onDashboardBatteryStateChanged(double pct, bool stale);
     void onUdcHealthMessage(const std_msgs::msg::String::SharedPtr msg);
     void pushUdcRecPillState();
     bool isUdcDeadOrWedged() const;
+
+    // Streaming-camera selection (Stage 4 FPV pill).  See
+    // CameraSwitchPill — the operator picks which onboard camera UDC
+    // streams over RTP.  AppShell owns the publisher (so we can
+    // coalesce with the per-launch first-status push) and forwards
+    // confirmation back to ExplorationScreen.
+    void onExplorationCameraSelectRequested(const QString& cam);
+    void publishStreamCameraSelection(const QString& cam);
+    void onStreamCameraStatus(const std_msgs::msg::String::SharedPtr msg);
 
     // Link-health resilience (Stages 0-3 of the disconnect-resilience
     // feature).  link_monitor_ owns all "is the robot reachable?"
@@ -265,11 +281,20 @@ private:
     // mashed E-Stop button doesn't stack toasts.
     void showCommandDroppedToast(const QString& message);
     void hideCommandDroppedToast();
-    // Returns true when the LinkHealthMonitor is armed and reports
-    // Disconnected.  Used as a gate by the planner RPC paths so we
-    // don't optimistically mutate local state (planner_estop_active_,
-    // etc.) when the robot can't possibly have received the command.
+    // Returns true when the LinkHealthMonitor is armed AND we should
+    // hard-block any RPC to the robot.  Covers BOTH true OFFLINE
+    // (probe + ROS topics both gone — host unreachable) AND
+    // RECONNECTING (ROS topics stale but probe says host is up).
+    // Used as a gate by the planner RPC paths so we don't
+    // optimistically mutate local state (planner_estop_active_, etc.)
+    // when the robot can't possibly have received the command.
     bool isRobotLinkOffline() const;
+    // Strict variant: true ONLY when the link is truly unreachable
+    // (probe failed AND ROS topics stale).  Used by the Complete
+    // Mission flow to decide between the normal RPC path and the
+    // OfflineFinalizeDialog — RECONNECTING shouldn't pop the dialog
+    // because the link might recover in seconds.
+    bool isRobotLinkUnreachable() const;
     // Re-publish all "soft" state the robot needs to be in sync with
     // the OCU's current model.  Called once per Disconnected -> Healthy
     // transition so that a bot that rebooted mid-disconnect lands back
@@ -421,6 +446,14 @@ private:
     bool exploration_storage_probe_in_flight_ = false;
     qint64 exploration_last_storage_probe_at_ms_ = 0;
     int exploration_rf_rssi_dbm_ = 0;
+
+    // Latest battery sample mirrored from DashboardScreen.  Populated
+    // by onDashboardBatteryStateChanged.  `last_battery_stale_` starts
+    // true so Stage 4/5 pills render "—%" until the first real
+    // dashboard payload arrives, never the constructor placeholder.
+    double last_battery_pct_ = 0.0;
+    bool last_battery_stale_ = true;
+
     double exploration_thermal_max_c_ = 0.0;
     double exploration_thermal_avg_c_ = 0.0;
     double exploration_thermal_min_c_ = 0.0;
@@ -473,6 +506,11 @@ private:
     // state with TRANSIENT_LOCAL durability, so subscribing late still
     // catches it.
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr udc_health_sub_;
+    // Streaming-camera selection (CameraSwitchPill <-> UDC).  Bound to
+    // /stream_camera_select (pub) and /stream_camera_status (sub) when
+    // ensureExplorationRosInterfaces() spins up the orchestrator node.
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr stream_camera_select_pub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr stream_camera_status_sub_;
     QString udc_health_state_ = QStringLiteral("UNKNOWN");
     qint64 udc_health_last_msg_ms_ = 0;
     quint64 udc_health_total_rows_ = 0;
@@ -483,6 +521,12 @@ private:
     // AppShell, stamped from existing ROS callbacks, consumed by
     // PlannerScreen + ExplorationScreen via setRobotLinkState().
     LinkHealthMonitor* link_monitor_ = nullptr;
+    // Network-layer ICMP/TCP-22 probe.  Pushes its reachability
+    // verdict into link_monitor_->setReachability so the layered
+    // model can distinguish RECONNECTING (Zenoh hiccup, host still
+    // up) from DISCONNECTED (host genuinely gone).  Armed/disarmed
+    // alongside link_monitor_.
+    RobotReachabilityProbe* reachability_probe_ = nullptr;
     // Toast widget used for "command dropped — robot offline" hints.
     // Lazily constructed on first show; always parented to central_root_
     // so the OTA banner / window controls stay above it.  Single

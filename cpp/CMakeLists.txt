@@ -141,11 +141,13 @@ set(HEADERS
     include/components/fpv_camera_view.hpp
     include/components/auto_hide_scroll_bar.hpp
     include/components/svg_icon_button.hpp
+    include/components/camera_switch_pill.hpp
     include/components/rollback_banner.hpp
     include/components/update_banner.hpp
     include/components/update_modal.hpp
     include/units_system.hpp
     include/link_health_monitor.hpp
+    include/robot_reachability_probe.hpp
     include/update/update_settings.hpp
     include/update/update_checker.hpp
     include/video_stream_widget.hpp
@@ -219,12 +221,14 @@ set(GUI_SOURCES
     src/components/fpv_camera_view.cpp
     src/components/auto_hide_scroll_bar.cpp
     src/components/svg_icon_button.cpp
+    src/components/camera_switch_pill.cpp
     src/components/rollback_banner.cpp
     src/components/update_banner.cpp
     src/components/update_modal.cpp
     src/update/update_checker.cpp
     src/units_system.cpp
     src/link_health_monitor.cpp
+    src/robot_reachability_probe.cpp
     src/main.cpp
     resources.qrc
 )

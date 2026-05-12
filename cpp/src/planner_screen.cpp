@@ -1268,6 +1268,70 @@ void PlannerScreen::setTopSignalState(const QString& text, ValueTone tone) {
     }
 }
 
+void PlannerScreen::setTopBatteryState(double pct, bool stale) {
+    top_battery_pct_ = pct;
+    top_battery_stale_ = stale;
+    if (!lbl_top_battery_) {
+        return;
+    }
+
+    // Threshold mirror of dashboard_screen.cpp's kBatteryLowPct (25)
+    // and kBatteryCriticalPct (12) — keep these in lockstep with that
+    // file or operators see one screen amber while another stays green
+    // for the same SoC.
+    ValueTone tone = ValueTone::Good;
+    QString text;
+    if (stale) {
+        tone = ValueTone::Muted;
+        text = QStringLiteral("—%");
+    } else {
+        const int rounded =
+            std::clamp(static_cast<int>(std::round(pct)), 0, 100);
+        text = QStringLiteral("%1%").arg(rounded);
+        if (pct <= 12.0) {
+            tone = ValueTone::Error;
+        } else if (pct <= 25.0) {
+            tone = ValueTone::Warning;
+        } else {
+            tone = ValueTone::Good;
+        }
+    }
+
+    lbl_top_battery_->setText(text);
+    applyToneToLabel(lbl_top_battery_, tone, false);
+
+    // Tint the leading battery glyph icon — same pattern as
+    // setTopSignalState, but the glyph is the battery SVG instead of
+    // the status dot.
+    QString icon_color = dark_mode_ ? QStringLiteral("#9F9FA9")
+                                    : QStringLiteral("#6B7280");
+    switch (tone) {
+        case ValueTone::Good:
+            icon_color = QStringLiteral("#10B981");
+            break;
+        case ValueTone::Warning:
+            icon_color = QStringLiteral("#F59E0B");
+            break;
+        case ValueTone::Muted:
+            break;
+        case ValueTone::Error:
+            icon_color = QStringLiteral("#EF4444");
+            break;
+    }
+    if (QWidget* item = lbl_top_battery_->parentWidget()) {
+        const auto icons =
+            item->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+        for (QLabel* icon_label : icons) {
+            if (icon_label && icon_label != lbl_top_battery_) {
+                icon_label->setPixmap(loadSvgPixmap(
+                    QStringLiteral(":/assets/missionplanner/battery.svg"),
+                    16, 16, icon_color));
+                break;
+            }
+        }
+    }
+}
+
 void PlannerScreen::setTopRecPillState(const QString& text, ValueTone tone) {
     // Mirror of setTopSignalState — drives the new REC pill from
     // /udc/health.  See AppShellWindow::onUdcHealthMessage.
@@ -1303,7 +1367,7 @@ void PlannerScreen::setTopRecPillState(const QString& text, ValueTone tone) {
 void PlannerScreen::setBotLinkPillState(const QString& text, ValueTone tone) {
     // Mirror of setTopRecPillState — dot+text pill driven by
     // AppShellWindow::onLinkStateChanged.  Tone semantics:
-    //   Good=BOT LIVE (green), Warning=BOT LAGGY (amber),
+    //   Good=BOT LIVE (green), Warning=BOT LIVE - SYNCING (amber),
     //   Error=BOT OFFLINE (red), Muted=BOT IDLE (grey, pre-launch).
     if (top_bot_text_ == text && top_bot_tone_ == tone) {
         return;
@@ -1334,36 +1398,48 @@ void PlannerScreen::setBotLinkPillState(const QString& text, ValueTone tone) {
     }
 }
 
-void PlannerScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
-    // Stage 4 disconnect surface.  The scan-tick timer is intentionally
-    // NOT paused — operator wants the elapsed clock to keep ticking
-    // against real wall-clock so they see how long the bot has actually
-    // been out of contact.  Stale telemetry is communicated via the
-    // grey-out (opacity 0.55) on every value derived from robot data.
+void PlannerScreen::setLinkConnectionState(bool connected, bool reachable, qint64 since_ms) {
+    // Stage 4 disconnect surface, layered model.
+    //
+    // - connected=true            -> Healthy.  Clear all overlays.
+    // - connected=false, reach=t  -> Reconnecting.  Grey-out + button
+    //                                lockout, but no banner / halo
+    //                                (the host is still on the
+    //                                network — soft visual treatment).
+    // - connected=false, reach=f  -> True OFFLINE.  Banner + halo +
+    //                                grey-out + button lockout.
+    //
+    // The scan-tick timer is intentionally NOT paused — operator
+    // wants the elapsed clock to keep ticking against real wall-clock
+    // so they see how long the bot has actually been out of contact.
     const bool was_connected = link_connected_;
-    const bool transitioned = was_connected != connected;
+    const bool was_reachable = link_reachable_;
+    const bool connection_changed = (was_connected != connected);
+    const bool reachable_changed = (was_reachable != reachable);
     link_connected_ = connected;
+    link_reachable_ = reachable;
     link_disconnected_since_ms_ = connected ? 0 : since_ms;
 
-    // Heavyweight per-widget opacity overlay only flips on transitions.
-    // The slow-tick re-entry (every ~1s while Disconnected) just refreshes
-    // the second-counters on the banner + map halo below.
-    if (transitioned) {
+    // True OFFLINE = both gone.  Banner + halo are gated on this.
+    const bool offline = (!connected && !reachable);
+
+    // Heavyweight per-widget opacity overlay only flips on transitions
+    // of `connected` (grey-out covers both Reconnecting and Offline).
+    if (connection_changed) {
         setScanLabelsStale(!connected);
     }
 
-    // Forward to the map widget so it can paint the amber halo +
-    // "robot pose stale (Xs)" caption while offline. setLinkOffline is
-    // self-deduping so re-entry every second only triggers one repaint.
+    // Forward to the map widget — halo only on true OFFLINE.
+    // setLinkOffline is self-deduping so re-entry only triggers one
+    // repaint.
     if (plot_) {
-        plot_->setLinkOffline(!connected, since_ms);
+        plot_->setLinkOffline(offline, since_ms);
     }
 
-    // Build / update the inline disconnect banner.  Constructed
-    // lazily on first disconnect; inserted into our top-level
-    // QVBoxLayout right after top_bar_ so it appears as a thin strip
-    // below the title bar without disturbing any existing layouts.
-    if (!connected && !link_offline_banner_ && top_bar_) {
+    // Build / update the inline disconnect banner.  Only shown on
+    // true OFFLINE — Reconnecting deliberately stays banner-less so
+    // brief Zenoh peer-rediscovery windows don't flash the operator.
+    if (offline && !link_offline_banner_ && top_bar_) {
         if (auto* root_layout = qobject_cast<QVBoxLayout*>(this->layout())) {
             link_offline_banner_ = new QFrame(this);
             link_offline_banner_->setObjectName("PlannerLinkOfflineBanner");
@@ -1387,16 +1463,16 @@ void PlannerScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
     }
     if (link_offline_banner_) {
         const bool currently_visible = link_offline_banner_->isVisible();
-        link_offline_banner_->setVisible(!connected);
+        link_offline_banner_->setVisible(offline);
         // When the banner toggles, sibling widgets shift by 32 px; any
         // transparent overlay children may leave paint residue at their
         // old position. Force a full screen repaint on the toggle so
         // the residue is cleared.
-        if (currently_visible == connected) {
+        if (currently_visible != offline) {
             this->update();
         }
     }
-    if (lbl_link_offline_text_ && !connected) {
+    if (lbl_link_offline_text_ && offline) {
         const int seconds = static_cast<int>((since_ms + 500) / 1000);
         lbl_link_offline_text_->setText(
             QStringLiteral("Robot offline for %1s \u2014 controls disabled until reconnect.")
@@ -1406,8 +1482,10 @@ void PlannerScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
     // Lock / unlock the link-dependent buttons on Stage 4 (Scan).
     // We only touch enable() — we do NOT mutate visibility or
     // styling so that updateScanRunUi()'s normal recomputation can
-    // re-enable them when conditions allow on link recovery.
-    if (was_connected != connected && current_step_ == PlannerStep::Scan) {
+    // re-enable them when conditions allow on link recovery.  Re-run
+    // when EITHER the connection or reachability flips so tooltips
+    // can swap between "reconnecting…" and "wait for reconnect".
+    if ((connection_changed || reachable_changed) && current_step_ == PlannerStep::Scan) {
         updateScanRunUi();
     }
 }
@@ -1640,12 +1718,10 @@ void PlannerScreen::applyStyle() {
                            "background: transparent;")
                 .arg(title));
     }
-    if (lbl_top_battery_) {
-        lbl_top_battery_->setStyleSheet(
-            QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 400; color: %1; "
-                           "background: transparent;")
-                .arg(muted));
-    }
+    // Re-apply battery pill from cached state — was previously
+    // unconditionally muted on every dark-mode toggle, which clobbered
+    // the threshold colour set by setTopBatteryState.
+    setTopBatteryState(top_battery_pct_, top_battery_stale_);
     if (stage_header_) {
         stage_header_->setStyleSheet(QStringLiteral("background: %1;").arg(header));
     }
@@ -2150,6 +2226,21 @@ bool PlannerScreen::eventFilter(QObject* watched, QEvent* event) {
     }
 
     return QWidget::eventFilter(watched, event);
+}
+
+qint64 PlannerScreen::lastScanFpvFrameWallMs() const {
+    // Mirror of ExplorationScreen::lastFpvFrameWallMs() — same proof-
+    // of-life signal for the Stage 5 camera tile.  Returns 0 when the
+    // stream isn't actively playing so AppShell's stamp logic skips it
+    // (avoids stamping with a stale "last frame from yesterday's run"
+    // timestamp after the operator backs out and returns).
+    if (!scan_camera_view_ || !scan_camera_view_->isPlaying()) {
+        return 0;
+    }
+    if (auto* sw = scan_camera_view_->streamWidget()) {
+        return sw->lastFrameWallMs();
+    }
+    return 0;
 }
 
 void PlannerScreen::showEvent(QShowEvent* event) {
@@ -5850,7 +5941,7 @@ void PlannerScreen::buildUi() {
     status_layout->addWidget(makeStatusItem(status_bar,
                                             QStringLiteral(":/assets/missionplanner/battery.svg"),
                                             16,
-                                            QStringLiteral("87%"),
+                                            QStringLiteral("—%"),
                                             kStatusBatteryMinWidth,
                                             kInitialStatus14,
                                             QString(),
@@ -9439,19 +9530,29 @@ void PlannerScreen::updateScanRunUi() {
         btn_scan_start_pause_->setEnabled(enabled && link_connected_);
         if (!link_connected_) {
             btn_scan_start_pause_->setToolTip(
-                QStringLiteral("Robot offline — wait for reconnect."));
+                link_reachable_
+                    ? QStringLiteral("Robot reconnecting…")
+                    : QStringLiteral("Robot offline — wait for reconnect."));
         } else {
             btn_scan_start_pause_->setToolTip(QString());
         }
     }
     if (btn_scan_emergency_stop_) {
+        // E-STOP BYPASS: enabled even in SYNCING (link_connected_=false
+        // but link_reachable_=true).  Camera + network probe both say
+        // the bot is alive — refusing to send E-Stop in this window
+        // would leave the operator powerless during exactly the kind
+        // of event where they need the kill switch most.  Only true
+        // OFFLINE (link_reachable_=false) blocks the press.
+        const bool estop_blocked = !link_connected_ && !link_reachable_;
         const bool estop_enabled =
             (run_state == ScanRunState::Running || run_state == ScanRunState::Paused) &&
-            link_connected_;
+            !estop_blocked;
         btn_scan_emergency_stop_->setEnabled(estop_enabled);
         btn_scan_emergency_stop_->setToolTip(
-            link_connected_ ? QString()
-                            : QStringLiteral("Robot offline — wait for reconnect."));
+            estop_blocked
+                ? QStringLiteral("Robot offline — wait for reconnect.")
+                : QString());
         if (lbl_scan_emergency_stop_text_) {
             setScanActionLabel(btn_scan_emergency_stop_, lbl_scan_emergency_stop_text_,
                                scan_estop_latched_ ? QStringLiteral("Clear E-Stop")
@@ -9526,8 +9627,11 @@ void PlannerScreen::updateScanRunUi() {
         btn_scan_cancel_->setStyleSheet(style);
         btn_scan_cancel_->setEnabled(enabled);
         btn_scan_cancel_->setToolTip(
-            link_connected_ ? QString()
-                            : QStringLiteral("Robot offline — wait for reconnect."));
+            link_connected_
+                ? QString()
+                : (link_reachable_
+                       ? QStringLiteral("Robot reconnecting…")
+                       : QStringLiteral("Robot offline — wait for reconnect.")));
         if (lbl_scan_cancel_text_) {
             setScanActionLabel(btn_scan_cancel_, lbl_scan_cancel_text_, label);
         }

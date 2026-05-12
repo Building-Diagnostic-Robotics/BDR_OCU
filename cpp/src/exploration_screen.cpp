@@ -1,6 +1,7 @@
 #include "exploration_screen.hpp"
 
 #include "components/auto_hide_scroll_bar.hpp"
+#include "components/camera_switch_pill.hpp"
 
 #include "units_system.hpp"
 #include "video_stream_widget.hpp"
@@ -1108,7 +1109,6 @@ ExplorationScreen::ExplorationScreen(QWidget* parent)
     setTelemetryPositionMeters(0.0, 0.0);
     setTelemetryAltitudeMeters(0.0);
     setTelemetryScanTimeSeconds(0);
-    setFpvSpeedMps(0.0);
     setThermalHidden();
     resetNavigationMap();
     setHardwareStatus("Unknown",
@@ -1293,6 +1293,73 @@ void ExplorationScreen::setTopSignalState(const QString& text, ValueTone tone) {
     }
 }
 
+void ExplorationScreen::setTopBatteryState(double pct, bool stale) {
+    top_battery_pct_ = pct;
+    top_battery_stale_ = stale;
+    if (!lbl_top_battery_) {
+        return;
+    }
+
+    // Threshold mirror of dashboard_screen.cpp's kBatteryLowPct (25)
+    // and kBatteryCriticalPct (12) — keep these in lockstep with that
+    // file or the operator will see one screen amber while another is
+    // still green for the same SoC value.
+    ValueTone tone = ValueTone::Good;
+    QString text;
+    if (stale) {
+        tone = ValueTone::Muted;
+        text = QStringLiteral("—%");
+    } else {
+        // Round to nearest int %; clamp to [0, 100] so a transient
+        // out-of-range payload (e.g. uncalibrated battery reporting
+        // 102 %) doesn't render absurd values on the pill.
+        const int rounded =
+            std::clamp(static_cast<int>(std::round(pct)), 0, 100);
+        text = QStringLiteral("%1%").arg(rounded);
+        if (pct <= 12.0) {
+            tone = ValueTone::Error;
+        } else if (pct <= 25.0) {
+            tone = ValueTone::Warning;
+        } else {
+            tone = ValueTone::Good;
+        }
+    }
+
+    lbl_top_battery_->setText(text);
+    applyTopStatusToneToLabel(lbl_top_battery_, tone, false);
+
+    // Tint the leading battery glyph so the icon color tracks the
+    // tone.  Matches setTopSignalState's icon-recoloring pattern,
+    // but the glyph is the battery SVG instead of the status dot.
+    QString icon_color = dark_mode_ ? QStringLiteral("#9F9FA9")
+                                    : QStringLiteral("#6B7280");
+    switch (tone) {
+        case ValueTone::Good:
+            icon_color = QStringLiteral("#10B981");
+            break;
+        case ValueTone::Warning:
+            icon_color = QStringLiteral("#F59E0B");
+            break;
+        case ValueTone::Muted:
+            break;
+        case ValueTone::Error:
+            icon_color = QStringLiteral("#EF4444");
+            break;
+    }
+    if (QWidget* item = lbl_top_battery_->parentWidget()) {
+        const auto icons =
+            item->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+        for (QLabel* icon_label : icons) {
+            if (icon_label && icon_label != lbl_top_battery_) {
+                icon_label->setPixmap(loadSvgPixmap(
+                    QStringLiteral(":/assets/missionplanner/battery.svg"),
+                    16, 16, icon_color));
+                break;
+            }
+        }
+    }
+}
+
 void ExplorationScreen::setTopRecPillState(const QString& text, ValueTone tone) {
     // Mirror of setTopSignalState — same dot+text pattern.  Driven by
     // AppShellWindow::onUdcHealthMessage.
@@ -1358,15 +1425,19 @@ void ExplorationScreen::setBotLinkPillState(const QString& text, ValueTone tone)
     }
 }
 
-void ExplorationScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
-    // Stage 4 disconnect surface mirror for the exploration screen.
-    // BOT pill in the top bar is the always-on signal; an amber strip
-    // is lazily inserted under the top bar on first disconnect to make
-    // the failure mode unmistakable while mapping is in progress.
+void ExplorationScreen::setLinkConnectionState(bool connected, bool reachable, qint64 since_ms) {
+    // Stage 4 disconnect surface mirror for the exploration screen,
+    // layered model.  BOT pill in the top bar is the always-on signal;
+    // the amber strip + nav-map halo are reserved for true OFFLINE
+    // (probe also failed) — a reconnecting Zenoh peer doesn't trigger
+    // the heavy visual treatment.
     link_connected_ = connected;
+    link_reachable_ = reachable;
     link_disconnected_since_ms_ = connected ? 0 : since_ms;
 
-    if (!connected && !link_offline_banner_ && top_bar_ && content_root_) {
+    const bool offline = (!connected && !reachable);
+
+    if (offline && !link_offline_banner_ && top_bar_ && content_root_) {
         if (auto* root_layout = qobject_cast<QVBoxLayout*>(content_root_->layout())) {
             link_offline_banner_ = new QFrame(content_root_);
             link_offline_banner_->setObjectName("ExplLinkOfflineBanner");
@@ -1390,24 +1461,23 @@ void ExplorationScreen::setLinkConnectionState(bool connected, qint64 since_ms) 
     }
     if (link_offline_banner_) {
         const bool currently_visible = link_offline_banner_->isVisible();
-        link_offline_banner_->setVisible(!connected);
-        // When the banner toggles, the FPV widget shrinks/grows by 32 px.
-        // The transparent fpv_overlay (FPS/RES/FOV + speed labels) doesn't
-        // get its old pixel positions cleared by Qt because it has no
-        // opaque background, so the post-shrink/grow paint leaves stale
-        // residue. Force a full repaint of the content root to clear it.
-        if (currently_visible == connected && content_root_) {
+        link_offline_banner_->setVisible(offline);
+        // Banner toggles change center_panel's height by 32 px.  Force a
+        // full repaint of the content root after the geometry settles so
+        // any stale paint along the now-resized FPV / thermal / nav-map
+        // widgets gets cleared. Cheap on every transition.
+        if (currently_visible != offline && content_root_) {
             content_root_->update();
         }
     }
     // Forward to the small Nav Map widget so its amber halo paints.
-    // The widget already shows a STALE chip via topic-freshness, which
-    // covers the "(Xs)" intent; keep the halo border as the link-offline
-    // signal here to match the Stage 5 behaviour.
+    // Halo only on true OFFLINE — Reconnecting deliberately stays
+    // halo-less so the operator isn't visually punished for normal
+    // Zenoh peer-rediscovery windows.
     if (nav_map_widget_) {
-        nav_map_widget_->setLinkOffline(!connected, since_ms);
+        nav_map_widget_->setLinkOffline(offline, since_ms);
     }
-    if (lbl_link_offline_text_ && !connected) {
+    if (lbl_link_offline_text_ && offline) {
         const int seconds = static_cast<int>((since_ms + 500) / 1000);
         lbl_link_offline_text_->setText(
             QStringLiteral("Robot offline for %1s \u2014 controls disabled until reconnect.")
@@ -1418,8 +1488,11 @@ void ExplorationScreen::setLinkConnectionState(bool connected, qint64 since_ms) 
     if (btn_stop_pipeline_) {
         btn_stop_pipeline_->setEnabled(connected);
         btn_stop_pipeline_->setToolTip(
-            connected ? QString()
-                      : QStringLiteral("Robot offline \u2014 wait for reconnect."));
+            connected
+                ? QString()
+                : (reachable
+                       ? QStringLiteral("Robot reconnecting\u2026")
+                       : QStringLiteral("Robot offline \u2014 wait for reconnect.")));
     }
     if (btn_start_planning_) {
         btn_start_planning_->setEnabled(planning_enabled_ && connected);
@@ -1547,16 +1620,6 @@ void ExplorationScreen::setTelemetryScanTimeSeconds(int elapsed_seconds) {
                    .arg(seconds, 2, 10, QLatin1Char('0'));
     }
     lbl_telemetry_scan_time_->setText(text);
-}
-
-void ExplorationScreen::setFpvSpeedMps(double speed_mps) {
-    if (!lbl_fpv_speed_overlay_) {
-        return;
-    }
-    lbl_fpv_speed_overlay_->setText(
-        QString("<span style=\"font-size:30px; line-height:36px; color:#FFFFFF;\">%1 </span>"
-                "<span style=\"font-size:18px; line-height:28px; color:#9F9FA9;\">m/s</span>")
-            .arg(std::max(0.0, speed_mps), 0, 'f', 1));
 }
 
 void ExplorationScreen::setThermalSummary(double max_c,
@@ -2245,7 +2308,9 @@ void ExplorationScreen::refreshPrimaryActionButton() {
         primary_action_enabled_by_state_ && !launch_in_progress_ && link_connected_);
     if (!link_connected_) {
         btn_start_scan_->setToolTip(
-            QStringLiteral("Robot offline — wait for reconnect."));
+            link_reachable_
+                ? QStringLiteral("Robot reconnecting…")
+                : QStringLiteral("Robot offline — wait for reconnect."));
     } else {
         btn_start_scan_->setToolTip(QString());
     }
@@ -2351,6 +2416,21 @@ qint64 ExplorationScreen::lastFpvFrameWallMs() const {
     return fpv_stream_widget_->lastFrameWallMs();
 }
 
+void ExplorationScreen::setStreamingCamera(const QString& cam) {
+    if (cam != QStringLiteral("left") && cam != QStringLiteral("right")) {
+        return;
+    }
+    if (camera_switch_pill_) {
+        camera_switch_pill_->setActiveCamera(cam);
+    } else {
+        // FPV overlay (and the pill it owns) is built lazily inside
+        // buildUi -> the FPV pane.  AppShell may push a value before
+        // that path runs (Stage 4 not yet shown).  Cache and apply
+        // when the widget is constructed.
+        pending_streaming_camera_ = cam;
+    }
+}
+
 void ExplorationScreen::buildUi() {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -2408,7 +2488,7 @@ void ExplorationScreen::buildUi() {
     status_layout->addWidget(makePlannerStatusItem(status_bar,
                                                    QStringLiteral(":/assets/missionplanner/battery.svg"),
                                                    16,
-                                                   QStringLiteral("87%"),
+                                                   QStringLiteral("—%"),
                                                    kTopStatusBatteryMinWidth,
                                                    kInitialStatus14,
                                                    QString(),
@@ -2644,9 +2724,17 @@ void ExplorationScreen::buildUi() {
     fpv->setObjectName("ExplFpvArea");
     fpv->setMinimumHeight(kFpvMinHeight);
     fpv_focus_target_ = fpv;
-    auto* fpv_stack = new QStackedLayout(fpv);
-    fpv_stack->setContentsMargins(0, 0, 0, 0);
-    fpv_stack->setStackingMode(QStackedLayout::StackAll);
+    // Plain QVBoxLayout — no QStackedLayout(StackAll) overlay.  The
+    // GStreamer video sink renders to its own native window on Linux;
+    // overlaying transparent Qt widgets on top of it via StackAll is
+    // unreliable (intermittent invisibility, repaint residue,
+    // run-to-run flapping).  Anything that previously lived as an
+    // overlay (FPS/RES/FOV pill, speed pill, crosshair) has been
+    // removed; the camera-switch pill now lives in its own sibling
+    // strip directly below this widget — also inside center_layout.
+    auto* fpv_layout = new QVBoxLayout(fpv);
+    fpv_layout->setContentsMargins(0, 0, 0, 0);
+    fpv_layout->setSpacing(0);
 
     fpv_media_stack_ = new QStackedWidget(fpv);
     fpv_media_stack_->setObjectName("ExplFpvMediaStack");
@@ -2676,48 +2764,37 @@ void ExplorationScreen::buildUi() {
     connect(fpv_stream_widget_, &VideoStreamWidget::streamError, this, [showFpvPlaceholder](const QString&) {
         showFpvPlaceholder();
     });
-    fpv_stack->addWidget(fpv_media_stack_);
-
-    auto* fpv_overlay = new QWidget(fpv);
-    auto* fpv_layout = new QGridLayout(fpv_overlay);
-    fpv_layout->setContentsMargins(16, 16, 16, 16);
-    fpv_layout->setHorizontalSpacing(16);
-    fpv_layout->setVerticalSpacing(16);
-    fpv_layout->setRowStretch(0, 0);
-    fpv_layout->setRowStretch(1, 1);
-    fpv_layout->setRowStretch(2, 0);
-    fpv_layout->setColumnStretch(0, 1);
-    fpv_layout->setColumnStretch(1, 1);
-
-    auto* overlay_left = new QLabel("FPS: 30\nRES: 1920x1080\nFOV: 120°", fpv_overlay);
-    overlay_left->setObjectName("ExplFpvStats");
-    overlay_left->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    overlay_left->setFixedSize(142, 84);
-    fpv_layout->addWidget(overlay_left, 0, 0, Qt::AlignLeft | Qt::AlignTop);
-
-    lbl_fpv_speed_overlay_ =
-        new QLabel("<span style=\"font-size:30px; line-height:36px; color:#FFFFFF;\">0.0 </span>"
-                   "<span style=\"font-size:18px; line-height:28px; color:#9F9FA9;\">m/s</span>",
-                   fpv_overlay);
-    lbl_fpv_speed_overlay_->setObjectName("ExplFpvSpeed");
-    lbl_fpv_speed_overlay_->setFixedSize(136, 52);
-    lbl_fpv_speed_overlay_->setTextFormat(Qt::RichText);
-    lbl_fpv_speed_overlay_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    fpv_layout->addWidget(lbl_fpv_speed_overlay_, 0, 1, Qt::AlignRight | Qt::AlignTop);
-
-    auto* crosshair = new QWidget(fpv_overlay);
-    crosshair->setObjectName("ExplCrosshair");
-    crosshair->setFixedSize(32, 32);
-    auto* crosshair_h = new QFrame(crosshair);
-    crosshair_h->setObjectName("ExplCrosshairH");
-    crosshair_h->setGeometry(0, 15, 32, 1);
-    auto* crosshair_v = new QFrame(crosshair);
-    crosshair_v->setObjectName("ExplCrosshairV");
-    crosshair_v->setGeometry(15, 0, 1, 32);
-    fpv_layout->addWidget(crosshair, 1, 0, 1, 2, Qt::AlignCenter);
-    fpv_stack->addWidget(fpv_overlay);
+    fpv_layout->addWidget(fpv_media_stack_);
 
     center_layout->addWidget(fpv, 1);
+
+    // Camera-switch strip — sibling of the FPV pane in center_layout.
+    // Per the Figma `196:119` frame: dark rgba(24,24,27,0.95) bar
+    // with a 1 px top border (#27272a), 61 px tall, holding the
+    // CameraSwitchPill horizontally centered.  Always visible
+    // throughout Stage 4 (operator can pre-pick a camera before the
+    // launch comes up; AppShell replays the persisted choice on
+    // first /stream_status).  Stage 5 (Scan) does NOT get this strip
+    // — the chosen camera carries over automatically because Stage 5
+    // shares the same RTP stream.
+    camera_switch_strip_ = new QWidget(center_panel);
+    camera_switch_strip_->setObjectName("ExplCameraSwitchStrip");
+    camera_switch_strip_->setFixedHeight(61);
+    auto* camera_switch_strip_layout = new QHBoxLayout(camera_switch_strip_);
+    camera_switch_strip_layout->setContentsMargins(0, 9, 0, 8);
+    camera_switch_strip_layout->setSpacing(0);
+    camera_switch_pill_ = new CameraSwitchPill(camera_switch_strip_);
+    if (!pending_streaming_camera_.isEmpty()) {
+        camera_switch_pill_->setActiveCamera(pending_streaming_camera_);
+        pending_streaming_camera_.clear();
+    }
+    connect(camera_switch_pill_, &CameraSwitchPill::cameraRequested, this,
+            [this](const QString& cam) { emit cameraSelectRequested(cam); });
+    camera_switch_strip_layout->addStretch(1);
+    camera_switch_strip_layout->addWidget(camera_switch_pill_);
+    camera_switch_strip_layout->addStretch(1);
+
+    center_layout->addWidget(camera_switch_strip_, 0);
 
     auto* controls = new QWidget(center_panel);
     controls->setObjectName("ExplControlBar");
@@ -3123,22 +3200,10 @@ void ExplorationScreen::applyStyle() {
         #ExplFpvBackground {
             background: #000000;
         }
-        #ExplFpvStats {
-            background: rgba(0, 0, 0, 0.5);
-            border-radius: 4px;
-            color: #00D492;
-            font-family: "Liberation Mono";
-            font-size: 14px;
-            padding: 8px 12px;
-        }
-        #ExplFpvSpeed {
-            background: rgba(0, 0, 0, 0.5);
-            border-radius: 4px;
-            font-family: "Liberation Mono";
-            padding: 0 0 0 16px;
-        }
-        #ExplCrosshairH, #ExplCrosshairV {
-            background: rgba(0, 188, 125, 0.5);
+        #ExplCameraSwitchStrip {
+            background-color: rgba(24, 24, 27, 242);
+            border: none;
+            border-top: 1px solid %3;
         }
         #ExplControlBar {
             background: %2;
@@ -3283,13 +3348,12 @@ void ExplorationScreen::applyStyle() {
     style.replace("@STANDBY@", standby);
     style.replace("@FEED_HEADER@", feed_header);
     setStyleSheet(style);
-    if (lbl_top_battery_) {
-        const QString battery_text = dark_mode_ ? QStringLiteral("#9F9FA9") : QStringLiteral("#475569");
-        lbl_top_battery_->setStyleSheet(
-            QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 400; color: %1; "
-                           "background: transparent;")
-                .arg(battery_text));
-    }
+    // Re-apply the battery pill from cached state so its text + tone +
+    // glyph tint follow the live battery sample, not a static muted
+    // colour (the previous unconditional grey overwrote the threshold
+    // colour set by setTopBatteryState the moment the operator toggled
+    // dark mode).
+    setTopBatteryState(top_battery_pct_, top_battery_stale_);
     setTopSignalState(top_signal_text_, top_signal_tone_);
     setTopRecPillState(top_rec_text_, top_rec_tone_);
     setTopLockChipState(top_lock_text_, top_lock_tone_);
