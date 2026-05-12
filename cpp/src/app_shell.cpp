@@ -497,8 +497,18 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     setExplorationLaunchFailed("Robot launch failed: ROS environment not sourced");
                     return;
                 }
-                if ((lower.contains("sudo") && lower.contains("password")) ||
-                    lower.contains("password for")) {
+                // Match ONLY the canonical sudo prompt — `[sudo] password
+                // for <user>:` is the literal string sudo writes to stderr
+                // when it can't run non-interactively, and nothing else
+                // emits it.  The previous loose `(sudo && password) ||
+                // ("password for")` regex false-positived on benign log
+                // lines that mentioned both words (e.g. seek_usb_reset's
+                // "sudo -n tee ... failed: sudo: a password is required"
+                // warning).  A false positive here is expensive: it flips
+                // the launch state to FAILED, freezes the diagnostics
+                // panel, and the operator sees "Waiting for video
+                // services..." forever even though UDC is healthy.
+                if (lower.contains("[sudo] password for")) {
                     setExplorationLaunchFailed(
                         "Robot launch blocked: passwordless sudo is required on robot");
                     return;
