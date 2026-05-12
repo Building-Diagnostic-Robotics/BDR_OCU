@@ -186,6 +186,11 @@ private:
     ValueTone top_motors_tone_ = ValueTone::Muted;
     bool link_connected_ = true;
     qint64 link_disconnected_since_ms_ = 0;
+    // Top bar widget pointer kept so the disconnect banner can be
+    // inserted right below it on first disconnect (lazy construction).
+    QWidget* top_bar_ = nullptr;
+    QWidget* link_offline_banner_ = nullptr;
+    QLabel* lbl_link_offline_text_ = nullptr;
 
     QPushButton* btn_dashboard_ = nullptr;
     QPushButton* btn_start_scan_ = nullptr;

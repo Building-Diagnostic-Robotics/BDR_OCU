@@ -430,6 +430,10 @@ private:
     // same chrome (76 px) and Arimo bold 16 px stylesheet font.
     void setScanActionLabel(QPushButton* btn, QLabel* label, const QString& text);
     void updateScanRunUi();
+    // Toggle a 0.55 opacity overlay on every Scan-stage value derived
+    // from live robot telemetry while the link is offline. Called only
+    // from setLinkConnectionState on state transitions.
+    void setScanLabelsStale(bool stale);
     void updateScanLiveTelemetry();
     void refreshScanSegmentStatusList();
     void ensureScanSegmentSpinnerTimer();

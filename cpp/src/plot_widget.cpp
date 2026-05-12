@@ -212,6 +212,15 @@ void PlotWidget::setDarkMode(bool enabled) {
     update();
 }
 
+void PlotWidget::setLinkOffline(bool offline, qint64 since_ms) {
+    if (link_offline_ == offline && link_offline_since_ms_ == since_ms) {
+        return;
+    }
+    link_offline_ = offline;
+    link_offline_since_ms_ = offline ? since_ms : 0;
+    update();
+}
+
 void PlotWidget::setPlannerPreviewMode(bool enabled) {
     planner_preview_mode_ = enabled;
 
@@ -1116,6 +1125,54 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
             painter.drawText(box.left() + padding, y, line);
             y += line_height;
         }
+    }
+
+    // Disconnect overlay — drawn last so it sits over every layer.
+    // Amber border ringing the viewport plus a caption near the robot
+    // marker so the operator visually knows the displayed pose is the
+    // last-known one, not live. Driven by AppShell's LinkHealthMonitor.
+    if (link_offline_) {
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const QColor halo_color(QStringLiteral("#F59E0B"));
+        const int halo_width = 4;
+        QPen halo_pen(halo_color, halo_width);
+        halo_pen.setJoinStyle(Qt::MiterJoin);
+        painter.setPen(halo_pen);
+        painter.setBrush(Qt::NoBrush);
+        const qreal inset = halo_width / 2.0;
+        painter.drawRect(QRectF(inset, inset, width() - 2 * inset, height() - 2 * inset));
+
+        const int seconds = static_cast<int>((link_offline_since_ms_ + 500) / 1000);
+        const QString caption = QString::fromLatin1("Robot pose stale (%1s)").arg(seconds);
+        QFont caption_font = painter.font();
+        caption_font.setPointSizeF(std::max(9.0, caption_font.pointSizeF()));
+        caption_font.setBold(true);
+        painter.setFont(caption_font);
+        const QFontMetrics fm(caption_font);
+        const int padding = 6;
+        QRect text_rect = fm.boundingRect(caption);
+        QPoint anchor;
+        if (robot_pose_) {
+            const QPointF screen_pose = worldToScreen(robot_pose_->point);
+            anchor = QPoint(static_cast<int>(screen_pose.x()) + 14,
+                            static_cast<int>(screen_pose.y()) - text_rect.height() - 14);
+        } else {
+            anchor = QPoint(halo_width + 8, halo_width + 8);
+        }
+        QRect box(anchor.x(), anchor.y(),
+                  text_rect.width() + 2 * padding,
+                  text_rect.height() + 2 * padding);
+        if (box.right() > width() - halo_width) {
+            box.moveLeft(width() - halo_width - box.width());
+        }
+        if (box.top() < halo_width) {
+            box.moveTop(halo_width + 4);
+        }
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(180, 83, 9, 220));  // #B45309 with alpha
+        painter.drawRoundedRect(box, 4, 4);
+        painter.setPen(QColor(QStringLiteral("#FFFBEB")));
+        painter.drawText(box, Qt::AlignCenter, caption);
     }
 }
 

@@ -70,6 +70,14 @@ public:
     bool isDarkMode() const { return dark_mode_; }
     void setPlannerPreviewMode(bool enabled);
 
+    // Link health overlay. When offline, paint an amber border around
+    // the viewport plus a small "robot pose stale (Xs)" caption near
+    // the robot marker so the operator visually knows the displayed
+    // pose is the last-known one, not live. Driven by AppShellWindow's
+    // LinkHealthMonitor — passes the seconds-since-disconnect for the
+    // caption. since_ms<0 means "online" (clears the overlay).
+    void setLinkOffline(bool offline, qint64 since_ms);
+
     void clearAll();
     void clearPoints();
     void clearPolygon();
@@ -149,6 +157,8 @@ private:
 
     bool dark_mode_ = false;
     bool planner_preview_mode_ = false;
+    bool link_offline_ = false;
+    qint64 link_offline_since_ms_ = 0;
 
     double scale_ = 1.0;
     double offset_x_ = 0.0;

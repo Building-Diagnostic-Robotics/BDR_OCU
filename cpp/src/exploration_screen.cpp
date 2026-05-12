@@ -1330,20 +1330,49 @@ void ExplorationScreen::setBotLinkPillState(const QString& text, ValueTone tone)
 
 void ExplorationScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
     // Stage 4 disconnect surface mirror for the exploration screen.
-    // The BOT pill in the top bar is the primary visual signal; the
-    // only behavior change here is gating the primary-action and stop-
-    // pipeline buttons so the operator can't fire RPCs we know will be
-    // dropped.  No inline banner — the exploration screen has no
-    // ticking-clock display that needs a freeze callout.
+    // BOT pill in the top bar is the always-on signal; an amber strip
+    // is lazily inserted under the top bar on first disconnect to make
+    // the failure mode unmistakable while mapping is in progress.
     link_connected_ = connected;
     link_disconnected_since_ms_ = connected ? 0 : since_ms;
+
+    if (!connected && !link_offline_banner_ && top_bar_ && content_root_) {
+        if (auto* root_layout = qobject_cast<QVBoxLayout*>(content_root_->layout())) {
+            link_offline_banner_ = new QFrame(content_root_);
+            link_offline_banner_->setObjectName("ExplLinkOfflineBanner");
+            link_offline_banner_->setStyleSheet(
+                QStringLiteral("QFrame#ExplLinkOfflineBanner { background: #B45309; "
+                               "border-bottom: 1px solid #F59E0B; }"));
+            link_offline_banner_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            link_offline_banner_->setFixedHeight(32);
+            auto* banner_layout = new QHBoxLayout(link_offline_banner_);
+            banner_layout->setContentsMargins(16, 4, 16, 4);
+            banner_layout->setSpacing(8);
+            lbl_link_offline_text_ = new QLabel(link_offline_banner_);
+            lbl_link_offline_text_->setStyleSheet(
+                QStringLiteral("color: #FFFBEB; font-family: 'Arimo'; font-size: 13px; "
+                               "font-weight: 600; background: transparent;"));
+            banner_layout->addWidget(lbl_link_offline_text_, 1, Qt::AlignVCenter);
+            const int top_bar_idx = root_layout->indexOf(top_bar_);
+            root_layout->insertWidget(top_bar_idx >= 0 ? top_bar_idx + 1 : 0,
+                                      link_offline_banner_);
+        }
+    }
+    if (link_offline_banner_) {
+        link_offline_banner_->setVisible(!connected);
+    }
+    if (lbl_link_offline_text_ && !connected) {
+        const int seconds = static_cast<int>((since_ms + 500) / 1000);
+        lbl_link_offline_text_->setText(QString::fromLatin1(
+            "Robot offline for %1s \u2014 controls disabled until reconnect.").arg(seconds));
+    }
 
     refreshPrimaryActionButton();
     if (btn_stop_pipeline_) {
         btn_stop_pipeline_->setEnabled(connected);
         btn_stop_pipeline_->setToolTip(
             connected ? QString()
-                      : QStringLiteral("Robot offline — wait for reconnect."));
+                      : QStringLiteral("Robot offline \u2014 wait for reconnect."));
     }
     if (btn_start_planning_) {
         btn_start_planning_->setEnabled(planning_enabled_ && connected);
@@ -2289,6 +2318,7 @@ void ExplorationScreen::buildUi() {
 
     // Top status strip (matches Figma frame top row).
     auto* top_bar = new QWidget(content_root_);
+    top_bar_ = top_bar;
     top_bar->setObjectName("ExplTopBar");
     top_bar->setFixedHeight(49);
     auto* top_bar_layout = new QHBoxLayout(top_bar);

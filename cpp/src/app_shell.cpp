@@ -3884,27 +3884,17 @@ void AppShellWindow::onLinkStateChanged(LinkHealthMonitor::State old_state,
 }
 
 void AppShellWindow::onRobotLinkRecovered() {
-    // Reconnect handshake: re-publish soft state the robot might have
-    // lost track of (autonomy_enable matches our local intent, cruise
-    // speed matches the slider).  Idempotent and cheap; safe to call
-    // even when the robot didn't actually reboot.
+    // Log-only on reconnect — the robot-side controller already handles
+    // pause/resume across heartbeat loss/recovery (see
+    // mpc_accel_autonomous_controller.py heartbeat_callback +
+    // _check_heartbeat_safety: zero-velocity + DC pause on loss,
+    // _maybe_resume_dc on recovery).  Re-publishing autonomy_enable from
+    // the OCU here would race with that path and could clobber the
+    // operator's intent if they pressed E-Stop while disconnected.
     //
-    // We deliberately do NOT auto-resume autonomy.  If the operator
-    // had pressed E-Stop while the link was down, planner_estop_active_
-    // is true and we keep the robot in IDLE / paused state.  If the
-    // operator's local intent was Running (no E-Stop), we re-publish
-    // autonomy_enable=true so the controller comes back armed if it
-    // restarted mid-disconnect.  Either way the operator's last
-    // explicit click wins.
-    if (planner_estop_active_) {
-        publishPlannerAutonomyEnable(false);
-    } else if (stage5_) {
-        // Best-effort autonomy resync only when scan is nominally Running.
-        // We can't easily check ScanRunState from here; the publish is
-        // cheap and idempotent so we always re-publish whatever our
-        // local intent says.
-        publishPlannerAutonomyEnable(true);
-    }
+    // The slot stays wired so post-mortems can grep the log for the
+    // recovery transition; no soft state is pushed.
+    qInfo("[AppShell] onRobotLinkRecovered — controller heartbeat path owns resync");
 }
 
 void AppShellWindow::pushUdcRecPillState() {

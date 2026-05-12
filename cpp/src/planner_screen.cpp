@@ -23,6 +23,7 @@
 #include <QFrame>
 #include <QGraphicsBlurEffect>
 #include <QGraphicsDropShadowEffect>
+#include <QGraphicsOpacityEffect>
 #include <QGridLayout>
 #include <QHideEvent>
 #include <QHBoxLayout>
@@ -1334,23 +1335,28 @@ void PlannerScreen::setBotLinkPillState(const QString& text, ValueTone tone) {
 }
 
 void PlannerScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
-    // Stage 4 disconnect surface.  The scan-tick timer is local; we
-    // pause it when the link drops so the elapsed clock doesn't keep
-    // ticking past the moment we last had ground truth.  When the
-    // link recovers and the run is still nominally Running we restart
-    // the timer; cache.scan_elapsed_ms is preserved across the gap so
-    // the displayed elapsed reflects only "active" time.
+    // Stage 4 disconnect surface.  The scan-tick timer is intentionally
+    // NOT paused — operator wants the elapsed clock to keep ticking
+    // against real wall-clock so they see how long the bot has actually
+    // been out of contact.  Stale telemetry is communicated via the
+    // grey-out (opacity 0.55) on every value derived from robot data.
     const bool was_connected = link_connected_;
+    const bool transitioned = was_connected != connected;
     link_connected_ = connected;
     link_disconnected_since_ms_ = connected ? 0 : since_ms;
 
-    const SessionCache* cache = activeSessionPtr();
-    if (cache && cache->scan_run_state == ScanRunState::Running) {
-        if (!connected && scan_tick_timer_ && scan_tick_timer_->isActive()) {
-            scan_tick_timer_->stop();
-        } else if (connected && scan_tick_timer_ && !scan_tick_timer_->isActive()) {
-            scan_tick_timer_->start();
-        }
+    // Heavyweight per-widget opacity overlay only flips on transitions.
+    // The slow-tick re-entry (every ~1s while Disconnected) just refreshes
+    // the second-counters on the banner + map halo below.
+    if (transitioned) {
+        setScanLabelsStale(!connected);
+    }
+
+    // Forward to the map widget so it can paint the amber halo +
+    // "robot pose stale (Xs)" caption while offline. setLinkOffline is
+    // self-deduping so re-entry every second only triggers one repaint.
+    if (plot_) {
+        plot_->setLinkOffline(!connected, since_ms);
     }
 
     // Build / update the inline disconnect banner.  Constructed
@@ -1395,6 +1401,54 @@ void PlannerScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
     if (was_connected != connected && current_step_ == PlannerStep::Scan) {
         updateScanRunUi();
     }
+}
+
+void PlannerScreen::setScanLabelsStale(bool stale) {
+    // Apply a 0.55 opacity overlay to every Scan-stage value derived
+    // from live robot telemetry while the link is offline.  Lazily
+    // attaches a QGraphicsOpacityEffect per widget on first use; on
+    // recovery we just toggle effect->setEnabled(false) so the cost is
+    // a single bool flip per widget per state change.  Buttons are
+    // intentionally excluded — they're already hard-disabled by
+    // updateScanRunUi() when offline, which is a clearer signal.
+    auto fade = [stale](QWidget* w) {
+        if (!w) {
+            return;
+        }
+        auto* eff = qobject_cast<QGraphicsOpacityEffect*>(w->graphicsEffect());
+        if (!eff) {
+            if (!stale) {
+                return;
+            }
+            eff = new QGraphicsOpacityEffect(w);
+            eff->setOpacity(0.55);
+            w->setGraphicsEffect(eff);
+            return;
+        }
+        eff->setOpacity(stale ? 0.55 : 1.0);
+        eff->setEnabled(stale);
+    };
+    fade(lbl_scan_time_value_);
+    fade(lbl_scan_run_summary_);
+    fade(lbl_scan_stats_eta_);
+    fade(lbl_scan_stats_distance_);
+    fade(lbl_scan_stats_avg_quality_);
+    fade(lbl_scan_total_coverage_value_);
+    fade(bar_scan_total_coverage_);
+    fade(lbl_scan_total_quality_value_);
+    fade(bar_scan_total_quality_);
+    fade(list_scan_segment_status_);
+    fade(lbl_scan_active_segment_);
+    fade(lbl_scan_active_progress_value_);
+    fade(bar_scan_active_progress_);
+    fade(lbl_scan_active_quality_);
+    fade(lbl_scan_legend_completed_);
+    fade(lbl_scan_legend_active_);
+    fade(lbl_scan_legend_pending_);
+    fade(lbl_scan_telemetry_speed_);
+    fade(lbl_scan_telemetry_pos_x_);
+    fade(lbl_scan_telemetry_pos_y_);
+    fade(lbl_scan_telemetry_heading_);
 }
 
 void PlannerScreen::setTopLockChipState(const QString& text, ValueTone tone) {
