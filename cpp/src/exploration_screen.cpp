@@ -701,6 +701,15 @@ public:
         update();
     }
 
+    void setLinkOffline(bool offline, qint64 since_ms) {
+        if (link_offline_ == offline && link_offline_since_ms_ == since_ms) {
+            return;
+        }
+        link_offline_ = offline;
+        link_offline_since_ms_ = offline ? since_ms : 0;
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent* event) override {
         Q_UNUSED(event);
@@ -737,6 +746,25 @@ protected:
 
         if (has_grid_ && has_pose_) {
             drawRobotArrow(painter, grid_rect);
+        }
+
+        // Link-offline halo — drawn last so it sits above pose/stale.
+        // Caption is omitted at this size; the Stage 4 BOT pill +
+        // banner already carry the textual context. Border lives on
+        // the same rounded rect as the map frame so the corners line
+        // up with the existing card chrome.
+        if (link_offline_) {
+            painter.save();
+            const QColor halo_color(QStringLiteral("#F59E0B"));
+            const qreal halo_width = 3.0;
+            QPen halo_pen(halo_color, halo_width);
+            halo_pen.setJoinStyle(Qt::MiterJoin);
+            painter.setPen(halo_pen);
+            painter.setBrush(Qt::NoBrush);
+            const qreal inset = halo_width / 2.0;
+            painter.drawRoundedRect(
+                map_frame.adjusted(inset, inset, -inset, -inset), 13.0, 13.0);
+            painter.restore();
         }
     }
 
@@ -879,6 +907,8 @@ private:
     bool has_grid_ = false;
     bool has_pose_ = false;
     bool stale_ = false;
+    bool link_offline_ = false;
+    qint64 link_offline_since_ms_ = 0;
     double yaw_rad_ = 0.0;
     bool cache_dirty_ = true;
     QByteArray packed_grid_;
@@ -1359,12 +1389,29 @@ void ExplorationScreen::setLinkConnectionState(bool connected, qint64 since_ms) 
         }
     }
     if (link_offline_banner_) {
+        const bool currently_visible = link_offline_banner_->isVisible();
         link_offline_banner_->setVisible(!connected);
+        // When the banner toggles, the FPV widget shrinks/grows by 32 px.
+        // The transparent fpv_overlay (FPS/RES/FOV + speed labels) doesn't
+        // get its old pixel positions cleared by Qt because it has no
+        // opaque background, so the post-shrink/grow paint leaves stale
+        // residue. Force a full repaint of the content root to clear it.
+        if (currently_visible == connected && content_root_) {
+            content_root_->update();
+        }
+    }
+    // Forward to the small Nav Map widget so its amber halo paints.
+    // The widget already shows a STALE chip via topic-freshness, which
+    // covers the "(Xs)" intent; keep the halo border as the link-offline
+    // signal here to match the Stage 5 behaviour.
+    if (nav_map_widget_) {
+        nav_map_widget_->setLinkOffline(!connected, since_ms);
     }
     if (lbl_link_offline_text_ && !connected) {
         const int seconds = static_cast<int>((since_ms + 500) / 1000);
-        lbl_link_offline_text_->setText(QString::fromLatin1(
-            "Robot offline for %1s \u2014 controls disabled until reconnect.").arg(seconds));
+        lbl_link_offline_text_->setText(
+            QStringLiteral("Robot offline for %1s \u2014 controls disabled until reconnect.")
+                .arg(seconds));
     }
 
     refreshPrimaryActionButton();

@@ -1386,12 +1386,21 @@ void PlannerScreen::setLinkConnectionState(bool connected, qint64 since_ms) {
         }
     }
     if (link_offline_banner_) {
+        const bool currently_visible = link_offline_banner_->isVisible();
         link_offline_banner_->setVisible(!connected);
+        // When the banner toggles, sibling widgets shift by 32 px; any
+        // transparent overlay children may leave paint residue at their
+        // old position. Force a full screen repaint on the toggle so
+        // the residue is cleared.
+        if (currently_visible == connected) {
+            this->update();
+        }
     }
     if (lbl_link_offline_text_ && !connected) {
         const int seconds = static_cast<int>((since_ms + 500) / 1000);
-        lbl_link_offline_text_->setText(QString::fromLatin1(
-            "Robot offline for %1s \u2014 controls disabled until reconnect.").arg(seconds));
+        lbl_link_offline_text_->setText(
+            QStringLiteral("Robot offline for %1s \u2014 controls disabled until reconnect.")
+                .arg(seconds));
     }
 
     // Lock / unlock the link-dependent buttons on Stage 4 (Scan).
