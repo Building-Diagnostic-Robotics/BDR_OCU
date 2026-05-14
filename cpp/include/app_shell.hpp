@@ -47,6 +47,7 @@ class SetupScreen;
 class StartupScreen;
 class UpdateBanner;
 class RollbackBanner;
+class UploadDialog;
 
 namespace update {
 class UpdateChecker;
@@ -102,6 +103,13 @@ private slots:
     void onThemeToggleChanged(bool dark_mode);
 
     void onStartNewScan();
+    /// Stage 3 quick-action: "Upload Data" button. Opens the modal
+    /// `UploadDialog` which SSH-probes the robot's `/R_DATA/` and
+    /// streams `pilot_control/scripts/uploader.py` over SSH for any
+    /// section/mission the operator selects. Hard-blocks while a
+    /// scan/launch tree is alive (same `launch_active` rule the close
+    /// guard uses) — operators must finish the mission first.
+    void onUploadDataRequested();
     void onExplorationStartScanRequested();
     void onExplorationFinishSaveMapRequested();
     void onExplorationStartPlanningRequested();
@@ -371,6 +379,12 @@ private:
     DashboardScreen* stage3_ = nullptr;
     ExplorationScreen* stage4_ = nullptr;
     PlannerScreen* stage5_ = nullptr;
+
+    // Lazily constructed cloud upload dialog (Stage 3 quick-action).
+    // Lives across openings so it can carry probe state in-process if
+    // the operator closes and reopens it within a session. See
+    // `onUploadDataRequested()` for the seeding contract.
+    UploadDialog* upload_dialog_ = nullptr;
 
     // OTA update plumbing. Banner sits above the stage stack so it persists
     // across stage transitions; checker polls GitHub Releases on a 5-min

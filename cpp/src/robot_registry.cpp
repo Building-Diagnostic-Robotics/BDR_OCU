@@ -19,6 +19,14 @@
 
 namespace f2c_cpp {
 
+namespace {
+// Compiled-in fallback so a fresh checkout still talks to the dev backend
+// even when robots.json / cloud_config.json don't ship a cloud_api_base key.
+// Field-deployable .deb packages should always set the value explicitly.
+constexpr const char* kDefaultCloudApiBase =
+    "https://zx8j0tqep2.execute-api.us-east-1.amazonaws.com";
+}  // namespace
+
 static std::optional<QJsonDocument> readJsonFile(const QString& path, QString& error) {
     QFile f(path);
     if (!f.exists()) {
@@ -74,6 +82,12 @@ std::optional<RobotProfile> RobotProfile::fromJson(const QJsonObject& obj, QStri
     p.known_hosts_entry = obj.value("known_hosts_entry").toString().trimmed();
     p.host_key_fingerprint = obj.value("host_key_fingerprint").toString().trimmed();
     p.default_remote_upload_dir = obj.value("default_remote_upload_dir").toString().trimmed();
+
+    // Cloud upload credentials. Empty values are not an error here; the
+    // upload dialog enforces presence at use time so robots without a
+    // populated entry still load (and the rest of the OCU keeps working).
+    p.cloud_client_id = obj.value("cloud_client_id").toString().trimmed();
+    p.cloud_device_token = obj.value("cloud_device_token").toString().trimmed();
 
     QString slug = obj.value("robot_id_slug").toString().trimmed();
     if (slug.isEmpty()) {
@@ -166,6 +180,7 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
 
     QJsonDocument doc = *doc_opt;
     QJsonArray arr;
+    QString api_base_from_root;
 
     if (doc.isArray()) {
         arr = doc.array();
@@ -178,6 +193,10 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
             loaded_ = false;
             return false;
         }
+        // Optional top-level cloud_api_base. Lives outside the per-robot
+        // block because the backend deployment is global; per-robot
+        // x-client-id / x-device-token still differentiate callers.
+        api_base_from_root = root.value("cloud_api_base").toString().trimmed();
     } else {
         if (error) *error = "Robot registry JSON must be an array or object.";
         loaded_ = false;
@@ -204,6 +223,28 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
 
     robots_ = parsed;
     source_path_ = path;
+
+    // Resolve cloud_api_base in priority order:
+    //   1. Top-level key in robots.json (loaded above).
+    //   2. Sibling cloud_config.json next to robots.json.
+    //   3. Compiled-in fallback.
+    cloud_api_base_ = api_base_from_root;
+    if (cloud_api_base_.isEmpty()) {
+        const QString sibling = QFileInfo(path).absoluteDir().filePath("cloud_config.json");
+        QString cfg_err;
+        auto cfg_doc = readJsonFile(sibling, cfg_err);
+        if (cfg_doc.has_value() && cfg_doc->isObject()) {
+            cloud_api_base_ =
+                cfg_doc->object().value("cloud_api_base").toString().trimmed();
+        }
+    }
+    if (cloud_api_base_.isEmpty()) {
+        cloud_api_base_ = QString::fromLatin1(kDefaultCloudApiBase);
+    }
+    while (cloud_api_base_.endsWith('/')) {
+        cloud_api_base_.chop(1);
+    }
+
     loaded_ = true;
     return true;
 }

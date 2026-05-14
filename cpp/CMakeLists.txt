@@ -130,6 +130,8 @@ set(HEADERS
     include/ui_theme_constants.hpp
     include/cloud_upload_manager.hpp
     include/robot_registry.hpp
+    include/upload_runner.hpp
+    include/upload_dialog.hpp
     include/components/bdr_message_box.hpp
     include/components/bdr_input_dialog.hpp
     include/components/bdr_progress_dialog.hpp
@@ -207,6 +209,8 @@ set(GUI_SOURCES
     src/transfer_manager.cpp
     src/preset_manager.cpp
     src/cloud_upload_manager.cpp
+    src/upload_runner.cpp
+    src/upload_dialog.cpp
     src/video_stream_widget.cpp
     src/robot_registry.cpp
     src/robot_login.cpp

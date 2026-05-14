@@ -52,14 +52,22 @@ a live robot connection. Each item below must be rewired (or guarded behind a
 
 ## Stage 3 — Dashboard (`cpp/src/dashboard_screen.cpp`, `cpp/src/app_shell.cpp`)
 
-- [ ] **Recordings action.** `DashboardScreen::viewRecordingsRequested` is
-      emitted (`dashboard_screen.cpp:398`) but not connected in
-      `AppShellWindow::ensureStage3()` (`app_shell.cpp:751-764`). Wire it
-      to open `DataTransferDialog` (robot → laptop rsync) and, optionally,
-      `CloudUploadDialog` (laptop → S3). Implementations live under
-      `cpp/src/` but are **not** linked into `bdr_coverage_planner` until
-      this is wired — re-add them to `GUI_SOURCES` in `cpp/CMakeLists.txt`
-      (see comment above that block).
+- [x] **Upload Data action (formerly "View Recordings").**
+      `DashboardScreen::viewRecordingsRequested` is now connected in
+      `AppShellWindow::ensureStage3()` to `onUploadDataRequested()`,
+      which opens the new `UploadDialog`. The dialog SSH-probes the
+      robot's `/R_DATA/` for sections/missions, classifies each as
+      None / Partial / Done by checking on-disk sentinels
+      (`upload_state.json`, `manifest.json`), and streams
+      `pilot_control/scripts/uploader.py` over SSH for any selected
+      target. The legacy `DataTransferDialog` (robot → laptop rsync) +
+      `CloudUploadDialog` (laptop → S3 via `aws s3 sync`) pair is
+      retired by this path: uploads go robot → S3 directly via
+      presigned URLs minted by the BDR backend, no IAM credentials on
+      the laptop. See **Upload pipeline** in `AGENTS.md` and
+      `cpp/CLAUDE.md` for the full design.
+      Hard-blocked while a scan/launch is alive (same `launch_active`
+      composite the close guard uses).
 - [x] **Info-card values.** All four info-card values are now live.
   - [x] Firmware — wired to the OCU build version
     (`f2c_cpp::version::kAppSemver`, derived from

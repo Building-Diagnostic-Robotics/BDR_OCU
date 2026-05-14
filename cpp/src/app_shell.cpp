@@ -58,6 +58,7 @@
 #include "startup_screen.hpp"
 #include "transfer_manager.hpp"
 #include "units_system.hpp"
+#include "upload_dialog.hpp"
 #include "update/update_checker.hpp"
 #include "update/update_lockfile.hpp"
 #include "update/update_state.hpp"
@@ -1137,6 +1138,7 @@ void AppShellWindow::ensureStage3() {
     connect(stage3_, &DashboardScreen::logoutRequested, this, &AppShellWindow::goToStage1);
     connect(stage3_, &DashboardScreen::runDiagnosticsRequested, this, &AppShellWindow::goToStage2);
     connect(stage3_, &DashboardScreen::startNewScanRequested, this, &AppShellWindow::onStartNewScan);
+    connect(stage3_, &DashboardScreen::viewRecordingsRequested, this, &AppShellWindow::onUploadDataRequested);
     // Mirror the dashboard's MQTT battery state onto the Stage 4 /
     // Stage 5 top-bar pills.  Dashboard owns the subprocess + JSON
     // parsing; AppShell only caches the latest sample and pushes it
@@ -1271,6 +1273,120 @@ void AppShellWindow::onStartNewScan() {
     }
 
     goToStage4();
+}
+
+void AppShellWindow::onUploadDataRequested() {
+    // Hard-block uploads while any part of the launch tree is alive on
+    // the robot. Same composite check that closeEvent uses to gate the
+    // "Are you sure?" prompt — sharing the rule keeps the contract
+    // single-source. Operators must Complete Mission first; uploading
+    // mid-scan would race with `/R_DATA/...` writes from the
+    // unified_data_collector.
+    const bool launch_active =
+        exploration_launch_in_progress_ ||
+        exploration_launch_ready_ ||
+        laptop_launch_started_ ||
+        robot_launch_started_;
+    if (launch_active) {
+        BdrMessageBox::warning(
+            this,
+            tr("Upload unavailable"),
+            tr("A scan is currently active. Complete Mission first, then "
+               "upload from the dashboard."));
+        return;
+    }
+
+    QString resolve_err;
+    ResolvedRobotSshTarget ssh_target{};
+    if (!resolveRobotSshTargetFromSettings(&ssh_target, &resolve_err)) {
+        BdrMessageBox::warning(
+            this,
+            tr("Upload unavailable"),
+            resolve_err.isEmpty()
+                ? tr("No robot is currently logged in.")
+                : resolve_err);
+        return;
+    }
+
+    // Pull the per-robot cloud credentials from the registry. Missing
+    // values are not auto-fixable from the OCU side — the deploy script
+    // ships robots.json and operators don't edit it in the field — so
+    // we surface the gap immediately rather than silently opening a
+    // dialog with disabled buttons.
+    RobotRegistry registry;
+    QString load_err;
+    if (!registry.load(&load_err)) {
+        BdrMessageBox::warning(
+            this,
+            tr("Upload unavailable"),
+            load_err.isEmpty() ? tr("Robot registry could not be loaded.")
+                               : load_err);
+        return;
+    }
+
+    const QSettings settings(kSettingsOrgName, kSettingsAppName);
+    const QString robot_id =
+        settings.value(QStringLiteral("setup/robot_id"), QString())
+            .toString().trimmed();
+    const auto profile = registry.findById(robot_id);
+    if (!profile.has_value()) {
+        BdrMessageBox::warning(
+            this,
+            tr("Upload unavailable"),
+            tr("No registry entry for the active robot."));
+        return;
+    }
+    if (profile->cloud_client_id.isEmpty() ||
+        profile->cloud_device_token.isEmpty()) {
+        BdrMessageBox::warning(
+            this,
+            tr("Upload unavailable"),
+            tr("Cloud credentials are missing for this robot. Update "
+               "robots.json with cloud_client_id and cloud_device_token."));
+        return;
+    }
+
+    if (!upload_dialog_) {
+        upload_dialog_ = new UploadDialog(this);
+    }
+    upload_dialog_->setDarkMode(dark_mode_);
+    upload_dialog_->setRemote(ssh_target.host, ssh_target.ssh_user);
+    upload_dialog_->setRobotId(profile->robot_id);
+    upload_dialog_->setCloudAuth(registry.cloudApiBase(),
+                                 profile->cloud_client_id,
+                                 profile->cloud_device_token);
+    upload_dialog_->setDataRoot(profile->robot_data_path.isEmpty()
+                                    ? QStringLiteral("/R_DATA")
+                                    : profile->robot_data_path);
+
+    // Same backdrop-blur pattern as the New Scan modal so the
+    // dashboard underneath reads as inactive while the dialog is up.
+    QWidget* backdrop = nullptr;
+    if (stage3_) {
+        backdrop = stage3_;
+    } else if (stack_) {
+        backdrop = stack_->currentWidget();
+    }
+    QGraphicsBlurEffect* blur = nullptr;
+    if (backdrop) {
+        blur = new QGraphicsBlurEffect(backdrop);
+        blur->setBlurRadius(14.0);
+        backdrop->setGraphicsEffect(blur);
+    }
+
+    QPointer<UploadDialog> guard(upload_dialog_);
+    QTimer::singleShot(0, upload_dialog_, [this, guard]() {
+        if (!guard) return;
+        const QPoint top_left = mapToGlobal(QPoint(
+            (width() - guard->width()) / 2,
+            (height() - guard->height()) / 2));
+        guard->move(top_left);
+    });
+    upload_dialog_->exec();
+
+    if (backdrop) {
+        backdrop->setGraphicsEffect(nullptr);
+    }
 }
 
 void AppShellWindow::resizeEvent(QResizeEvent* event) {

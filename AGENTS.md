@@ -544,6 +544,122 @@ autonomy arms.
  `onPlannerScanStartRequested`, never in parallel — a failed
  push must hard-block autonomy.
 
+## Upload pipeline (Stage 3 Dashboard, production-wired)
+
+Operator-driven cloud upload. Replaces the legacy
+`CloudUploadDialog`/`DataTransferDialog` pair (which orchestrated
+`aws s3 sync` from the laptop with IAM credentials in `~/.aws/`). The
+new flow runs **robot → S3 directly** via presigned URLs minted by the
+BDR backend's API Gateway + Lambda; the laptop holds zero AWS state and
+just observes progress over SSH.
+
+### Topology
+
+- **Robot side** (`pilot_ws/src/pilot_control/scripts/uploader.py`):
+  Python 3 script that walks a single section/mission folder, calls
+  `POST /presign` per file, PUTs to the returned S3 URL, writes
+  `upload_state.json` after each file (atomic tmp + `os.replace`),
+  generates `manifest.json`, and finally calls `POST /complete`. Reads
+  `BDR_CLOUD_API_BASE` / `BDR_CLOUD_CLIENT_ID` /
+  `BDR_CLOUD_DEVICE_TOKEN` / `BDR_UPLOAD_WORKERS` from the environment
+  so the OCU can push per-robot creds via the SSH `env(1)` prefix
+  without editing the script per laptop.
+- **OCU side** (`cpp/include/upload_runner.hpp` +
+  `cpp/include/upload_dialog.hpp`): two helpers + a frameless
+  `UploadDialog` reachable from the Stage 3 "Upload Data" quick-action
+  card.
+  - `UploadStateProbe` — one-shot SSH `find /R_DATA -mindepth 3
+    -maxdepth 3` walk that emits `SECTION|<date>|<building>|<section>|
+    <state>|<completed>|<total>|<size>` lines. State derives from
+    on-robot sentinels: `manifest.json` present → Done,
+    `upload_state.json` present → Partial, neither → None.
+  - `UploadRunner` — sequential queue driver. One `QProcess` per
+    target running `ssh -tt user@host env … python3 -u uploader.py
+    <data_root> <robot_id> <run_id>`. Stdout is parsed line-by-line
+    for `^✓ Uploaded:`, `^Skipping already uploaded:`, `^Connection
+    error:`, `^Manual pause detected.`, `^Unexpected error:`, etc.,
+    and emitted as Qt signals.
+
+### Decisions baked into the design
+
+- **Robot-side, not laptop-side.** Robot has direct internet on base
+  wifi. Skips the rsync robot→laptop hop entirely. Laptop reimage
+  loses nothing because all state (`upload_state.json`,
+  `manifest.json`) lives on robot disk.
+- **Per-section `run_id`.** `run_id = "<date>/<building>/<section>"`
+  (or `Mission_HHMMSS`). Atomic — one section failure ≠ whole-day
+  failure. S3 layout `<client_id>/<robot_id>/<run_id>/<relpath>` mirrors
+  on-disk reality 1:1.
+- **Single PUT only.** Backend mints single-PUT presigns; per-file
+  ceiling is 5 GB. Roofus rosbags / PCDs are sized below this; if
+  that ever stops being true the backend has to add multipart presigns.
+- **Sequential targets, parallel files within a target.** Script's
+  internal `UPLOAD_WORKERS=12` provides per-section parallelism. OCU
+  walks the queue one section at a time so the dialog has a single
+  progress story.
+- **Per-file progress.** Stdout `^✓ Uploaded:` line per file is the
+  unit of progress — the bar updates once per file completion. Per-
+  byte streaming is a future option (would require chunked PUT in
+  `uploader.py` + a callback signal); not needed for v1.
+- **Manifest schema is strict.** `{client_id, robot_id, run_id,
+  files[]}` only. Operator-entered metadata
+  (`session_config.json`, `mission_config.json`) ships as ordinary
+  files in the section folder so backend can index without
+  schema-migrating the manifest.
+- **State on robot, not laptop.** No backend `GET /manifest`
+  endpoint required. The probe re-derives Done/Partial/None from
+  on-disk truth on every dialog open.
+- **Hard-blocked while a scan is alive.** `onUploadDataRequested`
+  reuses the same `launch_active` composite the close-event guard
+  uses (`exploration_launch_in_progress_ ||
+  exploration_launch_ready_ || laptop_launch_started_ ||
+  robot_launch_started_`). Operators must Complete Mission first.
+
+### Configuration
+
+- `cpp/config/robots.json` carries:
+  - top-level `cloud_api_base` (global; one URL across the fleet)
+  - per-robot `cloud_client_id` + `cloud_device_token`
+- An optional sibling `cloud_config.json` with `{"cloud_api_base":
+  "..."}` overrides the top-level key — useful for dev installs.
+- Compiled-in fallback in `kDefaultCloudApiBase` keeps the OCU usable
+  on a fresh checkout.
+- `RobotProfile::cloud_client_id` / `cloud_device_token` are read by
+  `AppShellWindow::onUploadDataRequested`; missing values produce a
+  `BdrMessageBox` and refuse to open the dialog.
+
+### Pause / cancel
+
+- **Pause** SSH-touches `<remote_path>/pause.flag`. The script polls
+  for it and exits cleanly at the next file boundary. Resume = press
+  Upload again with the same selection — script re-reads
+  `upload_state.json` and skips completed files.
+- **Cancel** SIGTERMs the SSH process. State on disk is preserved
+  (writes are post-file), so the next run resumes cleanly.
+- **Closing the dialog while busy** routes through `requestPause()`
+  for graceful resume — see `UploadDialog::closeEvent`.
+
+### Rules for agents touching this path
+
+- **Do NOT remove or "simplify"** any of the following — they are
+  load-bearing:
+  - `uploader.py`'s atomic state writes (`os.replace`).
+  - `python3 -u` in the SSH invocation (without it the OCU's stdout
+    parser stalls 4 KB at a time and operators see no progress).
+  - The SSH `find -mindepth 3 -maxdepth 3` probe — depth-3 is the
+    canonical layout (`<date>/<building>/<section>`).
+  - `RobotRegistry::cloudApiBase()` and the three-tier resolution
+    (top-level → sibling cloud_config.json → compiled-in fallback).
+- **Do NOT downgrade the launch-active gate** in
+  `onUploadDataRequested` — uploads during a live scan would race
+  with `unified_data_collector` writes.
+- **Do NOT add IAM credentials to the OCU.** This is the security
+  posture the new design exists to enforce.
+- The script invocation **must NOT** go through `ros2 run` — non-
+  interactive SSH doesn't source the ROS env, same gotcha as
+  `finalize_mission_local.py`. Always invoke via direct
+  `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`.
+
 ## Docs worth reading
 
 - `cpp/CLAUDE.md` — authoritative architecture overview and build notes.

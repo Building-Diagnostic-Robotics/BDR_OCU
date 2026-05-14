@@ -344,7 +344,7 @@ DashboardScreen::DashboardScreen(QWidget* parent)
     actionsRow->addWidget(btn_run_diagnostics_, 1);
 
     btn_view_recordings_ = makeActionButton(actionsCard, "DashboardBtnRecordings", "#9810FA", "#9810FA",
-        ":/assets/dashboard/camera.svg", "View Recordings", "Access previous scan data");
+        ":/assets/dashboard/camera.svg", "Upload Data", "Push completed scans to the cloud");
     connect(btn_view_recordings_, &QPushButton::clicked, this, &DashboardScreen::onViewRecordingsClicked);
     actionsRow->addWidget(btn_view_recordings_, 1);
 

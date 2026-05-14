@@ -34,6 +34,17 @@ struct RobotProfile {
     // Optional mission file upload destination on robot
     QString default_remote_upload_dir; // e.g., "/R_DATA/waypoints"
 
+    // Cloud upload credentials (presigned-URL backend). Persisted in
+    // robots.json per-robot so each laptop's deploy carries its own
+    // x-client-id / x-device-token without an extra config dialog.
+    // The backend differentiates customers by client_id and individual
+    // robots by device_token; both headers are required on every
+    // /presign and /complete call. See cpp/CLAUDE.md "Upload pipeline"
+    // for the contract and `pilot_control/scripts/uploader.py` for the
+    // runtime consumer.
+    QString cloud_client_id;        // e.g. "sig_roofing_ID"
+    QString cloud_device_token;     // e.g. "roofus#0001"
+
     static std::optional<RobotProfile> fromJson(const QJsonObject& obj, QString& error);
 };
 
@@ -51,6 +62,20 @@ public:
     QStringList robotIds() const;
     std::optional<RobotProfile> findById(const QString& robot_id) const;
 
+    /**
+     * Cloud upload backend base URL (API Gateway invoke URL minted by the
+     * BDR backend Lambda team). Read from one of:
+     *  1. The optional top-level "cloud_api_base" key in robots.json.
+     *  2. Sibling `cloud_config.json` (`{"cloud_api_base": "..."}`) — same
+     *     search path as robots.json.
+     *  3. The compiled-in fallback in `kDefaultCloudApiBase`.
+     *
+     * Per the design lock-in this is **global** (shared across robots /
+     * customers); per-robot differentiation lives in
+     * `RobotProfile::cloud_client_id` + `cloud_device_token`.
+     */
+    QString cloudApiBase() const { return cloud_api_base_; }
+
     QString sourcePath() const { return source_path_; }
 
     static QString slugifyRobotId(const QString& robot_id);
@@ -59,6 +84,7 @@ public:
 private:
     QList<RobotProfile> robots_;
     QString source_path_;
+    QString cloud_api_base_;
     bool loaded_ = false;
 };
 
