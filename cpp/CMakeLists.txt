@@ -96,6 +96,11 @@ find_package(Fields2Cover QUIET)
 # CGAL for geometry operations (alphashape, etc.)
 find_package(CGAL QUIET)
 
+# Official Cloth Simulation Filter (CSF) implementation (Apache-2.0).
+# Vendored at external/csf (jianboqi/CSF @ e0322a2). Builds a static `CSF`
+# target consumed by obstacle_detector's ground segmentation.
+add_subdirectory(external/csf EXCLUDE_FROM_ALL)
+
 # GStreamer for video streaming
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-video-1.0)
@@ -105,6 +110,7 @@ include_directories(${GST_INCLUDE_DIRS})
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include/components
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/csf/src
     ${CMAKE_BINARY_DIR}/generated
     ${PCL_INCLUDE_DIRS}
     ${EIGEN3_INCLUDE_DIR}
@@ -277,6 +283,7 @@ target_link_libraries(bdr_coverage_planner
     ${QT_LIBS}
     ${PCL_FILTERED_LIBS}
     Eigen3::Eigen
+    CSF
     ${GST_LIBRARIES}
 )
 

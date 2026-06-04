@@ -26,6 +26,7 @@ class QProgressBar;
 class QPushButton;
 class QKeyEvent;
 class QShowEvent;
+class QSlider;
 class QSpinBox;
 class QStackedWidget;
 class QTimer;
@@ -267,6 +268,9 @@ private:
         bool coverage_roi_drawing_active = false;
         Polygon2D coverage_roi_polygon;
         QString coverage_obstacle_mode = QStringLiteral("automatic");
+        // CSF auto-detection sensitivity (0-100, default 50). Higher = more
+        // sensitive (smaller CSF class threshold => detects smaller protrusions).
+        double coverage_csf_sensitivity = 50.0;
         QString coverage_drawing_tool = QStringLiteral("rectangle");
         bool coverage_drawing_active = false;
         bool coverage_obstacles_detected = false;
@@ -692,6 +696,9 @@ private:
     QPushButton* btn_coverage_obstacle_auto_ = nullptr;
     QPushButton* btn_coverage_obstacle_manual_ = nullptr;
     QPushButton* btn_coverage_detect_ = nullptr;
+    // CSF "Detection Sensitivity" control (Auto-detect panel).
+    PlannerTrackSlider* csf_sensitivity_slider_ = nullptr;
+    QLabel* csf_sensitivity_value_ = nullptr;
     QPushButton* btn_coverage_clear_obstacles_ = nullptr;
     QPushButton* btn_coverage_draw_rectangle_ = nullptr;
     QPushButton* btn_coverage_draw_polygon_ = nullptr;

@@ -2,16 +2,11 @@
  * @file obstacle_detector.hpp
  * @brief Automatic obstacle detection from a 3D point cloud + driven path.
  *
- * This is a C++ port of `scripts/test_scripts/test_obstacle_detection.py`.
- * It uses the driven path to sample "footprint ground" points, fits a plane
- * with RANSAC, extracts obstacle candidates above/below the ground band,
- * removes outliers, clusters with DBSCAN, merges nearby clusters, and then
- * polygonizes each merged group.
- *
- * This port tracks the evolving Python reference implementation, including:
- * - grid-based polygonization with optional coarser contour extraction
- * - conservative smoothing (rolling-disk closing) with optional hole preservation
- * - micro-obstacle preservation (tiny but dense)
+ * Ground/non-ground segmentation uses the official Cloth Simulation Filter
+ * (CSF, Apache-2.0, vendored at external/csf). Non-ground points within a
+ * traversable clearance band become obstacle candidates; points swept by the
+ * driven robot footprint are removed, and the survivors are polygonized on an
+ * occupancy grid (with optional coarser contour extraction).
  */
 
 #pragma once
@@ -35,11 +30,31 @@ struct ObstacleDetectionParams {
     double robot_width_m = 0.28;
     double footprint_margin_m = 0.10;
 
-    // Ground detection
+    // Ground detection (legacy fallbacks; CSF is the active path)
     double ground_z_max = 0.0;
     int ransac_iters = 300;
     double ransac_thresh_m = 0.03;
     double ground_band_m = 0.05;
+
+    // Cloth Simulation Filter (CSF) ground segmentation
+    double csf_cloth_resolution_m = 0.35;
+    int csf_max_iterations = 2000;
+    double csf_classification_threshold_m = 0.03;  // sensitivity-driven (see planner UI)
+    int csf_rigidness = 4;
+    bool csf_slope_processing = false;
+    double csf_max_obstacle_clearance_m = 0.50;
+    bool csf_trail_footprint_cleanup = true;
+    double csf_trail_cleanup_margin_m = 0.150;
+    bool csf_pre_sor_enabled = true;
+    int csf_pre_sor_k = 20;
+    double csf_pre_sor_std = 1.5;
+
+    // Traversable-clearance derivation (min clearance for a non-ground point to
+    // count as a blocking obstacle). If traversable_step_height_m <= 0 it is
+    // derived from wheel_radius_m * traversable_step_height_ratio.
+    double wheel_radius_m = 0.072;
+    double traversable_step_height_ratio = 0.70;
+    double traversable_step_height_m = -1.0;
 
     // Obstacle extraction
     double obstacle_z_max = 0.30;

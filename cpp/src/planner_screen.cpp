@@ -74,6 +74,25 @@ namespace f2c_cpp {
 
 namespace {
 
+// CSF detection-sensitivity slider envelope (operator-facing 0-100).
+constexpr double kCsfSensitivityMin = 0.0;
+constexpr double kCsfSensitivityMax = 100.0;
+constexpr double kCsfSensitivityDefault = 50.0;
+
+// Map sensitivity (0-100) -> CSF class threshold (m). Higher sensitivity =>
+// smaller threshold => detects smaller protrusions. Piecewise-linear, pinned
+// 50 -> 0.030 m (legacy default), 0 -> 0.060 m, 100 -> 0.005 m.
+inline double csfSensitivityToClassThreshold(double sensitivity) {
+    const double s = std::clamp(sensitivity, kCsfSensitivityMin, kCsfSensitivityMax);
+    constexpr double kThreshLow = 0.060;   // s = 0   (least sensitive)
+    constexpr double kThreshMid = 0.030;   // s = 50
+    constexpr double kThreshHigh = 0.005;  // s = 100 (most sensitive)
+    if (s <= 50.0) {
+        return kThreshLow + (s / 50.0) * (kThreshMid - kThreshLow);
+    }
+    return kThreshMid + ((s - 50.0) / 50.0) * (kThreshHigh - kThreshMid);
+}
+
 constexpr size_t kPreviewTargetPointCount = 180000;
 constexpr double kVoxelSizeMin = 0.01;
 constexpr double kVoxelSizeMax = 0.20;
@@ -2480,6 +2499,10 @@ void PlannerScreen::loadPersistedParameters(SessionCache& cache) const {
         cache.coverage_obstacle_mode =
             settings.value(QStringLiteral("coverage_obstacle_mode")).toString();
     }
+    if (settings.contains(QStringLiteral("coverage_csf_sensitivity"))) {
+        cache.coverage_csf_sensitivity = std::clamp(
+            settings.value(QStringLiteral("coverage_csf_sensitivity")).toDouble(), 0.0, 100.0);
+    }
     if (settings.contains(QStringLiteral("coverage_drawing_tool"))) {
         cache.coverage_drawing_tool = settings.value(QStringLiteral("coverage_drawing_tool")).toString();
     }
@@ -2549,6 +2572,7 @@ void PlannerScreen::persistParameters() const {
     // globally below so a preset selection survives switching robots.
     settings.setValue(QStringLiteral("coverage_roi_drawing_tool"), cache->coverage_roi_drawing_tool);
     settings.setValue(QStringLiteral("coverage_obstacle_mode"), cache->coverage_obstacle_mode);
+    settings.setValue(QStringLiteral("coverage_csf_sensitivity"), cache->coverage_csf_sensitivity);
     settings.setValue(QStringLiteral("coverage_drawing_tool"), cache->coverage_drawing_tool);
     settings.setValue(QStringLiteral("scan_distance_m"), cache->scan_distance_m);
     settings.setValue(QStringLiteral("scan_progression_mode"), cache->scan_progression_mode);
@@ -2800,6 +2824,10 @@ void PlannerScreen::updateValueLabels() {
     if (lbl_coverage_scan_speed_value_) {
         lbl_coverage_scan_speed_value_->setText(
             units::formatSpeed(cache.coverage_scan_speed_mps, 2));
+    }
+    if (csf_sensitivity_value_) {
+        csf_sensitivity_value_->setText(
+            QString::number(static_cast<int>(std::lround(cache.coverage_csf_sensitivity))));
     }
 }
 
@@ -4151,6 +4179,9 @@ void PlannerScreen::applySessionToUi() {
     if (slider_coverage_scan_speed_) {
         slider_coverage_scan_speed_->setValue(cache.coverage_scan_speed_mps);
     }
+    if (csf_sensitivity_slider_) {
+        csf_sensitivity_slider_->setValue(cache.coverage_csf_sensitivity);
+    }
     if (combo_coverage_presets_) {
         refreshCoveragePresetCombo();
         QSignalBlocker blocker(combo_coverage_presets_);
@@ -5074,8 +5105,16 @@ void PlannerScreen::startDetectObstacles() {
                               ? cache.coverage_roi_polygon
                               : Polygon2D{};
 
-    QtConcurrent::run([guard, generation, cloud, trail, roi]() mutable {
+    // Map the operator-facing CSF sensitivity (0-100) onto the CSF class
+    // threshold (m). Higher sensitivity => smaller threshold => detects
+    // smaller protrusions. Piecewise-linear, pinned 50 -> 0.030 m, with
+    // 0 -> 0.060 m and 100 -> 0.005 m endpoints.
+    const double csf_class_threshold_m =
+        csfSensitivityToClassThreshold(cache.coverage_csf_sensitivity);
+
+    QtConcurrent::run([guard, generation, cloud, trail, roi, csf_class_threshold_m]() mutable {
         ObstacleDetectionParams params;
+        params.csf_classification_threshold_m = csf_class_threshold_m;
         ObstacleDetectionResult result = detectObstaclesAuto(cloud, trail, nullptr, params);
 
         if (result.success && roi.size() >= 3) {
@@ -6993,6 +7032,101 @@ void PlannerScreen::buildUi() {
     auto_info_text_col->addWidget(auto_info_body);
     auto_info_layout->addLayout(auto_info_text_col, 1);
     auto_detect_layout->addWidget(coverage_auto_info_card_);
+
+    // Detection Sensitivity: the only operator-exposed CSF knob. Maps 0-100
+    // onto the CSF class threshold (see csfSensitivityToClassThreshold).
+    {
+        auto* sens_block = new QWidget(auto_detect_panel);
+        auto* sens_layout = new QVBoxLayout(sens_block);
+        sens_layout->setContentsMargins(0, 0, 0, 0);
+        sens_layout->setSpacing(4);
+
+        auto* sens_header = new QHBoxLayout();
+        sens_header->setContentsMargins(0, 0, 0, 0);
+        sens_header->setSpacing(12);
+        sens_header->addWidget(
+            makeTrackedLabel(sens_block, QStringLiteral("Detection Sensitivity"),
+                             kInitialLabel12, &label12_labels_),
+            1);
+        csf_sensitivity_value_ = makeTrackedLabel(
+            sens_block,
+            QString::number(static_cast<int>(std::lround(kCsfSensitivityDefault))),
+            kInitialMono12White,
+            &mono12_white_labels_,
+            Qt::AlignRight | Qt::AlignVCenter);
+        sens_header->addWidget(csf_sensitivity_value_);
+        sens_layout->addLayout(sens_header);
+        sens_layout->addSpacing(4);
+
+        auto* sens_slider_row = new QHBoxLayout();
+        sens_slider_row->setContentsMargins(0, 0, 0, 0);
+        sens_slider_row->setSpacing(8);
+        auto* sens_minus = make_stepper_button(
+            sens_block, QStringLiteral(":/assets/missionplanner/stepper_minus.svg"));
+        sens_slider_row->addWidget(sens_minus, 0, Qt::AlignVCenter);
+        csf_sensitivity_slider_ = new PlannerTrackSlider(sens_block);
+        csf_sensitivity_slider_->setRange(kCsfSensitivityMin, kCsfSensitivityMax);
+        csf_sensitivity_slider_->setStep(1.0);
+        csf_sensitivity_slider_->setDecimals(0);
+        csf_sensitivity_slider_->setValue(kCsfSensitivityDefault);
+        sens_slider_row->addWidget(csf_sensitivity_slider_, 1, Qt::AlignVCenter);
+        auto* sens_plus = make_stepper_button(
+            sens_block, QStringLiteral(":/assets/missionplanner/stepper_plus.svg"));
+        sens_slider_row->addWidget(sens_plus, 0, Qt::AlignVCenter);
+        sens_layout->addLayout(sens_slider_row);
+
+        auto* sens_range_row = new QHBoxLayout();
+        sens_range_row->setContentsMargins(0, 0, 0, 0);
+        sens_range_row->setSpacing(0);
+        sens_range_row->addWidget(
+            makeTrackedLabel(sens_block, QStringLiteral("Low"), kInitialMono9Muted, &mono9_labels_));
+        sens_range_row->addStretch(1);
+        sens_range_row->addWidget(makeTrackedLabel(sens_block, QStringLiteral("Medium"),
+                                                   kInitialMono9Muted, &mono9_labels_,
+                                                   Qt::AlignHCenter | Qt::AlignVCenter));
+        sens_range_row->addStretch(1);
+        sens_range_row->addWidget(makeTrackedLabel(sens_block, QStringLiteral("High"),
+                                                   kInitialMono9Muted, &mono9_labels_,
+                                                   Qt::AlignRight | Qt::AlignVCenter));
+        sens_layout->addLayout(sens_range_row);
+
+        auto apply_sensitivity = [this](double value) {
+            const double clamped =
+                std::clamp(value, kCsfSensitivityMin, kCsfSensitivityMax);
+            if (csf_sensitivity_value_) {
+                csf_sensitivity_value_->setText(
+                    QString::number(static_cast<int>(std::lround(clamped))));
+            }
+            activeSession().coverage_csf_sensitivity = clamped;
+            persistParameters();
+        };
+        csf_sensitivity_slider_->on_value_changed = apply_sensitivity;
+        connect(sens_minus, &QPushButton::clicked, this, [this]() {
+            if (!csf_sensitivity_slider_) return;
+            const double next = std::max(csf_sensitivity_slider_->minimum(),
+                                         csf_sensitivity_slider_->value() -
+                                             csf_sensitivity_slider_->step());
+            if (std::abs(next - csf_sensitivity_slider_->value()) < 1e-9) return;
+            csf_sensitivity_slider_->setValue(next);
+            if (csf_sensitivity_slider_->on_value_changed) {
+                csf_sensitivity_slider_->on_value_changed(csf_sensitivity_slider_->value());
+            }
+        });
+        connect(sens_plus, &QPushButton::clicked, this, [this]() {
+            if (!csf_sensitivity_slider_) return;
+            const double next = std::min(csf_sensitivity_slider_->maximum(),
+                                         csf_sensitivity_slider_->value() +
+                                             csf_sensitivity_slider_->step());
+            if (std::abs(next - csf_sensitivity_slider_->value()) < 1e-9) return;
+            csf_sensitivity_slider_->setValue(next);
+            if (csf_sensitivity_slider_->on_value_changed) {
+                csf_sensitivity_slider_->on_value_changed(csf_sensitivity_slider_->value());
+            }
+        });
+
+        auto_detect_layout->addWidget(sens_block);
+    }
+
     btn_coverage_detect_ = new QPushButton(auto_detect_panel);
     btn_coverage_detect_->setCursor(Qt::PointingHandCursor);
     btn_coverage_detect_->setFlat(true);
