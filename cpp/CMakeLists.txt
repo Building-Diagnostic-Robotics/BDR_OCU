@@ -339,6 +339,40 @@ target_link_libraries(bdr-update-runner PRIVATE
     ${QT_GUI_LIBS}
 )
 
+# ---------------------------------------------------------------------------
+# Unit tests (GoogleTest). Opt-in via -DBDR_BUILD_TESTS=ON (default ON when
+# GTest is available). Tests compile UpdateChecker's pure-function surface in
+# isolation against Qt Core/Network + bdr_update_core — no GUI, ROS, or PCL.
+# Never installed; create_deb only packages the two RUNTIME targets below.
+# ---------------------------------------------------------------------------
+option(BDR_BUILD_TESTS "Build unit tests (requires GoogleTest)" ON)
+if(BDR_BUILD_TESTS)
+    find_package(GTest QUIET)
+    if(GTest_FOUND)
+        enable_testing()
+        add_executable(update_checker_tests
+            tests/update_checker_tests.cpp
+            src/update/update_checker.cpp
+            include/update/update_checker.hpp
+        )
+        add_dependencies(update_checker_tests version_info_stamp)
+        target_include_directories(update_checker_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_BINARY_DIR}/generated
+        )
+        target_link_libraries(update_checker_tests PRIVATE
+            bdr_update_core
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME update_checker_tests COMMAND update_checker_tests)
+        message(STATUS "Unit tests: enabled (update_checker_tests)")
+    else()
+        message(STATUS "Unit tests: GTest not found, skipping")
+    endif()
+endif()
+
 # Install
 install(TARGETS bdr_coverage_planner bdr-update-runner
     RUNTIME DESTINATION bin

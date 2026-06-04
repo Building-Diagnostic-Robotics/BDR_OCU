@@ -8,6 +8,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
@@ -18,6 +19,28 @@
 #include "version_info.hpp"
 
 namespace f2c_cpp::update {
+
+namespace {
+
+/// True iff `s` is a bare hex string between 7 and 40 chars (a plausible
+/// abbreviated-or-full git commit SHA).
+bool isHexSha(const QString& s) {
+    if (s.size() < 7 || s.size() > 40) {
+        return false;
+    }
+    static const QRegularExpression re(QStringLiteral("\\A[0-9a-fA-F]+\\z"));
+    return re.match(s).hasMatch();
+}
+
+/// First contiguous hex run of length 7-40 in `s`, lowercased; empty if none.
+/// Used to lift a SHA out of a release name like "Latest (abc1234)".
+QString firstHexToken(const QString& s) {
+    static const QRegularExpression re(QStringLiteral("[0-9a-fA-F]{7,40}"));
+    const QRegularExpressionMatch m = re.match(s);
+    return m.hasMatch() ? m.captured(0).toLower() : QString();
+}
+
+}  // namespace
 
 UpdateChecker::UpdateChecker(QObject* parent) : QObject(parent) {
     nam_ = new QNetworkAccessManager(this);
@@ -99,6 +122,30 @@ void UpdateChecker::clearSnooze() {
     setSnoozedUntil(0);
 }
 
+QString UpdateChecker::extractRemoteSha(const QString& releaseName,
+                                        const QString& tag,
+                                        const QString& targetCommitish) {
+    // 1. SHA embedded in the release name ("Latest (abc1234)" / "v-abc1234").
+    const QString fromName = firstHexToken(releaseName);
+    if (!fromName.isEmpty()) {
+        return fromName;
+    }
+    // 2. Immutable "v-<sha>" tag.
+    if (tag.startsWith(QStringLiteral("v-"))) {
+        const QString candidate = tag.mid(2);
+        if (isHexSha(candidate)) {
+            return candidate.toLower();
+        }
+    }
+    // 3. target_commitish — ONLY when it's actually a SHA. On the rolling
+    //    `latest` tag GitHub returns the default branch name ("main") here,
+    //    which must never be treated as a build identity.
+    if (isHexSha(targetCommitish)) {
+        return targetCommitish.toLower();
+    }
+    return {};
+}
+
 bool UpdateChecker::isUpdateNewer(const QString& embeddedShortSha,
                                   const QString& remoteFullOrShort) {
     if (embeddedShortSha.isEmpty() || remoteFullOrShort.isEmpty()) {
@@ -135,7 +182,14 @@ VersionInfo UpdateChecker::parseReleaseJson(const QByteArray& json,
     const QJsonObject obj = doc.object();
     VersionInfo out;
     out.tag = obj.value(QStringLiteral("tag_name")).toString();
-    out.commitSha = obj.value(QStringLiteral("target_commitish")).toString();
+    const QString releaseName = obj.value(QStringLiteral("name")).toString();
+    const QString targetCommitish =
+        obj.value(QStringLiteral("target_commitish")).toString();
+    // Resolve a real commit SHA. `target_commitish` is NOT trusted on its own
+    // because the rolling `latest` tag makes GitHub return "main" here, which
+    // would make every poll look like a fresh build. Empty result => caller
+    // treats it as "no update" (stays quiet) rather than nagging.
+    out.commitSha = extractRemoteSha(releaseName, out.tag, targetCommitish);
     out.releaseNotes = obj.value(QStringLiteral("body")).toString();
     out.publishedAtIso8601 = obj.value(QStringLiteral("published_at")).toString();
 
@@ -171,11 +225,11 @@ VersionInfo UpdateChecker::parseReleaseJson(const QByteArray& json,
         }
     }
 
-    if (out.commitSha.isEmpty()) {
-        // Fall back to tag_name; some release-creation paths leave
-        // target_commitish empty when the tag is rolling.
-        out.commitSha = out.tag;
-    }
+    // NOTE: deliberately no `out.commitSha = out.tag` fallback. A non-SHA tag
+    // ("latest") would compare unequal to the embedded SHA forever and re-offer
+    // the same build on every launch. extractRemoteSha already tried the tag
+    // when it was a `v-<sha>` form; anything else leaves commitSha empty so the
+    // caller stays quiet.
 
     if (err) err->clear();
     return out;

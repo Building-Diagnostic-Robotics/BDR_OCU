@@ -23,8 +23,10 @@ struct VersionInfo {
     /// Release tag, e.g. "v-fb662d4" or "latest".
     QString tag;
 
-    /// Full commit SHA from the release's `target_commitish` field.
-    /// Compared against the embedded short SHA via prefix match.
+    /// Resolved commit SHA for the release (see UpdateChecker::extractRemoteSha:
+    /// release `name` → `v-<sha>` tag → `target_commitish` only if it's a real
+    /// SHA). Empty when none is usable. Compared against the embedded short SHA
+    /// via prefix match.
     QString commitSha;
 
     /// Direct browser_download_url to the `_amd64.deb` asset.

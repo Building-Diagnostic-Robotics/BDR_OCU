@@ -95,6 +95,26 @@ public:
      */
     static VersionInfo parseReleaseJson(const QByteArray& json, QString* err);
 
+    /**
+     * @brief Resolve the remote build's commit SHA from a release's fields.
+     *
+     * `target_commitish` is unreliable for identity: the rolling `latest`
+     * tag makes the GitHub API return the repo's default branch name
+     * ("main") here once the tag exists, which would make every poll look
+     * like a new build. So we prefer, in order:
+     *   1. a hex SHA embedded in the release `name` (CI publishes
+     *      "Latest (<short-sha>)" / "v-<short-sha>"),
+     *   2. the `v-<sha>` immutable tag,
+     *   3. `target_commitish` ONLY when it is itself a bare hex SHA.
+     *
+     * @return Lowercased hex SHA (7-40 chars), or empty when none is usable.
+     *         An empty result is treated by the caller as "no update" so a
+     *         non-SHA commitish never nags the operator.
+     */
+    static QString extractRemoteSha(const QString& releaseName,
+                                    const QString& tag,
+                                    const QString& targetCommitish);
+
 signals:
     /// Fired when a poll finds a SHA different from the embedded one AND no
     /// snooze is active. Carries the parsed release details.
