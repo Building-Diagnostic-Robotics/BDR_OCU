@@ -25,6 +25,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "app_shell.hpp"
+#include "dev_flags.hpp"
 #include "settings_constants.hpp"
 #include "update/update_lockfile.hpp"
 #include "update/update_log.hpp"
@@ -266,6 +267,17 @@ int main(int argc, char* argv[])
     // Cross-process safety relies on each binary calling setProcessTag()
     // before any info/warn/error (concern #1, locked Phase 7).
     f2c_cpp::update::log::setProcessTag("ocu");
+
+    // BDR_REWIRE: loud dev-mode banner. Compiled out in Release.
+    if constexpr (kDevMode) {
+        std::cerr << "\n"
+                  << "============================================================\n"
+                  << "  BDR_DEV_MODE ACTIVE — operational gates are BYPASSED.\n"
+                  << "  This is a DEVELOPMENT build and must NOT be shipped.\n"
+                  << "  See docs/DEV_BYPASSES.md.\n"
+                  << "============================================================\n"
+                  << std::endl;
+    }
 
     // Set application/window icon (embedded via Qt resources)
     app.setWindowIcon(QIcon(":/assets/bdr_logo.png"));

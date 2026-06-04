@@ -11,6 +11,53 @@ a live robot connection. Each item below must be rewired (or guarded behind a
 
 ---
 
+## Unified dev mode — `BDR_DEV_MODE` (compile-time)
+
+Most operational gates are now folded under a **single compile-time flag**.
+Enable it only on a non-Release build:
+
+```bash
+cd cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBDR_DEV_MODE=ON
+cmake --build build -j"$(nproc)"
+./build/bdr_coverage_planner   # prints a loud "BDR_DEV_MODE ACTIVE" banner
+```
+
+- The CMake option is **OFF by default**. Enabling it with
+  `-DCMAKE_BUILD_TYPE=Release` is a **hard `FATAL_ERROR`** — dev mode can never
+  ship in a `.deb`.
+- `cpp/include/dev_flags.hpp` exposes `kDevMode` (`true` only when the
+  `BDR_DEV_MODE` macro is defined). Every gate site guards its bypass with
+  `if constexpr (kDevMode)` / `if (!kDevMode && …)`, so in a Release build the
+  bypass code is **compiled out entirely** (zero runtime cost / surface).
+- To re-enable all gating: build Release, or simply don't pass
+  `-DBDR_DEV_MODE=ON`. No code changes required.
+
+**Semantics chosen (locked with operator):** dev mode still *attempts* robot
+calls (SSH login, robot launch, Start-Scan service chain) but their failure no
+longer blocks navigation. **Dev mode CAN command a real robot if one is
+connected.** The New-Scan metadata modal still shows (Cancel proceeds).
+
+### Gate sites under `kDevMode`
+
+| Stage | Gate | Site (`// BDR_REWIRE:` tagged) | Dev-mode behavior |
+|-------|------|--------------------------------|-------------------|
+| 1 → 2 | SSH login | `setup_screen.cpp` `submit()` failure path | Login attempted; failure still advances to Stage 2 |
+| 2 → 3 | Preflight Continue | `startup_screen.cpp` `kEnableLaunchDashboardPassthrough = kDevMode` | Continue enabled without a passing report |
+| 3 → 4 | Planner button unlock | `app_shell.cpp` `goToStage4()` | `setPlanningEnabled(true)` on Stage 4 entry |
+| 4 → 5 | "Open Mission Planner" needs saved map | `app_shell.cpp` `onExplorationStartPlanningRequested()` | Opens planner without a map (Release blocks + returns) |
+| 5 | Planner sub-step nav gates | `planner_screen.cpp` `kBypassPlannerStageGates = kDevMode` | All 4 sub-steps clickable without map/plan/waypoints |
+| 5 | Start Scan UDC-health gate | `app_shell.cpp` `onPlannerScanStartRequested()` (`!kDevMode && isUdcDeadOrWedged()`) | Not hard-blocked on dead/wedged UDC |
+| 5 | Start Scan metadata push | `app_shell.cpp` metadata callback (`!ok && !kDevMode`) | Failed push no longer aborts arming |
+| 5 | Complete Mission needs finished run | `planner_screen.cpp` `updateFooter()` + `onCompleteMissionClicked()` | Allowed without a `Completed` run |
+| 4/5 | Link-offline grey-out | `app_shell.cpp` `isRobotLinkOffline()` / `isRobotLinkUnreachable()` | Both return `false` → controls stay live |
+
+**Re-assert verification:** a plain Release build (`-DCMAKE_BUILD_TYPE=Release`,
+no flag) restores every gate above. `rg -n 'kDevMode|BDR_REWIRE' cpp/`
+enumerates all sites.
+
+---
+
 ## Stage 1 — Setup / Login (`cpp/src/setup_screen.cpp`)
 
 - [x] **Real authentication.** `SetupScreen::submit()` now calls
@@ -44,11 +91,11 @@ a live robot connection. Each item below must be rewired (or guarded behind a
 
 ## Stage 2 — Pre-flight Diagnostics (`cpp/src/startup_screen.cpp`)
 
-- [ ] **Continue gate.** Remove
-      `constexpr bool kEnableLaunchDashboardPassthrough = true;` (top of
-      file) or guard it behind `#ifdef BDR_DEV_MODE`. The "enabled" check
-      around line 1071 must reduce to
-      `preflight_completed_ && !has_fail` once the passthrough is gone.
+- [x] **Continue gate.** Folded under unified dev mode:
+      `constexpr bool kEnableLaunchDashboardPassthrough = kDevMode;` (was
+      hardcoded `true`). A Release build (no `BDR_DEV_MODE`) reduces the
+      "enabled" check to `preflight_completed_ && !has_fail`. See
+      **Unified dev mode** above.
 
 ## Stage 3 — Dashboard (`cpp/src/dashboard_screen.cpp`, `cpp/src/app_shell.cpp`)
 
@@ -127,20 +174,19 @@ a live robot connection. Each item below must be rewired (or guarded behind a
 
 ## Stage 5 — Planner (`cpp/src/planner_screen.cpp`)
 
-- [ ] **Stage 3 / Stage 4 navigation gates.** A single dev-bypass constant
-      `kBypassPlannerStageGates = true` (top of `planner_screen.cpp`,
-      anonymous namespace) currently lets the operator click into the
-      Scan Splitting and Scan stages even when there is no saved map,
-      no completed coverage plan, and no published waypoints. Touched
-      sites all reference the constant: `onNextClicked` (×2),
-      `updateStageSteps` (`plan_ready` / `scan_ready`),
-      `updateFooter` (`plan_ready` / `scan_ready`), and the two
-      stage-step chip click handlers. Flip the constant to `false` to
-      restore the proper preconditions in one line. The internal
-      *operation* guards (`onPublishSelectedClicked`,
-      `onStartSelectedClicked`) are intentionally left in place — they
-      stop you from publishing/starting nothing, even when navigation
-      is open.
+- [x] **Stage 3 / Stage 4 navigation gates.** Folded under unified dev
+      mode: `kBypassPlannerStageGates = kDevMode` (top of
+      `planner_screen.cpp`, anonymous namespace; was hardcoded `true`).
+      Lets the operator click into the Scan Splitting and Scan stages
+      even when there is no saved map, no completed coverage plan, and
+      no published waypoints. Touched sites all reference the constant:
+      `onNextClicked` (×2), `updateStageSteps` (`plan_ready` /
+      `scan_ready`), `updateFooter` (`plan_ready` / `scan_ready`), and
+      the two stage-step chip click handlers. A Release build re-asserts
+      the proper preconditions. The internal *operation* guards
+      (`onPublishSelectedClicked`, `onStartSelectedClicked`) are
+      intentionally left in place — they stop you from publishing /
+      starting nothing, even when navigation is open.
 - [x] **Autonomy handoff.** Scan Splitting (Stage 3 of 4 within the planner
       workflow) now owns the autonomy handoff. `PlannerScreen::onPublishSelectedClicked`
       and `onStartSelectedClicked` emit `publishScanSegmentsRequested` and

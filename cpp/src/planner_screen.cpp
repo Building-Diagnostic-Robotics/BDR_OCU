@@ -6,6 +6,7 @@
 #include "components/fpv_camera_view.hpp"
 #include "components/pre_scan_checklist_dialog.hpp"
 #include "components/svg_icon_button.hpp"
+#include "dev_flags.hpp"
 #include "plot_widget.hpp"
 #include "video_stream_widget.hpp"
 #include "settings_constants.hpp"
@@ -101,13 +102,14 @@ constexpr int kPlannerScanLeftRailWidth = 320;
 constexpr int kPlannerRightRailWidth = 380;
 constexpr int kStageRowWidth = 668;
 
-// BDR_REWIRE: Dev bypass — temporarily allow the operator to navigate into
-// Stage 3 (Scan Splitting) and Stage 4 (Scan) even when there is no saved map,
-// no completed coverage plan, or no published waypoints. Lets the UI be poked
-// at offline without a robot. Flip to `false` to restore the proper
-// preconditions (planning_complete for Stage 3, scan_waypoints_published for
-// Stage 4). See docs/DEV_BYPASSES.md.
-constexpr bool kBypassPlannerStageGates = true;
+// BDR_REWIRE: Dev bypass — allow the operator to navigate into Stage 3 (Scan
+// Splitting) and Stage 4 (Scan) even when there is no saved map, no completed
+// coverage plan, or no published waypoints. Lets the UI be poked at offline
+// without a robot. Now folded under the unified dev-mode flag (was hardcoded
+// `true`), so a Release build re-asserts the proper preconditions
+// (planning_complete for Stage 3, scan_waypoints_published for Stage 4).
+// See docs/DEV_BYPASSES.md.
+constexpr bool kBypassPlannerStageGates = kDevMode;
 constexpr int kFooterCallToActionWidth = 278;
 
 // QSettings key for the globally-shared selected preset name (not per-robot).
@@ -4016,7 +4018,10 @@ void PlannerScreen::updateFooter() {
         // PlannerStep::Scan — Complete Mission button on the right.
         lbl_stage_footer_->setText(QStringLiteral("Stage 4 of 4"));
         setNextStageLabel(QStringLiteral("Complete Mission"));
+        // BDR_REWIRE: dev mode (or the legacy BDR_DEV_START_AT_SCAN screenshot
+        // hook) lets Complete Mission fire without a finished scan run.
         const bool dev_force_complete =
+            kDevMode ||
             qEnvironmentVariable("BDR_DEV_START_AT_SCAN").trimmed() == QStringLiteral("1");
         const bool can_complete =
             dev_force_complete ||
@@ -10350,7 +10355,10 @@ void PlannerScreen::notifyScanDiscarded(bool success) {
 
 void PlannerScreen::onCompleteMissionClicked(const char* trigger) {
     const SessionCache* cache = activeSessionPtr();
+    // BDR_REWIRE: dev mode (or the legacy BDR_DEV_START_AT_SCAN screenshot
+    // hook) lets Complete Mission fire without a finished scan run.
     const bool dev_force_complete =
+        kDevMode ||
         qEnvironmentVariable("BDR_DEV_START_AT_SCAN").trimmed() == QStringLiteral("1");
     const bool can_complete =
         dev_force_complete ||

@@ -1,4 +1,5 @@
 #include "startup_screen.hpp"
+#include "dev_flags.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
 
@@ -26,8 +27,10 @@ namespace f2c_cpp {
 
 namespace {
 
-// Temporary passthrough: allow launching the dashboard without running diagnostics.
-constexpr bool kEnableLaunchDashboardPassthrough = true;
+// BDR_REWIRE: Stage 2 Continue passthrough — allow launching the dashboard
+// without a passing preflight report. Now folded under the unified dev-mode
+// flag (was hardcoded `true`), so a Release build re-asserts the gate.
+constexpr bool kEnableLaunchDashboardPassthrough = kDevMode;
 
 QString trimmed(const QString& s) {
     return s.trimmed();

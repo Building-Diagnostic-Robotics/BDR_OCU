@@ -1,4 +1,5 @@
 #include "setup_screen.hpp"
+#include "dev_flags.hpp"
 #include "robot_login.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
@@ -677,6 +678,19 @@ void SetupScreen::submit() {
                 .arg(robot_id)
                 .arg(resolved_host.isEmpty() ? QStringLiteral("?") : resolved_host)
                 .arg(login_error));
+        // BDR_REWIRE: dev mode still ATTEMPTS the SSH login above, but a
+        // failure no longer blocks advancing to Stage 2 so the staged flow
+        // can be walked offline. Compiled out in Release.
+        if constexpr (kDevMode) {
+            update::log::warn(
+                "setup",
+                QStringLiteral("BDR_DEV_MODE: advancing past login failure for robot_id=%1")
+                    .arg(robot_id));
+            QSettings settings(kSettingsOrgName, kSettingsAppName);
+            settings.setValue("setup/robot_id", robot_id);
+            emit loginSubmitted(robot_id, access_code);
+            return;
+        }
         if (lbl_error_) {
             lbl_error_->setText(mapLoginErrorForOperator(login_error));
             lbl_error_->setVisible(true);

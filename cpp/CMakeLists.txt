@@ -44,6 +44,18 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# BDR_REWIRE: Unified dev-mode gate bypass (see cpp/include/dev_flags.hpp and
+# docs/DEV_BYPASSES.md). OFF by default. Compiled in ONLY for non-Release build
+# types so a Release .deb can never carry the bypass. Enabling it on a Release
+# build is a hard configure error.
+option(BDR_DEV_MODE "Bypass operational gates for offline UI testing (non-Release only)" OFF)
+if(BDR_DEV_MODE AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(FATAL_ERROR
+        "BDR_DEV_MODE=ON is forbidden with CMAKE_BUILD_TYPE=Release. "
+        "Dev mode bypasses operational gates and must never ship. "
+        "Use -DCMAKE_BUILD_TYPE=Debug (or RelWithDebInfo) to enable it.")
+endif()
+
 # Compiler flags
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
@@ -267,6 +279,13 @@ target_link_libraries(bdr_coverage_planner
     Eigen3::Eigen
     ${GST_LIBRARIES}
 )
+
+# BDR_REWIRE: define BDR_DEV_MODE so dev_flags.hpp's kDevMode is true. Only ever
+# reached for non-Release builds (guarded above).
+if(BDR_DEV_MODE)
+    target_compile_definitions(bdr_coverage_planner PRIVATE BDR_DEV_MODE)
+    message(STATUS "BDR_DEV_MODE=ON — operational gates bypassed (DEV BUILD, do not ship)")
+endif()
 
 # Link Fields2Cover if found
 if(Fields2Cover_FOUND)

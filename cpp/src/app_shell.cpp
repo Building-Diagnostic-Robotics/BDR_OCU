@@ -50,6 +50,7 @@
 #include "components/update_banner.hpp"
 #include "components/update_modal.hpp"
 #include "dashboard_screen.hpp"
+#include "dev_flags.hpp"
 #include "exploration_screen.hpp"
 #include "planner_screen.hpp"
 #include "robot_registry.hpp"
@@ -877,6 +878,12 @@ void AppShellWindow::goToStage4() {
     // would stay at "—%" until the dashboard's NEXT publish, which
     // could be ≥1 s away depending on when the operator transitioned.
     stage4_->setTopBatteryState(last_battery_pct_, last_battery_stale_);
+    // BDR_REWIRE: in dev mode the operator hasn't necessarily launched the
+    // robot or saved a map, so unlock the "Open Mission Planner" button on
+    // Stage 4 entry to keep the 4 -> 5 path walkable. Compiled out in Release.
+    if constexpr (kDevMode) {
+        stage4_->setPlanningEnabled(true);
+    }
 }
 
 void AppShellWindow::goToStage5() {
@@ -1874,15 +1881,25 @@ void AppShellWindow::onExplorationFinishSaveMapRequested() {
 
 void AppShellWindow::onExplorationStartPlanningRequested() {
     if (latest_saved_map_local_path_.isEmpty()) {
-        if (stage4_) {
-            // TEMP(planner-preview): allow entering Mission Planner without a
-            // downloaded tilt-corrected map so the planner UI can be reviewed.
-            // Restore the blocking return after planner validation is complete.
-            stage4_->setLaunchProgress(100, "Opening Mission Planner preview without a saved map.");
-            stage4_->setLaunchDiagnostics(
-                buildExplorationDiagnostics(
-                    "Planner preview override active: proceeding without a downloaded "
-                    "tilt-corrected map"));
+        // BDR_REWIRE: dev mode lets the operator enter Mission Planner without
+        // a downloaded tilt-corrected map so the planner UI can be reviewed
+        // offline. In Release this blocks and returns (no map -> no planner).
+        if constexpr (kDevMode) {
+            if (stage4_) {
+                stage4_->setLaunchProgress(100, "Opening Mission Planner preview without a saved map.");
+                stage4_->setLaunchDiagnostics(
+                    buildExplorationDiagnostics(
+                        "Planner preview override active (BDR_DEV_MODE): proceeding "
+                        "without a downloaded tilt-corrected map"));
+            }
+        } else {
+            if (stage4_) {
+                stage4_->setLaunchProgress(100, "Save a map before opening Mission Planner.");
+                stage4_->setLaunchDiagnostics(
+                    buildExplorationDiagnostics(
+                        "Open Mission Planner blocked: no tilt-corrected map saved yet"));
+            }
+            return;
         }
     }
     goToStage5();
@@ -1972,7 +1989,10 @@ void AppShellWindow::onPlannerScanStartRequested(double speed_mps) {
     // If we don't gate here the operator gets a scan that records GPR
     // + rosbag + odom but ZERO visual frames, and won't notice until
     // post-mission inspection.
-    if (isUdcDeadOrWedged()) {
+    // BDR_REWIRE: dev mode does not hard-block Start Scan on a dead/wedged
+    // UDC — the rest of the chain (metadata push, autonomy enable) is still
+    // attempted. Compiled out in Release.
+    if (!kDevMode && isUdcDeadOrWedged()) {
         QMessageBox box(this);
         box.setWindowTitle(QStringLiteral("Cannot start scan"));
         box.setIcon(QMessageBox::Critical);
@@ -2027,7 +2047,10 @@ void AppShellWindow::onPlannerScanStartRequested(double speed_mps) {
     sendDataCollectorSessionMetadata(
         building_name, operator_name, units_preference,
         [this, speed_mps](bool ok) {
-            if (!ok) {
+            // BDR_REWIRE: dev mode still ATTEMPTS the metadata push, but a
+            // failure no longer hard-blocks arming autonomy. Compiled out in
+            // Release (where a failed push always aborts the scan).
+            if (!ok && !kDevMode) {
                 return;
             }
             sendControllerMaxLinearVelocity(speed_mps);
@@ -4086,6 +4109,12 @@ bool AppShellWindow::isUdcDeadOrWedged() const {
 }
 
 bool AppShellWindow::isRobotLinkOffline() const {
+    // BDR_REWIRE: dev mode never reports the link as offline, so Stage 4/5
+    // controls stay live even when the (still-armed) monitor sees stale
+    // topics. Compiled out in Release.
+    if constexpr (kDevMode) {
+        return false;
+    }
     // Hard-block RPCs in BOTH true OFFLINE and the RECONNECTING soft
     // window (operator confirmed Q1=a).  An RPC fired during
     // RECONNECTING would race with the Zenoh peer-rediscovery and
@@ -4100,6 +4129,11 @@ bool AppShellWindow::isRobotLinkOffline() const {
 }
 
 bool AppShellWindow::isRobotLinkUnreachable() const {
+    // BDR_REWIRE: dev mode never reports the link as unreachable (keeps the
+    // Complete Mission normal path + E-Stop live). Compiled out in Release.
+    if constexpr (kDevMode) {
+        return false;
+    }
     // Strict variant — only true OFFLINE.  Used by the Complete
     // Mission flow so RECONNECTING (probe says host is up) doesn't
     // pop the OfflineFinalizeDialog when a few seconds of patience
