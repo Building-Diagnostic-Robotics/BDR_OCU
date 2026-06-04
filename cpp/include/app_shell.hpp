@@ -141,6 +141,11 @@ private slots:
 
 private:
     void setDarkMode(bool dark_mode);
+    /// Apply the current theme's window background to a banner margin host
+    /// (object-name-scoped so it doesn't cascade into the banner card).
+    /// Used by both the OTA and rollback banner hosts so the title-bar band
+    /// behind the floating window controls matches the active theme.
+    void applyBannerHostTheme(QWidget* host);
     /// Build a fresh GateState (battery, transfers, uploads, mission) and
     /// open the OTA "What's New" modal centered on this window. Called
     /// from the UpdateBanner::viewDetailsRequested handler. The modal is
@@ -390,9 +395,17 @@ private:
     // across stage transitions; checker polls GitHub Releases on a 5-min
     // cadence and toggles banner visibility.
     UpdateBanner* update_banner_ = nullptr;
+    /// Margin host wrapping `update_banner_`. Tracked so it can be hidden
+    /// alongside the banner — otherwise its reserved top margin leaves a
+    /// thin strip at the top of the window when no update is available.
+    QWidget* update_banner_host_ = nullptr;
     /// Phase 9 advisory banner. Created lazily in `showRolledBackBanner`
     /// because the typical operator session never sees it.
     RollbackBanner* rollback_banner_ = nullptr;
+    /// Margin host wrapping `rollback_banner_`. Tracked (like
+    /// `update_banner_host_`) so its themed background follows live theme
+    /// toggles instead of leaving an unthemed white band at the top.
+    QWidget* rollback_banner_host_ = nullptr;
     update::UpdateChecker* update_checker_ = nullptr;
 
     QWidget* central_root_ = nullptr;

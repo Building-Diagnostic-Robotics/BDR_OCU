@@ -58,6 +58,7 @@
 #include "settings_constants.hpp"
 #include "startup_screen.hpp"
 #include "transfer_manager.hpp"
+#include "ui_theme_constants.hpp"
 #include "units_system.hpp"
 #include "upload_dialog.hpp"
 #include "update/update_checker.hpp"
@@ -80,6 +81,13 @@ constexpr int kCorrectedMapRetryCount = 1;
 constexpr int kCorrectedMapRetryDelayMs = 750;
 constexpr int kOdriveAxisStateIdle = 1;
 constexpr int kOdriveAxisStateClosedLoopControl = 8;
+
+// Height of the custom title-bar band along the top of the window where
+// the frameless min/max/close + theme-toggle controls float. Shared by
+// updateWindowControlsPosition() (vertical centering of the controls) and
+// the OTA banner host (so the banner drops below the controls instead of
+// sliding under them).
+constexpr int kTitleBarHeight = 53;
 
 QString sshUserHostSpec(const ResolvedRobotSshTarget& t) {
     const QString user =
@@ -346,14 +354,20 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     update_banner_->setDarkMode(dark_mode_);
     update_banner_->hide();
     {
-        // Wrap the banner in a thin margin row so it doesn't hug the window
-        // edge — keeps it readable at the top of the central root.
-        auto* banner_host = new QWidget(central_root_);
-        auto* banner_lay = new QHBoxLayout(banner_host);
-        banner_lay->setContentsMargins(12, 8, 12, 0);
+        // Wrap the banner in a margin row. The top margin clears the
+        // title-bar band so the banner drops BELOW the floating window
+        // controls instead of sliding under them. The host is hidden by
+        // default (and toggled with the banner) so its reserved margin
+        // doesn't leave a thin strip at the top when no update is available.
+        update_banner_host_ = new QWidget(central_root_);
+        update_banner_host_->setObjectName(QStringLiteral("UpdateBannerHost"));
+        applyBannerHostTheme(update_banner_host_);
+        auto* banner_lay = new QHBoxLayout(update_banner_host_);
+        banner_lay->setContentsMargins(12, kTitleBarHeight, 12, 0);
         banner_lay->setSpacing(0);
         banner_lay->addWidget(update_banner_);
-        root_layout->addWidget(banner_host);
+        update_banner_host_->hide();
+        root_layout->addWidget(update_banner_host_);
     }
 
     stack_ = new QStackedWidget(central_root_);
@@ -369,10 +383,14 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                                   QStringLiteral("update available: tag=%1 sha=%2")
                                       .arg(info.tag).arg(info.commitSha));
                 update_banner_->setVersionInfo(info);
+                if (update_banner_host_) update_banner_host_->show();
                 update_banner_->show();
             });
     connect(update_checker_, &update::UpdateChecker::noUpdateAvailable,
-            this, [this]() { update_banner_->hide(); });
+            this, [this]() {
+                update_banner_->hide();
+                if (update_banner_host_) update_banner_host_->hide();
+            });
     connect(update_checker_, &update::UpdateChecker::checkFailed,
             this, [](const QString& reason) {
                 update::log::warn("appshell",
@@ -736,12 +754,17 @@ void AppShellWindow::showRolledBackBanner(const QString& message) {
         auto* root_layout =
             qobject_cast<QVBoxLayout*>(central_root_->layout());
         if (root_layout) {
-            auto* host = new QWidget(central_root_);
-            auto* host_lay = new QHBoxLayout(host);
-            host_lay->setContentsMargins(12, 8, 12, 0);
+            rollback_banner_host_ = new QWidget(central_root_);
+            rollback_banner_host_->setObjectName(
+                QStringLiteral("RollbackBannerHost"));
+            applyBannerHostTheme(rollback_banner_host_);
+            auto* host_lay = new QHBoxLayout(rollback_banner_host_);
+            // Clear the title-bar band so the banner sits below the
+            // floating window controls instead of under them.
+            host_lay->setContentsMargins(12, kTitleBarHeight, 12, 0);
             host_lay->setSpacing(0);
             host_lay->addWidget(rollback_banner_);
-            root_layout->insertWidget(0, host);
+            root_layout->insertWidget(0, rollback_banner_host_);
         }
 
         connect(rollback_banner_, &RollbackBanner::dismissRequested,
@@ -922,13 +945,32 @@ void AppShellWindow::onThemeToggleChanged(bool dark_mode) {
 }
 
 
+void AppShellWindow::applyBannerHostTheme(QWidget* host) {
+    if (!host) {
+        return;
+    }
+    const QString name = host->objectName();
+    if (name.isEmpty()) {
+        return;
+    }
+    host->setStyleSheet(
+        QStringLiteral("QWidget#%1 { background-color: %2; }")
+            .arg(name, uiThemeTokens(dark_mode_).bg));
+}
+
 void AppShellWindow::setDarkMode(bool dark_mode) {
     dark_mode_ = dark_mode;
     if (update_banner_) {
         update_banner_->setDarkMode(dark_mode_);
     }
+    if (update_banner_host_) {
+        applyBannerHostTheme(update_banner_host_);
+    }
     if (rollback_banner_) {
         rollback_banner_->setDarkMode(dark_mode_);
+    }
+    if (rollback_banner_host_) {
+        applyBannerHostTheme(rollback_banner_host_);
     }
     if (stage1_) {
         stage1_->setDarkMode(dark_mode_);
@@ -985,6 +1027,9 @@ void AppShellWindow::showUpdateModal(const update::VersionInfo& info) {
                         .arg(until_ms));
                 if (update_banner_) {
                     update_banner_->hide();
+                }
+                if (update_banner_host_) {
+                    update_banner_host_->hide();
                 }
             });
 
@@ -1594,7 +1639,7 @@ void AppShellWindow::updateWindowControlsPosition() {
     const int margin = 24;
     window_controls_->adjustSize();
     const int x = std::max(0, central_root_->width() - window_controls_->width() - margin);
-    const int y = std::max(0, (53 - window_controls_->height()) / 2);
+    const int y = std::max(0, (kTitleBarHeight - window_controls_->height()) / 2);
     window_controls_->move(x, y);
     window_controls_->raise();
 
