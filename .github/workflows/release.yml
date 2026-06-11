@@ -204,6 +204,29 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Prune stale assets from 'latest'
+        # The 'latest' release is a rolling tag, but every build produces a
+        # uniquely-named .deb (version embeds build-number + short SHA), so
+        # softprops/action-gh-release (which only overwrites same-named files)
+        # would let old packages accumulate forever. Operators following the
+        # README's `--pattern '*.deb'` flow would then download/install an
+        # ambiguous (often stale) build. Delete all existing assets first so
+        # 'latest' always holds exactly one .deb + its .sha256. Safe: each
+        # build's package is also published under its immutable v-<sha> tag.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view latest -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release view latest -R "$GITHUB_REPOSITORY" \
+              --json assets -q '.assets[].name' \
+              | while read -r asset; do
+                  [ -n "$asset" ] || continue
+                  echo "Deleting stale asset: $asset"
+                  gh release delete-asset latest "$asset" \
+                    -R "$GITHUB_REPOSITORY" -y || true
+                done
+          fi
+
       - name: Publish rolling 'latest' release
         uses: softprops/action-gh-release@v2
         with:

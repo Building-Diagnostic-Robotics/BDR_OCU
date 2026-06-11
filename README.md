@@ -167,30 +167,34 @@ time.
 
 ### Recommended — install the published `.deb`
 
-Every push to `main` publishes a fresh package to the rolling `latest` tag.
+Every push to `main` publishes a fresh package to the rolling `latest`
+tag. CI prunes old assets, so `latest` holds exactly one `.deb` + its
+`.sha256` sidecar.
 
 ```bash
+cd /tmp
 gh release download latest \
   -R Building-Diagnostic-Robotics/BDR_OCU \
-  --pattern '*.deb'
+  --pattern 'bdr-coverage-planner_*_amd64.deb*' --clobber
 
-sudo dpkg -i ./bdr-coverage-planner_*_amd64.deb
-sudo apt -f install -y
+# Verify integrity, then install (apt resolves runtime deps in one step).
+sha256sum -c bdr-coverage-planner_*_amd64.deb.sha256
+sudo apt install -y ./bdr-coverage-planner_*_amd64.deb
 ```
 
 After the first install, **in-app OTA takes over** — every subsequent
 release surfaces as a banner on the Dashboard.
 
-If `gh` is unavailable:
+If `gh` is unavailable, resolve the single `latest` `.deb` URL via the API:
 
 ```bash
+cd /tmp
 DEB_URL=$(curl -sH "Authorization: token <PAT>" \
   https://api.github.com/repos/Building-Diagnostic-Robotics/BDR_OCU/releases/tags/latest \
-  | grep '"browser_download_url".*\.deb"' | cut -d'"' -f4)
+  | grep '"browser_download_url".*_amd64\.deb"' | cut -d'"' -f4)
 
-wget --header="Authorization: token <PAT>" "$DEB_URL"
-sudo dpkg -i ./bdr-coverage-planner_*_amd64.deb
-sudo apt -f install -y
+curl -L -H "Authorization: token <PAT>" -o bdr-coverage-planner_amd64.deb "$DEB_URL"
+sudo apt install -y ./bdr-coverage-planner_amd64.deb
 ```
 
 ### Build from source
