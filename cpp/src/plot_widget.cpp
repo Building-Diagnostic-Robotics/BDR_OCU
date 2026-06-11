@@ -22,6 +22,22 @@
 
 namespace f2c_cpp {
 
+namespace {
+// Density-raster resolution envelope. The larger data axis maps to
+// kPointCloudProjectionMaxDim px; the shorter axis is scaled to preserve
+// aspect ratio (clamped to kPointCloudProjectionMinDim). Matches the legacy
+// planner so the rendered cloud looks identical.
+constexpr int kPointCloudProjectionMaxDim = 4096;
+constexpr int kPointCloudProjectionMinDim = 64;
+
+// Per-pixel alpha envelope for the density modulation. A pixel hit by a
+// single point is faint; the densest pixels are near-opaque. kFlatAlpha is
+// used when every occupied pixel has the same count (no contrast to scale).
+constexpr int kSingleHitAlpha = 120;
+constexpr int kFlatAlpha = 170;
+constexpr int kMaxHitAlpha = 235;
+}  // namespace
+
 // =============================================================================
 // PlotWidget Implementation
 // =============================================================================
@@ -42,6 +58,7 @@ PlotWidget::PlotWidget(QWidget* parent)
 
 void PlotWidget::setPoints(const std::vector<Point2D>& points) {
     points_ = points;
+    rebuildPointCloudImage();
     updateDataBounds();
     update();
 }
@@ -209,6 +226,9 @@ void PlotWidget::setDarkMode(bool enabled) {
         pal.setColor(QPalette::WindowText, Qt::black);
     }
     setPalette(pal);
+    // Cloud color is theme-dependent — re-rasterize so the density image
+    // tracks the active theme.
+    rebuildPointCloudImage();
     update();
 }
 
@@ -236,6 +256,9 @@ void PlotWidget::setPlannerPreviewMode(bool enabled) {
         pal.setColor(QPalette::WindowText, Qt::black);
     }
     setPalette(pal);
+    // Cloud color differs between planner-preview and standalone modes —
+    // re-rasterize so the density image matches the active mode.
+    rebuildPointCloudImage();
     update();
 }
 
@@ -261,6 +284,8 @@ double PlotWidget::distanceToLineSegment(const QPointF& mouse, const QPointF& p1
 
 void PlotWidget::clearAll() {
     points_.clear();
+    point_cloud_image_ = QImage();
+    point_cloud_image_bounds_ = QRectF();
     polygon_.clear();
     roi_.clear();
     obstacles_.clear();
@@ -288,7 +313,12 @@ void PlotWidget::clearAll() {
     update();
 }
 
-void PlotWidget::clearPoints() { points_.clear(); update(); }
+void PlotWidget::clearPoints() {
+    points_.clear();
+    point_cloud_image_ = QImage();
+    point_cloud_image_bounds_ = QRectF();
+    update();
+}
 void PlotWidget::clearPolygon() { polygon_.clear(); update(); }
 void PlotWidget::clearROI() { roi_.clear(); update(); }
 void PlotWidget::clearObstacles() {
@@ -437,6 +467,148 @@ void PlotWidget::updateDataBounds() {
     data_max_y_ += margin_y;
 }
 
+void PlotWidget::rebuildPointCloudImage() {
+    point_cloud_image_ = QImage();
+    point_cloud_image_bounds_ = QRectF();
+    if (points_.empty()) {
+        return;
+    }
+
+    double min_x = std::numeric_limits<double>::max();
+    double min_y = std::numeric_limits<double>::max();
+    double max_x = std::numeric_limits<double>::lowest();
+    double max_y = std::numeric_limits<double>::lowest();
+    for (const auto& p : points_) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y)) {
+            continue;
+        }
+        min_x = std::min(min_x, p.x);
+        max_x = std::max(max_x, p.x);
+        min_y = std::min(min_y, p.y);
+        max_y = std::max(max_y, p.y);
+    }
+    if (min_x > max_x || min_y > max_y) {
+        return;
+    }
+    if (std::abs(max_x - min_x) < 1e-6) {
+        min_x -= 0.5;
+        max_x += 0.5;
+    }
+    if (std::abs(max_y - min_y) < 1e-6) {
+        min_y -= 0.5;
+        max_y += 0.5;
+    }
+
+    const double range_x = max_x - min_x;
+    const double range_y = max_y - min_y;
+    const double max_range = std::max(range_x, range_y);
+    if (max_range < 1e-9) {
+        return;
+    }
+    const int width = std::clamp(
+        static_cast<int>(std::ceil((range_x / max_range) * kPointCloudProjectionMaxDim)),
+        kPointCloudProjectionMinDim, kPointCloudProjectionMaxDim);
+    const int height = std::clamp(
+        static_cast<int>(std::ceil((range_y / max_range) * kPointCloudProjectionMaxDim)),
+        kPointCloudProjectionMinDim, kPointCloudProjectionMaxDim);
+
+    QImage image(width, height, QImage::Format_ARGB32);
+    if (image.isNull()) {
+        return;
+    }
+    image.fill(Qt::transparent);
+
+    std::vector<unsigned int> pixel_counts(
+        static_cast<size_t>(width) * static_cast<size_t>(height), 0u);
+    unsigned int max_count = 0u;
+    for (const auto& p : points_) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y)) {
+            continue;
+        }
+        const int u = std::clamp(
+            static_cast<int>(std::llround(((p.x - min_x) / range_x) * (width - 1))),
+            0, width - 1);
+        const int v = std::clamp(
+            static_cast<int>(std::llround(((max_y - p.y) / range_y) * (height - 1))),
+            0, height - 1);
+        const size_t idx = static_cast<size_t>(v) * static_cast<size_t>(width) +
+                           static_cast<size_t>(u);
+        const unsigned int count = ++pixel_counts[idx];
+        max_count = std::max(max_count, count);
+    }
+    if (max_count == 0u) {
+        return;
+    }
+
+    // Log-percentile contrast stretch so a few high-density pixels don't wash
+    // the rest out (clamped to the 2nd..98th percentile of occupied pixels).
+    std::vector<unsigned int> occupied_counts;
+    occupied_counts.reserve(pixel_counts.size() / 8);
+    for (unsigned int count : pixel_counts) {
+        if (count > 0u) {
+            occupied_counts.push_back(count);
+        }
+    }
+    auto percentileCount = [&occupied_counts](double percentile) -> unsigned int {
+        if (occupied_counts.empty()) {
+            return 1u;
+        }
+        const size_t percentile_idx = std::min(
+            occupied_counts.size() - 1,
+            static_cast<size_t>(
+                std::floor(percentile * static_cast<double>(occupied_counts.size() - 1))));
+        std::nth_element(occupied_counts.begin(),
+                         occupied_counts.begin() + static_cast<std::ptrdiff_t>(percentile_idx),
+                         occupied_counts.end());
+        return std::max(1u, occupied_counts[percentile_idx]);
+    };
+    const unsigned int low_count = percentileCount(0.02);
+    const unsigned int high_count = std::max(low_count, percentileCount(0.98));
+    const double log_low = std::log1p(static_cast<double>(low_count - 1u));
+    const double log_high = std::log1p(static_cast<double>(high_count - 1u));
+    const double log_range = std::max(1e-6, log_high - log_low);
+    const bool has_count_contrast = high_count > low_count;
+
+    // Cloud color: keep the planner-preview teal/green identity; neutral gray
+    // elsewhere so colored overlays (obstacles, ROI, path) stay legible.
+    int cr;
+    int cg;
+    int cb;
+    if (planner_preview_mode_) {
+        cr = dark_mode_ ? 0 : 5;
+        cg = dark_mode_ ? 212 : 150;
+        cb = dark_mode_ ? 146 : 105;
+    } else {
+        const int gray = dark_mode_ ? 210 : 45;
+        cr = cg = cb = gray;
+    }
+
+    for (int v = 0; v < height; ++v) {
+        QRgb* row = reinterpret_cast<QRgb*>(image.scanLine(v));
+        for (int u = 0; u < width; ++u) {
+            const unsigned int count =
+                pixel_counts[static_cast<size_t>(v) * static_cast<size_t>(width) +
+                             static_cast<size_t>(u)];
+            if (count == 0u) {
+                continue;
+            }
+            int alpha = kFlatAlpha;
+            if (has_count_contrast) {
+                const double log_count = std::log1p(static_cast<double>(count - 1u));
+                const double t = std::clamp((log_count - log_low) / log_range, 0.0, 1.0);
+                alpha = kSingleHitAlpha +
+                        static_cast<int>(std::round(
+                            t * static_cast<double>(kMaxHitAlpha - kSingleHitAlpha)));
+            }
+            row[u] = qRgba(cr, cg, cb, std::clamp(alpha, kSingleHitAlpha, kMaxHitAlpha));
+        }
+    }
+
+    point_cloud_image_ = std::move(image);
+    point_cloud_image_bounds_ =
+        QRectF(QPointF(min_x, min_y), QPointF(max_x, max_y)).normalized();
+}
+
 void PlotWidget::fitToData() {
     updateDataBounds();
     
@@ -470,7 +642,13 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     
     QPainter painter(this);
-    const bool dense_planner_points = planner_preview_mode_ && points_.size() > 60000;
+    const bool has_cloud_raster =
+        !point_cloud_image_.isNull() && point_cloud_image_bounds_.isValid();
+    // Only the discrete-point fallback needs antialiasing disabled for dense
+    // clouds; when the raster is present we draw a single image, so keep
+    // antialiasing on for the vector overlays.
+    const bool dense_planner_points =
+        planner_preview_mode_ && !has_cloud_raster && points_.size() > 60000;
     painter.setRenderHint(QPainter::Antialiasing, !dense_planner_points);
     
     // Background
@@ -499,8 +677,17 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
         }
     }
     
-    // Draw points
-    if (!points_.empty()) {
+    // Draw the point cloud. Prefer the cached density raster (one blit, scales
+    // with zoom/pan); fall back to discrete points only when the raster is
+    // unavailable (no points, or a failed image allocation).
+    if (has_cloud_raster) {
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        const QPointF top_left = worldToScreen(
+            Point2D(point_cloud_image_bounds_.left(), point_cloud_image_bounds_.bottom()));
+        const QPointF bottom_right = worldToScreen(
+            Point2D(point_cloud_image_bounds_.right(), point_cloud_image_bounds_.top()));
+        painter.drawImage(QRectF(top_left, bottom_right).normalized(), point_cloud_image_);
+    } else if (!points_.empty()) {
         const QColor point_color =
             planner_preview_mode_
                 ? (dark_mode_ ? QColor(0, 212, 146, points_.size() > 140000 ? 160 : 210)

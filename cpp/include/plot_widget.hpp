@@ -2,8 +2,10 @@
 
 #include "coverage_pipeline.hpp"
 
+#include <QImage>
 #include <QPoint>
 #include <QPointF>
+#include <QRectF>
 #include <QWidget>
 
 #include <optional>
@@ -123,6 +125,12 @@ protected:
 
 private:
     std::vector<Point2D> points_;
+    // Cached density raster of `points_` (a responsive base layer drawn in
+    // place of per-point ellipses). Rebuilt only when `points_` or the theme
+    // change, so zoom/pan is a single blit instead of re-drawing every point.
+    // `point_cloud_image_bounds_` is the world-space rect the image maps onto.
+    QImage point_cloud_image_;
+    QRectF point_cloud_image_bounds_;
     Polygon2D polygon_;
     Polygon2D roi_;
     std::vector<Obstacle2D> obstacles_;
@@ -180,6 +188,9 @@ private:
     QPointF worldToScreen(const Point2D& p) const;
     Point2D screenToWorld(const QPointF& p) const;
     void updateDataBounds();
+    // Rasterize `points_` into `point_cloud_image_` (density-modulated alpha,
+    // theme-aware color). No-op (clears the image) when there are no points.
+    void rebuildPointCloudImage();
     void fitToData();
     double distanceToLineSegment(const QPointF& mouse, const QPointF& p1, const QPointF& p2) const;
 };
