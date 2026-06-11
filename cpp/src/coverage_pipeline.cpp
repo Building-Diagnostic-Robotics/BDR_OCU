@@ -371,23 +371,51 @@ static bool buildEffectiveCellsFromROIAndObstacles(
     }
 
     if (obstacles && !obstacles->empty()) {
+        // Union all obstacles into a single multipolygon BEFORE subtracting.
+        // Sequential per-obstacle differencing aborted the whole run whenever
+        // one obstacle ring was self-touching/overlapping (a common output of
+        // the occupancy-grid contour extractor when two obstacle blobs are
+        // adjacent). Unioning resolves overlaps and self-touches into valid,
+        // disjoint polygons; an individual obstacle that is still invalid after
+        // bg::correct is skipped (logged) rather than failing the generation.
+        BgMultiPolygon obstacles_union;
         for (size_t i = 0; i < obstacles->size(); ++i) {
             const auto& obs_in = obstacles->at(i);
             Polygon2D obs_outer_clean = sanitizePolygon2D(obs_in.outer);
             if (obs_outer_clean.size() < 3) {
-                error = "Obstacle polygon #" + std::to_string(i + 1) + " is too small (need >= 3 vertices)";
-                return false;
+                std::cerr << "[Coverage] Skipping obstacle #" << (i + 1)
+                          << " (degenerate: < 3 vertices)\n";
+                continue;
             }
             Obstacle2D obs_clean{obs_outer_clean, obs_in.holes};
             BgPolygon obs_bg = toBgPolygon(obs_clean);
             {
                 std::string why;
                 if (!bgValidate(obs_bg, why)) {
-                    error = "Obstacle polygon #" + std::to_string(i + 1) + " is invalid: " + why;
-                    return false;
+                    std::cerr << "[Coverage] Skipping invalid obstacle #" << (i + 1)
+                              << " (" << why << ")\n";
+                    continue;
                 }
             }
-            work = bgDifference(work, obs_bg);
+            BgMultiPolygon merged;
+            bg::union_(obstacles_union, obs_bg, merged);
+            for (auto& p : merged) {
+                bg::correct(p);
+            }
+            obstacles_union = std::move(merged);
+        }
+
+        if (!obstacles_union.empty()) {
+            BgMultiPolygon after;
+            bg::difference(work, obstacles_union, after);
+            BgMultiPolygon kept;
+            for (auto& p : after) {
+                bg::correct(p);
+                if (std::fabs(bg::area(p)) > kMinValidArea) {
+                    kept.push_back(p);
+                }
+            }
+            work = std::move(kept);
             if (work.empty()) {
                 error = "Obstacles removed all usable area";
                 return false;
@@ -1108,6 +1136,55 @@ void polygonBounds(const Polygon2D& poly,
         min_y = std::min(min_y, p.y);
         max_y = std::max(max_y, p.y);
     }
+}
+
+std::vector<Obstacle2D> clipObstacleToPolygon(const Obstacle2D& obstacle,
+                                              const Polygon2D& clip) {
+    std::vector<Obstacle2D> out;
+
+    Polygon2D outer_clean = sanitizePolygon2D(obstacle.outer);
+    if (outer_clean.size() < 3) {
+        return out;
+    }
+    Polygon2D clip_clean = sanitizePolygon2D(clip);
+    if (clip_clean.size() < 3) {
+        out.push_back(obstacle);  // no usable clip region -> passthrough
+        return out;
+    }
+
+    BgPolygon obs_bg = toBgPolygon(obstacle);
+    BgPolygon clip_bg = toBgPolygon(clip_clean);
+    {
+        std::string why;
+        if (!bgValidate(obs_bg, why) || !bgValidate(clip_bg, why)) {
+            // Can't safely clip; fall back to the original obstacle so coverage
+            // and display still see it (the pipeline difference will trim it).
+            out.push_back(obstacle);
+            return out;
+        }
+    }
+
+    BgMultiPolygon clipped;
+    bg::intersection(obs_bg, clip_bg, clipped);
+    for (auto& p : clipped) {
+        bg::correct(p);
+        if (std::fabs(bg::area(p)) <= kMinValidArea) {
+            continue;
+        }
+        Obstacle2D piece;
+        piece.outer = bgRingToPolygon2D(p.outer());
+        if (piece.outer.size() < 3) {
+            continue;
+        }
+        for (const auto& inner_bg : p.inners()) {
+            Polygon2D hole = bgRingToPolygon2D(inner_bg);
+            if (hole.size() >= 3) {
+                piece.holes.push_back(std::move(hole));
+            }
+        }
+        out.push_back(std::move(piece));
+    }
+    return out;
 }
 
 // =============================================================================

@@ -218,6 +218,18 @@ void polygonBounds(const Polygon2D& poly,
                    double& min_x, double& min_y, 
                    double& max_x, double& max_y);
 
+/**
+ * @brief Clip an obstacle to a (possibly concave) clip polygon.
+ *
+ * Returns the obstacle pieces that fall inside @p clip (interior holes
+ * preserved). May return zero pieces (obstacle entirely outside the clip)
+ * or multiple pieces (obstacle split by a concave clip boundary). If @p clip
+ * has < 3 vertices the obstacle is returned unchanged. Concave-safe (uses
+ * Boost.Geometry intersection, not convex-only clipping).
+ */
+std::vector<Obstacle2D> clipObstacleToPolygon(const Obstacle2D& obstacle,
+                                              const Polygon2D& clip);
+
 // =============================================================================
 // Coverage Generation
 // =============================================================================
