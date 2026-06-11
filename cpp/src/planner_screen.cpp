@@ -93,13 +93,12 @@ inline double csfSensitivityToClassThreshold(double sensitivity) {
     return kThreshMid + ((s - 50.0) / 50.0) * (kThreshHigh - kThreshMid);
 }
 
+// Vertical padding (m) added above/below the robot trail's Z extent when
+// auto-cropping the displayed cloud to the traversed scan band. Mirrors the
+// legacy coverage GUI's trail-Z display crop tolerance.
+constexpr double kTrailDisplayCropToleranceM = 0.40;
+
 constexpr size_t kPreviewTargetPointCount = 180000;
-constexpr double kVoxelSizeMin = 0.01;
-constexpr double kVoxelSizeMax = 0.20;
-constexpr double kZFilterMin = -0.50;
-constexpr double kZFilterMax = 0.50;
-constexpr double kHullAlphaMin = 0.10;
-constexpr double kHullAlphaMax = 3.00;
 constexpr double kCoveragePathSpacingMin = 0.20;
 constexpr double kCoveragePathSpacingMax = 1.00;
 constexpr double kCoverageHeadlandMin = 0.10;
@@ -329,66 +328,6 @@ private:
     qreal radius_;
 };
 
-bool sanitizePlannerParameters(double* voxel_size,
-                               double* z_min,
-                               double* z_max,
-                               double* alpha,
-                               QStringList* warnings = nullptr) {
-    auto sanitize_value =
-        [warnings](double* value,
-                   double fallback,
-                   double minimum,
-                   double maximum,
-                   const QString& warning_text) {
-            bool adjusted = false;
-            if (!std::isfinite(*value)) {
-                *value = fallback;
-                adjusted = true;
-            }
-            const double clamped = std::max(minimum, std::min(maximum, *value));
-            if (*value != clamped) {
-                *value = clamped;
-                adjusted = true;
-            }
-            if (adjusted && warnings) {
-                warnings->append(warning_text);
-            }
-            return adjusted;
-        };
-
-    bool adjusted = false;
-    adjusted |= sanitize_value(voxel_size,
-                               0.05,
-                               kVoxelSizeMin,
-                               kVoxelSizeMax,
-                               QStringLiteral("Voxel size was adjusted into 0.01m-0.20m."));
-    adjusted |= sanitize_value(z_min,
-                               -0.10,
-                               kZFilterMin,
-                               kZFilterMax,
-                               QStringLiteral("Z Min was adjusted into -0.50m-0.50m."));
-    adjusted |= sanitize_value(z_max,
-                               0.10,
-                               kZFilterMin,
-                               kZFilterMax,
-                               QStringLiteral("Z Max was adjusted into -0.50m-0.50m."));
-    adjusted |= sanitize_value(alpha,
-                               1.50,
-                               kHullAlphaMin,
-                               kHullAlphaMax,
-                               QStringLiteral("Alpha was adjusted into 0.10-3.00."));
-
-    if (*z_min > *z_max) {
-        *z_max = *z_min;
-        adjusted = true;
-        if (warnings) {
-            warnings->append(QStringLiteral("Z Max was raised to match Z Min."));
-        }
-    }
-
-    return adjusted;
-}
-
 PointCloudPtr makeFinitePointCloud(const PointCloudPtr& cloud) {
     if (!cloud || cloud->empty()) {
         return cloud;
@@ -430,18 +369,6 @@ QString formatMeters(double value) {
     // CoverageConfig, QSettings, and the JSON exports — only the
     // label changes. See units_system.hpp.
     return units::formatLength(value, 2);
-}
-
-QString formatParameter(double value) {
-    return QStringLiteral("%1").arg(value, 0, 'f', 2);
-}
-
-QString formatPercent(double value) {
-    return QStringLiteral("%1%").arg(value, 0, 'f', 0);
-}
-
-QString formatFileSize(double value_mb) {
-    return QStringLiteral("%1 MB").arg(value_mb, 0, 'f', 1);
 }
 
 QString formatArea(double value_m2) {
@@ -701,11 +628,20 @@ double estimateAreaFromPointCloudBounds(const PointCloudPtr& cloud) {
     return width * height;
 }
 
-std::vector<Point2D> buildProjectedPointsFromCloud(const PointCloudPtr& cloud) {
+std::vector<Point2D> buildProjectedPointsFromCloud(
+    const PointCloudPtr& cloud,
+    const std::optional<std::pair<double, double>>& z_range = std::nullopt) {
     std::vector<Point2D> projected_points;
     if (!cloud || cloud->empty()) {
         return projected_points;
     }
+
+    const bool crop_z = z_range.has_value();
+    const double z_lo = crop_z ? z_range->first : 0.0;
+    const double z_hi = crop_z ? z_range->second : 0.0;
+    const auto in_band = [&](float z) {
+        return !crop_z || (std::isfinite(z) && z >= z_lo && z <= z_hi);
+    };
 
     const size_t total_points = cloud->points.size();
     const size_t stride = std::max<size_t>(
@@ -719,6 +655,9 @@ std::vector<Point2D> buildProjectedPointsFromCloud(const PointCloudPtr& cloud) {
         if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
             continue;
         }
+        if (!in_band(point.z)) {
+            continue;
+        }
         projected_points.emplace_back(point.x, point.y);
     }
 
@@ -727,26 +666,14 @@ std::vector<Point2D> buildProjectedPointsFromCloud(const PointCloudPtr& cloud) {
             if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
                 continue;
             }
+            if (!in_band(point.z)) {
+                continue;
+            }
             projected_points.emplace_back(point.x, point.y);
             break;
         }
     }
     return projected_points;
-}
-
-QString deriveQualityLabel(qsizetype raw_count, qsizetype processed_count, double voxel_size) {
-    if (raw_count <= 0 || processed_count <= 0) {
-        return QStringLiteral("--");
-    }
-
-    const double retained_ratio = static_cast<double>(processed_count) / static_cast<double>(raw_count);
-    if (retained_ratio >= 0.75 && voxel_size <= 0.04) {
-        return QStringLiteral("High");
-    }
-    if (retained_ratio >= 0.40 && voxel_size <= 0.10) {
-        return QStringLiteral("Medium");
-    }
-    return QStringLiteral("Low");
 }
 
 // Forward decl so the rotated variant can call into the standard renderer
@@ -1186,18 +1113,6 @@ void PlannerScreen::setDarkMode(bool dark_mode) {
     if (plot_) {
         plot_->setDarkMode(dark_mode_);
         plot_->setPlannerPreviewMode(true);
-    }
-    if (slider_voxel_) {
-        slider_voxel_->setDarkMode(dark_mode_);
-    }
-    if (slider_z_min_) {
-        slider_z_min_->setDarkMode(dark_mode_);
-    }
-    if (slider_z_max_) {
-        slider_z_max_->setDarkMode(dark_mode_);
-    }
-    if (slider_alpha_) {
-        slider_alpha_->setDarkMode(dark_mode_);
     }
     if (slider_coverage_path_spacing_) {
         slider_coverage_path_spacing_->setDarkMode(dark_mode_);
@@ -1787,10 +1702,6 @@ void PlannerScreen::applyStyle() {
         left_rail_->setStyleSheet(
             QStringLiteral("background: %1; border-right: 1px solid %2;").arg(left_surface, border));
     }
-    if (output_section_) {
-        output_section_->setStyleSheet(
-            QStringLiteral("background: transparent; border-top: 1px solid %1;").arg(border));
-    }
     for (QWidget* card_widget : output_cards_) {
         if (!card_widget) {
             continue;
@@ -1806,11 +1717,6 @@ void PlannerScreen::applyStyle() {
     }
     if (center_stage_) {
         center_stage_->setStyleSheet(QStringLiteral("background: %1;").arg(center_bg));
-    }
-    if (stats_chip_) {
-        stats_chip_->setStyleSheet(
-            QStringLiteral("background: %1; border: 1px solid %2; border-radius: 10px;")
-                .arg(card_soft, border));
     }
     if (footer_) {
         footer_->setStyleSheet(QStringLiteral("background: %1;").arg(header));
@@ -1880,64 +1786,11 @@ void PlannerScreen::applyStyle() {
                     .arg(accent));
         }
     }
-    if (lbl_stats_points_) {
-        lbl_stats_points_->setStyleSheet(
-            QStringLiteral("font-family: 'Liberation Mono'; font-size: 14px; font-weight: 400; "
-                           "color: %1; background: transparent;")
-                .arg(text));
-    }
-    if (lbl_stats_area_) {
-        lbl_stats_area_->setStyleSheet(
-            QStringLiteral("font-family: 'Liberation Mono'; font-size: 14px; font-weight: 400; "
-                           "color: %1; background: transparent;")
-                .arg(text));
-    }
-
     if (lbl_placeholder_title_) {
         lbl_placeholder_title_->setStyleSheet(
             QStringLiteral("font-family: 'Arimo'; font-size: 24px; font-weight: 700; color: %1; "
                            "background: transparent;")
                 .arg(title));
-    }
-    if (lbl_stage2_message_) {
-        lbl_stage2_message_->setStyleSheet(
-            QStringLiteral("font-family: 'Arimo'; font-size: 13px; font-weight: 400; color: %1; "
-                           "background: transparent;")
-                .arg(muted));
-    }
-    if (lbl_process_icon_) {
-        lbl_process_icon_->setPixmap(loadSvgPixmap(
-            QStringLiteral(":/assets/missionplanner/process_point_cloud.svg"), 16, 16, accent_text));
-    }
-    if (lbl_process_text_) {
-        lbl_process_text_->setStyleSheet(
-            QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 700; color: %1; "
-                           "background: transparent;")
-                .arg(accent_text));
-    }
-    if (lbl_hull_icon_) {
-        lbl_hull_icon_->setPixmap(loadSvgPixmap(
-            QStringLiteral(":/assets/missionplanner/compute_hull.svg"), 14, 14, neutral_button_text));
-    }
-    if (lbl_hull_text_) {
-        lbl_hull_text_->setStyleSheet(
-            QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 400; color: %1; "
-                           "background: transparent;")
-                .arg(neutral_button_text));
-    }
-    if (btn_process_) {
-        btn_process_->setStyleSheet(
-            QStringLiteral("QPushButton { background: %1; border: none; border-radius: 14px; } "
-                           "QPushButton:hover { background: %2; } "
-                           "QPushButton:disabled { background: %3; }")
-                .arg(accent, accent_hover, next_disabled));
-    }
-    if (btn_hull_) {
-        btn_hull_->setStyleSheet(
-            QStringLiteral("QPushButton { background: %1; border: 1px solid %2; border-radius: "
-                           "10px; } QPushButton:hover { border-color: %3; } "
-                           "QPushButton:disabled { background: %4; border-color: %2; }")
-                .arg(neutral_button_bg, neutral_button_border, tool_hover, neutral_button_disabled));
     }
     if (lbl_tool_zoom_in_icon_) {
         lbl_tool_zoom_in_icon_->setPixmap(loadSvgPixmap(
@@ -1967,18 +1820,6 @@ void PlannerScreen::applyStyle() {
                            "QPushButton:hover { background: %2; } "
                            "QPushButton:disabled { background: %3; }")
                 .arg(accent, accent_hover, next_disabled));
-    }
-    if (slider_voxel_) {
-        slider_voxel_->setDarkMode(dark_mode_);
-    }
-    if (slider_z_min_) {
-        slider_z_min_->setDarkMode(dark_mode_);
-    }
-    if (slider_z_max_) {
-        slider_z_max_->setDarkMode(dark_mode_);
-    }
-    if (slider_alpha_) {
-        slider_alpha_->setDarkMode(dark_mode_);
     }
     if (slider_coverage_path_spacing_) {
         slider_coverage_path_spacing_->setDarkMode(dark_mode_);
@@ -2044,10 +1885,29 @@ void PlannerScreen::setMapPath(const QString& map_path) {
     restoreCurrentSession();
 }
 
+std::optional<std::pair<double, double>> PlannerScreen::currentTrailZRange() const {
+    double z_lo = std::numeric_limits<double>::infinity();
+    double z_hi = -std::numeric_limits<double>::infinity();
+    for (const double z : live_robot_trail_z_) {
+        if (!std::isfinite(z)) {
+            continue;
+        }
+        z_lo = std::min(z_lo, z);
+        z_hi = std::max(z_hi, z);
+    }
+    if (!std::isfinite(z_lo) || !std::isfinite(z_hi)) {
+        return std::nullopt;
+    }
+    return std::make_pair(z_lo - kTrailDisplayCropToleranceM,
+                          z_hi + kTrailDisplayCropToleranceM);
+}
+
 void PlannerScreen::setLiveRobotTelemetry(const std::optional<PathState>& pose,
-                                          const std::vector<Point2D>& trail) {
+                                          const std::vector<Point2D>& trail,
+                                          const std::vector<double>& trail_z) {
     live_robot_pose_ = pose;
     live_robot_trail_ = trail;
+    live_robot_trail_z_ = trail_z;
     applyLiveOverlayToPlot();
     if (current_step_ != PlannerStep::Scan) {
         return;
@@ -2409,9 +2269,7 @@ void PlannerScreen::onNextClicked() {
     const bool should_complete_from_next =
         current_step_ == PlannerStep::Scan && cache &&
         (cache->scan_run_state == ScanRunState::Completed || scan_manual_override_engaged_once_);
-    if (current_step_ == PlannerStep::MapProcessing) {
-        navigateToStep(PlannerStep::CoveragePlanning);
-    } else if (current_step_ == PlannerStep::CoveragePlanning) {
+    if (current_step_ == PlannerStep::CoveragePlanning) {
         if (kBypassPlannerStageGates || (cache && cache->planning_complete)) {
             navigateToStep(PlannerStep::ScanSplitting);
         }
@@ -2452,23 +2310,8 @@ void PlannerScreen::loadPersistedParameters(SessionCache& cache) const {
     QSettings settings(kSettingsOrgName, kSettingsAppName);
     settings.beginGroup(QStringLiteral("planner/mission_planner"));
     settings.beginGroup(settingsGroupKey());
-    if (settings.contains(QStringLiteral("voxel_size"))) {
-        cache.voxel_size = settings.value(QStringLiteral("voxel_size")).toDouble();
-    }
-    if (settings.contains(QStringLiteral("z_min"))) {
-        cache.z_min = settings.value(QStringLiteral("z_min")).toDouble();
-    }
-    if (settings.contains(QStringLiteral("z_max"))) {
-        cache.z_max = settings.value(QStringLiteral("z_max")).toDouble();
-    }
-    if (settings.contains(QStringLiteral("alpha"))) {
-        cache.alpha = settings.value(QStringLiteral("alpha")).toDouble();
-    }
     if (settings.contains(QStringLiteral("coverage_pattern"))) {
         cache.coverage_pattern = settings.value(QStringLiteral("coverage_pattern")).toString();
-    }
-    if (settings.contains(QStringLiteral("coverage_scan_mode"))) {
-        cache.coverage_scan_mode = settings.value(QStringLiteral("coverage_scan_mode")).toString();
     }
     if (settings.contains(QStringLiteral("coverage_path_spacing"))) {
         cache.coverage_path_spacing =
@@ -2558,11 +2401,6 @@ void PlannerScreen::persistParameters() const {
     settings.beginGroup(settingsGroupKey());
     settings.setValue(QStringLiteral("robot_id"), robot_id_);
     settings.setValue(QStringLiteral("map_path"), map_path_);
-    settings.setValue(QStringLiteral("voxel_size"), cache->voxel_size);
-    settings.setValue(QStringLiteral("z_min"), cache->z_min);
-    settings.setValue(QStringLiteral("z_max"), cache->z_max);
-    settings.setValue(QStringLiteral("alpha"), cache->alpha);
-    settings.setValue(QStringLiteral("coverage_scan_mode"), cache->coverage_scan_mode);
     settings.setValue(QStringLiteral("coverage_pattern"), cache->coverage_pattern);
     settings.setValue(QStringLiteral("coverage_path_spacing"), cache->coverage_path_spacing);
     settings.setValue(QStringLiteral("coverage_headland_width"), cache->coverage_headland_width);
@@ -2607,9 +2445,6 @@ void PlannerScreen::ensureCoverageDefaults(SessionCache& cache) const {
     cache.coverage_scan_speed_mps =
         clampValue(cache.coverage_scan_speed_mps, kCoverageScanSpeedMin, kCoverageScanSpeedMax);
 
-    if (cache.coverage_scan_mode.isEmpty()) {
-        cache.coverage_scan_mode = QStringLiteral("complete");
-    }
     if (cache.coverage_pattern.isEmpty()) {
         cache.coverage_pattern = QStringLiteral("boustro");
     }
@@ -2735,56 +2570,6 @@ void PlannerScreen::applyPlanningPresetToSession(const PlanningPreset& p,
     }
 }
 
-void PlannerScreen::invalidateProcessingResult(const QString& status_message) {
-    SessionCache& cache = activeSession();
-    cache.processing_complete = false;
-    cache.hull_complete = false;
-    cache.processed_cloud.reset();
-    cache.processed_projected_points.clear();
-    cache.hull_polygon.clear();
-    cache.processed_point_count = 0;
-    cache.processed_area_estimate_m2 = 0.0;
-    cache.hull_area_m2 = 0.0;
-    cache.estimated_file_size_mb = 0.0;
-    cache.quality_label.clear();
-    invalidateCoverageResult();
-    cache.coverage_roi_polygon.clear();
-    cache.coverage_roi_drawing_active = false;
-    cache.coverage_obstacles_detected = false;
-    cache.coverage_obstacles.clear();
-    cache.coverage_drawing_active = false;
-
-    updatePreview();
-    updateOutputCards();
-    updateStatsChip();
-    updatePlaceholderMessage();
-    updateButtonsAndStatus();
-    if (!status_message.isEmpty()) {
-        setInlineStatus(status_message, QStringLiteral("#71717B"));
-    }
-}
-
-void PlannerScreen::invalidateHullResult(const QString& status_message) {
-    SessionCache& cache = activeSession();
-    cache.hull_complete = false;
-    cache.hull_polygon.clear();
-    cache.hull_area_m2 = 0.0;
-    invalidateCoverageResult();
-    cache.coverage_roi_polygon.clear();
-    cache.coverage_roi_drawing_active = false;
-    cache.coverage_obstacles_detected = false;
-    cache.coverage_obstacles.clear();
-    cache.coverage_drawing_active = false;
-
-    updatePreview();
-    updateStatsChip();
-    updatePlaceholderMessage();
-    updateButtonsAndStatus();
-    if (!status_message.isEmpty()) {
-        setInlineStatus(status_message, QStringLiteral("#71717B"));
-    }
-}
-
 void PlannerScreen::invalidateCoverageResult(const QString& status_message) {
     SessionCache& cache = activeSession();
     cache.planning_complete = false;
@@ -2803,18 +2588,6 @@ void PlannerScreen::invalidateCoverageResult(const QString& status_message) {
 
 void PlannerScreen::updateValueLabels() {
     const SessionCache& cache = activeSession();
-    if (lbl_voxel_value_) {
-        lbl_voxel_value_->setText(formatMeters(cache.voxel_size));
-    }
-    if (lbl_z_min_value_) {
-        lbl_z_min_value_->setText(formatMeters(cache.z_min));
-    }
-    if (lbl_z_max_value_) {
-        lbl_z_max_value_->setText(formatMeters(cache.z_max));
-    }
-    if (lbl_alpha_value_) {
-        lbl_alpha_value_->setText(formatParameter(cache.alpha));
-    }
     if (lbl_coverage_path_spacing_value_) {
         lbl_coverage_path_spacing_value_->setText(formatMeters(cache.coverage_path_spacing));
     }
@@ -2837,8 +2610,7 @@ void PlannerScreen::updatePreview() {
     }
 
     if (preview_bottom_overlay_stack_) {
-        preview_bottom_overlay_stack_->setCurrentWidget(
-            current_step_ == PlannerStep::MapProcessing ? stats_chip_ : coverage_legend_chip_);
+        preview_bottom_overlay_stack_->setCurrentWidget(coverage_legend_chip_);
     }
 
     const QFileInfo map_info(map_path_);
@@ -2853,161 +2625,43 @@ void PlannerScreen::updatePreview() {
     const bool was_showing_plot = preview_stack_->currentWidget() == plot_;
     plot_->clearAll();
 
-    if (current_step_ == PlannerStep::CoveragePlanning ||
-        current_step_ == PlannerStep::ScanSplitting ||
+    // Base layer is always the (trail-Z cropped) raw cloud raster. The
+    // operator-drawn ROI is the coverage boundary; there is no separate
+    // hull layer anymore.
+    plot_->setPoints(cache->raw_projected_points);
+    const bool has_roi = cache->coverage_roi_polygon.size() >= 3;
+    if (has_roi) {
+        plot_->setPolygon(cache->coverage_roi_polygon);
+    }
+
+    std::vector<Obstacle2D> preview_obstacles;
+    preview_obstacles.reserve(cache->coverage_obstacles.size());
+    for (const auto& obstacle : cache->coverage_obstacles) {
+        if (obstacle.geometry.outer.size() >= 3) {
+            preview_obstacles.push_back(obstacle.geometry);
+        }
+    }
+    if (!preview_obstacles.empty()) {
+        plot_->setObstacles(preview_obstacles);
+    }
+
+    if (cache->planning_complete) {
+        if (current_step_ != PlannerStep::Scan) {
+            plot_->setSwaths(cache->planned_swaths);
+            plot_->setRoute(cache->planned_route);
+        }
+        plot_->setPath(cache->planned_path);
+    }
+
+    if (current_step_ == PlannerStep::ScanSplitting ||
         current_step_ == PlannerStep::Scan) {
-        if (cache->processing_complete) {
-            plot_->setPoints(cache->processed_projected_points);
-        } else {
-            plot_->setPoints(cache->raw_projected_points);
-        }
-        if (cache->hull_complete) {
-            plot_->setPolygon(cache->hull_polygon);
-            if (cache->coverage_scan_mode == QStringLiteral("roi") &&
-                cache->coverage_roi_polygon.size() >= 3) {
-                plot_->setROI(cache->coverage_roi_polygon);
-            }
-            std::vector<Obstacle2D> preview_obstacles;
-            preview_obstacles.reserve(cache->coverage_obstacles.size());
-            for (const auto& obstacle : cache->coverage_obstacles) {
-                if (obstacle.geometry.outer.size() >= 3) {
-                    preview_obstacles.push_back(obstacle.geometry);
-                }
-            }
-            if (!preview_obstacles.empty()) {
-                plot_->setObstacles(preview_obstacles);
-            }
-            if (cache->planning_complete) {
-                if (current_step_ != PlannerStep::Scan) {
-                    plot_->setSwaths(cache->planned_swaths);
-                    plot_->setRoute(cache->planned_route);
-                }
-                plot_->setPath(cache->planned_path);
-            }
-        }
-        if (current_step_ == PlannerStep::ScanSplitting ||
-            current_step_ == PlannerStep::Scan) {
-            pushScanSegmentsToPlot();
-        }
-    } else if (cache->processing_complete) {
-        plot_->setPoints(cache->processed_projected_points);
-        plot_->setPolygon(cache->hull_complete ? cache->hull_polygon : Polygon2D{});
-    } else {
-        plot_->setPoints(cache->raw_projected_points);
-        plot_->setPolygon(Polygon2D{});
+        pushScanSegmentsToPlot();
     }
     applyLiveOverlayToPlot();
     preview_stack_->setCurrentWidget(plot_);
     if (!was_showing_plot) {
         plot_->resetView();
     }
-}
-
-void PlannerScreen::updateOutputCards() {
-    const QFileInfo map_info(map_path_);
-    const SessionCache* cache = activeSessionPtr();
-    const bool map_valid = !map_path_.isEmpty() && map_info.exists();
-    if (!map_valid || !cache || !cache->processing_complete) {
-        if (lbl_output_points_) {
-            lbl_output_points_->setText(QStringLiteral("--"));
-        }
-        if (lbl_output_reduction_) {
-            lbl_output_reduction_->setText(QStringLiteral("--"));
-        }
-        if (lbl_output_file_size_) {
-            lbl_output_file_size_->setText(QStringLiteral("--"));
-        }
-        if (lbl_output_quality_) {
-            lbl_output_quality_->setText(QStringLiteral("--"));
-        }
-        return;
-    }
-
-    if (lbl_output_points_) {
-        lbl_output_points_->setText(formatCount(cache->processed_point_count));
-    }
-    if (lbl_output_reduction_) {
-        const double reduction = cache->raw_point_count > 0
-                                     ? (1.0 - (static_cast<double>(cache->processed_point_count) /
-                                               static_cast<double>(cache->raw_point_count))) *
-                                           100.0
-                                     : 0.0;
-        lbl_output_reduction_->setText(formatPercent(std::max(0.0, reduction)));
-    }
-    if (lbl_output_file_size_) {
-        lbl_output_file_size_->setText(formatFileSize(cache->estimated_file_size_mb));
-    }
-    if (lbl_output_quality_) {
-        lbl_output_quality_->setText(cache->quality_label.isEmpty() ? QStringLiteral("--")
-                                                                    : cache->quality_label);
-    }
-}
-
-void PlannerScreen::updateStatsChip() {
-    const QFileInfo map_info(map_path_);
-    const SessionCache* cache = activeSessionPtr();
-    const bool map_valid = !map_path_.isEmpty() && map_info.exists();
-    if (!map_valid || !cache || !cache->raw_loaded) {
-        if (lbl_stats_points_) {
-            lbl_stats_points_->setText(QStringLiteral("--"));
-        }
-        if (lbl_stats_area_) {
-            lbl_stats_area_->setText(QStringLiteral("--"));
-        }
-        return;
-    }
-
-    qsizetype points = cache->raw_point_count;
-    double area_m2 = cache->raw_area_estimate_m2;
-    if (cache->processing_complete) {
-        points = cache->processed_point_count;
-        area_m2 = cache->processed_area_estimate_m2;
-    }
-    if (cache->hull_complete) {
-        area_m2 = cache->hull_area_m2;
-    }
-
-    if (lbl_stats_points_) {
-        lbl_stats_points_->setText(formatCount(points));
-    }
-    if (lbl_stats_area_) {
-        lbl_stats_area_->setText(area_m2 > 0.0 ? formatArea(area_m2) : QStringLiteral("--"));
-    }
-}
-
-void PlannerScreen::updatePlaceholderMessage() {
-    if (!lbl_stage2_message_) {
-        return;
-    }
-
-    const QFileInfo map_info(map_path_);
-    const SessionCache* cache = activeSessionPtr();
-    if (map_path_.isEmpty() || !map_info.exists()) {
-        lbl_stage2_message_->setVisible(true);
-        lbl_stage2_message_->setText(
-            QStringLiteral("A saved exploration map is still required before coverage planning can begin."));
-        return;
-    }
-
-    QString message;
-    if (load_in_flight_) {
-        message = QStringLiteral("Loading the saved map from exploration...");
-    } else if (!cache || !cache->raw_loaded) {
-        message = QStringLiteral("Waiting for the saved map to finish loading.");
-    } else if (!cache->processing_complete) {
-        message = QStringLiteral("Process the point cloud in Stage 1 to unlock coverage planning.");
-    } else if (!cache->hull_complete) {
-        message = QStringLiteral("Compute and project the hull in Stage 1 to establish the planning boundary.");
-    } else if (planning_in_flight_) {
-        message = QStringLiteral("Generating coverage paths from the projected hull...");
-    } else if (cache->planning_complete) {
-        message = QStringLiteral("Coverage paths are ready. Adjust the scan configuration and regenerate as needed.");
-    } else {
-        message = QStringLiteral("Boundary ready. Adjust the scan configuration and generate coverage paths.");
-    }
-
-    lbl_stage2_message_->setVisible(true);
-    lbl_stage2_message_->setText(message);
 }
 
 void PlannerScreen::refreshCoveragePresetCombo() {
@@ -3273,7 +2927,8 @@ void PlannerScreen::updateCoveragePlanningUi() {
         cache.coverage_drawing_active = false;
     }
 
-    const bool roi_mode = cache.coverage_scan_mode == QStringLiteral("roi");
+    // ROI is the only coverage mode now (hull pipeline removed).
+    const bool roi_mode = true;
     const bool has_roi = cache.coverage_roi_polygon.size() >= 3;
     const bool roi_drawing_active = cache.coverage_roi_drawing_active;
     const bool manual_obstacles = cache.coverage_obstacle_mode == QStringLiteral("manual");
@@ -3406,16 +3061,6 @@ void PlannerScreen::updateCoveragePlanningUi() {
                      border));
     }
 
-    setChoiceButtonStyle(btn_coverage_scan_complete_,
-                         cache.coverage_scan_mode != QStringLiteral("roi"),
-                         accent_text,
-                         accent_soft_bg,
-                         accent_soft_border);
-    setChoiceButtonStyle(btn_coverage_scan_roi_,
-                         cache.coverage_scan_mode == QStringLiteral("roi"),
-                         accent_text,
-                         accent_soft_bg,
-                         accent_soft_border);
     setChoiceButtonStyle(btn_coverage_roi_draw_rectangle_,
                          cache.coverage_roi_drawing_tool == QStringLiteral("rectangle"),
                          blue_text,
@@ -3502,18 +3147,6 @@ void PlannerScreen::updateCoveragePlanningUi() {
             guide));
     }
 
-    if (lbl_coverage_scan_complete_icon_) {
-        lbl_coverage_scan_complete_icon_->setPixmap(makeCoverageControlIconPixmap(
-            QStringLiteral("scan_complete"),
-            QColor(roi_mode ? submuted : accent_text),
-            16));
-    }
-    if (lbl_coverage_scan_roi_icon_) {
-        lbl_coverage_scan_roi_icon_->setPixmap(makeCoverageControlIconPixmap(
-            QStringLiteral("scan_roi"),
-            QColor(roi_mode ? accent_text : submuted),
-            16));
-    }
     if (lbl_coverage_roi_rectangle_icon_) {
         lbl_coverage_roi_rectangle_icon_->setPixmap(makeCoverageControlIconPixmap(
             QStringLiteral("roi_rectangle"),
@@ -3715,11 +3348,7 @@ void PlannerScreen::updateCoveragePlanningUi() {
                                         : obstacle.area_m2);
                         });
     const double total_area =
-        roi_mode && has_roi
-            ? polygonArea(cache.coverage_roi_polygon)
-            : (cache.hull_complete ? cache.hull_area_m2
-                                   : (cache.processing_complete ? cache.processed_area_estimate_m2
-                                                                : cache.raw_area_estimate_m2));
+        has_roi ? polygonArea(cache.coverage_roi_polygon) : cache.raw_area_estimate_m2;
     const double effective_area = cache.planning_complete
                                       ? cache.planned_effective_area_m2
                                       : std::max(0.0, total_area - obstacle_area);
@@ -3850,15 +3479,7 @@ void PlannerScreen::updateHeaderForCurrentStep() {
     }
 
     const QString accent = dark_mode_ ? QStringLiteral("#00D492") : QStringLiteral("#059669");
-    if (current_step_ == PlannerStep::MapProcessing) {
-        lbl_left_header_icon_->setPixmap(
-            loadSvgPixmap(QStringLiteral(":/assets/missionplanner/point_cloud_processing.svg"),
-                          16,
-                          16,
-                          accent));
-        lbl_left_header_title_->setText(QStringLiteral("Point Cloud Processing"));
-        lbl_left_header_subtitle_->setText(QStringLiteral("Optimize and clean scan data"));
-    } else if (current_step_ == PlannerStep::CoveragePlanning) {
+    if (current_step_ == PlannerStep::CoveragePlanning) {
         lbl_left_header_icon_->setPixmap(
             loadSvgPixmap(QStringLiteral(":/assets/missionplanner/stage_coverage_planning.svg"),
                           16,
@@ -3934,10 +3555,9 @@ void PlannerScreen::updateStageSteps() {
         kBypassPlannerStageGates || (cache && cache->planning_complete);
     const bool scan_ready =
         kBypassPlannerStageGates || (cache && cache->scan_waypoints_published);
-    style_step(step_map_processing_, 0, true);
-    style_step(step_coverage_planning_, 1, true);
-    style_step(step_scan_splitting_, 2, plan_ready);
-    style_step(step_scan_, 3, scan_ready);
+    style_step(step_coverage_planning_, 0, true);
+    style_step(step_scan_splitting_, 1, plan_ready);
+    style_step(step_scan_, 2, scan_ready);
 }
 
 // Width budget for the footer next-stage CTA (btn_next_). Inner layout =
@@ -3997,22 +3617,9 @@ void PlannerScreen::updateFooter() {
         kBypassPlannerStageGates || (cache && cache->planning_complete);
     const bool scan_ready =
         kBypassPlannerStageGates || (cache && cache->scan_waypoints_published);
-    if (current_step_ == PlannerStep::MapProcessing) {
-        lbl_stage_footer_->setText(QStringLiteral("Stage 1 of 4"));
-        setNextStageLabel(QStringLiteral("Stage 2 (Coverage Planning)"));
-        lbl_next_text_->setStyleSheet(
-            QStringLiteral("font-family: 'Arimo'; font-size: 16px; font-weight: 700; "
-                           "color: %1; background: transparent;")
-                .arg(next_active));
-        lbl_next_icon_->setPixmap(loadSvgPixmap(QStringLiteral(":/assets/missionplanner/next_arrow.svg"),
-                                                16,
-                                                16,
-                                                next_active));
-        btn_next_->setEnabled(true);
-        btn_next_->setToolTip(QStringLiteral("Open the coverage planning step."));
-    } else if (current_step_ == PlannerStep::CoveragePlanning) {
-        lbl_stage_footer_->setText(QStringLiteral("Stage 2 of 4"));
-        setNextStageLabel(QStringLiteral("Stage 3 (Scan Splitting)"));
+    if (current_step_ == PlannerStep::CoveragePlanning) {
+        lbl_stage_footer_->setText(QStringLiteral("Stage 1 of 3"));
+        setNextStageLabel(QStringLiteral("Stage 2 (Scan Splitting)"));
         const QString tone = plan_ready ? next_active : muted;
         lbl_next_text_->setStyleSheet(
             QStringLiteral("font-family: 'Arimo'; font-size: 16px; font-weight: 700; "
@@ -4027,8 +3634,8 @@ void PlannerScreen::updateFooter() {
                                   ? QStringLiteral("Open the scan splitting step.")
                                   : QStringLiteral("Generate a coverage plan before splitting scans."));
     } else if (current_step_ == PlannerStep::ScanSplitting) {
-        lbl_stage_footer_->setText(QStringLiteral("Stage 3 of 4"));
-        setNextStageLabel(QStringLiteral("Stage 4 (Scan)"));
+        lbl_stage_footer_->setText(QStringLiteral("Stage 2 of 3"));
+        setNextStageLabel(QStringLiteral("Stage 3 (Scan)"));
         const QString tone = scan_ready ? next_active : muted;
         lbl_next_text_->setStyleSheet(
             QStringLiteral("font-family: 'Arimo'; font-size: 16px; font-weight: 700; "
@@ -4044,7 +3651,7 @@ void PlannerScreen::updateFooter() {
                        : QStringLiteral("Publish at least one segment before opening Scan."));
     } else {
         // PlannerStep::Scan — Complete Mission button on the right.
-        lbl_stage_footer_->setText(QStringLiteral("Stage 4 of 4"));
+        lbl_stage_footer_->setText(QStringLiteral("Stage 3 of 3"));
         setNextStageLabel(QStringLiteral("Complete Mission"));
         // BDR_REWIRE: dev mode (or the legacy BDR_DEV_START_AT_SCAN screenshot
         // hook) lets Complete Mission fire without a finished scan run.
@@ -4085,62 +3692,32 @@ void PlannerScreen::updateButtonsAndStatus() {
     const QFileInfo map_info(map_path_);
     const SessionCache* cache = activeSessionPtr();
     const bool map_valid = !map_path_.isEmpty() && map_info.exists();
-    const bool roi_required =
-        cache && cache->coverage_scan_mode == QStringLiteral("roi");
-    const bool roi_ready =
-        !roi_required || cache->coverage_roi_polygon.size() >= 3;
-    const bool can_process =
-        current_step_ == PlannerStep::MapProcessing && map_valid && cache && cache->raw_loaded &&
-        !load_in_flight_ && !process_in_flight_ && !hull_in_flight_;
-    const bool can_hull =
-        current_step_ == PlannerStep::MapProcessing && map_valid && cache &&
-        cache->processing_complete && !process_in_flight_ && !hull_in_flight_;
+    const bool roi_ready = cache && cache->coverage_roi_polygon.size() >= 3;
     const bool can_generate =
         current_step_ == PlannerStep::CoveragePlanning && map_valid && cache &&
-        cache->hull_complete && !load_in_flight_ && !process_in_flight_ && !hull_in_flight_ &&
+        cache->raw_loaded && !load_in_flight_ &&
         !planning_in_flight_ && !detect_in_flight_ && roi_ready &&
         !cache->coverage_roi_drawing_active && !cache->coverage_drawing_active;
-
-    if (btn_process_) {
-        btn_process_->setEnabled(can_process);
-        btn_process_->setToolTip(
-            !map_valid ? QStringLiteral("A valid saved map is required.")
-            : load_in_flight_ ? QStringLiteral("The saved map is still loading.")
-            : process_in_flight_ ? QStringLiteral("Point cloud processing is already running.")
-                                 : QStringLiteral("Apply Z filtering and voxel downsampling."));
-    }
-
-    if (btn_hull_) {
-        btn_hull_->setEnabled(can_hull);
-        btn_hull_->setToolTip(
-            !map_valid ? QStringLiteral("A valid saved map is required.")
-            : !cache || !cache->processing_complete
-                ? QStringLiteral("Process Point Cloud first.")
-                : hull_in_flight_ ? QStringLiteral("Hull computation is already running.")
-                                  : QStringLiteral("Compute a projected hull from the processed cloud."));
-    }
 
     if (btn_coverage_generate_) {
         btn_coverage_generate_->setEnabled(can_generate);
         btn_coverage_generate_->setToolTip(
             !map_valid ? QStringLiteral("A valid saved map is required.")
-            : !cache || !cache->processing_complete
-                ? QStringLiteral("Process Point Cloud first.")
-            : !cache->hull_complete
-                ? QStringLiteral("Compute and project the hull first.")
+            : !cache || !cache->raw_loaded
+                ? QStringLiteral("Waiting for the saved map to load.")
             : cache->coverage_roi_drawing_active || cache->coverage_drawing_active
                 ? QStringLiteral("Finish or cancel the current drawing interaction first.")
-            : roi_required && !roi_ready
-                ? QStringLiteral("Draw an ROI before generating coverage.")
+            : !roi_ready
+                ? QStringLiteral("Draw a region of interest before generating coverage.")
             : planning_in_flight_ ? QStringLiteral("Coverage generation is already running.")
-                                  : QStringLiteral("Generate coverage paths from the projected hull."));
+                                  : QStringLiteral("Generate coverage paths from the region of interest."));
     }
 
     updateCoveragePlanningUi();
     // Stepper and footer share the same gating state (planning_complete,
-    // processing_complete, current_step_) as the per-action buttons, so refresh
-    // them together to avoid stale "Next" / scan-splitting-step states after
-    // the coverage plan completes or is invalidated.
+    // current_step_) as the per-action button, so refresh them together to
+    // avoid stale "Next" / scan-splitting-step states after the coverage plan
+    // completes or is invalidated.
     updateStageSteps();
     updateFooter();
 }
@@ -4158,18 +3735,6 @@ void PlannerScreen::applySessionToUi() {
     syncing_widgets_ = true;
     SessionCache& cache = activeSession();
     ensureCoverageDefaults(cache);
-    if (slider_voxel_) {
-        slider_voxel_->setValue(cache.voxel_size);
-    }
-    if (slider_z_min_) {
-        slider_z_min_->setValue(cache.z_min);
-    }
-    if (slider_z_max_) {
-        slider_z_max_->setValue(cache.z_max);
-    }
-    if (slider_alpha_) {
-        slider_alpha_->setValue(cache.alpha);
-    }
     if (slider_coverage_path_spacing_) {
         slider_coverage_path_spacing_->setValue(cache.coverage_path_spacing);
     }
@@ -4201,10 +3766,8 @@ void PlannerScreen::applySessionToUi() {
     syncing_widgets_ = false;
 
     if (content_stack_) {
-        QWidget* target_page = map_processing_page_;
-        if (current_step_ == PlannerStep::CoveragePlanning) {
-            target_page = coverage_placeholder_page_;
-        } else if (current_step_ == PlannerStep::ScanSplitting && scan_splitting_page_) {
+        QWidget* target_page = coverage_placeholder_page_;
+        if (current_step_ == PlannerStep::ScanSplitting && scan_splitting_page_) {
             target_page = scan_splitting_page_;
         } else if (current_step_ == PlannerStep::Scan && scan_page_) {
             target_page = scan_page_;
@@ -4274,11 +3837,7 @@ void PlannerScreen::applySessionToUi() {
             preview_bottom_overlay_stack_->setVisible(false);
         } else {
             preview_bottom_overlay_stack_->setVisible(true);
-            QWidget* overlay = stats_chip_;
-            if (current_step_ != PlannerStep::MapProcessing) {
-                overlay = coverage_legend_chip_;
-            }
-            preview_bottom_overlay_stack_->setCurrentWidget(overlay);
+            preview_bottom_overlay_stack_->setCurrentWidget(coverage_legend_chip_);
         }
     }
     if (preview_container_) {
@@ -4305,9 +3864,6 @@ void PlannerScreen::applySessionToUi() {
     updateStageSteps();
     updateFooter();
     updatePreview();
-    updateOutputCards();
-    updateStatsChip();
-    updatePlaceholderMessage();
     updateScanSplittingUi();
     updateScanRunUi();
     updateButtonsAndStatus();
@@ -4377,37 +3933,17 @@ void PlannerScreen::logAutotestSummary(const QString& phase) {
     }
 
     const SessionCache& cache = activeSession();
-    QSettings settings(kSettingsOrgName, kSettingsAppName);
-    settings.beginGroup(QStringLiteral("planner/mission_planner"));
-    settings.beginGroup(settingsGroupKey());
-    const double stored_voxel = settings.value(QStringLiteral("voxel_size"), -1.0).toDouble();
-    const double stored_z_min = settings.value(QStringLiteral("z_min"), -999.0).toDouble();
-    const double stored_z_max = settings.value(QStringLiteral("z_max"), -999.0).toDouble();
-    const double stored_alpha = settings.value(QStringLiteral("alpha"), -1.0).toDouble();
-    settings.endGroup();
-    settings.endGroup();
 
     std::cout << "PLANNER_AUTOTEST"
               << " phase=" << phase.toStdString()
               << " raw_loaded=" << (cache.raw_loaded ? 1 : 0)
-              << " processed=" << (cache.processing_complete ? 1 : 0)
-              << " hull=" << (cache.hull_complete ? 1 : 0)
               << " step="
-              << (current_step_ == PlannerStep::MapProcessing ? "map_processing"
-                  : current_step_ == PlannerStep::CoveragePlanning
-                        ? "coverage_planning"
-                        : "scan_splitting")
-              << " voxel=" << cache.voxel_size
-              << " z_min=" << cache.z_min
-              << " z_max=" << cache.z_max
-              << " alpha=" << cache.alpha
-              << " stored_voxel=" << stored_voxel
-              << " stored_z_min=" << stored_z_min
-              << " stored_z_max=" << stored_z_max
-              << " stored_alpha=" << stored_alpha
+              << (current_step_ == PlannerStep::CoveragePlanning ? "coverage_planning"
+                  : current_step_ == PlannerStep::ScanSplitting   ? "scan_splitting"
+                                                                  : "scan")
               << " raw_points=" << cache.raw_point_count
-              << " processed_points=" << cache.processed_point_count
-              << " hull_vertices=" << cache.hull_polygon.size()
+              << " roi_vertices=" << cache.coverage_roi_polygon.size()
+              << " planning_complete=" << (cache.planning_complete ? 1 : 0)
               << " status=\"" << lbl_inline_status_->text().toStdString() << "\""
               << std::endl;
 }
@@ -4435,30 +3971,15 @@ void PlannerScreen::maybeRunAutotest() {
     if (!autotest_started_) {
         autotest_started_ = true;
         std::cout << "PLANNER_AUTOTEST phase=full_start" << std::endl;
-        cache.voxel_size = 0.07;
-        cache.z_min = -0.12;
-        cache.z_max = 0.18;
-        cache.alpha = 1.23;
-        persistParameters();
-        applySessionToUi();
         setInlineStatus(QStringLiteral("Running planner autotest..."), QStringLiteral("#71717B"));
-        QTimer::singleShot(0, this, [this]() { startProcessPointCloud(); });
+        if (current_step_ != PlannerStep::CoveragePlanning) {
+            QTimer::singleShot(0, this,
+                               [this]() { navigateToStep(PlannerStep::CoveragePlanning); });
+        }
         return;
     }
 
-    if (cache.processing_complete && !cache.hull_complete && !process_in_flight_ && !hull_in_flight_) {
-        std::cout << "PLANNER_AUTOTEST phase=run_hull" << std::endl;
-        QTimer::singleShot(0, this, [this]() { startComputeHull(); });
-        return;
-    }
-
-    if (cache.hull_complete && current_step_ == PlannerStep::MapProcessing) {
-        std::cout << "PLANNER_AUTOTEST phase=goto_placeholder" << std::endl;
-        QTimer::singleShot(0, this, [this]() { navigateToStep(PlannerStep::CoveragePlanning); });
-        return;
-    }
-
-    if (cache.hull_complete && current_step_ == PlannerStep::CoveragePlanning) {
+    if (current_step_ == PlannerStep::CoveragePlanning) {
         logAutotestSummary(QStringLiteral("full_complete"));
         QTimer::singleShot(0, qApp, []() { qApp->quit(); });
     }
@@ -4471,12 +3992,8 @@ void PlannerScreen::restoreCurrentSession() {
         autotest_started_ = false;
         autotest_restore_reported_ = false;
         ++load_generation_;
-        ++process_generation_;
-        ++hull_generation_;
         ++planning_generation_;
         load_in_flight_ = false;
-        process_in_flight_ = false;
-        hull_in_flight_ = false;
         planning_in_flight_ = false;
         if (preview_stack_ && preview_placeholder_) {
             preview_stack_->setCurrentWidget(preview_placeholder_);
@@ -4485,14 +4002,6 @@ void PlannerScreen::restoreCurrentSession() {
 
     SessionCache& cache = activeSession();
     loadPersistedParameters(cache);
-    QStringList parameter_warnings;
-    const bool parameters_adjusted = sanitizePlannerParameters(
-        &cache.voxel_size, &cache.z_min, &cache.z_max, &cache.alpha, &parameter_warnings);
-    if (parameters_adjusted) {
-        persistParameters();
-        std::cout << "PlannerScreen adjusted persisted parameters: "
-                  << parameter_warnings.join(' ').toStdString() << std::endl;
-    }
     current_step_ = cache.last_step;
     applySessionToUi();
     if (autotest_enabled_) {
@@ -4516,28 +4025,12 @@ void PlannerScreen::restoreCurrentSession() {
     }
 
     if (cache.raw_loaded) {
-        if (cache.hull_complete) {
-            setInlineStatus(
-                QStringLiteral("Restored cached hull for %1.").arg(map_info.fileName()),
-                QStringLiteral("#00D492"));
-        } else if (cache.processing_complete) {
-            setInlineStatus(
-                QStringLiteral("Restored processed point cloud for %1.").arg(map_info.fileName()),
-                QStringLiteral("#00D492"));
-        } else {
-            setInlineStatus(
-                QStringLiteral("Saved map ready: %1").arg(map_info.fileName()),
-                QStringLiteral("#71717B"));
-        }
+        setInlineStatus(
+            QStringLiteral("Saved map ready: %1").arg(map_info.fileName()),
+            QStringLiteral("#71717B"));
         maybeRunAutotest();
     } else {
         startMapLoadIfNeeded();
-    }
-
-    if (parameters_adjusted) {
-        setInlineStatus(
-            QStringLiteral("Adjusted saved planner settings: %1").arg(parameter_warnings.join(' ')),
-            QStringLiteral("#F59E0B"));
     }
 }
 
@@ -4562,7 +4055,8 @@ void PlannerScreen::startMapLoadIfNeeded() {
 
     QPointer<PlannerScreen> guard(this);
     const QString path = map_info.absoluteFilePath();
-    QtConcurrent::run([guard, generation, path]() mutable {
+    const std::optional<std::pair<double, double>> trail_z_range = currentTrailZRange();
+    QtConcurrent::run([guard, generation, path, trail_z_range]() mutable {
         MapLoadResult result;
         try {
             result.raw_cloud = makeFinitePointCloud(loadPointCloudFile(path.toStdString()));
@@ -4570,7 +4064,8 @@ void PlannerScreen::startMapLoadIfNeeded() {
                 throw std::runtime_error("The saved map contains no points.");
             }
             result.raw_point_count = static_cast<qsizetype>(result.raw_cloud->size());
-            result.raw_projected_points = buildProjectedPointsFromCloud(result.raw_cloud);
+            result.raw_projected_points =
+                buildProjectedPointsFromCloud(result.raw_cloud, trail_z_range);
             if (result.raw_projected_points.empty()) {
                 throw std::runtime_error("The saved map contains no finite XY points.");
             }
@@ -4595,155 +4090,6 @@ void PlannerScreen::startMapLoadIfNeeded() {
     });
 }
 
-void PlannerScreen::startProcessPointCloud() {
-    const QFileInfo map_info(map_path_);
-    SessionCache& cache = activeSession();
-    if (map_path_.isEmpty() || !map_info.exists()) {
-        setInlineStatus(QStringLiteral("A valid saved map is required before processing."),
-                        QStringLiteral("#F87171"));
-        updateButtonsAndStatus();
-        return;
-    }
-    if (!cache.raw_loaded) {
-        startMapLoadIfNeeded();
-        setInlineStatus(QStringLiteral("Waiting for the saved map to finish loading."),
-                        QStringLiteral("#F59E0B"));
-        return;
-    }
-    if (process_in_flight_ || hull_in_flight_) {
-        return;
-    }
-
-    const quint64 generation = ++process_generation_;
-    process_in_flight_ = true;
-    updateButtonsAndStatus();
-    setInlineStatus(QStringLiteral("Processing point cloud with current voxel and height filters..."),
-                    QStringLiteral("#71717B"));
-
-    QPointer<PlannerScreen> guard(this);
-    const PointCloudPtr raw_cloud = cache.raw_cloud;
-    const double z_min = cache.z_min;
-    const double z_max = cache.z_max;
-    const double voxel_size = cache.voxel_size;
-    QtConcurrent::run([guard, generation, raw_cloud, z_min, z_max, voxel_size]() mutable {
-        ProcessResult result;
-        try {
-            PointCloudPtr filtered = filterByZRange(raw_cloud, z_min, z_max);
-            if (!filtered || filtered->empty()) {
-                throw std::runtime_error("No points remain after applying the height filter.");
-            }
-
-            result.processed_cloud = downsampleVoxel(filtered, voxel_size);
-            if (!result.processed_cloud || result.processed_cloud->empty()) {
-                throw std::runtime_error("No points remain after voxel downsampling.");
-            }
-
-            result.raw_point_count = static_cast<qsizetype>(raw_cloud->size());
-            result.processed_point_count = static_cast<qsizetype>(result.processed_cloud->size());
-            result.processed_projected_points =
-                buildProjectedPointsFromCloud(result.processed_cloud);
-            if (result.processed_projected_points.empty()) {
-                throw std::runtime_error("No finite XY points remain after voxel downsampling.");
-            }
-            result.area_estimate_m2 = estimateAreaFromPointCloudBounds(result.processed_cloud);
-            result.estimated_file_size_mb =
-                (static_cast<double>(result.processed_point_count) * sizeof(pcl::PointXYZ)) /
-                (1024.0 * 1024.0);
-            result.quality_label = deriveQualityLabel(result.raw_point_count,
-                                                      result.processed_point_count,
-                                                      voxel_size);
-            if (result.raw_point_count > 0) {
-                result.reduction_percent =
-                    (1.0 - (static_cast<double>(result.processed_point_count) /
-                            static_cast<double>(result.raw_point_count))) *
-                    100.0;
-            }
-            result.success = true;
-        } catch (const std::exception& error) {
-            result.error = QString::fromUtf8(error.what());
-        }
-
-        if (!guard) {
-            return;
-        }
-
-        QMetaObject::invokeMethod(
-            guard,
-            [guard, generation, result = std::move(result)]() mutable {
-                if (guard) {
-                    guard->applyProcessResult(generation, result);
-                }
-            },
-            Qt::QueuedConnection);
-    });
-}
-
-void PlannerScreen::startComputeHull() {
-    const QFileInfo map_info(map_path_);
-    SessionCache& cache = activeSession();
-    if (map_path_.isEmpty() || !map_info.exists()) {
-        setInlineStatus(QStringLiteral("A valid saved map is required before hull computation."),
-                        QStringLiteral("#F87171"));
-        return;
-    }
-    if (!cache.processing_complete || !cache.processed_cloud || cache.processed_cloud->empty()) {
-        setInlineStatus(QStringLiteral("Process Point Cloud before computing the hull."),
-                        QStringLiteral("#F59E0B"));
-        updateButtonsAndStatus();
-        return;
-    }
-    if (process_in_flight_ || hull_in_flight_) {
-        return;
-    }
-
-    const quint64 generation = ++hull_generation_;
-    hull_in_flight_ = true;
-    updateButtonsAndStatus();
-    setInlineStatus(QStringLiteral("Computing projected hull from the processed cloud..."),
-                    QStringLiteral("#71717B"));
-
-    QPointer<PlannerScreen> guard(this);
-    const PointCloudPtr processed_cloud = cache.processed_cloud;
-    const double alpha = cache.alpha;
-    QtConcurrent::run([guard, generation, processed_cloud, alpha]() mutable {
-        HullResult result;
-        try {
-            std::vector<Point2D> xy_points;
-            xy_points.reserve(processed_cloud->size());
-            for (const auto& point : processed_cloud->points) {
-                if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
-                    continue;
-                }
-                xy_points.emplace_back(point.x, point.y);
-            }
-            if (xy_points.size() < 3) {
-                throw std::runtime_error("Not enough finite XY points remain for hull computation.");
-            }
-            result.hull_polygon = computeConcaveHull(xy_points, alpha, "alphashape");
-            if (result.hull_polygon.empty()) {
-                throw std::runtime_error("Hull computation produced an empty boundary.");
-            }
-            result.area_m2 = polygonArea(result.hull_polygon);
-            result.success = true;
-        } catch (const std::exception& error) {
-            result.error = QString::fromUtf8(error.what());
-        }
-
-        if (!guard) {
-            return;
-        }
-
-        QMetaObject::invokeMethod(
-            guard,
-            [guard, generation, result = std::move(result)]() mutable {
-                if (guard) {
-                    guard->applyHullResult(generation, result);
-                }
-            },
-            Qt::QueuedConnection);
-    });
-}
-
 void PlannerScreen::startGenerateCoverage() {
     const QFileInfo map_info(map_path_);
     SessionCache& cache = activeSession();
@@ -4753,14 +4099,9 @@ void PlannerScreen::startGenerateCoverage() {
         updateButtonsAndStatus();
         return;
     }
-    if (!cache.processing_complete) {
-        setInlineStatus(QStringLiteral("Process Point Cloud before generating coverage paths."),
-                        QStringLiteral("#F59E0B"));
-        updateButtonsAndStatus();
-        return;
-    }
-    if (!cache.hull_complete || cache.hull_polygon.empty()) {
-        setInlineStatus(QStringLiteral("Compute and project the hull before generating coverage paths."),
+    if (!cache.raw_loaded) {
+        startMapLoadIfNeeded();
+        setInlineStatus(QStringLiteral("Waiting for the saved map to finish loading."),
                         QStringLiteral("#F59E0B"));
         updateButtonsAndStatus();
         return;
@@ -4771,13 +4112,13 @@ void PlannerScreen::startGenerateCoverage() {
         updateButtonsAndStatus();
         return;
     }
-    if (cache.coverage_scan_mode == QStringLiteral("roi") && cache.coverage_roi_polygon.size() < 3) {
-        setInlineStatus(QStringLiteral("Draw an ROI before generating coverage paths."),
+    if (cache.coverage_roi_polygon.size() < 3) {
+        setInlineStatus(QStringLiteral("Draw a region of interest before generating coverage paths."),
                         QStringLiteral("#F59E0B"));
         updateButtonsAndStatus();
         return;
     }
-    if (planning_in_flight_ || process_in_flight_ || hull_in_flight_) {
+    if (planning_in_flight_) {
         return;
     }
 
@@ -4786,11 +4127,12 @@ void PlannerScreen::startGenerateCoverage() {
     planning_in_flight_ = true;
     updatePreview();
     updateButtonsAndStatus();
-    setInlineStatus(QStringLiteral("Generating coverage paths from the projected hull..."),
+    setInlineStatus(QStringLiteral("Generating coverage paths from the region of interest..."),
                     QStringLiteral("#71717B"));
 
     QPointer<PlannerScreen> guard(this);
-    const Polygon2D boundary = cache.hull_polygon;
+    // ROI is the coverage boundary now (hull pipeline removed).
+    const Polygon2D boundary = cache.coverage_roi_polygon;
     CoverageConfig cfg;
     cfg.swath_width = cache.coverage_path_spacing;
     cfg.headland_width = cache.coverage_headland_width;
@@ -4806,8 +4148,6 @@ void PlannerScreen::startGenerateCoverage() {
     // resampler, keeping the route's exact corner waypoints.
     cfg.use_axial_turns = true;
     cfg.waypoint_spacing = 0.0;
-    const Polygon2D roi = cache.coverage_scan_mode == QStringLiteral("roi") ? cache.coverage_roi_polygon
-                                                                             : Polygon2D{};
     std::vector<Obstacle2D> obstacles;
     obstacles.reserve(cache.coverage_obstacles.size());
     for (const auto& obstacle : cache.coverage_obstacles) {
@@ -4816,12 +4156,11 @@ void PlannerScreen::startGenerateCoverage() {
         }
     }
 
-    QtConcurrent::run([guard, generation, boundary, cfg, roi, obstacles]() mutable {
+    QtConcurrent::run([guard, generation, boundary, cfg, obstacles]() mutable {
         PlanningResult result;
         try {
-            const Polygon2D* roi_ptr = roi.size() >= 3 ? &roi : nullptr;
             const std::vector<Obstacle2D>* obs_ptr = obstacles.empty() ? nullptr : &obstacles;
-            result.coverage = generateCoverage(boundary, cfg, roi_ptr, obs_ptr);
+            result.coverage = generateCoverage(boundary, cfg, nullptr, obs_ptr);
             if (!result.coverage.success) {
                 result.error = QString::fromStdString(result.coverage.error_message);
             } else {
@@ -4859,16 +4198,7 @@ void PlannerScreen::applyMapLoadResult(quint64 generation, const MapLoadResult& 
         cache.raw_projected_points.clear();
         cache.raw_point_count = 0;
         cache.raw_area_estimate_m2 = 0.0;
-        cache.processing_complete = false;
-        cache.hull_complete = false;
-        cache.processed_cloud.reset();
-        cache.processed_projected_points.clear();
-        cache.hull_polygon.clear();
-        cache.processed_point_count = 0;
-        cache.processed_area_estimate_m2 = 0.0;
-        cache.hull_area_m2 = 0.0;
         cache.estimated_file_size_mb = 0.0;
-        cache.quality_label.clear();
         invalidateCoverageResult();
         cache.coverage_roi_polygon.clear();
         cache.coverage_roi_drawing_active = false;
@@ -4877,9 +4207,6 @@ void PlannerScreen::applyMapLoadResult(quint64 generation, const MapLoadResult& 
         cache.coverage_drawing_active = false;
 
         updatePreview();
-        updateOutputCards();
-        updateStatsChip();
-        updatePlaceholderMessage();
         updateButtonsAndStatus();
         setInlineStatus(
             QStringLiteral("Saved map failed to load: %1").arg(result.error),
@@ -4903,8 +4230,6 @@ void PlannerScreen::applyMapLoadResult(quint64 generation, const MapLoadResult& 
     if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
         plot_->resetView();
     }
-    updateStatsChip();
-    updatePlaceholderMessage();
     updateButtonsAndStatus();
     setInlineStatus(
         QStringLiteral("Loaded %1 points from %2.")
@@ -4914,106 +4239,6 @@ void PlannerScreen::applyMapLoadResult(quint64 generation, const MapLoadResult& 
     if (autotest_enabled_) {
         std::cout << "PLANNER_AUTOTEST phase=map_loaded points=" << cache.raw_point_count
                   << std::endl;
-    }
-    maybeRunAutotest();
-}
-
-void PlannerScreen::applyProcessResult(quint64 generation, const ProcessResult& result) {
-    if (generation != process_generation_) {
-        return;
-    }
-
-    process_in_flight_ = false;
-    SessionCache& cache = activeSession();
-    if (!result.success) {
-        std::cerr << "[PlannerScreen] point cloud processing failed: "
-                  << result.error.toStdString() << std::endl;
-        updateButtonsAndStatus();
-        setInlineStatus(
-            QStringLiteral("Point cloud processing failed: %1").arg(result.error),
-            QStringLiteral("#F87171"));
-        return;
-    }
-
-    cache.processing_complete = true;
-    cache.hull_complete = false;
-    cache.processed_cloud = result.processed_cloud;
-    cache.processed_projected_points = result.processed_projected_points;
-    cache.processed_point_count = result.processed_point_count;
-    cache.processed_area_estimate_m2 = result.area_estimate_m2;
-    cache.hull_polygon.clear();
-    cache.hull_area_m2 = 0.0;
-    cache.estimated_file_size_mb = result.estimated_file_size_mb;
-    cache.quality_label = result.quality_label;
-    invalidateCoverageResult();
-    cache.coverage_roi_polygon.clear();
-    cache.coverage_roi_drawing_active = false;
-    cache.coverage_obstacles_detected = false;
-    cache.coverage_obstacles.clear();
-    cache.coverage_drawing_active = false;
-
-    updatePreview();
-    if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
-        plot_->resetView();
-    }
-    updateOutputCards();
-    updateStatsChip();
-    updatePlaceholderMessage();
-    updateButtonsAndStatus();
-    setInlineStatus(
-        QStringLiteral("Processed %1 -> %2 points.")
-            .arg(formatCount(result.raw_point_count))
-            .arg(formatCount(result.processed_point_count)),
-        QStringLiteral("#00D492"));
-    if (autotest_enabled_) {
-        std::cout << "PLANNER_AUTOTEST phase=process_complete points="
-                  << cache.processed_point_count << std::endl;
-    }
-    maybeRunAutotest();
-}
-
-void PlannerScreen::applyHullResult(quint64 generation, const HullResult& result) {
-    if (generation != hull_generation_) {
-        return;
-    }
-
-    hull_in_flight_ = false;
-    SessionCache& cache = activeSession();
-    if (!result.success) {
-        std::cerr << "[PlannerScreen] hull computation failed: "
-                  << result.error.toStdString() << std::endl;
-        updateButtonsAndStatus();
-        setInlineStatus(
-            QStringLiteral("Hull computation failed: %1").arg(result.error),
-            QStringLiteral("#F87171"));
-        return;
-    }
-
-    cache.hull_complete = true;
-    cache.hull_polygon = result.hull_polygon;
-    cache.hull_area_m2 = result.area_m2;
-    invalidateCoverageResult();
-    cache.coverage_roi_polygon.clear();
-    cache.coverage_roi_drawing_active = false;
-    cache.coverage_obstacles_detected = false;
-    cache.coverage_obstacles.clear();
-    cache.coverage_drawing_active = false;
-
-    updatePreview();
-    if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
-        plot_->resetView();
-    }
-    updateStatsChip();
-    updatePlaceholderMessage();
-    updateButtonsAndStatus();
-    setInlineStatus(
-        QStringLiteral("Hull ready with %1 vertices across %2.")
-            .arg(cache.hull_polygon.size())
-            .arg(formatArea(cache.hull_area_m2)),
-        QStringLiteral("#00D492"));
-    if (autotest_enabled_) {
-        std::cout << "PLANNER_AUTOTEST phase=hull_complete vertices="
-                  << cache.hull_polygon.size() << std::endl;
     }
     maybeRunAutotest();
 }
@@ -5047,7 +4272,6 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
     if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
         plot_->resetView();
     }
-    updatePlaceholderMessage();
     updateButtonsAndStatus();
     setInlineStatus(QStringLiteral("Generated %1 swaths and %2 path states.")
                         .arg(cache.planned_swaths.size())
@@ -5060,11 +4284,6 @@ void PlannerScreen::startDetectObstacles() {
     if (!cache.raw_cloud || cache.raw_cloud->empty()) {
         setInlineStatus(QStringLiteral("Load a map before running auto-detect."),
                         QStringLiteral("#F87171"));
-        return;
-    }
-    if (!cache.hull_complete) {
-        setInlineStatus(QStringLiteral("Compute the hull before running auto-detect."),
-                        QStringLiteral("#F59E0B"));
         return;
     }
     if (detect_in_flight_) {
@@ -5099,11 +4318,10 @@ void PlannerScreen::startDetectObstacles() {
         trail.push_back(PathState{live_robot_trail_[i], heading});
     }
 
-    // ROI filter applied in-thread so callers don't need to wait.
-    const Polygon2D roi = (cache.coverage_scan_mode == QStringLiteral("roi") &&
-                           cache.coverage_roi_polygon.size() >= 3)
-                              ? cache.coverage_roi_polygon
-                              : Polygon2D{};
+    // ROI filter applied in-thread so callers don't need to wait. The ROI is
+    // the coverage boundary now, so detected obstacles outside it are dropped.
+    const Polygon2D roi =
+        cache.coverage_roi_polygon.size() >= 3 ? cache.coverage_roi_polygon : Polygon2D{};
 
     // Map the operator-facing CSF sensitivity (0-100) onto the CSF class
     // threshold (m). Higher sensitivity => smaller threshold => detects
@@ -6136,17 +5354,6 @@ void PlannerScreen::buildUi() {
     stage_row_layout->setContentsMargins(0, 0, 0, 0);
     stage_row_layout->setSpacing(4);
 
-    step_map_processing_ = make_stage_step(
-        stage_row_frame_,
-        QStringLiteral(":/assets/missionplanner/stage_map_processing.svg"),
-        QStringLiteral("Map Processing"),
-        189,
-        158,
-        true);
-    connect(step_map_processing_.button, &QPushButton::clicked, this, [this]() {
-        navigateToStep(PlannerStep::MapProcessing);
-    });
-    stage_row_layout->addWidget(step_map_processing_.wrapper, 0, Qt::AlignVCenter);
     step_coverage_planning_ = make_stage_step(
         stage_row_frame_,
         QStringLiteral(":/assets/missionplanner/stage_coverage_planning.svg"),
@@ -6210,29 +5417,6 @@ void PlannerScreen::buildUi() {
     content_stack_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     content_stack_->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
     left_rail_layout->addWidget(content_stack_, 1);
-
-    map_processing_page_ = new QWidget(content_stack_);
-    map_processing_page_->setAttribute(Qt::WA_StyledBackground, true);
-    map_processing_page_->setStyleSheet(QStringLiteral("background: transparent;"));
-    auto* map_processing_page_layout = new QVBoxLayout(map_processing_page_);
-    map_processing_page_layout->setContentsMargins(0, 0, 0, 0);
-    map_processing_page_layout->setSpacing(0);
-
-    auto* left_scroll = new QScrollArea(map_processing_page_);
-    left_scroll->setFrameShape(QFrame::NoFrame);
-    left_scroll->setWidgetResizable(true);
-    left_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    left_scroll->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; border: none; }"));
-    left_scroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
-    AutoHideScrollBar::install(left_scroll, dark_mode_);
-    map_processing_page_layout->addWidget(left_scroll, 1);
-
-    auto* left_content = new QWidget(left_scroll);
-    left_content->setAttribute(Qt::WA_StyledBackground, true);
-    left_content->setStyleSheet(QStringLiteral("background: transparent;"));
-    auto* left_content_layout = new QVBoxLayout(left_content);
-    left_content_layout->setContentsMargins(24, 12, 24, 24);
-    left_content_layout->setSpacing(0);
 
     auto make_stepper_button = [this](QWidget* parent, const QString& icon_path) {
         auto* btn = new QPushButton(parent);
@@ -6358,233 +5542,16 @@ void PlannerScreen::buildUi() {
         return block;
     };
 
-    auto* downsampling_section = new QWidget(left_content);
-    downsampling_section->setFixedHeight(124);
-    auto* downsampling_layout = new QVBoxLayout(downsampling_section);
-    downsampling_layout->setContentsMargins(0, 0, 0, 0);
-    downsampling_layout->setSpacing(8);
-    downsampling_layout->addWidget(makeTrackedLabel(
-        downsampling_section, QStringLiteral("DOWNSAMPLING"), kInitialHeading10, &heading10_labels_));
-    QLabel* lbl_voxel_min = nullptr;
-    QLabel* lbl_voxel_max = nullptr;
-    downsampling_layout->addWidget(make_range_block(downsampling_section,
-                                                    QStringLiteral("Voxel Size"),
-                                                    QStringLiteral("Grid resolution for downsampling"),
-                                                    units::formatLength(0.01, 2),
-                                                    units::formatLength(0.20, 2),
-                                                    0.01,
-                                                    0.20,
-                                                    0.01,
-                                                    2,
-                                                    &slider_voxel_,
-                                                    &lbl_voxel_value_,
-                                                    &lbl_voxel_min,
-                                                    &lbl_voxel_max));
-    unit_endpoint_badges_.push_back(
-        UnitEndpointBadge{lbl_voxel_min, lbl_voxel_max, 0.01, 0.20,
-                          UnitEndpointBadge::Kind::Length, 2});
-    left_content_layout->addWidget(downsampling_section);
-    left_content_layout->addSpacing(12);
-
-    auto* height_section = new QWidget(left_content);
-    height_section->setFixedHeight(238);
-    auto* height_layout = new QVBoxLayout(height_section);
-    height_layout->setContentsMargins(0, 4, 0, 0);
-    height_layout->setSpacing(8);
-    height_layout->addWidget(makeTrackedLabel(height_section,
-                                              QStringLiteral("HEIGHT FILTRATION"),
-                                              kInitialHeading10,
-                                              &heading10_labels_));
-
-    auto* height_blocks = new QWidget(height_section);
-    auto* height_blocks_layout = new QVBoxLayout(height_blocks);
-    height_blocks_layout->setContentsMargins(0, 0, 0, 0);
-    height_blocks_layout->setSpacing(10);
-    QLabel* lbl_z_min_min = nullptr;
-    QLabel* lbl_z_min_max = nullptr;
-    height_blocks_layout->addWidget(make_range_block(height_section,
-                                                     QStringLiteral("Z Min"),
-                                                     QStringLiteral("Minimum height threshold"),
-                                                     units::formatLength(-0.50, 2),
-                                                     units::formatLength(0.50, 2),
-                                                     -0.50,
-                                                     0.50,
-                                                     0.01,
-                                                     2,
-                                                     &slider_z_min_,
-                                                     &lbl_z_min_value_,
-                                                     &lbl_z_min_min,
-                                                     &lbl_z_min_max));
-    unit_endpoint_badges_.push_back(
-        UnitEndpointBadge{lbl_z_min_min, lbl_z_min_max, -0.50, 0.50,
-                          UnitEndpointBadge::Kind::Length, 2});
-    QLabel* lbl_z_max_min = nullptr;
-    QLabel* lbl_z_max_max = nullptr;
-    height_blocks_layout->addWidget(make_range_block(height_section,
-                                                     QStringLiteral("Z Max"),
-                                                     QStringLiteral("Maximum height threshold"),
-                                                     units::formatLength(-0.50, 2),
-                                                     units::formatLength(0.50, 2),
-                                                     -0.50,
-                                                     0.50,
-                                                     0.01,
-                                                     2,
-                                                     &slider_z_max_,
-                                                     &lbl_z_max_value_,
-                                                     &lbl_z_max_min,
-                                                     &lbl_z_max_max));
-    unit_endpoint_badges_.push_back(
-        UnitEndpointBadge{lbl_z_max_min, lbl_z_max_max, -0.50, 0.50,
-                          UnitEndpointBadge::Kind::Length, 2});
-    height_layout->addWidget(height_blocks);
-    left_content_layout->addWidget(height_section);
-
-    left_content_layout->addSpacing(20);
-
-    btn_process_ = new QPushButton(left_content);
-    btn_process_->setCursor(Qt::PointingHandCursor);
-    btn_process_->setFlat(true);
-    btn_process_->setFixedHeight(40);
-    btn_process_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    btn_process_->setStyleSheet(QStringLiteral(
-        "QPushButton {"
-        "  background: #00BC7D;"
-        "  border: none;"
-        "  border-radius: 14px;"
-        "}"
-        "QPushButton:hover { background: #0ACB8B; }"
-        "QPushButton:disabled { background: #1F2937; }"));
-    auto* btn_process_layout = new QHBoxLayout(btn_process_);
-    btn_process_layout->setContentsMargins(0, 0, 0, 0);
-    btn_process_layout->setSpacing(8);
-    btn_process_layout->addStretch(1);
-    lbl_process_icon_ = makeIconLabel(btn_process_,
-                                      QStringLiteral(":/assets/missionplanner/process_point_cloud.svg"),
-                                      16,
-                                      QStringLiteral("#FFFFFF"));
-    btn_process_layout->addWidget(lbl_process_icon_);
-    lbl_process_text_ = makeTextLabel(
-        btn_process_,
-        QStringLiteral("Process Point Cloud"),
-        QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 700; color: #FFFFFF;"));
-    btn_process_layout->addWidget(lbl_process_text_);
-    btn_process_layout->addStretch(1);
-    applyDropShadow(btn_process_, 18, 4, QColor(0, 188, 125, 64));
-    connect(btn_process_, &QPushButton::clicked, this, [this]() { startProcessPointCloud(); });
-    left_content_layout->addWidget(btn_process_);
-    left_content_layout->addSpacing(12);
-
-    auto* hull_section = new QWidget(left_content);
-    hull_section->setFixedHeight(174);
-    auto* hull_layout = new QVBoxLayout(hull_section);
-    hull_layout->setContentsMargins(0, 4, 0, 0);
-    hull_layout->setSpacing(8);
-    hull_layout->addWidget(makeTrackedLabel(
-        hull_section, QStringLiteral("BOUNDARY HULL"), kInitialHeading10, &heading10_labels_));
-
-    auto* hull_content = new QWidget(hull_section);
-    auto* hull_content_layout = new QVBoxLayout(hull_content);
-    hull_content_layout->setContentsMargins(0, 0, 0, 0);
-    hull_content_layout->setSpacing(8);
-    hull_content_layout->addWidget(make_range_block(hull_section,
-                                                    QStringLiteral("Parameter"),
-                                                    QStringLiteral("Alpha value for hull computation"),
-                                                    QStringLiteral("0.10"),
-                                                    QStringLiteral("3.00"),
-                                                    0.10,
-                                                    3.00,
-                                                    0.01,
-                                                    2,
-                                                    &slider_alpha_,
-                                                    &lbl_alpha_value_));
-
-    btn_hull_ = new QPushButton(hull_content);
-    btn_hull_->setCursor(Qt::PointingHandCursor);
-    btn_hull_->setFlat(true);
-    btn_hull_->setFixedHeight(38);
-    btn_hull_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    btn_hull_->setStyleSheet(QStringLiteral(
-        "QPushButton {"
-        "  background: #27272A;"
-        "  border: 1px solid #3F3F47;"
-        "  border-radius: 10px;"
-        "}"
-        "QPushButton:hover { border-color: #52525C; }"
-        "QPushButton:disabled { background: #1F1F23; border-color: #27272A; }"));
-    auto* btn_hull_layout = new QHBoxLayout(btn_hull_);
-    btn_hull_layout->setContentsMargins(0, 0, 0, 0);
-    btn_hull_layout->setSpacing(10);
-    btn_hull_layout->addStretch(1);
-    lbl_hull_icon_ = makeIconLabel(btn_hull_,
-                                   QStringLiteral(":/assets/missionplanner/compute_hull.svg"),
-                                   14,
-                                   QStringLiteral("#E4E4E7"));
-    btn_hull_layout->addWidget(lbl_hull_icon_);
-    lbl_hull_text_ = makeTextLabel(
-        btn_hull_,
-        QStringLiteral("Compute and Project Hull"),
-        QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 400; color: #E4E4E7;"));
-    btn_hull_layout->addWidget(lbl_hull_text_);
-    btn_hull_layout->addStretch(1);
-    connect(btn_hull_, &QPushButton::clicked, this, [this]() { startComputeHull(); });
-    hull_content_layout->addWidget(btn_hull_);
-    hull_layout->addWidget(hull_content);
-    left_content_layout->addWidget(hull_section);
-    left_content_layout->addSpacing(12);
-
-    lbl_inline_status_ = makeTextLabel(left_content,
+    lbl_inline_status_ = makeTextLabel(left_rail_,
                                        QString(),
                                        QStringLiteral("font-family: 'Arimo'; font-size: 14px; "
                                                       "font-weight: 500; color: #71717B;"));
     lbl_inline_status_->setWordWrap(true);
     lbl_inline_status_->setVisible(false);
-    left_content_layout->addWidget(lbl_inline_status_);
+    lbl_inline_status_->setContentsMargins(24, 0, 24, 8);
+    left_rail_layout->addWidget(lbl_inline_status_);
 
-    output_section_ = new QWidget(left_content);
-    output_section_->setFixedHeight(146);
-    output_section_->setAttribute(Qt::WA_StyledBackground, true);
-    output_section_->setStyleSheet(
-        QStringLiteral("background: transparent; border-top: 1px solid #27272A;"));
-    auto* output_layout = new QVBoxLayout(output_section_);
-    output_layout->setContentsMargins(0, 9, 0, 0);
-    output_layout->setSpacing(8);
-    lbl_output_heading_ = makeTrackedLabel(output_section_,
-                                           QStringLiteral("Estimated Output"),
-                                           kInitialHeading10,
-                                           &heading10_labels_);
-    output_layout->addWidget(lbl_output_heading_);
-
-    auto* output_grid = new QGridLayout();
-    output_grid->setContentsMargins(0, 0, 0, 0);
-    output_grid->setHorizontalSpacing(8);
-    output_grid->setVerticalSpacing(8);
-    output_grid->addWidget(make_output_card(output_section_,
-                                            QStringLiteral("Points Retained"),
-                                            &lbl_output_points_),
-                           0,
-                           0);
-    output_grid->addWidget(make_output_card(output_section_,
-                                            QStringLiteral("Reduction"),
-                                            &lbl_output_reduction_),
-                           0,
-                           1);
-    output_grid->addWidget(make_output_card(output_section_,
-                                            QStringLiteral("Est. File Size"),
-                                            &lbl_output_file_size_),
-                           1,
-                           0);
-    output_grid->addWidget(make_output_card(output_section_,
-                                            QStringLiteral("Quality"),
-                                            &lbl_output_quality_),
-                           1,
-                           1);
-    output_layout->addLayout(output_grid);
-    left_content_layout->addWidget(output_section_);
-    left_content_layout->addStretch(1);
-
-    left_scroll->setWidget(left_content);
     body_layout->addWidget(left_rail_);
-    content_stack_->addWidget(map_processing_page_);
 
     auto make_choice_button = [&](QWidget* parent,
                                   const QString& title,
@@ -6681,25 +5648,6 @@ void PlannerScreen::buildUi() {
     auto* coverage_content_layout = new QVBoxLayout(coverage_content);
     coverage_content_layout->setContentsMargins(24, 12, 24, 24);
     coverage_content_layout->setSpacing(0);
-
-    auto* scan_mode_section = new QWidget(coverage_content);
-    auto* scan_mode_layout = new QVBoxLayout(scan_mode_section);
-    scan_mode_layout->setContentsMargins(0, 0, 0, 0);
-    scan_mode_layout->setSpacing(8);
-    scan_mode_layout->addWidget(
-        makeTrackedLabel(scan_mode_section, QStringLiteral("SCAN MODE"), kInitialHeading10, &heading10_labels_));
-    auto* scan_mode_grid = new QGridLayout();
-    scan_mode_grid->setContentsMargins(0, 0, 0, 0);
-    scan_mode_grid->setHorizontalSpacing(8);
-    btn_coverage_scan_complete_ =
-        make_row_choice_button(scan_mode_section, QStringLiteral("Complete"), &lbl_coverage_scan_complete_icon_, 42);
-    btn_coverage_scan_roi_ =
-        make_row_choice_button(scan_mode_section, QStringLiteral("ROI Scan"), &lbl_coverage_scan_roi_icon_, 42);
-    scan_mode_grid->addWidget(btn_coverage_scan_complete_, 0, 0);
-    scan_mode_grid->addWidget(btn_coverage_scan_roi_, 0, 1);
-    scan_mode_layout->addLayout(scan_mode_grid);
-    coverage_content_layout->addWidget(scan_mode_section);
-    coverage_content_layout->addSpacing(12);
 
     coverage_roi_section_ = new QWidget(coverage_content);
     coverage_roi_section_->setAttribute(Qt::WA_StyledBackground, true);
@@ -7639,55 +6587,9 @@ void PlannerScreen::buildUi() {
     tool_stack_layout->addWidget(tool_fit_);
     tool_stack_layout->addWidget(tool_reset_);
 
-    stats_chip_ = new QWidget(center_stage_host);
-    stats_chip_->setFixedHeight(66);
-    stats_chip_->setMinimumWidth(201);
-    stats_chip_->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
-    stats_chip_->setAttribute(Qt::WA_StyledBackground, true);
-    stats_chip_->setStyleSheet(QStringLiteral(
-        "background: rgba(24,24,27,0.9);"
-        "border: 1px solid #27272A;"
-        "border-radius: 10px;"));
-    auto* stats_layout = new QHBoxLayout(stats_chip_);
-    stats_layout->setContentsMargins(17, 13, 17, 13);
-    stats_layout->setSpacing(24);
-
-    auto* points_host = new QWidget(stats_chip_);
-    points_host->setMinimumWidth(76);
-    points_host->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
-    auto* points_col = new QVBoxLayout(points_host);
-    points_col->setContentsMargins(0, 0, 0, 0);
-    points_col->setSpacing(0);
-    points_col->addWidget(
-        makeTrackedLabel(points_host, QStringLiteral("Points"), kInitialMono12Muted, &mono12_muted_labels_));
-    lbl_stats_points_ = makeTextLabel(points_host,
-                                      QStringLiteral("--"),
-                                      QStringLiteral("font-family: 'Liberation Mono'; "
-                                                     "font-size: 14px; font-weight: 400; "
-                                                     "color: #E4E4E7;"));
-    points_col->addWidget(lbl_stats_points_);
-    stats_layout->addWidget(points_host);
-
-    auto* area_host = new QWidget(stats_chip_);
-    area_host->setMinimumWidth(68);
-    area_host->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
-    auto* area_col = new QVBoxLayout(area_host);
-    area_col->setContentsMargins(0, 0, 0, 0);
-    area_col->setSpacing(0);
-    area_col->addWidget(
-        makeTrackedLabel(area_host, QStringLiteral("Area"), kInitialMono12Muted, &mono12_muted_labels_));
-    lbl_stats_area_ = makeTextLabel(area_host,
-                                    QStringLiteral("--"),
-                                    QStringLiteral("font-family: 'Liberation Mono'; "
-                                                   "font-size: 14px; font-weight: 400; "
-                                                   "color: #E4E4E7;"));
-    area_col->addWidget(lbl_stats_area_);
-    stats_layout->addWidget(area_host);
-
     preview_bottom_overlay_stack_ = new QStackedWidget(center_stage_host);
     preview_bottom_overlay_stack_->setStyleSheet(
         QStringLiteral("background: transparent; border: none;"));
-    preview_bottom_overlay_stack_->addWidget(stats_chip_);
 
     coverage_legend_chip_ = new QWidget(preview_bottom_overlay_stack_);
     coverage_legend_chip_->setFixedHeight(50);
@@ -7708,7 +6610,7 @@ void PlannerScreen::buildUi() {
     boundary_legend_layout->addWidget(coverage_legend_boundary_swatch_, 0, Qt::AlignVCenter);
     lbl_coverage_legend_boundary_ = makeTextLabel(
         boundary_legend,
-        QStringLiteral("Boundary Hull"),
+        QStringLiteral("Region Boundary"),
         QStringLiteral("font-family: 'Arimo'; font-size: 12px; font-weight: 400; color: #A1A1AA;"));
     boundary_legend_layout->addWidget(lbl_coverage_legend_boundary_, 0, Qt::AlignVCenter);
     legend_layout->addWidget(boundary_legend);
@@ -7729,7 +6631,7 @@ void PlannerScreen::buildUi() {
     legend_layout->addWidget(path_legend);
 
     preview_bottom_overlay_stack_->addWidget(coverage_legend_chip_);
-    preview_bottom_overlay_stack_->setCurrentWidget(stats_chip_);
+    preview_bottom_overlay_stack_->setCurrentWidget(coverage_legend_chip_);
 
     // ---------------- Scan execution: top-left segment legend ----------------
     // Lives in the new top-left overlay slot (matches Figma) instead of being
@@ -7889,66 +6791,6 @@ void PlannerScreen::buildUi() {
     setNextStageLabel(lbl_next_text_->text());
     root_layout->addWidget(footer_);
 
-    slider_voxel_->on_value_changed = [this](double value) {
-        if (syncing_widgets_) {
-            return;
-        }
-        SessionCache& cache = activeSession();
-        cache.voxel_size = value;
-        persistParameters();
-        updateValueLabels();
-        invalidateProcessingResult(
-            QStringLiteral("Voxel size changed. Re-run point cloud processing to refresh the result."));
-    };
-
-    slider_z_min_->on_value_changed = [this](double value) {
-        if (syncing_widgets_) {
-            return;
-        }
-        SessionCache& cache = activeSession();
-        cache.z_min = value;
-        if (cache.z_min > cache.z_max) {
-            cache.z_max = cache.z_min;
-            syncing_widgets_ = true;
-            slider_z_max_->setValue(cache.z_max);
-            syncing_widgets_ = false;
-        }
-        persistParameters();
-        updateValueLabels();
-        invalidateProcessingResult(
-            QStringLiteral("Height filter changed. Re-run point cloud processing to refresh the result."));
-    };
-
-    slider_z_max_->on_value_changed = [this](double value) {
-        if (syncing_widgets_) {
-            return;
-        }
-        SessionCache& cache = activeSession();
-        cache.z_max = value;
-        if (cache.z_max < cache.z_min) {
-            cache.z_min = cache.z_max;
-            syncing_widgets_ = true;
-            slider_z_min_->setValue(cache.z_min);
-            syncing_widgets_ = false;
-        }
-        persistParameters();
-        updateValueLabels();
-        invalidateProcessingResult(
-            QStringLiteral("Height filter changed. Re-run point cloud processing to refresh the result."));
-    };
-
-    slider_alpha_->on_value_changed = [this](double value) {
-        if (syncing_widgets_) {
-            return;
-        }
-        SessionCache& cache = activeSession();
-        cache.alpha = value;
-        persistParameters();
-        updateValueLabels();
-        invalidateHullResult(
-            QStringLiteral("Hull parameter changed. Recompute the hull to refresh the boundary."));
-    };
-
     auto apply_coverage_preset = [this](const QString& preset_name) {
         SessionCache& cache = activeSession();
         ensureCoverageDefaults(cache);
@@ -8071,30 +6913,6 @@ void PlannerScreen::buildUi() {
         updateButtonsAndStatus();
     });
 
-    connect(btn_coverage_scan_complete_, &QPushButton::clicked, this, [this, cancel_coverage_selection]() {
-        SessionCache& cache = activeSession();
-        cancel_coverage_selection();
-        cache.coverage_scan_mode = QStringLiteral("complete");
-        cache.coverage_roi_drawing_active = false;
-        cache.coverage_drawing_active = false;
-        persistParameters();
-        invalidateCoverageResult(
-            QStringLiteral("Scan mode changed. Generate coverage paths again to refresh the preview."));
-        updatePreview();
-        updateButtonsAndStatus();
-    });
-    connect(btn_coverage_scan_roi_, &QPushButton::clicked, this, [this, cancel_coverage_selection]() {
-        SessionCache& cache = activeSession();
-        cancel_coverage_selection();
-        cache.coverage_scan_mode = QStringLiteral("roi");
-        cache.coverage_roi_drawing_active = false;
-        cache.coverage_drawing_active = false;
-        persistParameters();
-        invalidateCoverageResult(
-            QStringLiteral("Scan mode changed. Generate coverage paths again to refresh the preview."));
-        updatePreview();
-        updateButtonsAndStatus();
-    });
     connect(btn_coverage_roi_draw_rectangle_, &QPushButton::clicked, this, [this]() {
         SessionCache& cache = activeSession();
         cache.coverage_roi_drawing_tool = QStringLiteral("rectangle");
@@ -8109,8 +6927,8 @@ void PlannerScreen::buildUi() {
     });
     connect(btn_coverage_roi_start_, &QPushButton::clicked, this, [this, cancel_coverage_selection]() {
         SessionCache& cache = activeSession();
-        if (!cache.hull_complete || cache.hull_polygon.empty()) {
-            setInlineStatus(QStringLiteral("Compute and project the hull before drawing an ROI."),
+        if (!cache.raw_loaded) {
+            setInlineStatus(QStringLiteral("Wait for the saved map to load before drawing a region."),
                             QStringLiteral("#F59E0B"));
             updateButtonsAndStatus();
             return;
@@ -8494,8 +7312,8 @@ void PlannerScreen::buildUi() {
     });
     connect(btn_coverage_draw_toggle_, &QPushButton::clicked, this, [this, cancel_coverage_selection]() {
         SessionCache& cache = activeSession();
-        if (!cache.hull_complete || cache.hull_polygon.empty()) {
-            setInlineStatus(QStringLiteral("Compute and project the hull before drawing obstacles."),
+        if (!cache.raw_loaded) {
+            setInlineStatus(QStringLiteral("Wait for the saved map to load before drawing obstacles."),
                             QStringLiteral("#F59E0B"));
             updateButtonsAndStatus();
             return;
@@ -10363,10 +9181,10 @@ void PlannerScreen::notifyScanCancelled(bool success) {
     setScanManualOverride(false);
     stopScanCameraStream();
 
-    // Send the operator back to Map Processing. navigateToStep() also
+    // Send the operator back to Coverage Planning. navigateToStep() also
     // re-applies the session to the UI, which will refresh the stepper,
     // footer gates, and hide the Stage-4 widgets.
-    navigateToStep(PlannerStep::MapProcessing);
+    navigateToStep(PlannerStep::CoveragePlanning);
 }
 
 void PlannerScreen::onScanDiscardClicked() {
@@ -10484,7 +9302,7 @@ void PlannerScreen::notifyScanDiscarded(bool success) {
     setScanManualOverride(false);
     stopScanCameraStream();
 
-    navigateToStep(PlannerStep::MapProcessing);
+    navigateToStep(PlannerStep::CoveragePlanning);
 }
 
 void PlannerScreen::onCompleteMissionClicked(const char* trigger) {

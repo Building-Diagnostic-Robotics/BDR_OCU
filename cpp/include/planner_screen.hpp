@@ -7,6 +7,7 @@
 #include <QString>
 #include <QWidget>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "coverage_pipeline.hpp"
@@ -56,7 +57,8 @@ public:
     void setRobotId(const QString& robot_id);
     void setMapPath(const QString& map_path);
     void setLiveRobotTelemetry(const std::optional<PathState>& pose,
-                               const std::vector<Point2D>& trail);
+                               const std::vector<Point2D>& trail,
+                               const std::vector<double>& trail_z = {});
     // Latest robot ground speed (m/s, unsigned). Fed from AppShellWindow's
     // odometry pipe. Used by effectiveScanSpeedMps() while a scan is running.
     void setLiveRobotSpeedMps(double speed_mps);
@@ -196,10 +198,9 @@ protected:
 
 private:
     enum class PlannerStep {
-        MapProcessing = 0,
-        CoveragePlanning = 1,
-        ScanSplitting = 2,
-        Scan = 3,
+        CoveragePlanning = 0,
+        ScanSplitting = 1,
+        Scan = 2,
     };
 
     enum class ScanRunState {
@@ -246,11 +247,6 @@ private:
             double quality_pct = 0.0;
         };
 
-        double voxel_size = 0.05;
-        double z_min = -0.10;
-        double z_max = 0.10;
-        double alpha = 1.50;
-        QString coverage_scan_mode = QStringLiteral("complete");
         QString coverage_pattern = QStringLiteral("boustro");
         double coverage_path_spacing = 0.50;
         double coverage_headland_width = 0.30;
@@ -295,26 +291,17 @@ private:
         // Not persisted across runs.
         bool scan_preflight_acknowledged = false;
         bool raw_loaded = false;
-        bool processing_complete = false;
-        bool hull_complete = false;
         bool planning_complete = false;
         PointCloudPtr raw_cloud;
-        PointCloudPtr processed_cloud;
         std::vector<Point2D> raw_projected_points;
-        std::vector<Point2D> processed_projected_points;
-        Polygon2D hull_polygon;
         SwathList planned_swaths;
         PathStateList planned_route;
         PathStateList planned_path;
         qsizetype raw_point_count = 0;
-        qsizetype processed_point_count = 0;
         double raw_area_estimate_m2 = 0.0;
-        double processed_area_estimate_m2 = 0.0;
-        double hull_area_m2 = 0.0;
         double planned_effective_area_m2 = 0.0;
         double estimated_file_size_mb = 0.0;
-        QString quality_label;
-        PlannerStep last_step = PlannerStep::MapProcessing;
+        PlannerStep last_step = PlannerStep::CoveragePlanning;
     };
 
     struct StageStepUi {
@@ -335,26 +322,6 @@ private:
         std::vector<Point2D> raw_projected_points;
         qsizetype raw_point_count = 0;
         double area_estimate_m2 = 0.0;
-    };
-
-    struct ProcessResult {
-        bool success = false;
-        QString error;
-        PointCloudPtr processed_cloud;
-        std::vector<Point2D> processed_projected_points;
-        qsizetype raw_point_count = 0;
-        qsizetype processed_point_count = 0;
-        double reduction_percent = 0.0;
-        double estimated_file_size_mb = 0.0;
-        QString quality_label;
-        double area_estimate_m2 = 0.0;
-    };
-
-    struct HullResult {
-        bool success = false;
-        QString error;
-        Polygon2D hull_polygon;
-        double area_m2 = 0.0;
     };
 
     struct PlanningResult {
@@ -386,14 +353,9 @@ private:
     // ETA speed source: live odometry while scanning, else cached controller
     // max_linear_velocity, else 0.4 m/s. Pure (no UI side effects).
     double effectiveScanSpeedMps() const;
-    void invalidateProcessingResult(const QString& status_message = QString());
-    void invalidateHullResult(const QString& status_message = QString());
     void invalidateCoverageResult(const QString& status_message = QString());
     void updateValueLabels();
     void updatePreview();
-    void updateOutputCards();
-    void updateStatsChip();
-    void updatePlaceholderMessage();
     void updateCoveragePlanningUi();
     void refreshCoveragePresetCombo();
     void rebuildCoveragePresetRows();
@@ -407,17 +369,17 @@ private:
     void navigateToStep(PlannerStep step);
     void setInlineStatus(const QString& text, const QString& color_hex = QStringLiteral("#71717B"));
     void startMapLoadIfNeeded();
-    void startProcessPointCloud();
-    void startComputeHull();
     void startGenerateCoverage();
     void maybeRunAutotest();
     void logAutotestSummary(const QString& phase);
     void applyMapLoadResult(quint64 generation, const MapLoadResult& result);
-    void applyProcessResult(quint64 generation, const ProcessResult& result);
-    void applyHullResult(quint64 generation, const HullResult& result);
     void applyPlanningResult(quint64 generation, const PlanningResult& result);
     void startDetectObstacles();
     void applyDetectResult(quint64 generation, ObstacleDetectionResult result);
+    // Automatic display height-crop band derived from the robot trail's Z
+    // samples: [min(trail_z) - tol, max(trail_z) + tol]. Returns nullopt when
+    // no finite trail-Z samples exist (caller then shows the full cloud).
+    std::optional<std::pair<double, double>> currentTrailZRange() const;
 
     // Scan Splitting
     void rebuildScanSegments();
@@ -506,19 +468,15 @@ private:
     bool dark_mode_ = true;
     bool syncing_widgets_ = false;
     bool load_in_flight_ = false;
-    bool process_in_flight_ = false;
-    bool hull_in_flight_ = false;
     bool planning_in_flight_ = false;
     bool detect_in_flight_ = false;
     bool autotest_enabled_ = false;
     bool autotest_started_ = false;
     bool autotest_restore_reported_ = false;
     quint64 load_generation_ = 0;
-    quint64 process_generation_ = 0;
-    quint64 hull_generation_ = 0;
     quint64 planning_generation_ = 0;
     quint64 detect_generation_ = 0;
-    PlannerStep current_step_ = PlannerStep::MapProcessing;
+    PlannerStep current_step_ = PlannerStep::CoveragePlanning;
     QString active_context_key_;
     QString autotest_mode_;
     QString robot_id_;
@@ -546,6 +504,11 @@ private:
     qint64 link_disconnected_since_ms_ = 0;
     std::optional<PathState> live_robot_pose_;
     std::vector<Point2D> live_robot_trail_;
+    // Per-sample Z (m) of the robot odometry trail, parallel to
+    // `live_robot_trail_`. Source for the automatic display height-crop:
+    // the displayed cloud is restricted to the robot's traversed Z band so
+    // the operator sees the scan plane, not the full vertical extent.
+    std::vector<double> live_robot_trail_z_;
     double robot_marker_size_m_ = 0.6;
     // Latest robot ground speed (m/s, unsigned). Pushed from AppShellWindow.
     double live_robot_speed_mps_ = 0.0;
@@ -561,10 +524,8 @@ private:
     QWidget* stage_row_frame_ = nullptr;
     QWidget* left_header_icon_box_ = nullptr;
     QWidget* left_rail_ = nullptr;
-    QWidget* output_section_ = nullptr;
     QWidget* placeholder_card_ = nullptr;
     QWidget* center_stage_ = nullptr;
-    QWidget* stats_chip_ = nullptr;
     QWidget* footer_ = nullptr;
 
     QPushButton* btn_back_ = nullptr;
@@ -591,18 +552,8 @@ private:
     QLabel* lbl_left_header_icon_ = nullptr;
     QLabel* lbl_left_header_title_ = nullptr;
     QLabel* lbl_left_header_subtitle_ = nullptr;
-    QLabel* lbl_output_heading_ = nullptr;
     QLabel* lbl_placeholder_title_ = nullptr;
     QLabel* lbl_inline_status_ = nullptr;
-    QLabel* lbl_output_points_ = nullptr;
-    QLabel* lbl_output_reduction_ = nullptr;
-    QLabel* lbl_output_file_size_ = nullptr;
-    QLabel* lbl_output_quality_ = nullptr;
-    QLabel* lbl_stats_points_ = nullptr;
-    QLabel* lbl_stats_area_ = nullptr;
-    QLabel* lbl_stage2_message_ = nullptr;
-    QLabel* lbl_coverage_scan_complete_icon_ = nullptr;
-    QLabel* lbl_coverage_scan_roi_icon_ = nullptr;
     QLabel* lbl_coverage_roi_rectangle_icon_ = nullptr;
     QLabel* lbl_coverage_roi_polygon_icon_ = nullptr;
     QLabel* lbl_coverage_roi_status_icon_ = nullptr;
@@ -629,10 +580,6 @@ private:
     QLabel* lbl_coverage_legend_boundary_ = nullptr;
     QLabel* lbl_coverage_legend_path_ = nullptr;
 
-    PlannerTrackSlider* slider_voxel_ = nullptr;
-    PlannerTrackSlider* slider_z_min_ = nullptr;
-    PlannerTrackSlider* slider_z_max_ = nullptr;
-    PlannerTrackSlider* slider_alpha_ = nullptr;
     PlannerTrackSlider* slider_coverage_path_spacing_ = nullptr;
     PlannerTrackSlider* slider_coverage_headland_ = nullptr;
     PlannerTrackSlider* slider_coverage_scan_speed_ = nullptr;
@@ -665,22 +612,10 @@ private:
         int decimals = 2;
     };
     std::vector<UnitEndpointBadge> unit_endpoint_badges_;
-    QLabel* lbl_voxel_value_ = nullptr;
-    QLabel* lbl_z_min_value_ = nullptr;
-    QLabel* lbl_z_max_value_ = nullptr;
-    QLabel* lbl_alpha_value_ = nullptr;
-    QLabel* lbl_process_icon_ = nullptr;
-    QLabel* lbl_process_text_ = nullptr;
-    QLabel* lbl_hull_icon_ = nullptr;
-    QLabel* lbl_hull_text_ = nullptr;
     QLabel* lbl_tool_zoom_in_icon_ = nullptr;
     QLabel* lbl_tool_fit_icon_ = nullptr;
     QLabel* lbl_tool_reset_icon_ = nullptr;
 
-    QPushButton* btn_process_ = nullptr;
-    QPushButton* btn_hull_ = nullptr;
-    QPushButton* btn_coverage_scan_complete_ = nullptr;
-    QPushButton* btn_coverage_scan_roi_ = nullptr;
     QPushButton* btn_coverage_roi_draw_rectangle_ = nullptr;
     QPushButton* btn_coverage_roi_draw_polygon_ = nullptr;
     QPushButton* btn_coverage_roi_start_ = nullptr;
@@ -710,7 +645,6 @@ private:
     QStackedWidget* preview_stack_ = nullptr;
     QStackedWidget* preview_bottom_overlay_stack_ = nullptr;
     QStackedWidget* coverage_obstacle_mode_stack_ = nullptr;
-    QWidget* map_processing_page_ = nullptr;
     QWidget* coverage_placeholder_page_ = nullptr;
     QWidget* scan_splitting_page_ = nullptr;
     QLineEdit* edit_scan_distance_ = nullptr;
@@ -764,7 +698,6 @@ private:
     std::vector<QWidget*> output_cards_;
     std::vector<QWidget*> stage_separator_widgets_;
 
-    StageStepUi step_map_processing_;
     StageStepUi step_coverage_planning_;
     StageStepUi step_scan_splitting_;
     StageStepUi step_scan_;
