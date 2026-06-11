@@ -4148,11 +4148,19 @@ void PlannerScreen::startGenerateCoverage() {
     // resampler, keeping the route's exact corner waypoints.
     cfg.use_axial_turns = true;
     cfg.waypoint_spacing = 0.0;
+    // Feed the FULL (unclipped) obstacle shapes to the pipeline: it subtracts
+    // them from the ROI∩boundary work area, so any out-of-ROI portion is
+    // ignored while every in-ROI part is removed. Passing the display-clipped
+    // geometry could drop a piece in the rare concave-ROI split case and let
+    // the robot drive into it.
     std::vector<Obstacle2D> obstacles;
     obstacles.reserve(cache.coverage_obstacles.size());
     for (const auto& obstacle : cache.coverage_obstacles) {
-        if (obstacle.geometry.outer.size() >= 3) {
-            obstacles.push_back(obstacle.geometry);
+        const Obstacle2D& src =
+            obstacle.raw_geometry.outer.size() >= 3 ? obstacle.raw_geometry
+                                                    : obstacle.geometry;
+        if (src.outer.size() >= 3) {
+            obstacles.push_back(src);
         }
     }
 
@@ -4378,6 +4386,55 @@ void PlannerScreen::startDetectObstacles() {
     });
 }
 
+void PlannerScreen::reclipObstaclesToRoi() {
+    SessionCache& cache = activeSession();
+    const Polygon2D& roi = cache.coverage_roi_polygon;
+    const bool has_roi = roi.size() >= 3;
+
+    for (auto& obs : cache.coverage_obstacles) {
+        // Back-fill raw_geometry for entries created before this field existed
+        // (or restored from an older persisted session).
+        if (obs.raw_geometry.outer.empty()) {
+            obs.raw_geometry = obs.geometry;
+        }
+        if (obs.raw_geometry.outer.empty()) {
+            continue;
+        }
+
+        if (!has_roi) {
+            obs.geometry = obs.raw_geometry;
+            obs.area_m2 = std::abs(polygonArea(obs.geometry.outer));
+            continue;
+        }
+
+        std::vector<Obstacle2D> pieces = clipObstacleToPolygon(obs.raw_geometry, roi);
+        if (pieces.empty()) {
+            // Entirely outside the ROI: nothing to display or count. The raw
+            // shape is retained, and coverage subtracts raw_geometry directly,
+            // so a fully-outside obstacle simply contributes no removed area.
+            obs.geometry = Obstacle2D{};
+            obs.area_m2 = 0.0;
+            continue;
+        }
+
+        // Representative display geometry = largest in-ROI piece; the area
+        // readout sums every in-ROI piece (handles the rare concave-ROI split).
+        size_t best = 0;
+        double best_area = std::abs(polygonArea(pieces[0].outer));
+        double total_area = best_area;
+        for (size_t i = 1; i < pieces.size(); ++i) {
+            const double a = std::abs(polygonArea(pieces[i].outer));
+            total_area += a;
+            if (a > best_area) {
+                best_area = a;
+                best = i;
+            }
+        }
+        obs.geometry = std::move(pieces[best]);
+        obs.area_m2 = total_area;
+    }
+}
+
 void PlannerScreen::applyDetectResult(quint64 generation, ObstacleDetectionResult result) {
     if (generation != detect_generation_) {
         return;
@@ -4403,9 +4460,12 @@ void PlannerScreen::applyDetectResult(quint64 generation, ObstacleDetectionResul
         co.id = cache.coverage_next_obstacle_id++;
         co.type = QStringLiteral("auto");
         co.source = QStringLiteral("auto-detect");
+        co.raw_geometry = obs;
         co.geometry = std::move(obs);
         cache.coverage_obstacles.push_back(std::move(co));
     }
+    // Trim the detected obstacles to the current ROI for display + area.
+    reclipObstaclesToRoi();
 
     invalidateCoverageResult(
         QStringLiteral("Auto-detected %1 obstacle(s). Generate coverage paths again to refresh the preview.")
@@ -6842,14 +6902,18 @@ void PlannerScreen::buildUi() {
                                 : QStringLiteral("Rectangle");
         obstacle.area_m2 = std::abs(polygonArea(shape));
         obstacle.source = QStringLiteral("manual");
-        obstacle.geometry = Obstacle2D{shape, {}};
+        obstacle.raw_geometry = Obstacle2D{shape, {}};
+        obstacle.geometry = obstacle.raw_geometry;
         cache.coverage_obstacles.push_back(obstacle);
+        // Trim the newly drawn obstacle to the current ROI.
+        reclipObstaclesToRoi();
     };
 
     connect(plot_, &PlotWidget::roiSelected, this, [this](const Polygon2D& roi) {
         SessionCache& cache = activeSession();
         cache.coverage_roi_polygon = roi;
         cache.coverage_roi_drawing_active = false;
+        reclipObstaclesToRoi();
         invalidateCoverageResult(
             QStringLiteral("ROI updated. Generate coverage paths again to refresh the preview."));
         updatePreview();
@@ -6869,6 +6933,7 @@ void PlannerScreen::buildUi() {
         if (cache.coverage_roi_drawing_active) {
             cache.coverage_roi_polygon = rect;
             cache.coverage_roi_drawing_active = false;
+            reclipObstaclesToRoi();
             invalidateCoverageResult(
                 QStringLiteral("ROI updated. Generate coverage paths again to refresh the preview."));
             updatePreview();

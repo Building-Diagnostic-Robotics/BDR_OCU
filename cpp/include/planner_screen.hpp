@@ -229,7 +229,12 @@ private:
             QString type;
             double area_m2 = 0.0;
             QString source;
+            // Display/coverage geometry, clipped to the current ROI.
             Obstacle2D geometry;
+            // Original unclipped shape (detection output or as-drawn). Retained
+            // so the obstacle can be re-clipped live when the ROI is edited
+            // without progressively eroding the shape.
+            Obstacle2D raw_geometry;
         };
 
         struct ScanSegment {
@@ -360,6 +365,11 @@ private:
     void refreshCoveragePresetCombo();
     void rebuildCoveragePresetRows();
     void rebuildCoverageObstacleRows();
+    // Re-derive each obstacle's display/coverage geometry by clipping its
+    // raw_geometry to the current ROI polygon. No-op clip (ROI < 3 verts)
+    // leaves obstacles at full extent. Called after detection, after a manual
+    // obstacle is added, and whenever the ROI changes.
+    void reclipObstaclesToRoi();
     void updateHeaderForCurrentStep();
     void updateStageSteps();
     void updateFooter();
