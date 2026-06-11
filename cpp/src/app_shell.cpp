@@ -4004,7 +4004,7 @@ void AppShellWindow::onExplorationOdom(const nav_msgs::msg::Odometry::SharedPtr 
     if (exploration_odom_samples_.empty() ||
         std::hypot(exploration_odom_samples_.back().x - x,
                    exploration_odom_samples_.back().y - y) > 0.03) {
-        exploration_odom_samples_.push_back({x, y, now_ms});
+        exploration_odom_samples_.push_back({x, y, z, now_ms});
         if (exploration_odom_samples_.size() > exploration_odom_max_points_) {
             const size_t remove_n =
                 exploration_odom_samples_.size() - exploration_odom_max_points_;
@@ -4030,12 +4030,15 @@ void AppShellWindow::pushPlannerTelemetrySnapshot() {
     }
 
     std::vector<f2c_cpp::Point2D> trail;
+    std::vector<double> trail_z;
     trail.reserve(exploration_odom_samples_.size());
+    trail_z.reserve(exploration_odom_samples_.size());
     for (const auto& sample : exploration_odom_samples_) {
         trail.emplace_back(sample.x, sample.y);
+        trail_z.push_back(sample.z);
     }
 
-    stage5_->setLiveRobotTelemetry(pose, trail);
+    stage5_->setLiveRobotTelemetry(pose, trail, trail_z);
     pushPlannerMotorsChipState();
 }
 
