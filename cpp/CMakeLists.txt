@@ -203,6 +203,7 @@ set_target_properties(bdr_update_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Source files
 set(PIPELINE_SOURCES
     src/coverage_pipeline.cpp
+    src/obstacle_geometry.cpp
 )
 
 # Legacy-only sources (recordings / cloud tab UX, teleop dock, session JSON)
@@ -394,6 +395,24 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME update_checker_tests COMMAND update_checker_tests)
         message(STATUS "Unit tests: enabled (update_checker_tests)")
+
+        # Obstacle/free-space geometry core (boost-only; no GUI/ROS/PCL link).
+        add_executable(obstacle_geometry_tests
+            tests/obstacle_geometry_tests.cpp
+            src/obstacle_geometry.cpp
+        )
+        target_include_directories(obstacle_geometry_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${EIGEN3_INCLUDE_DIRS}
+            ${PCL_INCLUDE_DIRS}
+        )
+        target_link_libraries(obstacle_geometry_tests PRIVATE
+            Eigen3::Eigen
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME obstacle_geometry_tests COMMAND obstacle_geometry_tests)
+        message(STATUS "Unit tests: enabled (obstacle_geometry_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

@@ -316,145 +316,44 @@ static bool buildEffectiveCellsFromROIAndObstacles(
     const Polygon2D& boundary,
     const Polygon2D* roi,
     const std::vector<Obstacle2D>* obstacles,
+    double obstacle_clearance,
     F2CCells& out_cells,
     Polygon2D& out_primary_outer,
     double& out_effective_area_m2,
     std::string& error) {
 
-    Polygon2D boundary_clean = sanitizePolygon2D(boundary);
-    if (boundary_clean.size() < 3) {
-        error = "Boundary polygon is too small (need >= 3 vertices)";
+    FreeSpaceResult fs =
+        buildFreeSpacePolygons(boundary, roi, obstacles, obstacle_clearance);
+    if (!fs.success) {
+        error = fs.error_message;
         return false;
     }
+    out_effective_area_m2 = fs.effective_area_m2;
 
-    BgPolygon boundary_bg = toBgPolygon(boundary_clean);
-    {
-        std::string why;
-        if (!bgValidate(boundary_bg, why)) {
-            error = "Boundary polygon is invalid: " + why;
-            return false;
-        }
-    }
-
-    BgMultiPolygon work;
-    if (roi && !roi->empty()) {
-        Polygon2D roi_clean = sanitizePolygon2D(*roi);
-        if (roi_clean.size() < 3) {
-            error = "ROI polygon is too small (need >= 3 vertices)";
-            return false;
-        }
-        BgPolygon roi_bg = toBgPolygon(roi_clean);
-        {
-            std::string why;
-            if (!bgValidate(roi_bg, why)) {
-                error = "ROI polygon is invalid: " + why;
-                return false;
-            }
-        }
-        work = bgIntersection(boundary_bg, roi_bg);
-    } else {
-        work.push_back(boundary_bg);
-    }
-
-    // Drop tiny pieces (helps after intersection/difference)
-    BgMultiPolygon filtered;
-    for (auto& p : work) {
-        bg::correct(p);
-        if (std::fabs(bg::area(p)) > kMinValidArea) {
-            filtered.push_back(p);
-        }
-    }
-    work = filtered;
-    if (work.empty()) {
-        error = "ROI does not intersect the boundary (effective area is empty)";
-        return false;
-    }
-
-    if (obstacles && !obstacles->empty()) {
-        // Union all obstacles into a single multipolygon BEFORE subtracting.
-        // Sequential per-obstacle differencing aborted the whole run whenever
-        // one obstacle ring was self-touching/overlapping (a common output of
-        // the occupancy-grid contour extractor when two obstacle blobs are
-        // adjacent). Unioning resolves overlaps and self-touches into valid,
-        // disjoint polygons; an individual obstacle that is still invalid after
-        // bg::correct is skipped (logged) rather than failing the generation.
-        BgMultiPolygon obstacles_union;
-        for (size_t i = 0; i < obstacles->size(); ++i) {
-            const auto& obs_in = obstacles->at(i);
-            Polygon2D obs_outer_clean = sanitizePolygon2D(obs_in.outer);
-            if (obs_outer_clean.size() < 3) {
-                std::cerr << "[Coverage] Skipping obstacle #" << (i + 1)
-                          << " (degenerate: < 3 vertices)\n";
-                continue;
-            }
-            Obstacle2D obs_clean{obs_outer_clean, obs_in.holes};
-            BgPolygon obs_bg = toBgPolygon(obs_clean);
-            {
-                std::string why;
-                if (!bgValidate(obs_bg, why)) {
-                    std::cerr << "[Coverage] Skipping invalid obstacle #" << (i + 1)
-                              << " (" << why << ")\n";
-                    continue;
-                }
-            }
-            BgMultiPolygon merged;
-            bg::union_(obstacles_union, obs_bg, merged);
-            for (auto& p : merged) {
-                bg::correct(p);
-            }
-            obstacles_union = std::move(merged);
-        }
-
-        if (!obstacles_union.empty()) {
-            BgMultiPolygon after;
-            bg::difference(work, obstacles_union, after);
-            BgMultiPolygon kept;
-            for (auto& p : after) {
-                bg::correct(p);
-                if (std::fabs(bg::area(p)) > kMinValidArea) {
-                    kept.push_back(p);
-                }
-            }
-            work = std::move(kept);
-            if (work.empty()) {
-                error = "Obstacles removed all usable area";
-                return false;
-            }
-        }
-    }
-
-    out_effective_area_m2 = 0.0;
-    for (const auto& p : work) {
-        out_effective_area_m2 += std::fabs(bg::area(p));
-    }
-
-    // Choose a primary polygon (largest area) for swath alignment / concavity checks
+    // Primary polygon (largest area) drives swath alignment / concavity checks.
     double best_area = -1.0;
-    BgPolygon const* best = nullptr;
-    for (const auto& p : work) {
-        double a = std::fabs(bg::area(p));
+    const Obstacle2D* best = nullptr;
+    for (const auto& reg : fs.regions) {
+        const double a = std::fabs(signedAreaLocal(reg.outer));
         if (a > best_area) {
             best_area = a;
-            best = &p;
+            best = &reg;
         }
     }
     if (!best) {
         error = "Effective area is empty";
         return false;
     }
-    out_primary_outer = bgRingToPolygon2D(best->outer());
+    out_primary_outer = best->outer;
 
-    // Convert to F2C cells (multi-polygons become multiple cells; holes become interior rings)
     out_cells = F2CCells();
-    for (const auto& p : work) {
-        addBgPolygonToF2CCells(p, out_cells);
+    for (const auto& reg : fs.regions) {
+        addBgPolygonToF2CCells(toBgPolygon(reg), out_cells);
     }
-
     if (out_cells.size() == 0) {
         error = "Failed to build Fields2Cover cells from effective area";
         return false;
     }
-
     return true;
 }
 #endif  // HAVE_FIELDS2COVER
@@ -1138,54 +1037,8 @@ void polygonBounds(const Polygon2D& poly,
     }
 }
 
-std::vector<Obstacle2D> clipObstacleToPolygon(const Obstacle2D& obstacle,
-                                              const Polygon2D& clip) {
-    std::vector<Obstacle2D> out;
-
-    Polygon2D outer_clean = sanitizePolygon2D(obstacle.outer);
-    if (outer_clean.size() < 3) {
-        return out;
-    }
-    Polygon2D clip_clean = sanitizePolygon2D(clip);
-    if (clip_clean.size() < 3) {
-        out.push_back(obstacle);  // no usable clip region -> passthrough
-        return out;
-    }
-
-    BgPolygon obs_bg = toBgPolygon(obstacle);
-    BgPolygon clip_bg = toBgPolygon(clip_clean);
-    {
-        std::string why;
-        if (!bgValidate(obs_bg, why) || !bgValidate(clip_bg, why)) {
-            // Can't safely clip; fall back to the original obstacle so coverage
-            // and display still see it (the pipeline difference will trim it).
-            out.push_back(obstacle);
-            return out;
-        }
-    }
-
-    BgMultiPolygon clipped;
-    bg::intersection(obs_bg, clip_bg, clipped);
-    for (auto& p : clipped) {
-        bg::correct(p);
-        if (std::fabs(bg::area(p)) <= kMinValidArea) {
-            continue;
-        }
-        Obstacle2D piece;
-        piece.outer = bgRingToPolygon2D(p.outer());
-        if (piece.outer.size() < 3) {
-            continue;
-        }
-        for (const auto& inner_bg : p.inners()) {
-            Polygon2D hole = bgRingToPolygon2D(inner_bg);
-            if (hole.size() >= 3) {
-                piece.holes.push_back(std::move(hole));
-            }
-        }
-        out.push_back(std::move(piece));
-    }
-    return out;
-}
+// clipObstacleToPolygon + buildFreeSpacePolygons live in obstacle_geometry.cpp
+// (boost-only core, unit-tested standalone).
 
 // =============================================================================
 // Coverage Generation
@@ -1360,7 +1213,8 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
         double effective_area_m2 = 0.0;
         std::string geom_error;
         if (!buildEffectiveCellsFromROIAndObstacles(
-                boundary, roi, obstacles, cells, effective_outer, effective_area_m2, geom_error)) {
+                boundary, roi, obstacles, config.obstacle_clearance, cells,
+                effective_outer, effective_area_m2, geom_error)) {
             result.error_message = geom_error;
             return result;
         }

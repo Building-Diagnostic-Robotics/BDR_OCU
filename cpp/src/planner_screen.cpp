@@ -4148,6 +4148,12 @@ void PlannerScreen::startGenerateCoverage() {
     // resampler, keeping the route's exact corner waypoints.
     cfg.use_axial_turns = true;
     cfg.waypoint_spacing = 0.0;
+    // Standoff inflated around obstacles before subtraction: robot half-width +
+    // footprint margin (same source the detector uses for footprint cleanup).
+    {
+        const ObstacleDetectionParams fp;
+        cfg.obstacle_clearance = fp.robot_width_m * 0.5 + fp.footprint_margin_m;
+    }
     // Feed the FULL (unclipped) obstacle shapes to the pipeline: it subtracts
     // them from the ROI∩boundary work area, so any out-of-ROI portion is
     // ignored while every in-ROI part is removed. Passing the display-clipped

@@ -79,6 +79,9 @@ struct CoverageConfig {
     // If > 0, the returned path will be resampled to approximately this spacing (meters).
     // This helps controllers that expect more uniform waypoint spacing.
     double waypoint_spacing = 0.0;
+    // Safety standoff (m) inflated around the obstacle union before it is
+    // subtracted from the work area. 0 = no clearance (raw obstacle footprint).
+    double obstacle_clearance = 0.0;
     std::optional<Point2D> start_point;
     std::optional<Point2D> end_point;
 };
@@ -229,6 +232,35 @@ void polygonBounds(const Polygon2D& poly,
  */
 std::vector<Obstacle2D> clipObstacleToPolygon(const Obstacle2D& obstacle,
                                               const Polygon2D& clip);
+
+/**
+ * @brief Free-space result: (boundary ∩ ROI) − inflated obstacle union.
+ *
+ * @c regions are disjoint, valid polygons (holes preserved). On failure
+ * @c success is false and @c error_message is set. @c skipped_obstacles counts
+ * obstacles dropped because they were degenerate/unrepairable (never aborts the
+ * whole build).
+ */
+struct FreeSpaceResult {
+    std::vector<Obstacle2D> regions;
+    double effective_area_m2 = 0.0;
+    int skipped_obstacles = 0;
+    bool success = false;
+    std::string error_message;
+};
+
+/**
+ * @brief Build the robust free-space geometry (no Fields2Cover dependency).
+ *
+ * Pipeline: validate boundary → intersect with ROI → per-obstacle
+ * normalize/repair → union all obstacles → inflate by @p obstacle_clearance →
+ * single difference from the work area → sliver-filter. Invalid obstacles are
+ * skipped (counted) rather than failing the build.
+ */
+FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
+                                       const Polygon2D* roi,
+                                       const std::vector<Obstacle2D>* obstacles,
+                                       double obstacle_clearance = 0.0);
 
 // =============================================================================
 // Coverage Generation
