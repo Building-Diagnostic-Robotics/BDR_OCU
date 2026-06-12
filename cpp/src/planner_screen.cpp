@@ -1811,7 +1811,11 @@ void PlannerScreen::applyStyle() {
         lbl_tool_ruler_icon_->setPixmap(loadSvgPixmap(
             QStringLiteral(":/assets/missionplanner/tool_ruler.svg"), 14, 14, neutral_button_text));
     }
-    for (QPushButton* tool_button : {tool_zoom_in_, tool_fit_, tool_reset_, tool_ruler_}) {
+    if (lbl_tool_cut_icon_) {
+        lbl_tool_cut_icon_->setPixmap(loadSvgPixmap(
+            QStringLiteral(":/assets/missionplanner/obstacle_cut.svg"), 14, 14, neutral_button_text));
+    }
+    for (QPushButton* tool_button : {tool_zoom_in_, tool_fit_, tool_reset_, tool_ruler_, tool_cut_}) {
         if (!tool_button) {
             continue;
         }
@@ -3343,31 +3347,32 @@ void PlannerScreen::updateCoveragePlanningUi() {
                                  "font-weight: 600; } QPushButton:hover { background: %4; }")
                       .arg(card_soft, border, text, surface_hover));
     }
-    if (btn_coverage_cut_) {
+    if (tool_cut_) {
         const bool cutting = cache.coverage_cut_active;
         const bool has_obstacles = !cache.coverage_obstacles.empty();
-        btn_coverage_cut_->setEnabled(has_obstacles);
-        const QString cut_icon_color = !has_obstacles ? submuted : cutting ? amber_text : text;
-        if (lbl_coverage_cut_icon_) {
-            lbl_coverage_cut_icon_->setPixmap(loadSvgPixmap(
-                QStringLiteral(":/assets/missionplanner/obstacle_cut.svg"), 16, 16, cut_icon_color));
+        tool_cut_->setEnabled(has_obstacles);
+        const QString cut_neutral_text =
+            dark_mode_ ? QStringLiteral("#E4E4E7") : QStringLiteral("#3F3F47");
+        const QString cut_tool_bg =
+            dark_mode_ ? QStringLiteral("rgba(39,39,42,0.90)") : QStringLiteral("#FFFFFF");
+        const QString cut_tool_border =
+            dark_mode_ ? QStringLiteral("#3F3F47") : QStringLiteral("#D4D4D8");
+        const QString cut_tool_hover =
+            dark_mode_ ? QStringLiteral("#52525C") : QStringLiteral("#94A3B8");
+        const QString cut_icon_color =
+            !has_obstacles ? submuted : cutting ? QStringLiteral("#F59E0B") : cut_neutral_text;
+        if (lbl_tool_cut_icon_) {
+            lbl_tool_cut_icon_->setPixmap(loadSvgPixmap(
+                QStringLiteral(":/assets/missionplanner/obstacle_cut.svg"), 14, 14, cut_icon_color));
         }
-        if (lbl_coverage_cut_text_) {
-            lbl_coverage_cut_text_->setText(cutting ? QStringLiteral("Drawing Cut Region...")
-                                                    : QStringLiteral("Cut Region"));
-            lbl_coverage_cut_text_->setStyleSheet(
-                QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: %1; color: %2;")
-                    .arg(cutting ? QStringLiteral("700") : QStringLiteral("600"), cut_icon_color));
-        }
-        btn_coverage_cut_->setStyleSheet(
+        tool_cut_->setStyleSheet(
             cutting
-                ? QStringLiteral("QPushButton { background: %1; border: 1px solid %2; border-radius: "
-                                 "10px; } QPushButton:hover { background: %3; }")
-                      .arg(amber_soft_bg, amber_soft_border, surface_hover)
-                : QStringLiteral("QPushButton { background: %1; border: 1px solid %2; border-radius: "
-                                 "10px; } QPushButton:hover { background: %3; } "
+                ? QStringLiteral("QPushButton { background: rgba(245,158,11,0.18); "
+                                 "border: 1px solid #F59E0B; border-radius: 10px; }")
+                : QStringLiteral("QPushButton { background: %1; border: 1px solid %2; "
+                                 "border-radius: 10px; } QPushButton:hover { border-color: %3; } "
                                  "QPushButton:disabled { background: %1; }")
-                      .arg(card_soft, border, surface_hover));
+                      .arg(cut_tool_bg, cut_tool_border, cut_tool_hover));
     }
     if (tool_ruler_) {
         const bool measuring = plot_ && plot_->isMeasuring();
@@ -6368,26 +6373,6 @@ void PlannerScreen::buildUi() {
     btn_coverage_draw_toggle_->setFlat(true);
     btn_coverage_draw_toggle_->setFixedHeight(38);
     manual_layout->addWidget(btn_coverage_draw_toggle_);
-
-    btn_coverage_cut_ = new QPushButton(manual_panel);
-    btn_coverage_cut_->setCursor(Qt::PointingHandCursor);
-    btn_coverage_cut_->setFlat(true);
-    btn_coverage_cut_->setFixedHeight(38);
-    {
-        auto* cut_layout = new QHBoxLayout(btn_coverage_cut_);
-        cut_layout->setContentsMargins(12, 0, 12, 0);
-        cut_layout->setSpacing(8);
-        cut_layout->addStretch(1);
-        lbl_coverage_cut_icon_ = makeIconLabel(
-            btn_coverage_cut_, QStringLiteral(":/assets/missionplanner/obstacle_cut.svg"), 16);
-        cut_layout->addWidget(lbl_coverage_cut_icon_);
-        lbl_coverage_cut_text_ = makeTextLabel(
-            btn_coverage_cut_, QStringLiteral("Cut Region"),
-            QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 600;"));
-        cut_layout->addWidget(lbl_coverage_cut_text_);
-        cut_layout->addStretch(1);
-    }
-    manual_layout->addWidget(btn_coverage_cut_);
     coverage_manual_hint_card_ = new QWidget(manual_panel);
     coverage_manual_hint_card_->setAttribute(Qt::WA_StyledBackground, true);
     auto* manual_hint_layout = new QVBoxLayout(coverage_manual_hint_card_);
@@ -6844,10 +6829,14 @@ void PlannerScreen::buildUi() {
     tool_ruler_ =
         make_tool_button(tool_stack, QStringLiteral(":/assets/missionplanner/tool_ruler.svg"),
                          &lbl_tool_ruler_icon_);
+    tool_cut_ =
+        make_tool_button(tool_stack, QStringLiteral(":/assets/missionplanner/obstacle_cut.svg"),
+                         &lbl_tool_cut_icon_);
     tool_zoom_in_->setToolTip(QStringLiteral("Zoom in"));
     tool_fit_->setToolTip(QStringLiteral("Fit to travelled path"));
     tool_reset_->setToolTip(QStringLiteral("Fit all"));
     tool_ruler_->setToolTip(QStringLiteral("Measure"));
+    tool_cut_->setToolTip(QStringLiteral("Cut region from obstacles"));
     connect(tool_zoom_in_, &QPushButton::clicked, this, [this]() {
         if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
             plot_->zoomIn();
@@ -6872,6 +6861,7 @@ void PlannerScreen::buildUi() {
     tool_stack_layout->addWidget(tool_fit_);
     tool_stack_layout->addWidget(tool_reset_);
     tool_stack_layout->addWidget(tool_ruler_);
+    tool_stack_layout->addWidget(tool_cut_);
 
     preview_bottom_overlay_stack_ = new QStackedWidget(center_stage_host);
     preview_bottom_overlay_stack_->setStyleSheet(
@@ -7654,7 +7644,10 @@ void PlannerScreen::buildUi() {
                         QStringLiteral("#71717B"));
         updateButtonsAndStatus();
     });
-    connect(btn_coverage_cut_, &QPushButton::clicked, this, [this, cancel_coverage_selection]() {
+    connect(tool_cut_, &QPushButton::clicked, this, [this, cancel_coverage_selection]() {
+        if (!plot_ || !preview_stack_ || preview_stack_->currentWidget() != plot_) {
+            return;
+        }
         SessionCache& cache = activeSession();
         if (!cache.raw_loaded) {
             setInlineStatus(QStringLiteral("Wait for the saved map to load before cutting obstacles."),

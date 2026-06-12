@@ -554,6 +554,7 @@ private:
     QPushButton* tool_fit_ = nullptr;
     QPushButton* tool_reset_ = nullptr;
     QPushButton* tool_ruler_ = nullptr;
+    QPushButton* tool_cut_ = nullptr;
     QWidget* tool_stack_ = nullptr;
     QLabel* lbl_next_text_ = nullptr;
     QLabel* lbl_next_icon_ = nullptr;
@@ -637,6 +638,7 @@ private:
     QLabel* lbl_tool_fit_icon_ = nullptr;
     QLabel* lbl_tool_reset_icon_ = nullptr;
     QLabel* lbl_tool_ruler_icon_ = nullptr;
+    QLabel* lbl_tool_cut_icon_ = nullptr;
 
     QPushButton* btn_coverage_roi_draw_rectangle_ = nullptr;
     QPushButton* btn_coverage_roi_draw_polygon_ = nullptr;
@@ -661,9 +663,6 @@ private:
     QPushButton* btn_coverage_draw_polygon_ = nullptr;
     QPushButton* btn_coverage_draw_circle_ = nullptr;
     QPushButton* btn_coverage_draw_toggle_ = nullptr;
-    QPushButton* btn_coverage_cut_ = nullptr;
-    QLabel* lbl_coverage_cut_icon_ = nullptr;
-    QLabel* lbl_coverage_cut_text_ = nullptr;
     QPushButton* btn_coverage_generate_ = nullptr;
     PlotWidget* plot_ = nullptr;
     QStackedWidget* content_stack_ = nullptr;
