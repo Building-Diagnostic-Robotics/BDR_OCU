@@ -68,6 +68,14 @@ public:
     void cancelRectangleMode();
     bool isDrawingRectangle() const { return drawing_rectangle_; }
 
+    // Transient on-map measurement overlay (no coverage impact).
+    enum class MeasureMode { None, Distance, Area };
+    void startMeasure(MeasureMode mode);
+    void clearMeasure();
+    bool isMeasuring() const { return measure_mode_ != MeasureMode::None; }
+
+    void fitToTrail();
+
     void setDarkMode(bool enabled);
     bool isDarkMode() const { return dark_mode_; }
     void setPlannerPreviewMode(bool enabled);
@@ -112,6 +120,7 @@ signals:
     void obstacleDeleteRequested(int index);
     void customWaypointRequested(const Point2D& point);
     void rectangleCompleted(const Polygon2D& rect);
+    void measureCleared();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -179,6 +188,10 @@ private:
     std::vector<Point2D> selection_points_;
     QPointF cursor_pos_;
 
+    MeasureMode measure_mode_ = MeasureMode::None;
+    std::vector<Point2D> measure_points_;
+    bool measure_finished_ = false;
+
     int selected_obstacle_idx_ = -1;
 
     bool panning_ = false;
@@ -192,6 +205,7 @@ private:
     // theme-aware color). No-op (clears the image) when there are no points.
     void rebuildPointCloudImage();
     void fitToData();
+    void drawMeasureOverlay(QPainter& painter);
     double distanceToLineSegment(const QPointF& mouse, const QPointF& p1, const QPointF& p2) const;
 };
 

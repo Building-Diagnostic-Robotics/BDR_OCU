@@ -630,6 +630,65 @@ void PlotWidget::fitToData() {
     offset_y_ = height() / 2 + center_y * scale_;  // Y flipped
 }
 
+void PlotWidget::fitToTrail() {
+    if (robot_trail_.size() < 2) {
+        fitToData();
+        return;
+    }
+    double min_x = 1e300, min_y = 1e300, max_x = -1e300, max_y = -1e300;
+    for (const auto& p : robot_trail_) {
+        min_x = std::min(min_x, p.x); max_x = std::max(max_x, p.x);
+        min_y = std::min(min_y, p.y); max_y = std::max(max_y, p.y);
+    }
+    double data_w = max_x - min_x;
+    double data_h = max_y - min_y;
+    if (data_w < 1e-10) data_w = 1;
+    if (data_h < 1e-10) data_h = 1;
+
+    const double canvas_padding = planner_preview_mode_ ? 36.0 : 60.0;
+    const double scale_x = std::max(1.0, width() - canvas_padding) / data_w;
+    const double scale_y = std::max(1.0, height() - canvas_padding) / data_h;
+    scale_ = std::min(scale_x, scale_y);
+
+    const double center_x = (min_x + max_x) / 2;
+    const double center_y = (min_y + max_y) / 2;
+    offset_x_ = width() / 2 - center_x * scale_;
+    offset_y_ = height() / 2 + center_y * scale_;  // Y flipped
+    update();
+}
+
+void PlotWidget::startMeasure(MeasureMode mode) {
+    // Measurement is exclusive with the draw/selection interactions.
+    selecting_ = false;
+    selecting_roi_ = false;
+    selection_points_.clear();
+    drawing_rectangle_ = false;
+    rect_points_.clear();
+
+    measure_mode_ = mode;
+    measure_points_.clear();
+    measure_finished_ = false;
+    if (mode != MeasureMode::None) {
+        setCursor(Qt::CrossCursor);
+        setFocus();
+    } else {
+        setCursor(Qt::ArrowCursor);
+    }
+    update();
+}
+
+void PlotWidget::clearMeasure() {
+    const bool was_measuring = measure_mode_ != MeasureMode::None;
+    measure_mode_ = MeasureMode::None;
+    measure_points_.clear();
+    measure_finished_ = false;
+    setCursor(Qt::ArrowCursor);
+    update();
+    if (was_measuring) {
+        emit measureCleared();
+    }
+}
+
 QPointF PlotWidget::worldToScreen(const Point2D& p) const {
     return QPointF(p.x * scale_ + offset_x_, -p.y * scale_ + offset_y_);
 }
@@ -1361,10 +1420,118 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
         painter.setPen(QColor(QStringLiteral("#FFFBEB")));
         painter.drawText(box, Qt::AlignCenter, caption);
     }
+
+    drawMeasureOverlay(painter);
+}
+
+void PlotWidget::drawMeasureOverlay(QPainter& painter) {
+    if (measure_mode_ == MeasureMode::None || measure_points_.empty()) {
+        return;
+    }
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    const bool area = measure_mode_ == MeasureMode::Area;
+    const QColor accent = area ? QColor(QStringLiteral("#34D399")) : QColor(QStringLiteral("#38BDF8"));
+
+    // Build the screen-space vertex list, including a live cursor point while
+    // the measurement is still open.
+    std::vector<QPointF> pts;
+    pts.reserve(measure_points_.size() + 1);
+    for (const auto& p : measure_points_) pts.push_back(worldToScreen(p));
+    const bool show_cursor = !measure_finished_ && underMouse();
+    if (show_cursor) pts.push_back(cursor_pos_);
+
+    // Fill for area mode.
+    if (area && pts.size() >= 3) {
+        QPolygonF poly;
+        for (const auto& p : pts) poly << p;
+        QColor fill = accent;
+        fill.setAlpha(40);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(fill);
+        painter.drawPolygon(poly);
+    }
+
+    QPen line_pen(accent, 2);
+    line_pen.setJoinStyle(Qt::RoundJoin);
+    painter.setPen(line_pen);
+    painter.setBrush(Qt::NoBrush);
+    for (size_t i = 1; i < pts.size(); ++i) {
+        painter.drawLine(pts[i - 1], pts[i]);
+    }
+    if (area && pts.size() >= 3) {
+        painter.drawLine(pts.back(), pts.front());  // closing edge preview
+    }
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(accent);
+    for (const auto& p : pts) {
+        painter.drawEllipse(p, 3.0, 3.0);
+    }
+
+    // Readout chip near the latest point.
+    double length_m = 0.0;
+    for (size_t i = 1; i < measure_points_.size(); ++i) {
+        length_m += std::hypot(measure_points_[i].x - measure_points_[i - 1].x,
+                               measure_points_[i].y - measure_points_[i - 1].y);
+    }
+    if (show_cursor && !measure_points_.empty()) {
+        const Point2D c = screenToWorld(cursor_pos_);
+        length_m += std::hypot(c.x - measure_points_.back().x, c.y - measure_points_.back().y);
+    }
+
+    QString text;
+    if (area) {
+        std::vector<Point2D> ring = measure_points_;
+        if (show_cursor) ring.push_back(screenToWorld(cursor_pos_));
+        double a2 = 0.0;
+        for (size_t i = 0; i < ring.size(); ++i) {
+            const Point2D& p1 = ring[i];
+            const Point2D& p2 = ring[(i + 1) % ring.size()];
+            a2 += p1.x * p2.y - p2.x * p1.y;
+        }
+        const double area_m2 = std::fabs(a2 / 2.0);
+        text = QStringLiteral("Area  %1\nPerim  %2")
+                   .arg(units::formatArea(area_m2, 2),
+                        units::formatLength(length_m, 1));
+    } else {
+        text = QStringLiteral("Dist  %1").arg(units::formatLength(length_m, 2));
+    }
+
+    QFont chip_font = painter.font();
+    chip_font.setBold(true);
+    painter.setFont(chip_font);
+    const QFontMetrics fm(chip_font);
+    QRect text_rect = fm.boundingRect(QRect(0, 0, 320, 80),
+                                      Qt::AlignLeft | Qt::TextWordWrap, text);
+    const int pad = 6;
+    QPointF anchor = pts.empty() ? QPointF(12, 12) : pts.back();
+    QRectF chip(anchor.x() + 12, anchor.y() - text_rect.height() - 2 * pad - 6,
+                text_rect.width() + 2 * pad, text_rect.height() + 2 * pad);
+    if (chip.right() > width() - 4) chip.moveRight(width() - 4);
+    if (chip.left() < 4) chip.moveLeft(4);
+    if (chip.top() < 4) chip.moveTop(anchor.y() + 12);
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(9, 9, 11, 220));
+    painter.drawRoundedRect(chip, 6, 6);
+    painter.setPen(QColor(QStringLiteral("#FFFFFF")));
+    painter.drawText(chip.adjusted(pad, pad, -pad, -pad),
+                     Qt::AlignLeft | Qt::TextWordWrap, text);
 }
 
 void PlotWidget::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
+        if (measure_mode_ != MeasureMode::None) {
+            if (measure_finished_) {  // start a fresh measurement
+                measure_points_.clear();
+                measure_finished_ = false;
+            }
+            measure_points_.push_back(screenToWorld(event->pos()));
+            update();
+            return;
+        }
+
         if (custom_draw_mode_) {
             Point2D world = screenToWorld(event->pos());
             emit customWaypointRequested(world);
@@ -1448,7 +1615,10 @@ void PlotWidget::mousePressEvent(QMouseEvent* event) {
             setCursor(Qt::ClosedHandCursor);
         }
     } else if (event->button() == Qt::RightButton) {
-        if (drawing_rectangle_) {
+        if (measure_mode_ != MeasureMode::None) {
+            measure_finished_ = true;  // freeze the current measurement
+            update();
+        } else if (drawing_rectangle_) {
             cancelRectangleMode();
         } else if (selecting_) {
             finishSelection();
@@ -1459,6 +1629,16 @@ void PlotWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void PlotWidget::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (measure_mode_ != MeasureMode::None && event->button() == Qt::LeftButton) {
+        // The double-click delivered an extra press; drop the duplicate point.
+        const int min_pts = measure_mode_ == MeasureMode::Area ? 3 : 2;
+        if (measure_points_.size() > static_cast<size_t>(min_pts)) {
+            measure_points_.pop_back();
+        }
+        measure_finished_ = measure_points_.size() >= static_cast<size_t>(min_pts);
+        update();
+        return;
+    }
     // Double-click to finish polygon selection (ROI or obstacle)
     if (selecting_ && event->button() == Qt::LeftButton) {
         if (selection_points_.size() >= 3) {
@@ -1470,6 +1650,19 @@ void PlotWidget::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 void PlotWidget::keyPressEvent(QKeyEvent* event) {
+    if (measure_mode_ != MeasureMode::None) {
+        if (event->key() == Qt::Key_Escape) {
+            clearMeasure();
+            return;
+        }
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            const int min_pts = measure_mode_ == MeasureMode::Area ? 3 : 2;
+            measure_finished_ = measure_points_.size() >= static_cast<size_t>(min_pts);
+            update();
+            return;
+        }
+    }
+
     // Delete selected obstacle
     if (!selecting_ && !drawing_rectangle_) {
         if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
@@ -1515,6 +1708,8 @@ void PlotWidget::mouseMoveEvent(QMouseEvent* event) {
         update();
     } else if (selecting_) {
         update();  // Redraw preview line
+    } else if (measure_mode_ != MeasureMode::None && !measure_finished_) {
+        update();  // Redraw rubber-band to cursor
     }
     
     // Hover on scan segments
