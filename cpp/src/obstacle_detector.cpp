@@ -335,6 +335,35 @@ static inline uint64_t packV(int x, int y) {
     return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) | static_cast<uint32_t>(y);
 }
 
+// Split a traced boundary loop into simple sub-loops at any revisited vertex.
+// A diagonal saddle (NW+SE or NE+SW occupied) makes the tracer pass through one
+// grid corner twice, yielding a self-touching ring that Boost flags invalid.
+// Peeling each closed sub-loop off a stack guarantees simple polygons at the
+// source instead of relying solely on downstream buffer repair.
+static std::vector<std::vector<std::pair<int, int>>> splitSimpleLoops(
+    const std::vector<std::pair<int, int>>& seq) {
+    std::vector<std::vector<std::pair<int, int>>> loops;
+    std::vector<std::pair<int, int>> stack;
+    std::unordered_map<uint64_t, int> pos;
+    for (const auto& v : seq) {
+        const uint64_t k = packV(v.first, v.second);
+        auto it = pos.find(k);
+        if (it != pos.end()) {
+            const int idx = it->second;
+            std::vector<std::pair<int, int>> loop(stack.begin() + idx, stack.end());
+            if (loop.size() >= 3) loops.push_back(std::move(loop));
+            for (int t = idx; t < static_cast<int>(stack.size()); ++t) {
+                pos.erase(packV(stack[t].first, stack[t].second));
+            }
+            stack.resize(idx);
+        }
+        pos[k] = static_cast<int>(stack.size());
+        stack.push_back(v);
+    }
+    if (stack.size() >= 3) loops.push_back(std::move(stack));
+    return loops;
+}
+
 static std::vector<Polygon2D> extractContourRingsFromOcc(const OccGrid& g) {
     std::vector<Edge> edges;
     edges.reserve(static_cast<size_t>(g.w) * static_cast<size_t>(g.h));
@@ -437,14 +466,16 @@ static std::vector<Polygon2D> extractContourRingsFromOcc(const OccGrid& g) {
             continue;
         }
 
-        Polygon2D ring;
-        ring.reserve(verts.size());
-        for (const auto& v : verts) {
-            double wx = g.xmin + static_cast<double>(v.first) * g.cell;
-            double wy = g.ymin + static_cast<double>(v.second) * g.cell;
-            ring.emplace_back(wx, wy);
+        for (const auto& loop : splitSimpleLoops(verts)) {
+            Polygon2D ring;
+            ring.reserve(loop.size());
+            for (const auto& v : loop) {
+                double wx = g.xmin + static_cast<double>(v.first) * g.cell;
+                double wy = g.ymin + static_cast<double>(v.second) * g.cell;
+                ring.emplace_back(wx, wy);
+            }
+            rings.push_back(std::move(ring));
         }
-        rings.push_back(std::move(ring));
     }
 
     return rings;
