@@ -3352,9 +3352,9 @@ void PlannerScreen::updateCoveragePlanningUi() {
         const bool has_obstacles = !cache.coverage_obstacles.empty();
         tool_cut_->setEnabled(has_obstacles);
         const QString cut_neutral_text =
-            dark_mode_ ? QStringLiteral("#E4E4E7") : QStringLiteral("#3F3F47");
+            dark_mode_ ? QStringLiteral("#E4E4E7") : QStringLiteral("#374151");
         const QString cut_tool_bg =
-            dark_mode_ ? QStringLiteral("rgba(39,39,42,0.90)") : QStringLiteral("#FFFFFF");
+            dark_mode_ ? QStringLiteral("rgba(39,39,42,0.90)") : QStringLiteral("rgba(255,255,255,0.92)");
         const QString cut_tool_border =
             dark_mode_ ? QStringLiteral("#3F3F47") : QStringLiteral("#D4D4D8");
         const QString cut_tool_hover =
@@ -3377,9 +3377,9 @@ void PlannerScreen::updateCoveragePlanningUi() {
     if (tool_ruler_) {
         const bool measuring = plot_ && plot_->isMeasuring();
         const QString ruler_neutral_text =
-            dark_mode_ ? QStringLiteral("#E4E4E7") : QStringLiteral("#3F3F47");
+            dark_mode_ ? QStringLiteral("#E4E4E7") : QStringLiteral("#374151");
         const QString ruler_tool_bg =
-            dark_mode_ ? QStringLiteral("rgba(39,39,42,0.90)") : QStringLiteral("#FFFFFF");
+            dark_mode_ ? QStringLiteral("rgba(39,39,42,0.90)") : QStringLiteral("rgba(255,255,255,0.92)");
         const QString ruler_tool_border =
             dark_mode_ ? QStringLiteral("#3F3F47") : QStringLiteral("#D4D4D8");
         const QString ruler_tool_hover =
