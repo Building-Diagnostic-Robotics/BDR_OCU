@@ -234,6 +234,18 @@ std::vector<Obstacle2D> clipObstacleToPolygon(const Obstacle2D& obstacle,
                                               const Polygon2D& clip);
 
 /**
+ * @brief Subtract a region from an obstacle (boolean difference).
+ *
+ * Returns the obstacle pieces remaining after @p cutter is removed. May return
+ * zero pieces (cutter fully covers the obstacle), one piece (possibly with a
+ * hole when the cutter is interior), or several (cutter bisects the obstacle).
+ * If @p cutter has < 3 vertices the obstacle is returned unchanged. Inputs that
+ * fail validation pass through untouched. Concave-safe.
+ */
+std::vector<Obstacle2D> subtractPolygonFromObstacle(const Obstacle2D& obstacle,
+                                                    const Polygon2D& cutter);
+
+/**
  * @brief Free-space result: (boundary ∩ ROI) − inflated obstacle union.
  *
  * @c regions are disjoint, valid polygons (holes preserved). On failure

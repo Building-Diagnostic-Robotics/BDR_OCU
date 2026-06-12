@@ -176,6 +176,33 @@ std::vector<Obstacle2D> clipObstacleToPolygon(const Obstacle2D& obstacle,
     return out;
 }
 
+std::vector<Obstacle2D> subtractPolygonFromObstacle(const Obstacle2D& obstacle,
+                                                    const Polygon2D& cutter) {
+    std::vector<Obstacle2D> out;
+    Polygon2D outer_clean = sanitize(obstacle.outer);
+    if (outer_clean.size() < 3) return out;
+    Polygon2D cut_clean = sanitize(cutter);
+    if (cut_clean.size() < 3) { out.push_back(obstacle); return out; }
+
+    BgPolygon obs_bg = toBg(obstacle);
+    BgPolygon cut_bg = toBg(cut_clean);
+    std::string why;
+    if (!validate(obs_bg, why) || !validate(cut_bg, why)) {
+        out.push_back(obstacle);  // can't cut safely -> leave obstacle intact
+        return out;
+    }
+
+    BgMultiPolygon diff;
+    bg::difference(obs_bg, cut_bg, diff);  // obstacle minus cutter
+    for (auto& p : diff) {
+        bg::correct(p);
+        if (std::fabs(bg::area(p)) <= kMinValidArea) continue;
+        Obstacle2D piece = bgToObstacle(p);
+        if (piece.outer.size() >= 3) out.push_back(std::move(piece));
+    }
+    return out;  // empty => cutter fully covered the obstacle
+}
+
 FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
                                        const Polygon2D* roi,
                                        const std::vector<Obstacle2D>* obstacles,

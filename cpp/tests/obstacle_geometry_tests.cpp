@@ -18,6 +18,7 @@ using f2c_cpp::Polygon2D;
 using f2c_cpp::Obstacle2D;
 using f2c_cpp::buildFreeSpacePolygons;
 using f2c_cpp::clipObstacleToPolygon;
+using f2c_cpp::subtractPolygonFromObstacle;
 
 namespace {
 
@@ -163,6 +164,46 @@ TEST(Clip, ObstacleFullyOutsideClipReturnsEmpty) {
     Polygon2D clip = rect(0, 0, 10, 10);
     auto pieces = clipObstacleToPolygon(obs, clip);
     EXPECT_TRUE(pieces.empty());
+}
+
+TEST(Cut, EdgeCutShrinksObstacle) {
+    Obstacle2D obs{rect(0, 0, 10, 10), {}};
+    Polygon2D cutter = rect(8, -1, 11, 11);  // bites the right 2 m strip
+    auto pieces = subtractPolygonFromObstacle(obs, cutter);
+    ASSERT_EQ(pieces.size(), 1u);
+    EXPECT_NEAR(totalArea(pieces), 80.0, 1e-4);
+}
+
+TEST(Cut, InteriorCutPunchesHole) {
+    Obstacle2D obs{rect(0, 0, 10, 10), {}};
+    Polygon2D cutter = rect(4, 4, 6, 6);  // fully interior
+    auto pieces = subtractPolygonFromObstacle(obs, cutter);
+    ASSERT_EQ(pieces.size(), 1u);
+    EXPECT_EQ(pieces[0].holes.size(), 1u);
+    EXPECT_NEAR(totalArea(pieces), 100.0, 1e-4);  // outer area unchanged
+}
+
+TEST(Cut, BisectingCutSplitsIntoTwo) {
+    Obstacle2D obs{rect(0, 0, 10, 10), {}};
+    Polygon2D cutter = rect(4, -1, 6, 11);  // vertical band through the middle
+    auto pieces = subtractPolygonFromObstacle(obs, cutter);
+    ASSERT_EQ(pieces.size(), 2u);
+    EXPECT_NEAR(totalArea(pieces), 80.0, 1e-4);  // two 4x10 halves
+}
+
+TEST(Cut, CutterCoveringObstacleReturnsEmpty) {
+    Obstacle2D obs{rect(2, 2, 4, 4), {}};
+    Polygon2D cutter = rect(0, 0, 10, 10);
+    auto pieces = subtractPolygonFromObstacle(obs, cutter);
+    EXPECT_TRUE(pieces.empty());
+}
+
+TEST(Cut, DisjointCutterLeavesObstacleIntact) {
+    Obstacle2D obs{rect(0, 0, 4, 4), {}};
+    Polygon2D cutter = rect(10, 10, 12, 12);
+    auto pieces = subtractPolygonFromObstacle(obs, cutter);
+    ASSERT_EQ(pieces.size(), 1u);
+    EXPECT_NEAR(totalArea(pieces), 16.0, 1e-4);
 }
 
 TEST(Clip, ConcaveClipSplitsObstacleIntoPieces) {
