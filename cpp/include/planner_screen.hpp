@@ -377,6 +377,9 @@ private:
     // difference). Obstacles fully covered are removed; a bisecting cut splits
     // one obstacle into multiple entries. Re-clips to ROI afterwards.
     void applyCutRegion(const Polygon2D& region);
+    // Fluid two-option popup (Point to Point / Area) anchored to the ruler
+    // tool button; selection arms the matching PlotWidget measure mode.
+    void showMeasurePopup();
     void updateHeaderForCurrentStep();
     void updateStageSteps();
     void updateFooter();
@@ -550,6 +553,7 @@ private:
     QPushButton* tool_zoom_in_ = nullptr;
     QPushButton* tool_fit_ = nullptr;
     QPushButton* tool_reset_ = nullptr;
+    QPushButton* tool_ruler_ = nullptr;
     QWidget* tool_stack_ = nullptr;
     QLabel* lbl_next_text_ = nullptr;
     QLabel* lbl_next_icon_ = nullptr;
@@ -632,6 +636,7 @@ private:
     QLabel* lbl_tool_zoom_in_icon_ = nullptr;
     QLabel* lbl_tool_fit_icon_ = nullptr;
     QLabel* lbl_tool_reset_icon_ = nullptr;
+    QLabel* lbl_tool_ruler_icon_ = nullptr;
 
     QPushButton* btn_coverage_roi_draw_rectangle_ = nullptr;
     QPushButton* btn_coverage_roi_draw_polygon_ = nullptr;

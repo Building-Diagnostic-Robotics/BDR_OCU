@@ -26,6 +26,9 @@
 #include <QGraphicsDropShadowEffect>
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
+#include <QPropertyAnimation>
+#include <QEasingCurve>
+#include <QAbstractAnimation>
 #include <QHideEvent>
 #include <QHBoxLayout>
 #include <QKeyEvent>
@@ -1804,7 +1807,11 @@ void PlannerScreen::applyStyle() {
         lbl_tool_reset_icon_->setPixmap(loadSvgPixmap(
             QStringLiteral(":/assets/missionplanner/tool_reset.svg"), 14, 14, neutral_button_text));
     }
-    for (QPushButton* tool_button : {tool_zoom_in_, tool_fit_, tool_reset_}) {
+    if (lbl_tool_ruler_icon_) {
+        lbl_tool_ruler_icon_->setPixmap(loadSvgPixmap(
+            QStringLiteral(":/assets/missionplanner/tool_ruler.svg"), 14, 14, neutral_button_text));
+    }
+    for (QPushButton* tool_button : {tool_zoom_in_, tool_fit_, tool_reset_, tool_ruler_}) {
         if (!tool_button) {
             continue;
         }
@@ -3362,6 +3369,29 @@ void PlannerScreen::updateCoveragePlanningUi() {
                                  "QPushButton:disabled { background: %1; }")
                       .arg(card_soft, border, surface_hover));
     }
+    if (tool_ruler_) {
+        const bool measuring = plot_ && plot_->isMeasuring();
+        const QString ruler_neutral_text =
+            dark_mode_ ? QStringLiteral("#E4E4E7") : QStringLiteral("#3F3F47");
+        const QString ruler_tool_bg =
+            dark_mode_ ? QStringLiteral("rgba(39,39,42,0.90)") : QStringLiteral("#FFFFFF");
+        const QString ruler_tool_border =
+            dark_mode_ ? QStringLiteral("#3F3F47") : QStringLiteral("#D4D4D8");
+        const QString ruler_tool_hover =
+            dark_mode_ ? QStringLiteral("#52525C") : QStringLiteral("#94A3B8");
+        const QString ruler_color = measuring ? QStringLiteral("#38BDF8") : ruler_neutral_text;
+        if (lbl_tool_ruler_icon_) {
+            lbl_tool_ruler_icon_->setPixmap(loadSvgPixmap(
+                QStringLiteral(":/assets/missionplanner/tool_ruler.svg"), 14, 14, ruler_color));
+        }
+        tool_ruler_->setStyleSheet(
+            measuring
+                ? QStringLiteral("QPushButton { background: rgba(56,189,248,0.18); "
+                                 "border: 1px solid #38BDF8; border-radius: 10px; }")
+                : QStringLiteral("QPushButton { background: %1; border: 1px solid %2; "
+                                 "border-radius: 10px; } QPushButton:hover { border-color: %3; }")
+                      .arg(ruler_tool_bg, ruler_tool_border, ruler_tool_hover));
+    }
 
     const double obstacle_area =
         std::accumulate(cache.coverage_obstacles.begin(),
@@ -4524,6 +4554,76 @@ void PlannerScreen::applyCutRegion(const Polygon2D& region) {
     }
     updatePreview();
     updateButtonsAndStatus();
+}
+
+void PlannerScreen::showMeasurePopup() {
+    if (!tool_ruler_ || !plot_) {
+        return;
+    }
+    const bool dark = dark_mode_;
+
+    auto* popup = new QFrame(this, Qt::Popup | Qt::FramelessWindowHint);
+    popup->setAttribute(Qt::WA_DeleteOnClose, true);
+    popup->setAttribute(Qt::WA_TranslucentBackground, true);
+    popup->setStyleSheet(
+        QStringLiteral("QFrame { background: %1; border: 1px solid %2; border-radius: 12px; }")
+            .arg(dark ? QStringLiteral("#18181B") : QStringLiteral("#FFFFFF"),
+                 dark ? QStringLiteral("#3F3F47") : QStringLiteral("#D4D4D8")));
+
+    auto* lay = new QVBoxLayout(popup);
+    lay->setContentsMargins(6, 6, 6, 6);
+    lay->setSpacing(4);
+
+    auto make_item = [&](const QString& label, PlotWidget::MeasureMode mode) {
+        auto* item = new QPushButton(label, popup);
+        item->setCursor(Qt::PointingHandCursor);
+        item->setFlat(true);
+        item->setFixedHeight(34);
+        item->setMinimumWidth(160);
+        item->setStyleSheet(
+            QStringLiteral("QPushButton { text-align: left; padding: 0 12px; background: transparent; "
+                           "border: none; border-radius: 8px; font-family: 'Arimo'; font-size: 13px; "
+                           "font-weight: 600; color: %1; } QPushButton:hover { background: %2; }")
+                .arg(dark ? QStringLiteral("#E4E4E7") : QStringLiteral("#27272A"),
+                     dark ? QStringLiteral("#27272A") : QStringLiteral("#F4F4F5")));
+        connect(item, &QPushButton::clicked, this, [this, popup, mode]() {
+            plot_->startMeasure(mode);
+            setInlineStatus(
+                mode == PlotWidget::MeasureMode::Area
+                    ? QStringLiteral("Click to outline an area; double-click to close it. ESC to exit.")
+                    : QStringLiteral("Click points to measure distance; double-click to finish. ESC to exit."),
+                QStringLiteral("#71717B"));
+            updateButtonsAndStatus();
+            popup->close();
+        });
+        return item;
+    };
+    lay->addWidget(make_item(QStringLiteral("Point to Point"), PlotWidget::MeasureMode::Distance));
+    lay->addWidget(make_item(QStringLiteral("Area"), PlotWidget::MeasureMode::Area));
+
+    popup->adjustSize();
+    const QSize sz = popup->sizeHint();
+    const QPoint btn_global = tool_ruler_->mapToGlobal(QPoint(0, 0));
+    // Anchored to the LEFT of the ruler button, vertically centered on it.
+    const QPoint target(btn_global.x() - sz.width() - 10,
+                        btn_global.y() + tool_ruler_->height() / 2 - sz.height() / 2);
+
+    popup->setWindowOpacity(0.0);
+    popup->move(target + QPoint(8, 0));
+    popup->show();
+
+    auto* fade = new QPropertyAnimation(popup, "windowOpacity", popup);
+    fade->setDuration(130);
+    fade->setStartValue(0.0);
+    fade->setEndValue(1.0);
+    fade->setEasingCurve(QEasingCurve::OutCubic);
+    auto* slide = new QPropertyAnimation(popup, "pos", popup);
+    slide->setDuration(140);
+    slide->setStartValue(target + QPoint(8, 0));
+    slide->setEndValue(target);
+    slide->setEasingCurve(QEasingCurve::OutCubic);
+    fade->start(QAbstractAnimation::DeleteWhenStopped);
+    slide->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void PlannerScreen::applyDetectResult(quint64 generation, ObstacleDetectionResult result) {
@@ -6741,6 +6841,13 @@ void PlannerScreen::buildUi() {
     tool_reset_ =
         make_tool_button(tool_stack, QStringLiteral(":/assets/missionplanner/tool_reset.svg"),
                          &lbl_tool_reset_icon_);
+    tool_ruler_ =
+        make_tool_button(tool_stack, QStringLiteral(":/assets/missionplanner/tool_ruler.svg"),
+                         &lbl_tool_ruler_icon_);
+    tool_zoom_in_->setToolTip(QStringLiteral("Zoom in"));
+    tool_fit_->setToolTip(QStringLiteral("Fit to travelled path"));
+    tool_reset_->setToolTip(QStringLiteral("Fit all"));
+    tool_ruler_->setToolTip(QStringLiteral("Measure"));
     connect(tool_zoom_in_, &QPushButton::clicked, this, [this]() {
         if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
             plot_->zoomIn();
@@ -6748,7 +6855,7 @@ void PlannerScreen::buildUi() {
     });
     connect(tool_fit_, &QPushButton::clicked, this, [this]() {
         if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
-            plot_->resetView();
+            plot_->fitToTrail();
         }
     });
     connect(tool_reset_, &QPushButton::clicked, this, [this]() {
@@ -6756,9 +6863,15 @@ void PlannerScreen::buildUi() {
             plot_->resetView();
         }
     });
+    connect(tool_ruler_, &QPushButton::clicked, this, [this]() {
+        if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
+            showMeasurePopup();
+        }
+    });
     tool_stack_layout->addWidget(tool_zoom_in_);
     tool_stack_layout->addWidget(tool_fit_);
     tool_stack_layout->addWidget(tool_reset_);
+    tool_stack_layout->addWidget(tool_ruler_);
 
     preview_bottom_overlay_stack_ = new QStackedWidget(center_stage_host);
     preview_bottom_overlay_stack_->setStyleSheet(
@@ -7003,6 +7116,9 @@ void PlannerScreen::buildUi() {
         if (plot_->isDrawingRectangle()) {
             plot_->cancelRectangleMode();
         }
+        if (plot_->isMeasuring()) {
+            plot_->clearMeasure();
+        }
     };
     auto add_manual_obstacle = [this](const Polygon2D& shape) {
         SessionCache& cache = activeSession();
@@ -7092,6 +7208,7 @@ void PlannerScreen::buildUi() {
         setInlineStatus(QStringLiteral("Selection cancelled."), QStringLiteral("#71717B"));
         updateButtonsAndStatus();
     });
+    connect(plot_, &PlotWidget::measureCleared, this, [this]() { updateButtonsAndStatus(); });
     connect(plot_, &PlotWidget::obstacleDeleteRequested, this, [this](int index) {
         SessionCache& cache = activeSession();
         if (index < 0 || index >= static_cast<int>(cache.coverage_obstacles.size())) {
