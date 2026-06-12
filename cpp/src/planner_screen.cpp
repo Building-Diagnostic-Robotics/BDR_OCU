@@ -3336,6 +3336,32 @@ void PlannerScreen::updateCoveragePlanningUi() {
                                  "font-weight: 600; } QPushButton:hover { background: %4; }")
                       .arg(card_soft, border, text, surface_hover));
     }
+    if (btn_coverage_cut_) {
+        const bool cutting = cache.coverage_cut_active;
+        const bool has_obstacles = !cache.coverage_obstacles.empty();
+        btn_coverage_cut_->setEnabled(has_obstacles);
+        const QString cut_icon_color = !has_obstacles ? submuted : cutting ? amber_text : text;
+        if (lbl_coverage_cut_icon_) {
+            lbl_coverage_cut_icon_->setPixmap(loadSvgPixmap(
+                QStringLiteral(":/assets/missionplanner/obstacle_cut.svg"), 16, 16, cut_icon_color));
+        }
+        if (lbl_coverage_cut_text_) {
+            lbl_coverage_cut_text_->setText(cutting ? QStringLiteral("Drawing Cut Region...")
+                                                    : QStringLiteral("Cut Region"));
+            lbl_coverage_cut_text_->setStyleSheet(
+                QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: %1; color: %2;")
+                    .arg(cutting ? QStringLiteral("700") : QStringLiteral("600"), cut_icon_color));
+        }
+        btn_coverage_cut_->setStyleSheet(
+            cutting
+                ? QStringLiteral("QPushButton { background: %1; border: 1px solid %2; border-radius: "
+                                 "10px; } QPushButton:hover { background: %3; }")
+                      .arg(amber_soft_bg, amber_soft_border, surface_hover)
+                : QStringLiteral("QPushButton { background: %1; border: 1px solid %2; border-radius: "
+                                 "10px; } QPushButton:hover { background: %3; } "
+                                 "QPushButton:disabled { background: %1; }")
+                      .arg(card_soft, border, surface_hover));
+    }
 
     const double obstacle_area =
         std::accumulate(cache.coverage_obstacles.begin(),
@@ -4439,6 +4465,65 @@ void PlannerScreen::reclipObstaclesToRoi() {
         obs.geometry = std::move(pieces[best]);
         obs.area_m2 = total_area;
     }
+}
+
+void PlannerScreen::applyCutRegion(const Polygon2D& region) {
+    SessionCache& cache = activeSession();
+    if (region.size() < 3 || cache.coverage_obstacles.empty()) {
+        updateButtonsAndStatus();
+        return;
+    }
+
+    std::vector<SessionCache::CoverageObstacle> next;
+    next.reserve(cache.coverage_obstacles.size());
+    int removed = 0;
+    int affected = 0;
+    for (const auto& obs : cache.coverage_obstacles) {
+        const Obstacle2D& src =
+            obs.raw_geometry.outer.size() >= 3 ? obs.raw_geometry : obs.geometry;
+        if (src.outer.size() < 3) {
+            next.push_back(obs);
+            continue;
+        }
+        std::vector<Obstacle2D> pieces = subtractPolygonFromObstacle(src, region);
+        if (pieces.empty()) {
+            ++removed;
+            ++affected;
+            continue;  // cutter fully covered this obstacle
+        }
+        // Untouched (disjoint cutter) returns the obstacle unchanged.
+        const bool changed =
+            pieces.size() != 1 ||
+            std::fabs(std::abs(polygonArea(pieces[0].outer)) - std::abs(polygonArea(src.outer))) >
+                1e-6;
+        if (changed) ++affected;
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            SessionCache::CoverageObstacle co = obs;
+            if (i > 0) co.id = cache.coverage_next_obstacle_id++;  // new id per extra piece
+            co.raw_geometry = pieces[i];
+            co.geometry = pieces[i];
+            co.area_m2 = std::abs(polygonArea(pieces[i].outer));
+            next.push_back(std::move(co));
+        }
+    }
+
+    cache.coverage_obstacles = std::move(next);
+    if (cache.coverage_obstacles.empty()) {
+        cache.coverage_obstacles_detected = false;
+    }
+    reclipObstaclesToRoi();
+    rebuildCoverageObstacleRows();
+
+    if (affected == 0) {
+        setInlineStatus(QStringLiteral("Cut region did not overlap any obstacle."),
+                        QStringLiteral("#71717B"));
+    } else {
+        invalidateCoverageResult(
+            QStringLiteral("Cut applied to %1 obstacle(s). Generate coverage paths again to refresh the preview.")
+                .arg(affected));
+    }
+    updatePreview();
+    updateButtonsAndStatus();
 }
 
 void PlannerScreen::applyDetectResult(quint64 generation, ObstacleDetectionResult result) {
@@ -6183,6 +6268,26 @@ void PlannerScreen::buildUi() {
     btn_coverage_draw_toggle_->setFlat(true);
     btn_coverage_draw_toggle_->setFixedHeight(38);
     manual_layout->addWidget(btn_coverage_draw_toggle_);
+
+    btn_coverage_cut_ = new QPushButton(manual_panel);
+    btn_coverage_cut_->setCursor(Qt::PointingHandCursor);
+    btn_coverage_cut_->setFlat(true);
+    btn_coverage_cut_->setFixedHeight(38);
+    {
+        auto* cut_layout = new QHBoxLayout(btn_coverage_cut_);
+        cut_layout->setContentsMargins(12, 0, 12, 0);
+        cut_layout->setSpacing(8);
+        cut_layout->addStretch(1);
+        lbl_coverage_cut_icon_ = makeIconLabel(
+            btn_coverage_cut_, QStringLiteral(":/assets/missionplanner/obstacle_cut.svg"), 16);
+        cut_layout->addWidget(lbl_coverage_cut_icon_);
+        lbl_coverage_cut_text_ = makeTextLabel(
+            btn_coverage_cut_, QStringLiteral("Cut Region"),
+            QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 600;"));
+        cut_layout->addWidget(lbl_coverage_cut_text_);
+        cut_layout->addStretch(1);
+    }
+    manual_layout->addWidget(btn_coverage_cut_);
     coverage_manual_hint_card_ = new QWidget(manual_panel);
     coverage_manual_hint_card_->setAttribute(Qt::WA_StyledBackground, true);
     auto* manual_hint_layout = new QVBoxLayout(coverage_manual_hint_card_);
@@ -6607,10 +6712,12 @@ void PlannerScreen::buildUi() {
             return;
         }
         SessionCache& cache = activeSession();
-        if ((cache.coverage_roi_drawing_active || cache.coverage_drawing_active) &&
+        if ((cache.coverage_roi_drawing_active || cache.coverage_drawing_active ||
+             cache.coverage_cut_active) &&
             !plot_->isSelecting() && !plot_->isDrawingRectangle()) {
             cache.coverage_roi_drawing_active = false;
             cache.coverage_drawing_active = false;
+            cache.coverage_cut_active = false;
             updateButtonsAndStatus();
         }
     });
@@ -6927,6 +7034,11 @@ void PlannerScreen::buildUi() {
     });
     connect(plot_, &PlotWidget::obstacleSelected, this, [this, add_manual_obstacle](const Polygon2D& obstacle) {
         SessionCache& cache = activeSession();
+        if (cache.coverage_cut_active) {
+            cache.coverage_cut_active = false;
+            applyCutRegion(obstacle);
+            return;
+        }
         add_manual_obstacle(obstacle);
         cache.coverage_drawing_active = false;
         invalidateCoverageResult(
@@ -6946,6 +7058,15 @@ void PlannerScreen::buildUi() {
             updateButtonsAndStatus();
             return;
         }
+        if (cache.coverage_cut_active) {
+            const Polygon2D shape =
+                cache.coverage_drawing_tool == QStringLiteral("circle")
+                    ? makeEllipsePolygonFromRectangle(rect)
+                    : rect;
+            cache.coverage_cut_active = false;
+            applyCutRegion(shape);
+            return;
+        }
         if (cache.coverage_drawing_active) {
             const Polygon2D shape =
                 cache.coverage_drawing_tool == QStringLiteral("circle")
@@ -6961,11 +7082,13 @@ void PlannerScreen::buildUi() {
     });
     connect(plot_, &PlotWidget::selectionCancelled, this, [this]() {
         SessionCache& cache = activeSession();
-        if (!cache.coverage_roi_drawing_active && !cache.coverage_drawing_active) {
+        if (!cache.coverage_roi_drawing_active && !cache.coverage_drawing_active &&
+            !cache.coverage_cut_active) {
             return;
         }
         cache.coverage_roi_drawing_active = false;
         cache.coverage_drawing_active = false;
+        cache.coverage_cut_active = false;
         setInlineStatus(QStringLiteral("Selection cancelled."), QStringLiteral("#71717B"));
         updateButtonsAndStatus();
     });
@@ -7411,6 +7534,45 @@ void PlannerScreen::buildUi() {
             plot_->setFocus();
         }
         setInlineStatus(QStringLiteral("Define the obstacle shape on the map preview."),
+                        QStringLiteral("#71717B"));
+        updateButtonsAndStatus();
+    });
+    connect(btn_coverage_cut_, &QPushButton::clicked, this, [this, cancel_coverage_selection]() {
+        SessionCache& cache = activeSession();
+        if (!cache.raw_loaded) {
+            setInlineStatus(QStringLiteral("Wait for the saved map to load before cutting obstacles."),
+                            QStringLiteral("#F59E0B"));
+            updateButtonsAndStatus();
+            return;
+        }
+        if (cache.coverage_obstacles.empty()) {
+            setInlineStatus(QStringLiteral("No obstacles to cut. Detect or draw obstacles first."),
+                            QStringLiteral("#F59E0B"));
+            updateButtonsAndStatus();
+            return;
+        }
+
+        if (cache.coverage_cut_active) {
+            cancel_coverage_selection();
+            cache.coverage_cut_active = false;
+            setInlineStatus(QStringLiteral("Cut cancelled."), QStringLiteral("#71717B"));
+            updateButtonsAndStatus();
+            return;
+        }
+
+        cancel_coverage_selection();
+        cache.coverage_roi_drawing_active = false;
+        cache.coverage_drawing_active = false;
+        cache.coverage_cut_active = true;
+        if (plot_) {
+            if (cache.coverage_drawing_tool == QStringLiteral("polygon")) {
+                plot_->startObstacleSelection();
+            } else {
+                plot_->startRectangleMode();
+            }
+            plot_->setFocus();
+        }
+        setInlineStatus(QStringLiteral("Draw a region to cut out of the obstacles."),
                         QStringLiteral("#71717B"));
         updateButtonsAndStatus();
     });

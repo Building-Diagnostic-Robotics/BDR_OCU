@@ -274,6 +274,9 @@ private:
         double coverage_csf_sensitivity = 50.0;
         QString coverage_drawing_tool = QStringLiteral("rectangle");
         bool coverage_drawing_active = false;
+        // Cut mode: the next drawn shape is subtracted from existing obstacles
+        // instead of being added as a new one.
+        bool coverage_cut_active = false;
         bool coverage_obstacles_detected = false;
         int coverage_next_obstacle_id = 1;
         std::vector<CoverageObstacle> coverage_obstacles;
@@ -370,6 +373,10 @@ private:
     // leaves obstacles at full extent. Called after detection, after a manual
     // obstacle is added, and whenever the ROI changes.
     void reclipObstaclesToRoi();
+    // Subtract a drawn region from every obstacle's raw_geometry (boolean
+    // difference). Obstacles fully covered are removed; a bisecting cut splits
+    // one obstacle into multiple entries. Re-clips to ROI afterwards.
+    void applyCutRegion(const Polygon2D& region);
     void updateHeaderForCurrentStep();
     void updateStageSteps();
     void updateFooter();
@@ -649,6 +656,9 @@ private:
     QPushButton* btn_coverage_draw_polygon_ = nullptr;
     QPushButton* btn_coverage_draw_circle_ = nullptr;
     QPushButton* btn_coverage_draw_toggle_ = nullptr;
+    QPushButton* btn_coverage_cut_ = nullptr;
+    QLabel* lbl_coverage_cut_icon_ = nullptr;
+    QLabel* lbl_coverage_cut_text_ = nullptr;
     QPushButton* btn_coverage_generate_ = nullptr;
     PlotWidget* plot_ = nullptr;
     QStackedWidget* content_stack_ = nullptr;
