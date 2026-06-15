@@ -7,7 +7,7 @@ robot, drive an exploration pass, plan coverage, run an autonomous scan,
 and ship the resulting data to the cloud.
 
 > Internal repository — distribute only inside Building Diagnostic Robotics
-> and approved field-test partners.
+> and approved field-test partners. If curious about how to use it reach out to andrew.dave@bdx-robotics.com
 
 ---
 
