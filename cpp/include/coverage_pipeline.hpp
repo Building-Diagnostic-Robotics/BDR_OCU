@@ -138,11 +138,9 @@ struct CoverageResult {
     // before the operator is allowed to publish waypoints / start a scan.
     bool path_valid = true;
     int skipped_obstacles = 0;
-    // Layer-1 routing diagnostics. skipped_swaths: swaths dropped because the
-    // connector router failed on them (warn, does NOT block). free_space_regions:
-    // count of disjoint navigable areas; > 1 means an obstacle split the ROI and
-    // the plan contains straight inter-region transits (which the gate flags).
-    int skipped_swaths = 0;
+    // Layer-1 routing diagnostic. free_space_regions: count of disjoint
+    // navigable areas; > 1 means an obstacle split the ROI and the plan contains
+    // straight inter-region transits (which the Layer-2 gate flags).
     int free_space_regions = 1;
 };
 

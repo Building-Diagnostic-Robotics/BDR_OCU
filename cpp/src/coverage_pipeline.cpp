@@ -1219,49 +1219,48 @@ static void recomputeAxialHeadings(PathStateList& path) {
     }
 }
 
-// Stitch the ordered swaths into a path, routing each inter-swath connector
-// through free space (visibility graph) and arc-filleting its corners. A
-// connector that comes back empty means the two swaths sit in disconnected
-// free-space components: a straight transit is emitted (the Layer-2 gate flags
-// it). A router exception drops that swath (skipped_swaths++), keeping the
-// previous endpoint so the next swath connects from there.
-static PathStateList buildObstacleAwarePath(const SwathList& swaths,
+// Re-route only the obstacle-crossing connectors of an existing route, leaving
+// its boustrophedon ordering and every clear segment untouched. For each
+// consecutive route segment: routeConnectorThroughFreeSpace returns the segment
+// unchanged when it already has line-of-sight (kept straight), a detour polyline
+// when it would cross an obstacle (arc-filleted and spliced in), or empty when
+// the endpoints are in disconnected free-space components (kept as a straight
+// transit that the Layer-2 gate flags). Order is never changed.
+static PathStateList buildObstacleAwarePath(const PathStateList& route,
                                             const std::vector<Obstacle2D>& free_space,
-                                            double smoothing_radius,
-                                            int& skipped_swaths) {
+                                            double smoothing_radius) {
     PathStateList path;
+    if (route.empty()) return path;
+
     const double max_r = smoothing_radius;
     const double min_r = std::max(0.05, smoothing_radius * 0.2);
 
-    bool have_prev = false;
-    Point2D prev_end;
-    for (const auto& s : swaths) {
-        if (have_prev) {
-            std::vector<Point2D> connector;
-            try {
-                connector = routeConnectorThroughFreeSpace(free_space, prev_end, s.start);
-            } catch (const std::exception& e) {
-                std::cerr << "[Coverage] Connector router failed, skipping swath: "
-                          << e.what() << std::endl;
-                ++skipped_swaths;
-                continue;  // keep prev_end; do not emit this swath
-            }
-            if (!connector.empty()) {
-                if (max_r > 0.0 && connector.size() >= 3) {
-                    connector = smoothPolylineWithinFreeSpace(connector, free_space,
-                                                              max_r, min_r);
-                }
-                // Endpoints duplicate prev_end / s.start, so emit interior only.
-                for (size_t k = 1; k + 1 < connector.size(); ++k) {
-                    path.push_back(PathState{connector[k], 0.0});
-                }
-            }
-            // empty connector => straight transit (prev_end -> s.start jump)
+    path.push_back(route.front());
+    for (size_t i = 1; i < route.size(); ++i) {
+        const Point2D a = route[i - 1].point;
+        const Point2D b = route[i].point;
+
+        std::vector<Point2D> connector;
+        try {
+            connector = routeConnectorThroughFreeSpace(free_space, a, b);
+        } catch (const std::exception& e) {
+            std::cerr << "[Coverage] Connector router failed, keeping straight: "
+                      << e.what() << std::endl;
+            connector.clear();
         }
-        path.push_back(PathState{s.start, 0.0});
-        path.push_back(PathState{s.end, 0.0});
-        have_prev = true;
-        prev_end = s.end;
+
+        if (connector.size() > 2) {
+            if (max_r > 0.0) {
+                connector = smoothPolylineWithinFreeSpace(connector, free_space, max_r, min_r);
+            }
+            // Endpoints duplicate a / b, so splice interior points only.
+            for (size_t k = 1; k + 1 < connector.size(); ++k) {
+                path.push_back(PathState{connector[k], 0.0});
+            }
+        }
+        // size <= 2: direct line of sight (clear) or disconnected (transit) ->
+        // keep the straight segment by emitting just the endpoint below.
+        path.push_back(PathState{b, 0.0});
     }
     recomputeAxialHeadings(path);
     return path;
@@ -1462,11 +1461,11 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
                 // through free space instead of straight lines.
                 const bool route_around_obstacles =
                     obstacles && !obstacles->empty() && !free_space_regions.empty() &&
-                    !result.swaths.empty();
+                    !result.route.empty();
                 if (route_around_obstacles) {
                     result.path = buildObstacleAwarePath(
-                        result.swaths, free_space_regions,
-                        config.connector_smoothing_radius, result.skipped_swaths);
+                        result.route, free_space_regions,
+                        config.connector_smoothing_radius);
                 } else if (!result.route.empty()) {
                     // Route waypoints are already in correct order - use them as path
                     result.path = result.route;

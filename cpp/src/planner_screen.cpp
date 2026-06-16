@@ -2595,7 +2595,6 @@ void PlannerScreen::invalidateCoverageResult(const QString& status_message) {
     cache.planned_effective_area_m2 = 0.0;
     cache.planned_path_valid = true;
     cache.planned_skipped_obstacles = 0;
-    cache.planned_skipped_swaths = 0;
     cache.planned_free_space_regions = 1;
     cache.scan_segments.clear();
     cache.scan_splits_dirty = true;
@@ -4384,7 +4383,6 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
     cache.planned_effective_area_m2 = result.coverage.effective_area_m2;
     cache.planned_path_valid = result.coverage.path_valid;
     cache.planned_skipped_obstacles = result.coverage.skipped_obstacles;
-    cache.planned_skipped_swaths = result.coverage.skipped_swaths;
     cache.planned_free_space_regions = result.coverage.free_space_regions;
 
     updatePreview();
@@ -4410,13 +4408,6 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
         setInlineStatus(QStringLiteral("Unsafe plan — %1. Edit obstacles/ROI and "
                                        "re-plan before scanning.").arg(why),
                         QStringLiteral("#F87171"));
-    } else if (cache.planned_skipped_swaths > 0) {
-        // Warn-only: the rest of the plan is safe and publishable.
-        setInlineStatus(QStringLiteral("Generated %1 swaths (%2 unreachable swath(s) "
-                                       "skipped). Review coverage before scanning.")
-                            .arg(cache.planned_swaths.size())
-                            .arg(cache.planned_skipped_swaths),
-                        QStringLiteral("#F59E0B"));
     } else {
         setInlineStatus(QStringLiteral("Generated %1 swaths and %2 path states.")
                             .arg(cache.planned_swaths.size())
