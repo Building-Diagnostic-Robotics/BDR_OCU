@@ -2595,6 +2595,8 @@ void PlannerScreen::invalidateCoverageResult(const QString& status_message) {
     cache.planned_effective_area_m2 = 0.0;
     cache.planned_path_valid = true;
     cache.planned_skipped_obstacles = 0;
+    cache.planned_skipped_swaths = 0;
+    cache.planned_free_space_regions = 1;
     cache.scan_segments.clear();
     cache.scan_splits_dirty = true;
     cache.scan_waypoints_published = false;
@@ -4249,6 +4251,10 @@ void PlannerScreen::startGenerateCoverage() {
         const ObstacleDetectionParams fp;
         cfg.obstacle_clearance = fp.robot_width_m * 0.5 + fp.footprint_margin_m;
     }
+    // Layer 1: arc-fillet radius for obstacle-routed connectors. Kept small —
+    // Roofus is skid-steer and can turn nearly in place; the router shrinks it
+    // further to fit tight corridors. Separate from cfg.turn_radius (Dubins).
+    cfg.connector_smoothing_radius = 0.30;
     // Feed the FULL (unclipped) obstacle shapes to the pipeline: it subtracts
     // them from the ROI∩boundary work area, so any out-of-ROI portion is
     // ignored while every in-ROI part is removed. Passing the display-clipped
@@ -4378,6 +4384,8 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
     cache.planned_effective_area_m2 = result.coverage.effective_area_m2;
     cache.planned_path_valid = result.coverage.path_valid;
     cache.planned_skipped_obstacles = result.coverage.skipped_obstacles;
+    cache.planned_skipped_swaths = result.coverage.skipped_swaths;
+    cache.planned_free_space_regions = result.coverage.free_space_regions;
 
     updatePreview();
     if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
@@ -4388,7 +4396,11 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
     if (!cache.planned_path_valid || cache.planned_skipped_obstacles > 0) {
         QString why;
         if (!cache.planned_path_valid) {
-            why = QStringLiteral("path drives through an obstacle");
+            why = cache.planned_free_space_regions > 1
+                      ? QStringLiteral("plan spans %1 disconnected regions — the robot "
+                                       "cannot transit between them safely")
+                            .arg(cache.planned_free_space_regions)
+                      : QStringLiteral("path drives through an obstacle");
         }
         if (cache.planned_skipped_obstacles > 0) {
             if (!why.isEmpty()) why += QStringLiteral("; ");
@@ -4398,6 +4410,13 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
         setInlineStatus(QStringLiteral("Unsafe plan — %1. Edit obstacles/ROI and "
                                        "re-plan before scanning.").arg(why),
                         QStringLiteral("#F87171"));
+    } else if (cache.planned_skipped_swaths > 0) {
+        // Warn-only: the rest of the plan is safe and publishable.
+        setInlineStatus(QStringLiteral("Generated %1 swaths (%2 unreachable swath(s) "
+                                       "skipped). Review coverage before scanning.")
+                            .arg(cache.planned_swaths.size())
+                            .arg(cache.planned_skipped_swaths),
+                        QStringLiteral("#F59E0B"));
     } else {
         setInlineStatus(QStringLiteral("Generated %1 swaths and %2 path states.")
                             .arg(cache.planned_swaths.size())

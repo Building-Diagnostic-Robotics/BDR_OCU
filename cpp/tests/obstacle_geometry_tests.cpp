@@ -20,6 +20,8 @@ using f2c_cpp::buildFreeSpacePolygons;
 using f2c_cpp::clipObstacleToPolygon;
 using f2c_cpp::subtractPolygonFromObstacle;
 using f2c_cpp::validatePathClearsObstacles;
+using f2c_cpp::routeConnectorThroughFreeSpace;
+using f2c_cpp::smoothPolylineWithinFreeSpace;
 
 namespace {
 
@@ -237,6 +239,52 @@ TEST(Validate, NoObstaclesOrShortPathIsValid) {
     std::vector<Obstacle2D> obs = {{rect(4, 0, 6, 10), {}}};
     std::vector<Point2D> one = {{0, 5}};
     EXPECT_TRUE(validatePathClearsObstacles(one, &obs, 0.0).valid);
+}
+
+TEST(Route, DirectLineOfSightIsTwoPoints) {
+    std::vector<Obstacle2D> fs = {{rect(0, 0, 10, 10), {}}};
+    auto p = routeConnectorThroughFreeSpace(fs, {1, 1}, {9, 9});
+    ASSERT_EQ(p.size(), 2u);
+    EXPECT_NEAR(p.front().x, 1, 1e-9);
+    EXPECT_NEAR(p.back().y, 9, 1e-9);
+}
+
+TEST(Route, RoutesAroundObstacleHole) {
+    Obstacle2D region;
+    region.outer = rect(0, 0, 10, 10);
+    region.holes = {rect(4, 4, 6, 6)};  // obstacle in the middle
+    std::vector<Obstacle2D> fs = {region};
+    auto p = routeConnectorThroughFreeSpace(fs, {2, 5}, {8, 5});
+    ASSERT_GE(p.size(), 3u);  // straight line blocked -> detours
+    EXPECT_NEAR(p.front().x, 2, 1e-9);
+    EXPECT_NEAR(p.back().x, 8, 1e-9);
+    for (const auto& q : p) {
+        const bool strictly_inside_hole =
+            q.x > 4.001 && q.x < 5.999 && q.y > 4.001 && q.y < 5.999;
+        EXPECT_FALSE(strictly_inside_hole);
+    }
+}
+
+TEST(Route, DisconnectedComponentsReturnEmpty) {
+    std::vector<Obstacle2D> fs = {{rect(0, 0, 4, 4), {}}, {rect(10, 10, 14, 14), {}}};
+    auto p = routeConnectorThroughFreeSpace(fs, {2, 2}, {12, 12});
+    EXPECT_TRUE(p.empty());
+}
+
+TEST(Smooth, RoundsRightAngleCornerAndKeepsEndpoints) {
+    std::vector<Obstacle2D> fs = {{rect(0, 0, 10, 10), {}}};
+    std::vector<Point2D> poly = {{1, 5}, {5, 5}, {5, 1}};  // 90-degree corner
+    auto s = smoothPolylineWithinFreeSpace(poly, fs, 1.0, 0.1);
+    EXPECT_GT(s.size(), poly.size());
+    EXPECT_NEAR(s.front().x, 1, 1e-9);
+    EXPECT_NEAR(s.front().y, 5, 1e-9);
+    EXPECT_NEAR(s.back().x, 5, 1e-9);
+    EXPECT_NEAR(s.back().y, 1, 1e-9);
+    bool sharp_corner_present = false;
+    for (const auto& q : s) {
+        if (std::hypot(q.x - 5.0, q.y - 5.0) < 1e-6) sharp_corner_present = true;
+    }
+    EXPECT_FALSE(sharp_corner_present);
 }
 
 TEST(Clip, ConcaveClipSplitsObstacleIntoPieces) {

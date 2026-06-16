@@ -314,6 +314,10 @@ private:
         // (planned_skipped_obstacles > 0) must not be published or scanned.
         bool planned_path_valid = true;
         int planned_skipped_obstacles = 0;
+        // Layer-1 routing diagnostics (warn-only, do not block): swaths the
+        // connector router dropped, and the count of disjoint free-space areas.
+        int planned_skipped_swaths = 0;
+        int planned_free_space_regions = 1;
         PlannerStep last_step = PlannerStep::CoveragePlanning;
     };
 

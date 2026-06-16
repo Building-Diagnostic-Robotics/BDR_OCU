@@ -321,6 +321,7 @@ static bool buildEffectiveCellsFromROIAndObstacles(
     Polygon2D& out_primary_outer,
     double& out_effective_area_m2,
     int& out_skipped_obstacles,
+    std::vector<Obstacle2D>& out_free_space,
     std::string& error) {
 
     FreeSpaceResult fs =
@@ -331,6 +332,7 @@ static bool buildEffectiveCellsFromROIAndObstacles(
         return false;
     }
     out_effective_area_m2 = fs.effective_area_m2;
+    out_free_space = fs.regions;
 
     // Primary polygon (largest area) drives swath alignment / concavity checks.
     double best_area = -1.0;
@@ -1199,6 +1201,72 @@ static PathStateList filterPathAroundObstacles(
 
 #ifdef HAVE_FIELDS2COVER
 
+// Recompute per-waypoint headings/velocity from consecutive points (axial model).
+static void recomputeAxialHeadings(PathStateList& path) {
+    for (size_t i = 0; i < path.size(); ++i) {
+        double heading;
+        if (i + 1 < path.size()) {
+            heading = std::atan2(path[i + 1].point.y - path[i].point.y,
+                                 path[i + 1].point.x - path[i].point.x);
+        } else if (i > 0) {
+            heading = path[i - 1].heading;
+        } else {
+            heading = 0.0;
+        }
+        path[i].heading = heading;
+        path[i].vx = std::cos(heading);
+        path[i].vy = std::sin(heading);
+    }
+}
+
+// Stitch the ordered swaths into a path, routing each inter-swath connector
+// through free space (visibility graph) and arc-filleting its corners. A
+// connector that comes back empty means the two swaths sit in disconnected
+// free-space components: a straight transit is emitted (the Layer-2 gate flags
+// it). A router exception drops that swath (skipped_swaths++), keeping the
+// previous endpoint so the next swath connects from there.
+static PathStateList buildObstacleAwarePath(const SwathList& swaths,
+                                            const std::vector<Obstacle2D>& free_space,
+                                            double smoothing_radius,
+                                            int& skipped_swaths) {
+    PathStateList path;
+    const double max_r = smoothing_radius;
+    const double min_r = std::max(0.05, smoothing_radius * 0.2);
+
+    bool have_prev = false;
+    Point2D prev_end;
+    for (const auto& s : swaths) {
+        if (have_prev) {
+            std::vector<Point2D> connector;
+            try {
+                connector = routeConnectorThroughFreeSpace(free_space, prev_end, s.start);
+            } catch (const std::exception& e) {
+                std::cerr << "[Coverage] Connector router failed, skipping swath: "
+                          << e.what() << std::endl;
+                ++skipped_swaths;
+                continue;  // keep prev_end; do not emit this swath
+            }
+            if (!connector.empty()) {
+                if (max_r > 0.0 && connector.size() >= 3) {
+                    connector = smoothPolylineWithinFreeSpace(connector, free_space,
+                                                              max_r, min_r);
+                }
+                // Endpoints duplicate prev_end / s.start, so emit interior only.
+                for (size_t k = 1; k + 1 < connector.size(); ++k) {
+                    path.push_back(PathState{connector[k], 0.0});
+                }
+            }
+            // empty connector => straight transit (prev_end -> s.start jump)
+        }
+        path.push_back(PathState{s.start, 0.0});
+        path.push_back(PathState{s.end, 0.0});
+        have_prev = true;
+        prev_end = s.end;
+    }
+    recomputeAxialHeadings(path);
+    return path;
+}
+
 CoverageResult generateCoverage(const Polygon2D& boundary,
                                 const CoverageConfig& config,
                                 const Polygon2D* roi,
@@ -1215,14 +1283,17 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
         double effective_area_m2 = 0.0;
         std::string geom_error;
         int skipped_obstacles = 0;
+        std::vector<Obstacle2D> free_space_regions;
         if (!buildEffectiveCellsFromROIAndObstacles(
                 boundary, roi, obstacles, config.obstacle_clearance, cells,
-                effective_outer, effective_area_m2, skipped_obstacles, geom_error)) {
+                effective_outer, effective_area_m2, skipped_obstacles,
+                free_space_regions, geom_error)) {
             result.error_message = geom_error;
             return result;
         }
         result.effective_area_m2 = effective_area_m2;
         result.skipped_obstacles = skipped_obstacles;
+        result.free_space_regions = static_cast<int>(free_space_regions.size());
 
         F2CField field(cells);
 
@@ -1387,10 +1458,16 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
             bool use_axial = config.use_axial_turns || (obstacles && !obstacles->empty());
             
             if (use_axial) {
-                // For axial turns, use the route waypoints directly
-                // The route already contains the correct traversal order with proper
-                // direction for each swath (Boustrophedon alternates directions)
-                if (!result.route.empty()) {
+                // Layer 1: with obstacles, route each inter-swath connector
+                // through free space instead of straight lines.
+                const bool route_around_obstacles =
+                    obstacles && !obstacles->empty() && !free_space_regions.empty() &&
+                    !result.swaths.empty();
+                if (route_around_obstacles) {
+                    result.path = buildObstacleAwarePath(
+                        result.swaths, free_space_regions,
+                        config.connector_smoothing_radius, result.skipped_swaths);
+                } else if (!result.route.empty()) {
                     // Route waypoints are already in correct order - use them as path
                     result.path = result.route;
                     
