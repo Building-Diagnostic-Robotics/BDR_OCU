@@ -19,6 +19,7 @@ using f2c_cpp::Obstacle2D;
 using f2c_cpp::buildFreeSpacePolygons;
 using f2c_cpp::clipObstacleToPolygon;
 using f2c_cpp::subtractPolygonFromObstacle;
+using f2c_cpp::validatePathClearsObstacles;
 
 namespace {
 
@@ -204,6 +205,38 @@ TEST(Cut, DisjointCutterLeavesObstacleIntact) {
     auto pieces = subtractPolygonFromObstacle(obs, cutter);
     ASSERT_EQ(pieces.size(), 1u);
     EXPECT_NEAR(totalArea(pieces), 16.0, 1e-4);
+}
+
+TEST(Validate, PathThroughObstacleIsInvalid) {
+    std::vector<Obstacle2D> obs = {{rect(4, 0, 6, 10), {}}};  // vertical wall
+    std::vector<Point2D> path = {{0, 5}, {10, 5}};            // drives straight through
+    auto v = validatePathClearsObstacles(path, &obs, 0.0);
+    EXPECT_FALSE(v.valid);
+    EXPECT_GE(v.crossing_segments, 1);
+    EXPECT_GT(v.breach_length_m, 1.0);
+}
+
+TEST(Validate, PathClearOfObstacleIsValid) {
+    std::vector<Obstacle2D> obs = {{rect(4, 0, 6, 4), {}}};  // wall only spans y in [0,4]
+    std::vector<Point2D> path = {{0, 8}, {10, 8}};           // passes well above
+    auto v = validatePathClearsObstacles(path, &obs, 0.0);
+    EXPECT_TRUE(v.valid);
+    EXPECT_EQ(v.crossing_segments, 0);
+}
+
+TEST(Validate, ClearanceCorridorCatchesNearMiss) {
+    std::vector<Obstacle2D> obs = {{rect(4, 0, 6, 4), {}}};  // top edge at y=4
+    std::vector<Point2D> path = {{0, 5}, {10, 5}};           // 1 m above the obstacle
+    EXPECT_TRUE(validatePathClearsObstacles(path, &obs, 0.0).valid);   // no clearance: clears
+    EXPECT_FALSE(validatePathClearsObstacles(path, &obs, 2.0).valid);  // 2 m corridor: breached
+}
+
+TEST(Validate, NoObstaclesOrShortPathIsValid) {
+    std::vector<Point2D> path = {{0, 0}, {10, 0}};
+    EXPECT_TRUE(validatePathClearsObstacles(path, nullptr, 1.0).valid);
+    std::vector<Obstacle2D> obs = {{rect(4, 0, 6, 10), {}}};
+    std::vector<Point2D> one = {{0, 5}};
+    EXPECT_TRUE(validatePathClearsObstacles(one, &obs, 0.0).valid);
 }
 
 TEST(Clip, ConcaveClipSplitsObstacleIntoPieces) {

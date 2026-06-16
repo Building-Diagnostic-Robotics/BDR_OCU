@@ -2593,6 +2593,8 @@ void PlannerScreen::invalidateCoverageResult(const QString& status_message) {
     cache.planned_route.clear();
     cache.planned_path.clear();
     cache.planned_effective_area_m2 = 0.0;
+    cache.planned_path_valid = true;
+    cache.planned_skipped_obstacles = 0;
     cache.scan_segments.clear();
     cache.scan_splits_dirty = true;
     cache.scan_waypoints_published = false;
@@ -4374,16 +4376,34 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
     cache.planned_route = result.coverage.route;
     cache.planned_path = result.coverage.path;
     cache.planned_effective_area_m2 = result.coverage.effective_area_m2;
+    cache.planned_path_valid = result.coverage.path_valid;
+    cache.planned_skipped_obstacles = result.coverage.skipped_obstacles;
 
     updatePreview();
     if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
         plot_->resetView();
     }
     updateButtonsAndStatus();
-    setInlineStatus(QStringLiteral("Generated %1 swaths and %2 path states.")
-                        .arg(cache.planned_swaths.size())
-                        .arg(cache.planned_path.size()),
-                    QStringLiteral("#00D492"));
+
+    if (!cache.planned_path_valid || cache.planned_skipped_obstacles > 0) {
+        QString why;
+        if (!cache.planned_path_valid) {
+            why = QStringLiteral("path drives through an obstacle");
+        }
+        if (cache.planned_skipped_obstacles > 0) {
+            if (!why.isEmpty()) why += QStringLiteral("; ");
+            why += QStringLiteral("%1 obstacle(s) could not be processed")
+                       .arg(cache.planned_skipped_obstacles);
+        }
+        setInlineStatus(QStringLiteral("Unsafe plan — %1. Edit obstacles/ROI and "
+                                       "re-plan before scanning.").arg(why),
+                        QStringLiteral("#F87171"));
+    } else {
+        setInlineStatus(QStringLiteral("Generated %1 swaths and %2 path states.")
+                            .arg(cache.planned_swaths.size())
+                            .arg(cache.planned_path.size()),
+                        QStringLiteral("#00D492"));
+    }
 }
 
 void PlannerScreen::startDetectObstacles() {
@@ -5160,7 +5180,34 @@ void PlannerScreen::showScanPreflightDialog() {
     }
 }
 
+bool PlannerScreen::ensurePlanSafeForExecution() {
+    const SessionCache* cache = activeSessionPtr();
+    if (!cache) {
+        return false;
+    }
+    if (cache->planned_path_valid && cache->planned_skipped_obstacles == 0) {
+        return true;
+    }
+    QString detail;
+    if (!cache->planned_path_valid) {
+        detail = QStringLiteral("The planned path drives through one or more obstacles.");
+    }
+    if (cache->planned_skipped_obstacles > 0) {
+        if (!detail.isEmpty()) detail += QStringLiteral("\n\n");
+        detail += QStringLiteral("%1 obstacle(s) could not be processed and were dropped "
+                                 "from the plan.")
+                      .arg(cache->planned_skipped_obstacles);
+    }
+    detail += QStringLiteral("\n\nEdit the obstacles or ROI and re-plan before publishing "
+                             "or starting a scan.");
+    BdrMessageBox::warning(this, QStringLiteral("Unsafe plan blocked"), detail);
+    return false;
+}
+
 void PlannerScreen::onPublishSelectedClicked() {
+    if (!ensurePlanSafeForExecution()) {
+        return;
+    }
     const auto indices = selectedScanSegmentIndices();
     if (indices.empty()) {
         BdrMessageBox::information(
@@ -5195,6 +5242,9 @@ void PlannerScreen::onPublishSelectedClicked() {
 }
 
 void PlannerScreen::onStartSelectedClicked() {
+    if (!ensurePlanSafeForExecution()) {
+        return;
+    }
     SessionCache& cache = activeSession();
     const auto indices = selectedScanSegmentIndices();
     if (indices.empty()) {
@@ -5262,18 +5312,29 @@ void PlannerScreen::updateScanSplittingUi() {
                        : QStringLiteral("Generate a coverage plan first."));
     }
     const bool has_selection = !selectedScanSegmentIndices().empty();
+    const bool path_safe =
+        cache->planned_path_valid && cache->planned_skipped_obstacles == 0;
+    const QString unsafe_tip =
+        !cache->planned_path_valid
+            ? QStringLiteral("Blocked: planned path drives through an obstacle. "
+                             "Edit obstacles/ROI and re-plan.")
+            : QStringLiteral("Blocked: %1 obstacle(s) could not be processed. "
+                             "Edit obstacles and re-plan.")
+                  .arg(cache->planned_skipped_obstacles);
     if (btn_scan_publish_selected_) {
-        btn_scan_publish_selected_->setEnabled(plan_ready && has_selection);
+        btn_scan_publish_selected_->setEnabled(plan_ready && has_selection && path_safe);
         btn_scan_publish_selected_->setToolTip(
             !plan_ready ? QStringLiteral("Generate a coverage plan first.")
+            : !path_safe ? unsafe_tip
             : !has_selection
                 ? QStringLiteral("Tick one or more segments to publish.")
                 : QStringLiteral("Publish the selected segments to /f2c_waypoints."));
     }
     if (btn_scan_start_selected_) {
-        btn_scan_start_selected_->setEnabled(plan_ready && has_selection);
+        btn_scan_start_selected_->setEnabled(plan_ready && has_selection && path_safe);
         btn_scan_start_selected_->setToolTip(
             !plan_ready ? QStringLiteral("Generate a coverage plan first.")
+            : !path_safe ? unsafe_tip
             : !has_selection ? QStringLiteral("Tick one or more segments to start.")
                              : QStringLiteral("Start navigating the published segments."));
     }

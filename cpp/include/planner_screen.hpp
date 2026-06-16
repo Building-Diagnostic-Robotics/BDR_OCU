@@ -309,6 +309,11 @@ private:
         double raw_area_estimate_m2 = 0.0;
         double planned_effective_area_m2 = 0.0;
         double estimated_file_size_mb = 0.0;
+        // Layer-2 safety gate: a plan that drives through an obstacle corridor
+        // (planned_path_valid == false) or dropped an unrepairable obstacle
+        // (planned_skipped_obstacles > 0) must not be published or scanned.
+        bool planned_path_valid = true;
+        int planned_skipped_obstacles = 0;
         PlannerStep last_step = PlannerStep::CoveragePlanning;
     };
 
@@ -414,6 +419,9 @@ private:
     std::vector<int> selectedScanSegmentIndices() const;
     PathStateList buildPublishPathFromSegments(const std::vector<int>& indices) const;
     void onSplitPathClicked();
+    // Layer-2 safety gate: blocks publish/start when the active plan is unsafe
+    // (path crosses an obstacle or an obstacle was skipped). Shows a red dialog.
+    bool ensurePlanSafeForExecution();
     void onPublishSelectedClicked();
     void onStartSelectedClicked();
     void onScanDistanceEdited();

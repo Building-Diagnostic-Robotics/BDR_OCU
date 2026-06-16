@@ -127,6 +127,12 @@ struct CoverageResult {
     double effective_area_m2 = 0.0;  // Area of (boundary ∩ ROI) − obstacles
     bool success = false;
     std::string error_message;
+    // Safety gate (Layer 2): false when a path segment drives through the
+    // inflated obstacle corridor. skipped_obstacles counts obstacles dropped
+    // during free-space build (unrepairable geometry). Both must be clean
+    // before the operator is allowed to publish waypoints / start a scan.
+    bool path_valid = true;
+    int skipped_obstacles = 0;
 };
 
 // =============================================================================
@@ -273,6 +279,32 @@ FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
                                        const Polygon2D* roi,
                                        const std::vector<Obstacle2D>* obstacles,
                                        double obstacle_clearance = 0.0);
+
+/**
+ * @brief Result of validating a planned path against the inflated obstacles.
+ *
+ * @c valid is false when any path segment drives through the obstacle corridor
+ * (obstacle footprint inflated by @c obstacle_clearance, the robot half-width).
+ * @c crossing_segments / @c breach_length_m quantify the breach for the UI.
+ * Tangential contact (a swath that legitimately runs along the clearance edge)
+ * does not count — only intersections with non-trivial length do.
+ */
+struct PathValidation {
+    bool valid = true;
+    int crossing_segments = 0;
+    double breach_length_m = 0.0;
+};
+
+/**
+ * @brief Check that a path keeps the robot footprint clear of every obstacle.
+ *
+ * Rebuilds the inflated obstacle union with the same strategy as
+ * buildFreeSpacePolygons (per-obstacle repair → union → buffer by
+ * @p obstacle_clearance) and measures how far each path segment penetrates it.
+ */
+PathValidation validatePathClearsObstacles(const std::vector<Point2D>& path_points,
+                                           const std::vector<Obstacle2D>* obstacles,
+                                           double obstacle_clearance = 0.0);
 
 // =============================================================================
 // Coverage Generation

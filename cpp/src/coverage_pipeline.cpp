@@ -320,10 +320,12 @@ static bool buildEffectiveCellsFromROIAndObstacles(
     F2CCells& out_cells,
     Polygon2D& out_primary_outer,
     double& out_effective_area_m2,
+    int& out_skipped_obstacles,
     std::string& error) {
 
     FreeSpaceResult fs =
         buildFreeSpacePolygons(boundary, roi, obstacles, obstacle_clearance);
+    out_skipped_obstacles = fs.skipped_obstacles;
     if (!fs.success) {
         error = fs.error_message;
         return false;
@@ -1212,13 +1214,15 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
         Polygon2D effective_outer;
         double effective_area_m2 = 0.0;
         std::string geom_error;
+        int skipped_obstacles = 0;
         if (!buildEffectiveCellsFromROIAndObstacles(
                 boundary, roi, obstacles, config.obstacle_clearance, cells,
-                effective_outer, effective_area_m2, geom_error)) {
+                effective_outer, effective_area_m2, skipped_obstacles, geom_error)) {
             result.error_message = geom_error;
             return result;
         }
         result.effective_area_m2 = effective_area_m2;
+        result.skipped_obstacles = skipped_obstacles;
 
         F2CField field(cells);
 
@@ -1514,7 +1518,23 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
         } catch (const std::exception& e) {
             std::cerr << "Route generation warning: " << e.what() << std::endl;
         }
-        
+
+        // Layer-2 safety gate: confirm no path segment drives through the
+        // inflated obstacle corridor (robot half-width = obstacle_clearance).
+        if (obstacles && !obstacles->empty() && !result.path.empty()) {
+            std::vector<Point2D> pts;
+            pts.reserve(result.path.size());
+            for (const auto& st : result.path) pts.push_back(st.point);
+            PathValidation pv =
+                validatePathClearsObstacles(pts, obstacles, config.obstacle_clearance);
+            result.path_valid = pv.valid;
+            if (!pv.valid) {
+                std::cerr << "[Coverage] Path crosses obstacles: "
+                          << pv.crossing_segments << " segment(s), "
+                          << pv.breach_length_m << " m through clearance\n";
+            }
+        }
+
         reportProgress(100, "Coverage generation complete");
         result.success = true;
         

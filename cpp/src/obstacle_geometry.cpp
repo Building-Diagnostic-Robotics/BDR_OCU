@@ -15,6 +15,8 @@
 #include <boost/geometry/geometries/point_xy.hpp>
 #include <boost/geometry/geometries/polygon.hpp>
 #include <boost/geometry/geometries/multi_polygon.hpp>
+#include <boost/geometry/geometries/linestring.hpp>
+#include <boost/geometry/geometries/multi_linestring.hpp>
 #include <boost/geometry/policies/is_valid/failing_reason_policy.hpp>
 
 namespace f2c_cpp {
@@ -24,6 +26,8 @@ namespace bg = boost::geometry;
 using BgPoint = bg::model::d2::point_xy<double>;
 using BgPolygon = bg::model::polygon<BgPoint, /*ClockWise=*/false, /*Closed=*/true>;
 using BgMultiPolygon = bg::model::multi_polygon<BgPolygon>;
+using BgLineString = bg::model::linestring<BgPoint>;
+using BgMultiLineString = bg::model::multi_linestring<BgLineString>;
 
 constexpr double kGeomEps = 1e-9;
 constexpr double kMinValidArea = 1e-10;
@@ -147,6 +151,30 @@ bool repairObstacle(const Obstacle2D& obs, BgMultiPolygon& out, std::string& rea
     return false;
 }
 
+// Repaired union of every obstacle, optionally inflated by `clearance`.
+// `skipped` (when non-null) accumulates obstacles dropped as unrepairable.
+BgMultiPolygon unionInflatedObstacles(const std::vector<Obstacle2D>& obstacles,
+                                      double clearance, int* skipped) {
+    BgMultiPolygon u;
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+        BgMultiPolygon parts;
+        std::string why;
+        if (!repairObstacle(obstacles[i], parts, why)) {
+            if (skipped) ++*skipped;
+            std::cerr << "[Coverage] Skipping obstacle #" << (i + 1) << " (" << why << ")\n";
+            continue;
+        }
+        for (const auto& p : parts) {
+            BgMultiPolygon merged;
+            bg::union_(u, p, merged);
+            for (auto& q : merged) bg::correct(q);
+            u = std::move(merged);
+        }
+    }
+    if (!u.empty() && clearance > 0.0) u = buffered(u, clearance);
+    return u;
+}
+
 }  // namespace
 
 std::vector<Obstacle2D> clipObstacleToPolygon(const Obstacle2D& obstacle,
@@ -203,6 +231,39 @@ std::vector<Obstacle2D> subtractPolygonFromObstacle(const Obstacle2D& obstacle,
     return out;  // empty => cutter fully covered the obstacle
 }
 
+PathValidation validatePathClearsObstacles(const std::vector<Point2D>& path_points,
+                                            const std::vector<Obstacle2D>* obstacles,
+                                            double obstacle_clearance) {
+    PathValidation v;
+    if (!obstacles || obstacles->empty() || path_points.size() < 2) return v;
+
+    BgMultiPolygon inflated =
+        unionInflatedObstacles(*obstacles, obstacle_clearance, nullptr);
+    if (inflated.empty()) return v;
+
+    // A swath that legitimately hugs the clearance edge touches the corridor
+    // with ~zero length; only a connector driving *through* it accrues length.
+    constexpr double kBreachLenEps = 0.05;  // meters
+
+    for (size_t i = 1; i < path_points.size(); ++i) {
+        BgLineString seg;
+        seg.push_back(BgPoint(path_points[i - 1].x, path_points[i - 1].y));
+        seg.push_back(BgPoint(path_points[i].x, path_points[i].y));
+
+        BgMultiLineString breach;
+        bg::intersection(seg, inflated, breach);
+
+        double len = 0.0;
+        for (const auto& ls : breach) len += bg::length(ls);
+        if (len > kBreachLenEps) {
+            ++v.crossing_segments;
+            v.breach_length_m += len;
+        }
+    }
+    v.valid = (v.crossing_segments == 0);
+    return v;
+}
+
 FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
                                        const Polygon2D* roi,
                                        const std::vector<Obstacle2D>* obstacles,
@@ -257,27 +318,10 @@ FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
     }
 
     if (obstacles && !obstacles->empty()) {
-        BgMultiPolygon obstacles_union;
-        for (size_t i = 0; i < obstacles->size(); ++i) {
-            BgMultiPolygon parts;
-            std::string why;
-            if (!repairObstacle(obstacles->at(i), parts, why)) {
-                ++r.skipped_obstacles;
-                std::cerr << "[Coverage] Skipping obstacle #" << (i + 1) << " (" << why << ")\n";
-                continue;
-            }
-            for (const auto& p : parts) {
-                BgMultiPolygon merged;
-                bg::union_(obstacles_union, p, merged);
-                for (auto& q : merged) bg::correct(q);
-                obstacles_union = std::move(merged);
-            }
-        }
+        BgMultiPolygon inflated =
+            unionInflatedObstacles(*obstacles, obstacle_clearance, &r.skipped_obstacles);
 
-        if (!obstacles_union.empty()) {
-            BgMultiPolygon inflated = obstacles_union;
-            if (obstacle_clearance > 0.0) inflated = buffered(obstacles_union, obstacle_clearance);
-
+        if (!inflated.empty()) {
             BgMultiPolygon after;
             bg::difference(work, inflated, after);
             BgMultiPolygon kept;
