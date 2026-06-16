@@ -317,24 +317,28 @@ static bool buildEffectiveCellsFromROIAndObstacles(
     const Polygon2D* roi,
     const std::vector<Obstacle2D>* obstacles,
     double obstacle_clearance,
+    double min_region_area_m2,
     F2CCells& out_cells,
     Polygon2D& out_primary_outer,
     double& out_effective_area_m2,
     int& out_skipped_obstacles,
+    int& out_region_count,
+    double& out_uncovered_area_m2,
     std::vector<Obstacle2D>& out_free_space,
     std::string& error) {
 
-    FreeSpaceResult fs =
-        buildFreeSpacePolygons(boundary, roi, obstacles, obstacle_clearance);
+    FreeSpaceResult fs = buildFreeSpacePolygons(boundary, roi, obstacles,
+                                                obstacle_clearance, min_region_area_m2);
     out_skipped_obstacles = fs.skipped_obstacles;
     if (!fs.success) {
         error = fs.error_message;
         return false;
     }
-    out_effective_area_m2 = fs.effective_area_m2;
-    out_free_space = fs.regions;
 
-    // Primary polygon (largest area) drives swath alignment / concavity checks.
+    // Cover only the largest connected component. Obstacles interior to it stay
+    // as holes (the router weaves around them); other substantial components are
+    // genuinely unreachable without crossing an obstacle, so they are reported
+    // as uncovered rather than stitched in with unsafe straight transits.
     double best_area = -1.0;
     const Obstacle2D* best = nullptr;
     for (const auto& reg : fs.regions) {
@@ -348,12 +352,15 @@ static bool buildEffectiveCellsFromROIAndObstacles(
         error = "Effective area is empty";
         return false;
     }
+
+    out_region_count = static_cast<int>(fs.regions.size());
+    out_uncovered_area_m2 = std::max(0.0, fs.effective_area_m2 - best_area);
+    out_effective_area_m2 = best_area;
     out_primary_outer = best->outer;
+    out_free_space = {*best};
 
     out_cells = F2CCells();
-    for (const auto& reg : fs.regions) {
-        addBgPolygonToF2CCells(toBgPolygon(reg), out_cells);
-    }
+    addBgPolygonToF2CCells(toBgPolygon(*best), out_cells);
     if (out_cells.size() == 0) {
         error = "Failed to build Fields2Cover cells from effective area";
         return false;
@@ -1282,17 +1289,21 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
         double effective_area_m2 = 0.0;
         std::string geom_error;
         int skipped_obstacles = 0;
+        int region_count = 1;
+        double uncovered_area_m2 = 0.0;
         std::vector<Obstacle2D> free_space_regions;
         if (!buildEffectiveCellsFromROIAndObstacles(
-                boundary, roi, obstacles, config.obstacle_clearance, cells,
-                effective_outer, effective_area_m2, skipped_obstacles,
-                free_space_regions, geom_error)) {
+                boundary, roi, obstacles, config.obstacle_clearance,
+                config.min_coverage_region_area_m2, cells, effective_outer,
+                effective_area_m2, skipped_obstacles, region_count,
+                uncovered_area_m2, free_space_regions, geom_error)) {
             result.error_message = geom_error;
             return result;
         }
         result.effective_area_m2 = effective_area_m2;
         result.skipped_obstacles = skipped_obstacles;
-        result.free_space_regions = static_cast<int>(free_space_regions.size());
+        result.free_space_regions = region_count;
+        result.uncovered_area_m2 = uncovered_area_m2;
 
         F2CField field(cells);
 

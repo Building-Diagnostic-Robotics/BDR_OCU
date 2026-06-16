@@ -475,7 +475,8 @@ std::vector<Point2D> smoothPolylineWithinFreeSpace(
 FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
                                        const Polygon2D* roi,
                                        const std::vector<Obstacle2D>* obstacles,
-                                       double obstacle_clearance) {
+                                       double obstacle_clearance,
+                                       double min_region_area_m2) {
     FreeSpaceResult r;
 
     Polygon2D bclean = sanitize(boundary);
@@ -545,10 +546,16 @@ FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
         }
     }
 
+    // Discard unscannable slivers: free-space components below the navigable
+    // area floor (typically the robot footprint). This stops edge pinch-offs
+    // and crumbs between clutter from being treated as real coverage regions.
+    const double area_floor = std::max(kMinValidArea, min_region_area_m2);
     r.effective_area_m2 = 0.0;
     r.regions.reserve(work.size());
     for (const auto& p : work) {
-        r.effective_area_m2 += std::fabs(bg::area(p));
+        const double a = std::fabs(bg::area(p));
+        if (a < area_floor) continue;
+        r.effective_area_m2 += a;
         Obstacle2D reg = bgToObstacle(p);
         if (reg.outer.size() >= 3) r.regions.push_back(std::move(reg));
     }

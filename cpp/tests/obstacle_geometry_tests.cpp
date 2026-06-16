@@ -241,6 +241,21 @@ TEST(Validate, NoObstaclesOrShortPathIsValid) {
     EXPECT_TRUE(validatePathClearsObstacles(one, &obs, 0.0).valid);
 }
 
+TEST(FreeSpace, SliverRegionFilteredByMinArea) {
+    Polygon2D boundary = rect(0, 0, 10, 10);
+    // Full-height wall splits free space into a 20 m^2 strip and a 78 m^2 area.
+    std::vector<Obstacle2D> obs = {{rect(2, 0, 2.2, 10), {}}};
+
+    auto all = buildFreeSpacePolygons(boundary, nullptr, &obs, 0.0, 0.0);
+    ASSERT_TRUE(all.success) << all.error_message;
+    EXPECT_EQ(all.regions.size(), 2u);
+
+    auto filtered = buildFreeSpacePolygons(boundary, nullptr, &obs, 0.0, 30.0);
+    ASSERT_TRUE(filtered.success) << filtered.error_message;
+    EXPECT_EQ(filtered.regions.size(), 1u);  // 20 m^2 strip dropped
+    EXPECT_NEAR(filtered.effective_area_m2, 78.0, 1.0);
+}
+
 TEST(Route, DirectLineOfSightIsTwoPoints) {
     std::vector<Obstacle2D> fs = {{rect(0, 0, 10, 10), {}}};
     auto p = routeConnectorThroughFreeSpace(fs, {1, 1}, {9, 9});

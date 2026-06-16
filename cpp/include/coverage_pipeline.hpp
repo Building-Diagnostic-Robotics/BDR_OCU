@@ -87,6 +87,11 @@ struct CoverageConfig {
     // arc-filleted up to this radius (m), shrinking to fit tight corridors.
     // 0 disables filleting (sharp polyline corners).
     double connector_smoothing_radius = 0.0;
+    // Free-space components smaller than this (m^2) are discarded as unscannable
+    // slivers before planning. Coverage then runs on the single largest
+    // surviving component; other substantial components are reported as
+    // unreachable (see CoverageResult::uncovered_area_m2). 0 = keep everything.
+    double min_coverage_region_area_m2 = 0.0;
     std::optional<Point2D> start_point;
     std::optional<Point2D> end_point;
 };
@@ -138,10 +143,12 @@ struct CoverageResult {
     // before the operator is allowed to publish waypoints / start a scan.
     bool path_valid = true;
     int skipped_obstacles = 0;
-    // Layer-1 routing diagnostic. free_space_regions: count of disjoint
-    // navigable areas; > 1 means an obstacle split the ROI and the plan contains
-    // straight inter-region transits (which the Layer-2 gate flags).
+    // Layer-1 routing diagnostics. free_space_regions: number of substantial
+    // (>= min_coverage_region_area_m2) disjoint navigable areas. When > 1 the
+    // plan covers only the largest; uncovered_area_m2 is the total area of the
+    // other substantial components reported to the operator (warn, no block).
     int free_space_regions = 1;
+    double uncovered_area_m2 = 0.0;
 };
 
 // =============================================================================
@@ -287,7 +294,8 @@ struct FreeSpaceResult {
 FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
                                        const Polygon2D* roi,
                                        const std::vector<Obstacle2D>* obstacles,
-                                       double obstacle_clearance = 0.0);
+                                       double obstacle_clearance = 0.0,
+                                       double min_region_area_m2 = 0.0);
 
 /**
  * @brief Result of validating a planned path against the inflated obstacles.

@@ -4249,6 +4249,10 @@ void PlannerScreen::startGenerateCoverage() {
     {
         const ObstacleDetectionParams fp;
         cfg.obstacle_clearance = fp.robot_width_m * 0.5 + fp.footprint_margin_m;
+        // Drop free-space components that can't even fit the robot footprint —
+        // edge pinch-offs and crumbs between clutter — so they don't fragment
+        // the plan or trip the multi-region warning.
+        cfg.min_coverage_region_area_m2 = fp.robot_length_m * fp.robot_width_m;
     }
     // Layer 1: arc-fillet radius for obstacle-routed connectors. Kept small —
     // Roofus is skid-steer and can turn nearly in place; the router shrinks it
@@ -4394,11 +4398,7 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
     if (!cache.planned_path_valid || cache.planned_skipped_obstacles > 0) {
         QString why;
         if (!cache.planned_path_valid) {
-            why = cache.planned_free_space_regions > 1
-                      ? QStringLiteral("plan spans %1 disconnected regions — the robot "
-                                       "cannot transit between them safely")
-                            .arg(cache.planned_free_space_regions)
-                      : QStringLiteral("path drives through an obstacle");
+            why = QStringLiteral("path drives through an obstacle");
         }
         if (cache.planned_skipped_obstacles > 0) {
             if (!why.isEmpty()) why += QStringLiteral("; ");
@@ -4408,6 +4408,15 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
         setInlineStatus(QStringLiteral("Unsafe plan — %1. Edit obstacles/ROI and "
                                        "re-plan before scanning.").arg(why),
                         QStringLiteral("#F87171"));
+    } else if (cache.planned_free_space_regions > 1) {
+        // Non-blocking: obstacles split the area; we cover the largest piece and
+        // tell the operator how much is left for a separate run.
+        setInlineStatus(
+            QStringLiteral("Covering largest area — %1 in %2 other region(s) not "
+                           "reachable this run. Re-scan separately if needed.")
+                .arg(units::formatArea(result.coverage.uncovered_area_m2, 1))
+                .arg(cache.planned_free_space_regions - 1),
+            QStringLiteral("#F59E0B"));
     } else {
         setInlineStatus(QStringLiteral("Generated %1 swaths and %2 path states.")
                             .arg(cache.planned_swaths.size())
