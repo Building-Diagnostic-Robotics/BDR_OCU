@@ -387,6 +387,8 @@ void PlotWidget::startEraseMode() {
     measure_mode_ = MeasureMode::None;
     measure_points_.clear();
     measure_finished_ = false;
+    approach_connector_.clear();
+    approach_connector_unsafe_ = false;
     selected_obstacle_idx_ = -1;
     erase_mode_ = true;
     erase_hover_idx_ = -1;
@@ -1466,6 +1468,7 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
     }
 
     drawMeasureOverlay(painter);
+    drawApproachConnector(painter);
 }
 
 void PlotWidget::drawActiveSelection(QPainter& painter) {
@@ -1503,6 +1506,41 @@ void PlotWidget::drawActiveSelection(QPainter& painter) {
     painter.setBrush(stroke);
     for (const auto& p : selection_points_) {
         painter.drawEllipse(worldToScreen(p), 4.0, 4.0);
+    }
+}
+
+void PlotWidget::setApproachConnector(const std::vector<Point2D>& pts, bool unsafe) {
+    approach_connector_ = pts;
+    approach_connector_unsafe_ = unsafe;
+    update();
+}
+
+void PlotWidget::drawApproachConnector(QPainter& painter) {
+    if (approach_connector_.size() < 2) return;
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QColor c = approach_connector_unsafe_ ? QColor(QStringLiteral("#F59E0B"))
+                                                : QColor(QStringLiteral("#38BDF8"));
+    QPolygonF poly;
+    poly.reserve(static_cast<int>(approach_connector_.size()));
+    for (const auto& p : approach_connector_) poly << worldToScreen(p);
+
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(c, 2.2, Qt::DotLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawPolyline(poly);
+
+    // Directional arrowheads on segments long enough to carry one.
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(c);
+    for (int i = 1; i < poly.size(); ++i) {
+        const QPointF a = poly[i - 1], b = poly[i];
+        const double ang = std::atan2(b.y() - a.y(), b.x() - a.x());
+        if (std::hypot(b.x() - a.x(), b.y() - a.y()) < 18.0) continue;
+        const double s = 7.0;
+        QPolygonF head;
+        head << b
+             << QPointF(b.x() - s * std::cos(ang - 0.5), b.y() - s * std::sin(ang - 0.5))
+             << QPointF(b.x() - s * std::cos(ang + 0.5), b.y() - s * std::sin(ang + 0.5));
+        painter.drawPolygon(head);
     }
 }
 

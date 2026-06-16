@@ -537,10 +537,9 @@ void DashboardScreen::showEvent(QShowEvent* event) {
     if (dashboard_first_shown_ms_ == 0) {
         dashboard_first_shown_ms_ = QDateTime::currentMSecsSinceEpoch();
     }
-    // Start the battery monitor on every show; the legacy CoverageGUI keeps
-    // it running for the entire app lifetime, but Stage 3 is a single
-    // screen in a stacked widget — kicking off only when visible avoids
-    // spawning mosquitto_sub during Stage 1/2 where it can't help anyway.
+    // Start the battery monitor on first show, then keep it alive for the rest
+    // of the app lifetime (startBatteryMonitor is idempotent; hideEvent no
+    // longer stops it) so the SOC pill stays live across Stages 4/5.
     startBatteryMonitor();
     if (battery_stale_timer_) {
         battery_stale_timer_->start();
@@ -561,10 +560,11 @@ void DashboardScreen::showEvent(QShowEvent* event) {
 
 void DashboardScreen::hideEvent(QHideEvent* event) {
     QWidget::hideEvent(event);
-    if (battery_stale_timer_) {
-        battery_stale_timer_->stop();
-    }
-    stopBatteryMonitor();
+    // Battery monitor + stale timer intentionally keep running while Stage 3 is
+    // hidden so the top-bar SOC pill stays live in Stages 4/5 (fed via
+    // batterySocChanged -> AppShellWindow::onDashboardBatteryStateChanged). It
+    // is torn down only in the destructor. The remaining probes below are
+    // Stage-3-only (expensive SSH / blink animation) and still pause on hide.
     if (calibration_refresh_timer_) {
         calibration_refresh_timer_->stop();
     }
@@ -586,6 +586,11 @@ void DashboardScreen::hideEvent(QHideEvent* event) {
 // =============================================================================
 
 void DashboardScreen::startBatteryMonitor() {
+    // Idempotent: the monitor now persists across stages (see hideEvent), so a
+    // return to Stage 3 must not tear down and reset a live subscriber.
+    if (battery_proc_ && battery_proc_->state() != QProcess::NotRunning) {
+        return;
+    }
     battery_last_start_attempt_ms_ = QDateTime::currentMSecsSinceEpoch();
     stopBatteryMonitor();
 

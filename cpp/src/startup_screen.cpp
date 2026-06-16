@@ -28,9 +28,10 @@ namespace f2c_cpp {
 namespace {
 
 // BDR_REWIRE: Stage 2 Continue passthrough — allow launching the dashboard
-// without a passing preflight report. Now folded under the unified dev-mode
-// flag (was hardcoded `true`), so a Release build re-asserts the gate.
-constexpr bool kEnableLaunchDashboardPassthrough = kDevMode;
+// without a passing preflight report. Always enabled (Release included): the
+// operator can always reach the dashboard after logging in regardless of the
+// preflight result. Pre-operation diagnostics are advisory, not a hard gate.
+constexpr bool kEnableLaunchDashboardPassthrough = true;
 
 QString trimmed(const QString& s) {
     return s.trimmed();

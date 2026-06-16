@@ -421,6 +421,23 @@ private:
     void updateScanSplittingUi();
     std::vector<int> selectedScanSegmentIndices() const;
     PathStateList buildPublishPathFromSegments(const std::vector<int>& indices) const;
+    // Robot->start approach connector: ROI-independent, obstacle-avoiding path
+    // from the live robot pose to a segment's first waypoint (visibility graph
+    // over an unclipped free space). NoRoute folds "outside mapped area" and
+    // "blocked by obstacles" — both warn and allow publish-anyway.
+    enum class ApproachStatus { Ok, AlreadyThere, NoPose, NoRoute };
+    struct ApproachConnector {
+        ApproachStatus status = ApproachStatus::NoPose;
+        PathStateList path;
+    };
+    std::vector<Obstacle2D> rawObstaclesUnclipped() const;
+    ApproachConnector planApproachConnector(const Point2D& goal) const;
+    // Builds the [x,y,dc] payload: connector prefix tagged dc=0 (transit), the
+    // scan path tagged dc=1. Reports the connector status via out_status.
+    std::vector<double> buildTriplePayloadWithApproach(const PathStateList& path,
+                                                       ApproachStatus* out_status) const;
+    bool confirmApproachOrAbort(ApproachStatus status);
+    void refreshApproachPreview();
     void onSplitPathClicked();
     // Layer-2 safety gate: blocks publish/start when the active plan is unsafe
     // (path crosses an obstacle or an obstacle was skipped). Shows a red dialog.
@@ -800,6 +817,10 @@ private:
     QTimer* scan_tick_timer_ = nullptr;
     QTimer* scan_manual_teleop_timer_ = nullptr;
     QTimer* scan_camera_restart_timer_ = nullptr;
+    // ~1 Hz approach-connector preview refresh, active only on ScanSplitting.
+    QTimer* approach_preview_timer_ = nullptr;
+    std::optional<Point2D> approach_preview_pose_;
+    std::optional<Point2D> approach_preview_goal_;
     QFutureWatcher<double>* scan_quality_watcher_ = nullptr;
     int scan_quality_segment_index_ = -1;
     qint64 scan_last_quality_sample_ms_ = 0;
