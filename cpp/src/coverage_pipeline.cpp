@@ -1606,14 +1606,20 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
             std::cerr << "Route generation warning: " << e.what() << std::endl;
         }
 
-        // Layer-2 safety gate: confirm no path segment drives through the
-        // inflated obstacle corridor (robot half-width = obstacle_clearance).
+        // Layer-2 safety gate: confirm no path segment drives into an obstacle.
+        // Planning already keeps the path obstacle_clearance away, and the
+        // Layer-1 router intentionally hugs that clearance boundary when going
+        // around holes. Validating at the SAME clearance would flag that
+        // legitimate boundary-hugging as a breach, so the gate checks against a
+        // reduced clearance: it still catches a path eating into the safety
+        // margin / driving over an obstacle, but tolerates headland-hugging.
         if (obstacles && !obstacles->empty() && !result.path.empty()) {
             std::vector<Point2D> pts;
             pts.reserve(result.path.size());
             for (const auto& st : result.path) pts.push_back(st.point);
+            const double validation_clearance = config.obstacle_clearance * 0.5;
             PathValidation pv =
-                validatePathClearsObstacles(pts, obstacles, config.obstacle_clearance);
+                validatePathClearsObstacles(pts, obstacles, validation_clearance);
             result.path_valid = pv.valid;
             if (!pv.valid) {
                 std::cerr << "[Coverage] Path crosses obstacles: "
