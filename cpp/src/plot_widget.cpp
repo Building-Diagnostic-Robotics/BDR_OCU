@@ -80,6 +80,9 @@ void PlotWidget::setObstacles(const std::vector<Obstacle2D>& obstacles) {
         selected_obstacle_idx_ = -1;
         emit obstacleSelectionChanged(-1);
     }
+    if (erase_hover_idx_ >= static_cast<int>(obstacles_.size())) {
+        erase_hover_idx_ = -1;
+    }
     update();
 }
 
@@ -198,7 +201,9 @@ void PlotWidget::setScanSegmentsOverlay(
 void PlotWidget::startRectangleMode() {
     drawing_rectangle_ = true;
     rect_points_.clear();
-    selecting_ = false;  // Cancel any other selection
+    erase_mode_ = false;
+    erase_hover_idx_ = -1;
+    selection_purpose_ = SelectionPurpose::None;
     selection_points_.clear();
     setCursor(Qt::CrossCursor);
     update();
@@ -307,7 +312,7 @@ void PlotWidget::clearAll() {
     reproj_lines_.clear();
     hovered_reproj_index_ = -1;
     selection_points_.clear();
-    selecting_ = false;
+    selection_purpose_ = SelectionPurpose::None;
     selected_obstacle_idx_ = -1;
     emit obstacleSelectionChanged(-1);
     update();
@@ -348,44 +353,97 @@ void PlotWidget::zoomOut() {
 }
 
 void PlotWidget::startROISelection() {
-    selecting_ = true;
-    selecting_roi_ = true;
+    erase_mode_ = false;
+    erase_hover_idx_ = -1;
+    selection_purpose_ = SelectionPurpose::Roi;
     selection_points_.clear();
     setCursor(Qt::CrossCursor);
     update();
 }
 
 void PlotWidget::startObstacleSelection() {
-    selecting_ = true;
-    selecting_roi_ = false;
+    erase_mode_ = false;
+    erase_hover_idx_ = -1;
+    selection_purpose_ = SelectionPurpose::Obstacle;
     selection_points_.clear();
     setCursor(Qt::CrossCursor);
     update();
 }
 
+void PlotWidget::startCutSelection() {
+    erase_mode_ = false;
+    erase_hover_idx_ = -1;
+    selection_purpose_ = SelectionPurpose::Cut;
+    selection_points_.clear();
+    setCursor(Qt::CrossCursor);
+    update();
+}
+
+void PlotWidget::startEraseMode() {
+    selection_purpose_ = SelectionPurpose::None;
+    selection_points_.clear();
+    drawing_rectangle_ = false;
+    rect_points_.clear();
+    measure_mode_ = MeasureMode::None;
+    measure_points_.clear();
+    measure_finished_ = false;
+    selected_obstacle_idx_ = -1;
+    erase_mode_ = true;
+    erase_hover_idx_ = -1;
+    setCursor(Qt::CrossCursor);
+    setFocus();
+    update();
+}
+
+void PlotWidget::clearEraseMode(bool notify_exited) {
+    if (!erase_mode_) {
+        return;
+    }
+    erase_mode_ = false;
+    erase_hover_idx_ = -1;
+    setCursor(Qt::ArrowCursor);
+    update();
+    if (notify_exited) {
+        emit eraseModeExited();
+    }
+}
+
 void PlotWidget::finishSelection() {
-    if (!selecting_ || selection_points_.size() < 3) {
+    if (selection_purpose_ == SelectionPurpose::None ||
+        selection_points_.size() < 3) {
         cancelSelection();
         return;
     }
-    
-    selecting_ = false;
+
+    const SelectionPurpose purpose = selection_purpose_;
+    selection_purpose_ = SelectionPurpose::None;
     setCursor(Qt::ArrowCursor);
-    
+
     Polygon2D poly = selection_points_;
     selection_points_.clear();
-    
-    if (selecting_roi_) {
+
+    switch (purpose) {
+    case SelectionPurpose::Roi:
         emit roiSelected(poly);
-    } else {
+        break;
+    case SelectionPurpose::Cut:
+        emit cutRegionSelected(poly);
+        break;
+    case SelectionPurpose::Obstacle:
         emit obstacleSelected(poly);
+        break;
+    default:
+        break;
     }
-    
+
     update();
 }
 
 void PlotWidget::cancelSelection() {
-    selecting_ = false;
+    if (selection_purpose_ == SelectionPurpose::None) {
+        return;
+    }
+    selection_purpose_ = SelectionPurpose::None;
     selection_points_.clear();
     setCursor(Qt::ArrowCursor);
     emit selectionCancelled();
@@ -659,11 +717,12 @@ void PlotWidget::fitToTrail() {
 
 void PlotWidget::startMeasure(MeasureMode mode) {
     // Measurement is exclusive with the draw/selection interactions.
-    selecting_ = false;
-    selecting_roi_ = false;
+    selection_purpose_ = SelectionPurpose::None;
     selection_points_.clear();
     drawing_rectangle_ = false;
     rect_points_.clear();
+    erase_mode_ = false;
+    erase_hover_idx_ = -1;
 
     measure_mode_ = mode;
     measure_points_.clear();
@@ -691,6 +750,15 @@ void PlotWidget::clearMeasure() {
 
 QPointF PlotWidget::worldToScreen(const Point2D& p) const {
     return QPointF(p.x * scale_ + offset_x_, -p.y * scale_ + offset_y_);
+}
+
+int PlotWidget::obstacleIndexAt(const Point2D& world) const {
+    for (int i = static_cast<int>(obstacles_.size()) - 1; i >= 0; --i) {
+        if (pointInObstacleShapeLocal(world, obstacles_[static_cast<size_t>(i)])) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 Point2D PlotWidget::screenToWorld(const QPointF& p) const {
@@ -818,20 +886,26 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
     for (size_t oi = 0; oi < obstacles_.size(); ++oi) {
         const auto& obs = obstacles_[oi];
         const bool selected = (static_cast<int>(oi) == selected_obstacle_idx_);
+        const bool erase_hover = erase_mode_ && static_cast<int>(oi) == erase_hover_idx_;
         const QColor obstacle_pen =
-            planner_preview_mode_
-                ? (selected ? QColor(QStringLiteral("#FBBF24"))
-                            : (dark_mode_ ? QColor(QStringLiteral("#F97316"))
-                                          : QColor(QStringLiteral("#EA580C"))))
-                : (selected ? QColor(255, 193, 7) : QColor(Qt::red));
+            erase_hover
+                ? QColor(QStringLiteral("#F87171"))
+                : planner_preview_mode_
+                      ? (selected ? QColor(QStringLiteral("#FBBF24"))
+                                  : (dark_mode_ ? QColor(QStringLiteral("#F97316"))
+                                                : QColor(QStringLiteral("#EA580C"))))
+                      : (selected ? QColor(255, 193, 7) : QColor(Qt::red));
         const QColor obstacle_fill =
-            planner_preview_mode_
-                ? QColor(obstacle_pen.red(),
-                         obstacle_pen.green(),
-                         obstacle_pen.blue(),
-                         selected ? 62 : (dark_mode_ ? 42 : 34))
-                : (selected ? QColor(255, 193, 7, 55) : QColor(255, 0, 0, 50));
-        painter.setPen(QPen(obstacle_pen, selected ? 3 : (planner_preview_mode_ ? 1.8 : 2.0)));
+            erase_hover
+                ? QColor(248, 113, 113, 72)
+                : planner_preview_mode_
+                      ? QColor(obstacle_pen.red(),
+                               obstacle_pen.green(),
+                               obstacle_pen.blue(),
+                               selected ? 62 : (dark_mode_ ? 42 : 34))
+                      : (selected ? QColor(255, 193, 7, 55) : QColor(255, 0, 0, 50));
+        painter.setPen(QPen(obstacle_pen, (selected || erase_hover) ? 3 : (planner_preview_mode_ ? 1.8 : 2.0),
+                            erase_hover ? Qt::DashLine : Qt::SolidLine));
         painter.setBrush(obstacle_fill);
         QPainterPath path;
         path.setFillRule(Qt::OddEvenFill);
@@ -1231,37 +1305,7 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
         }
     }
     
-    // Draw selection in progress
-    if (selecting_ && !selection_points_.empty()) {
-        painter.setPen(QPen(Qt::magenta, 1.5));
-        painter.setBrush(QColor(255, 0, 255, 30));
-        
-        QPolygonF sel_qp;
-        for (const auto& p : selection_points_) {
-            sel_qp << worldToScreen(p);
-        }
-        
-        // Draw preview line to cursor
-        if (cursor_pos_ != QPointF()) {
-            sel_qp << cursor_pos_;
-        }
-        
-        if (selection_points_.size() >= 3) {
-            sel_qp << sel_qp.first();  // Close for fill
-            painter.drawPolygon(sel_qp);
-        } else if (selection_points_.size() >= 2) {
-            painter.setBrush(Qt::NoBrush);
-            painter.drawPolyline(sel_qp);
-        }
-        
-        // Draw points
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(Qt::magenta);
-        for (const auto& p : selection_points_) {
-            QPointF sp = worldToScreen(p);
-            painter.drawEllipse(sp, 4, 4);
-        }
-    }
+    drawActiveSelection(painter);
     
     // Draw rectangle in progress (3-click tool)
     if (drawing_rectangle_ && !rect_points_.empty()) {
@@ -1424,6 +1468,44 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
     drawMeasureOverlay(painter);
 }
 
+void PlotWidget::drawActiveSelection(QPainter& painter) {
+    if (selection_purpose_ == SelectionPurpose::None || selection_points_.empty()) {
+        return;
+    }
+
+    const bool is_cut = selection_purpose_ == SelectionPurpose::Cut;
+    const QColor stroke = is_cut ? QColor(QStringLiteral("#EF4444")) : QColor(QStringLiteral("#D946EF"));
+    const QPen line_pen(stroke, is_cut ? 2.0 : 1.5,
+                        is_cut ? Qt::DashLine : Qt::SolidLine);
+    QColor fill = stroke;
+    fill.setAlpha(is_cut ? 25 : 30);
+
+    QPolygonF sel_qp;
+    for (const auto& p : selection_points_) {
+        sel_qp << worldToScreen(p);
+    }
+    if (cursor_pos_ != QPointF()) {
+        sel_qp << cursor_pos_;
+    }
+
+    painter.setPen(line_pen);
+    if (selection_points_.size() >= 3) {
+        QPolygonF closed = sel_qp;
+        closed << closed.first();
+        painter.setBrush(fill);
+        painter.drawPolygon(closed);
+    } else if (selection_points_.size() >= 2) {
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPolyline(sel_qp);
+    }
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(stroke);
+    for (const auto& p : selection_points_) {
+        painter.drawEllipse(worldToScreen(p), 4.0, 4.0);
+    }
+}
+
 void PlotWidget::drawMeasureOverlay(QPainter& painter) {
     if (measure_mode_ == MeasureMode::None || measure_points_.empty()) {
         return;
@@ -1578,21 +1660,25 @@ void PlotWidget::mousePressEvent(QMouseEvent* event) {
             update();
             return;
         }
+
+        if (erase_mode_) {
+            const Point2D world = screenToWorld(event->pos());
+            const int hit_idx = obstacleIndexAt(world);
+            if (hit_idx >= 0) {
+                emit obstacleDeleteRequested(hit_idx);
+            }
+            update();
+            return;
+        }
         
-        if (selecting_) {
+        if (isSelecting()) {
             Point2D world = screenToWorld(event->pos());
             selection_points_.push_back(world);
             update();
         } else {
             // Click-to-select obstacles (only when not selecting/drawing)
             Point2D world = screenToWorld(event->pos());
-            int hit_idx = -1;
-            for (int i = static_cast<int>(obstacles_.size()) - 1; i >= 0; --i) {
-                if (pointInObstacleShapeLocal(world, obstacles_[static_cast<size_t>(i)])) {
-                    hit_idx = i;
-                    break;
-                }
-            }
+            const int hit_idx = obstacleIndexAt(world);
             if (hit_idx != -1) {
                 if (selected_obstacle_idx_ != hit_idx) {
                     selected_obstacle_idx_ = hit_idx;
@@ -1620,7 +1706,7 @@ void PlotWidget::mousePressEvent(QMouseEvent* event) {
             update();
         } else if (drawing_rectangle_) {
             cancelRectangleMode();
-        } else if (selecting_) {
+        } else if (isSelecting()) {
             finishSelection();
         }
     } else if (event->button() == Qt::MiddleButton) {
@@ -1640,7 +1726,7 @@ void PlotWidget::mouseDoubleClickEvent(QMouseEvent* event) {
         return;
     }
     // Double-click to finish polygon selection (ROI or obstacle)
-    if (selecting_ && event->button() == Qt::LeftButton) {
+    if (isSelecting() && event->button() == Qt::LeftButton) {
         if (selection_points_.size() >= 3) {
             finishSelection();
         }
@@ -1650,6 +1736,11 @@ void PlotWidget::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 void PlotWidget::keyPressEvent(QKeyEvent* event) {
+    if (erase_mode_ && event->key() == Qt::Key_Escape) {
+        clearEraseMode();
+        return;
+    }
+
     if (measure_mode_ != MeasureMode::None) {
         if (event->key() == Qt::Key_Escape) {
             clearMeasure();
@@ -1664,7 +1755,7 @@ void PlotWidget::keyPressEvent(QKeyEvent* event) {
     }
 
     // Delete selected obstacle
-    if (!selecting_ && !drawing_rectangle_) {
+    if (!isSelecting() && !drawing_rectangle_ && !erase_mode_) {
         if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
             if (selected_obstacle_idx_ >= 0 &&
                 selected_obstacle_idx_ < static_cast<int>(obstacles_.size())) {
@@ -1678,7 +1769,7 @@ void PlotWidget::keyPressEvent(QKeyEvent* event) {
     }
 
     // Press Enter/Return to finish polygon selection
-    if (selecting_) {
+    if (isSelecting()) {
         if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
             if (selection_points_.size() >= 3) {
                 finishSelection();
@@ -1706,10 +1797,16 @@ void PlotWidget::mouseMoveEvent(QMouseEvent* event) {
         offset_x_ = pan_offset_x_ + (event->pos().x() - pan_start_.x());
         offset_y_ = pan_offset_y_ + (event->pos().y() - pan_start_.y());
         update();
-    } else if (selecting_) {
+    } else if (isSelecting()) {
         update();  // Redraw preview line
     } else if (measure_mode_ != MeasureMode::None && !measure_finished_) {
         update();  // Redraw rubber-band to cursor
+    } else if (erase_mode_) {
+        const int hover = obstacleIndexAt(screenToWorld(cursor_pos_));
+        if (hover != erase_hover_idx_) {
+            erase_hover_idx_ = hover;
+            update();
+        }
     }
     
     // Hover on scan segments

@@ -76,6 +76,7 @@
     <file alias="missionplanner/tool_reset.svg">../App resource/icons/mission_planner_tool_reset.svg</file>
     <file alias="missionplanner/tool_ruler.svg">../App resource/icons/mission_planner_tool_ruler.svg</file>
     <file alias="missionplanner/obstacle_cut.svg">../App resource/icons/mission_planner_obstacle_cut.svg</file>
+    <file alias="missionplanner/tool_erase.svg">../App resource/icons/mission_planner_tool_erase.svg</file>
     <file alias="missionplanner/next_arrow.svg">../App resource/icons/mission_planner_next_arrow.svg</file>
     <file alias="missionplanner/stepper_minus.svg">../App resource/icons/mission_planner_stepper_minus.svg</file>
     <file alias="missionplanner/stepper_plus.svg">../App resource/icons/mission_planner_stepper_plus.svg</file>

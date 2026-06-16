@@ -1815,7 +1815,12 @@ void PlannerScreen::applyStyle() {
         lbl_tool_cut_icon_->setPixmap(loadSvgPixmap(
             QStringLiteral(":/assets/missionplanner/obstacle_cut.svg"), 14, 14, neutral_button_text));
     }
-    for (QPushButton* tool_button : {tool_zoom_in_, tool_fit_, tool_reset_, tool_ruler_, tool_cut_}) {
+    if (lbl_tool_erase_icon_) {
+        lbl_tool_erase_icon_->setPixmap(loadSvgPixmap(
+            QStringLiteral(":/assets/missionplanner/tool_erase.svg"), 14, 14, neutral_button_text));
+    }
+    for (QPushButton* tool_button :
+         {tool_zoom_in_, tool_fit_, tool_reset_, tool_ruler_, tool_cut_, tool_erase_}) {
         if (!tool_button) {
             continue;
         }
@@ -3373,6 +3378,33 @@ void PlannerScreen::updateCoveragePlanningUi() {
                                  "border-radius: 10px; } QPushButton:hover { border-color: %3; } "
                                  "QPushButton:disabled { background: %1; }")
                       .arg(cut_tool_bg, cut_tool_border, cut_tool_hover));
+    }
+    if (tool_erase_) {
+        const bool erasing = plot_ && plot_->isErasing();
+        const bool has_obstacles = !cache.coverage_obstacles.empty();
+        tool_erase_->setEnabled(has_obstacles);
+        const QString erase_neutral_text =
+            dark_mode_ ? QStringLiteral("#E4E4E7") : QStringLiteral("#374151");
+        const QString erase_tool_bg =
+            dark_mode_ ? QStringLiteral("rgba(39,39,42,0.90)") : QStringLiteral("rgba(255,255,255,0.92)");
+        const QString erase_tool_border =
+            dark_mode_ ? QStringLiteral("#3F3F47") : QStringLiteral("#D4D4D8");
+        const QString erase_tool_hover =
+            dark_mode_ ? QStringLiteral("#52525C") : QStringLiteral("#94A3B8");
+        const QString erase_icon_color =
+            !has_obstacles ? submuted : erasing ? QStringLiteral("#F87171") : erase_neutral_text;
+        if (lbl_tool_erase_icon_) {
+            lbl_tool_erase_icon_->setPixmap(loadSvgPixmap(
+                QStringLiteral(":/assets/missionplanner/tool_erase.svg"), 14, 14, erase_icon_color));
+        }
+        tool_erase_->setStyleSheet(
+            erasing
+                ? QStringLiteral("QPushButton { background: rgba(248,113,113,0.18); "
+                                 "border: 1px solid #F87171; border-radius: 10px; }")
+                : QStringLiteral("QPushButton { background: %1; border: 1px solid %2; "
+                                 "border-radius: 10px; } QPushButton:hover { border-color: %3; } "
+                                 "QPushButton:disabled { background: %1; }")
+                      .arg(erase_tool_bg, erase_tool_border, erase_tool_hover));
     }
     if (tool_ruler_) {
         const bool measuring = plot_ && plot_->isMeasuring();
@@ -6832,11 +6864,15 @@ void PlannerScreen::buildUi() {
     tool_cut_ =
         make_tool_button(tool_stack, QStringLiteral(":/assets/missionplanner/obstacle_cut.svg"),
                          &lbl_tool_cut_icon_);
+    tool_erase_ =
+        make_tool_button(tool_stack, QStringLiteral(":/assets/missionplanner/tool_erase.svg"),
+                         &lbl_tool_erase_icon_);
     tool_zoom_in_->setToolTip(QStringLiteral("Zoom in"));
     tool_fit_->setToolTip(QStringLiteral("Fit to travelled path"));
     tool_reset_->setToolTip(QStringLiteral("Fit all"));
     tool_ruler_->setToolTip(QStringLiteral("Measure"));
-    tool_cut_->setToolTip(QStringLiteral("Cut region from obstacles"));
+    tool_cut_->setToolTip(QStringLiteral("Cut region from obstacles (polygon)"));
+    tool_erase_->setToolTip(QStringLiteral("Erase obstacles (click to delete)"));
     connect(tool_zoom_in_, &QPushButton::clicked, this, [this]() {
         if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
             plot_->zoomIn();
@@ -6862,6 +6898,7 @@ void PlannerScreen::buildUi() {
     tool_stack_layout->addWidget(tool_reset_);
     tool_stack_layout->addWidget(tool_ruler_);
     tool_stack_layout->addWidget(tool_cut_);
+    tool_stack_layout->addWidget(tool_erase_);
 
     preview_bottom_overlay_stack_ = new QStackedWidget(center_stage_host);
     preview_bottom_overlay_stack_->setStyleSheet(
@@ -7109,6 +7146,9 @@ void PlannerScreen::buildUi() {
         if (plot_->isMeasuring()) {
             plot_->clearMeasure();
         }
+        if (plot_->isErasing()) {
+            plot_->clearEraseMode(false);
+        }
     };
     auto add_manual_obstacle = [this](const Polygon2D& shape) {
         SessionCache& cache = activeSession();
@@ -7140,17 +7180,17 @@ void PlannerScreen::buildUi() {
     });
     connect(plot_, &PlotWidget::obstacleSelected, this, [this, add_manual_obstacle](const Polygon2D& obstacle) {
         SessionCache& cache = activeSession();
-        if (cache.coverage_cut_active) {
-            cache.coverage_cut_active = false;
-            applyCutRegion(obstacle);
-            return;
-        }
         add_manual_obstacle(obstacle);
         cache.coverage_drawing_active = false;
         invalidateCoverageResult(
             QStringLiteral("Manual obstacle added. Generate coverage paths again to refresh the preview."));
         updatePreview();
         updateButtonsAndStatus();
+    });
+    connect(plot_, &PlotWidget::cutRegionSelected, this, [this](const Polygon2D& region) {
+        SessionCache& cache = activeSession();
+        cache.coverage_cut_active = false;
+        applyCutRegion(region);
     });
     connect(plot_, &PlotWidget::rectangleCompleted, this, [this, add_manual_obstacle](const Polygon2D& rect) {
         SessionCache& cache = activeSession();
@@ -7162,15 +7202,6 @@ void PlannerScreen::buildUi() {
                 QStringLiteral("ROI updated. Generate coverage paths again to refresh the preview."));
             updatePreview();
             updateButtonsAndStatus();
-            return;
-        }
-        if (cache.coverage_cut_active) {
-            const Polygon2D shape =
-                cache.coverage_drawing_tool == QStringLiteral("circle")
-                    ? makeEllipsePolygonFromRectangle(rect)
-                    : rect;
-            cache.coverage_cut_active = false;
-            applyCutRegion(shape);
             return;
         }
         if (cache.coverage_drawing_active) {
@@ -7199,6 +7230,10 @@ void PlannerScreen::buildUi() {
         updateButtonsAndStatus();
     });
     connect(plot_, &PlotWidget::measureCleared, this, [this]() { updateButtonsAndStatus(); });
+    connect(plot_, &PlotWidget::eraseModeExited, this, [this]() {
+        setInlineStatus(QStringLiteral("Erase cancelled."), QStringLiteral("#71717B"));
+        updateButtonsAndStatus();
+    });
     connect(plot_, &PlotWidget::obstacleDeleteRequested, this, [this](int index) {
         SessionCache& cache = activeSession();
         if (index < 0 || index >= static_cast<int>(cache.coverage_obstacles.size())) {
@@ -7207,6 +7242,9 @@ void PlannerScreen::buildUi() {
         cache.coverage_obstacles.erase(cache.coverage_obstacles.begin() + index);
         if (cache.coverage_obstacles.empty()) {
             cache.coverage_obstacles_detected = false;
+            if (plot_ && plot_->isErasing()) {
+                plot_->clearEraseMode(false);
+            }
         }
         invalidateCoverageResult(
             QStringLiteral("Obstacle removed. Generate coverage paths again to refresh the preview."));
@@ -7675,14 +7713,44 @@ void PlannerScreen::buildUi() {
         cache.coverage_drawing_active = false;
         cache.coverage_cut_active = true;
         if (plot_) {
-            if (cache.coverage_drawing_tool == QStringLiteral("polygon")) {
-                plot_->startObstacleSelection();
-            } else {
-                plot_->startRectangleMode();
-            }
+            plot_->startCutSelection();
             plot_->setFocus();
         }
-        setInlineStatus(QStringLiteral("Draw a region to cut out of the obstacles."),
+        setInlineStatus(QStringLiteral("Click to outline a cut region; double-click to finish."),
+                        QStringLiteral("#71717B"));
+        updateButtonsAndStatus();
+    });
+    connect(tool_erase_, &QPushButton::clicked, this, [this, cancel_coverage_selection]() {
+        if (!plot_ || !preview_stack_ || preview_stack_->currentWidget() != plot_) {
+            return;
+        }
+        SessionCache& cache = activeSession();
+        if (!cache.raw_loaded) {
+            setInlineStatus(QStringLiteral("Wait for the saved map to load before erasing obstacles."),
+                            QStringLiteral("#F59E0B"));
+            updateButtonsAndStatus();
+            return;
+        }
+        if (cache.coverage_obstacles.empty()) {
+            setInlineStatus(QStringLiteral("No obstacles to erase."),
+                            QStringLiteral("#F59E0B"));
+            updateButtonsAndStatus();
+            return;
+        }
+
+        if (plot_->isErasing()) {
+            plot_->clearEraseMode();
+            setInlineStatus(QStringLiteral("Erase cancelled."), QStringLiteral("#71717B"));
+            updateButtonsAndStatus();
+            return;
+        }
+
+        cancel_coverage_selection();
+        cache.coverage_roi_drawing_active = false;
+        cache.coverage_drawing_active = false;
+        cache.coverage_cut_active = false;
+        plot_->startEraseMode();
+        setInlineStatus(QStringLiteral("Click obstacles to erase. Esc to exit."),
                         QStringLiteral("#71717B"));
         updateButtonsAndStatus();
     });

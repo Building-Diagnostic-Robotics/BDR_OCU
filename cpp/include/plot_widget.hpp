@@ -103,11 +103,15 @@ public:
 
     void startROISelection();
     void startObstacleSelection();
+    void startCutSelection();
+    void startEraseMode();
+    void clearEraseMode(bool notify_exited = true);
+    bool isErasing() const { return erase_mode_; }
     void finishSelection();
     void cancelSelection();
     void undoLastPoint();
 
-    bool isSelecting() const { return selecting_; }
+    bool isSelecting() const { return selection_purpose_ != SelectionPurpose::None; }
     Polygon2D getSelectedPolygon() const;
     int selectedObstacleIndex() const { return selected_obstacle_idx_; }
     void clearObstacleSelection();
@@ -115,12 +119,14 @@ public:
 signals:
     void roiSelected(const Polygon2D& roi);
     void obstacleSelected(const Polygon2D& obstacle);
+    void cutRegionSelected(const Polygon2D& region);
     void selectionCancelled();
     void obstacleSelectionChanged(int index);
     void obstacleDeleteRequested(int index);
     void customWaypointRequested(const Point2D& point);
     void rectangleCompleted(const Polygon2D& rect);
     void measureCleared();
+    void eraseModeExited();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -183,14 +189,17 @@ private:
     double data_min_x_ = 0, data_max_x_ = 1;
     double data_min_y_ = 0, data_max_y_ = 1;
 
-    bool selecting_ = false;
-    bool selecting_roi_ = false;
+    enum class SelectionPurpose { None, Roi, Obstacle, Cut };
+    SelectionPurpose selection_purpose_ = SelectionPurpose::None;
     std::vector<Point2D> selection_points_;
     QPointF cursor_pos_;
 
     MeasureMode measure_mode_ = MeasureMode::None;
     std::vector<Point2D> measure_points_;
     bool measure_finished_ = false;
+
+    bool erase_mode_ = false;
+    int erase_hover_idx_ = -1;
 
     int selected_obstacle_idx_ = -1;
 
@@ -205,7 +214,9 @@ private:
     // theme-aware color). No-op (clears the image) when there are no points.
     void rebuildPointCloudImage();
     void fitToData();
+    void drawActiveSelection(QPainter& painter);
     void drawMeasureOverlay(QPainter& painter);
+    int obstacleIndexAt(const Point2D& world) const;
     double distanceToLineSegment(const QPointF& mouse, const QPointF& p1, const QPointF& p2) const;
 };
 

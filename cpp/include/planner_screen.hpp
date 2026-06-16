@@ -555,6 +555,7 @@ private:
     QPushButton* tool_reset_ = nullptr;
     QPushButton* tool_ruler_ = nullptr;
     QPushButton* tool_cut_ = nullptr;
+    QPushButton* tool_erase_ = nullptr;
     QWidget* tool_stack_ = nullptr;
     QLabel* lbl_next_text_ = nullptr;
     QLabel* lbl_next_icon_ = nullptr;
@@ -639,6 +640,7 @@ private:
     QLabel* lbl_tool_reset_icon_ = nullptr;
     QLabel* lbl_tool_ruler_icon_ = nullptr;
     QLabel* lbl_tool_cut_icon_ = nullptr;
+    QLabel* lbl_tool_erase_icon_ = nullptr;
 
     QPushButton* btn_coverage_roi_draw_rectangle_ = nullptr;
     QPushButton* btn_coverage_roi_draw_polygon_ = nullptr;
