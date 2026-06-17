@@ -101,13 +101,24 @@ inline double csfSensitivityToClassThreshold(double sensitivity) {
 // legacy coverage GUI's trail-Z display crop tolerance.
 constexpr double kTrailDisplayCropToleranceM = 0.40;
 
-// Approach corridor: min point density (pts/m^2) for the cropped corridor cloud
-// to count as mapped. Below this we treat the corridor as unmapped/unreliable
-// and refuse to route blind (folds to NoRoute -> warn + publish-anyway).
-constexpr double kMinCorridorDensityPtsPerM2 = 5.0;
 // Drift (m) between the generate-time robot pose and the live pose at publish
 // beyond which the cached connector is considered stale.
 constexpr double kApproachDriftMaxM = 0.50;
+
+bool pointInPolygon(const Point2D& p, const Polygon2D& poly) {
+    const int n = static_cast<int>(poly.size());
+    if (n < 3) return false;
+    bool inside = false;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        if (((poly[i].y > p.y) != (poly[j].y > p.y)) &&
+            (p.x < (poly[j].x - poly[i].x) * (p.y - poly[i].y) /
+                           (poly[j].y - poly[i].y) +
+                       poly[i].x)) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
 
 constexpr size_t kPreviewTargetPointCount = 180000;
 constexpr double kCoveragePathSpacingMin = 0.20;
@@ -2298,7 +2309,7 @@ void PlannerScreen::onNextClicked() {
             navigateToStep(PlannerStep::ScanSplitting);
         }
     } else if (current_step_ == PlannerStep::ScanSplitting) {
-        if (kBypassPlannerStageGates || (cache && cache->scan_waypoints_published)) {
+        if (scanStageReady()) {
             enterScanStage();
         }
     } else if (current_step_ == PlannerStep::Scan) {
@@ -3667,8 +3678,7 @@ void PlannerScreen::updateStageSteps() {
     const SessionCache* cache = activeSessionPtr();
     const bool plan_ready =
         kBypassPlannerStageGates || (cache && cache->planning_complete);
-    const bool scan_ready =
-        kBypassPlannerStageGates || (cache && cache->scan_waypoints_published);
+    const bool scan_ready = scanStageReady();
     style_step(step_coverage_planning_, 0, true);
     style_step(step_scan_splitting_, 1, plan_ready);
     style_step(step_scan_, 2, scan_ready);
@@ -3729,8 +3739,7 @@ void PlannerScreen::updateFooter() {
     const SessionCache* cache = activeSessionPtr();
     const bool plan_ready =
         kBypassPlannerStageGates || (cache && cache->planning_complete);
-    const bool scan_ready =
-        kBypassPlannerStageGates || (cache && cache->scan_waypoints_published);
+    const bool scan_ready = scanStageReady();
     if (current_step_ == PlannerStep::CoveragePlanning) {
         lbl_stage_footer_->setText(QStringLiteral("Stage 1 of 3"));
         setNextStageLabel(QStringLiteral("Stage 2 (Scan Splitting)"));
@@ -4292,28 +4301,95 @@ void PlannerScreen::startGenerateCoverage() {
         }
     }
 
-    // Captured for the at-Generate approach connector (planned off-thread).
+    // Captured for the at-Generate routing grid + approach connector (off-thread).
     const std::optional<Point2D> approach_pose =
         live_robot_pose_ ? std::optional<Point2D>(live_robot_pose_->point) : std::nullopt;
     const PointCloudPtr approach_cloud = cache.raw_cloud;
     const double approach_csf =
         csfSensitivityToClassThreshold(cache.coverage_csf_sensitivity);
+    const double grid_inflation = cfg.obstacle_clearance;
 
     QtConcurrent::run([guard, generation, boundary, cfg, obstacles, approach_pose,
-                       approach_cloud, approach_csf]() mutable {
+                       approach_cloud, approach_csf, grid_inflation]() mutable {
         PlanningResult result;
         result.approach_pose = approach_pose;
+        // Post a status line to the GUI thread; dropped if a newer run started.
+        auto tick = [guard, generation](const char* msg) {
+            QMetaObject::invokeMethod(
+                guard,
+                [guard, generation, msg]() {
+                    if (guard && generation == guard->planning_generation_) {
+                        guard->setInlineStatus(QString::fromUtf8(msg),
+                                               QStringLiteral("#71717B"));
+                    }
+                },
+                Qt::QueuedConnection);
+        };
         try {
+            // 1. Global obstacle set for the routing grid: edited in-ROI shapes
+            //    plus freshly detected obstacles that lie fully OUTSIDE the ROI
+            //    (the case the coverage detect filter drops — the source of the
+            //    out-of-ROI approach collision).
+            std::vector<Obstacle2D> grid_obs = obstacles;
+            if (approach_cloud && !approach_cloud->empty()) {
+                tick("Scanning the map for obstacles...");
+                ObstacleDetectionParams p;
+                p.csf_classification_threshold_m = approach_csf;
+                try {
+                    ObstacleDetectionResult det =
+                        detectObstaclesAuto(approach_cloud, {}, nullptr, p);
+                    if (det.success) {
+                        for (auto& o : det.obstacles) {
+                            if (o.outer.size() < 3) continue;
+                            bool any_in = false;
+                            for (const auto& v : o.outer) {
+                                if (pointInPolygon(v, boundary)) {
+                                    any_in = true;
+                                    break;
+                                }
+                            }
+                            if (!any_in) result.out_of_roi_obstacles.push_back(o);
+                        }
+                    }
+                } catch (const std::exception&) {
+                }
+            }
+            grid_obs.insert(grid_obs.end(), result.out_of_roi_obstacles.begin(),
+                            result.out_of_roi_obstacles.end());
+
+            // 2. Build the shared inflated grid over obstacles ∪ ROI ∪ robot pose.
+            GridPlanner grid;
+            if (!grid_obs.empty() || approach_pose) {
+                double minx = boundary.empty() ? 0.0 : boundary.front().x;
+                double miny = boundary.empty() ? 0.0 : boundary.front().y;
+                double maxx = minx, maxy = miny;
+                auto extend = [&](const Point2D& q) {
+                    minx = std::min(minx, q.x);
+                    miny = std::min(miny, q.y);
+                    maxx = std::max(maxx, q.x);
+                    maxy = std::max(maxy, q.y);
+                };
+                for (const auto& q : boundary) extend(q);
+                for (const auto& o : grid_obs)
+                    for (const auto& q : o.outer) extend(q);
+                if (approach_pose) extend(*approach_pose);
+                const double pad = grid_inflation + 1.0;
+                grid.build(grid_obs, minx - pad, miny - pad, maxx + pad, maxy + pad,
+                           0.10, grid_inflation);
+            }
+            const GridPlanner* gptr = grid.valid() ? &grid : nullptr;
+
+            // 3. Coverage (grid-routed connectors) + approach connector.
+            tick("Routing coverage paths around obstacles...");
             const std::vector<Obstacle2D>* obs_ptr = obstacles.empty() ? nullptr : &obstacles;
-            result.coverage = generateCoverage(boundary, cfg, nullptr, obs_ptr);
+            result.coverage = generateCoverage(boundary, cfg, nullptr, obs_ptr, gptr);
             if (!result.coverage.success) {
                 result.error = QString::fromStdString(result.coverage.error_message);
             } else {
                 result.success = true;
-                if (!result.coverage.path.empty()) {
+                if (!result.coverage.path.empty() && gptr) {
                     result.approach = PlannerScreen::computeApproach(
-                        approach_pose, result.coverage.path.front().point, boundary,
-                        obstacles, approach_cloud, approach_csf);
+                        approach_pose, result.coverage.path.front().point, grid);
                 }
             }
         } catch (const std::exception& error) {
@@ -4422,7 +4498,7 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
     cache.planned_free_space_regions = result.coverage.free_space_regions;
     cache.planned_approach_status = result.approach.status;
     cache.planned_approach_connector = result.approach.connector;
-    cache.planned_approach_corridor_obstacles = result.approach.corridor_obstacles;
+    cache.planned_approach_corridor_obstacles = result.out_of_roi_obstacles;
     cache.planned_approach_goal =
         result.coverage.path.empty() ? Point2D() : result.coverage.path.front().point;
     cache.planned_approach_pose = result.approach_pose;
@@ -5145,89 +5221,18 @@ PathStateList PlannerScreen::buildPublishPathFromSegments(
 }
 
 PlannerScreen::ApproachResult PlannerScreen::computeApproach(
-    std::optional<Point2D> robot_pose, Point2D goal, Polygon2D /*roi*/,
-    std::vector<Obstacle2D> roi_obstacles, PointCloudPtr cloud,
-    double csf_class_threshold_m) {
+    std::optional<Point2D> robot_pose, Point2D goal, const GridPlanner& grid) {
     ApproachResult out;
     if (!robot_pose) {
         out.status = ApproachStatus::NoPose;
         return out;
     }
     const Point2D start = *robot_pose;
-    const double span = std::hypot(start.x - goal.x, start.y - goal.y);
-    if (span < 0.05) {
+    if (std::hypot(start.x - goal.x, start.y - goal.y) < 0.05) {
         out.status = ApproachStatus::AlreadyThere;
         return out;
     }
-
-    const ObstacleDetectionParams fp;
-    const double clearance = fp.robot_width_m * 0.5 + fp.footprint_margin_m;
-    const double min_area = fp.robot_length_m * fp.robot_width_m;
-
-    // One routing attempt over a corridor bbox of half-width `margin` around the
-    // start->goal extent. Crops the cloud to that bbox, detects obstacles there
-    // (out-of-ROI aware), merges with the in-ROI obstacles, then routes. Sparse
-    // corridor cloud => empty result (caller folds to NoRoute).
-    auto attempt = [&](double margin) -> std::vector<Point2D> {
-        const double min_x = std::min(start.x, goal.x) - margin;
-        const double max_x = std::max(start.x, goal.x) + margin;
-        const double min_y = std::min(start.y, goal.y) - margin;
-        const double max_y = std::max(start.y, goal.y) + margin;
-
-        std::vector<Obstacle2D> corridor;
-        if (cloud && !cloud->empty()) {
-            PointCloudPtr sub(new PointCloud);
-            sub->reserve(cloud->size());
-            for (const auto& pt : cloud->points) {
-                if (pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y) {
-                    sub->push_back(pt);
-                }
-            }
-            const double area = (max_x - min_x) * (max_y - min_y);
-            if (area <= 1e-6 ||
-                static_cast<double>(sub->size()) / area < kMinCorridorDensityPtsPerM2) {
-                return {};  // sparse/unmapped corridor
-            }
-            ObstacleDetectionParams p;
-            p.csf_classification_threshold_m = csf_class_threshold_m;
-            try {
-                ObstacleDetectionResult det = detectObstaclesAuto(sub, {}, nullptr, p);
-                if (det.success) corridor = std::move(det.obstacles);
-            } catch (const std::exception&) {
-            }
-        }
-        out.corridor_obstacles = corridor;
-
-        std::vector<Obstacle2D> merged = roi_obstacles;
-        merged.insert(merged.end(), corridor.begin(), corridor.end());
-        const std::vector<Obstacle2D>* obs_ptr = merged.empty() ? nullptr : &merged;
-
-        const Polygon2D bbox = {{min_x - clearance, min_y - clearance},
-                                {max_x + clearance, min_y - clearance},
-                                {max_x + clearance, max_y + clearance},
-                                {min_x - clearance, max_y + clearance}};
-        try {
-            FreeSpaceResult fs =
-                buildFreeSpacePolygons(bbox, nullptr, obs_ptr, clearance, min_area);
-            if (!fs.success || fs.regions.empty()) return {};
-            std::vector<Point2D> poly =
-                routeConnectorThroughFreeSpace(fs.regions, start, goal);
-            if (poly.size() < 2) return {};
-            poly = smoothPolylineWithinFreeSpace(poly, fs.regions, 0.30, 0.06);
-            if (poly.size() < 2 ||
-                (obs_ptr &&
-                 !validatePathClearsObstacles(poly, obs_ptr, clearance * 0.5).valid)) {
-                return {};
-            }
-            return poly;
-        } catch (const std::exception&) {
-            return {};
-        }
-    };
-
-    const double base = std::max(2.0, span * 0.5);
-    std::vector<Point2D> poly = attempt(base);
-    if (poly.size() < 2) poly = attempt(base * 2.0);  // auto-expand once
+    const std::vector<Point2D> poly = grid.plan(start, goal, 1.0);
     if (poly.size() < 2) {
         out.status = ApproachStatus::NoRoute;
         return out;
@@ -5450,65 +5455,13 @@ bool PlannerScreen::ensurePlanSafeForExecution() {
     return false;
 }
 
-void PlannerScreen::onPublishSelectedClicked() {
-    if (!ensurePlanSafeForExecution()) {
-        return;
+bool PlannerScreen::scanStageReady() const {
+    if (kBypassPlannerStageGates) {
+        return true;
     }
-    const auto indices = selectedScanSegmentIndices();
-    if (indices.empty()) {
-        BdrMessageBox::information(
-            this,
-            QStringLiteral("No selection"),
-            QStringLiteral("Select one or more scan segments before publishing."));
-        return;
-    }
-    const PathStateList publish_path = buildPublishPathFromSegments(indices);
-    if (publish_path.size() < 2) {
-        BdrMessageBox::warning(this,
-                               QStringLiteral("Empty path"),
-                               QStringLiteral("Selected segments contain no waypoints."));
-        return;
-    }
-    ApproachStatus approach = ApproachStatus::AlreadyThere;
-    const std::vector<double> payload =
-        buildTriplePayloadWithApproach(publish_path, &approach);
-    if (!confirmApproachOrAbort(approach)) {
-        return;
-    }
-    SessionCache& cache = activeSession();
-    cache.scan_waypoints_published = true;
-    if (lbl_scan_splitting_status_) {
-        lbl_scan_splitting_status_->setText(
-            QStringLiteral("Published %1 segment(s), %2 waypoints to /f2c_waypoints.")
-                .arg(indices.size())
-                .arg(payload.size() / 3));
-    }
-    emit publishScanSegmentsRequested(payload);
-    updateScanSplittingUi();
-}
-
-void PlannerScreen::onStartSelectedClicked() {
-    if (!ensurePlanSafeForExecution()) {
-        return;
-    }
-    SessionCache& cache = activeSession();
-    const auto indices = selectedScanSegmentIndices();
-    if (indices.empty()) {
-        BdrMessageBox::information(
-            this,
-            QStringLiteral("No selection"),
-            QStringLiteral("Select one or more scan segments before starting."));
-        return;
-    }
-    cache.scan_waypoints_published = true;
-    if (lbl_scan_splitting_status_) {
-        lbl_scan_splitting_status_->setText(
-            QStringLiteral("Ready to execute selected segments. Press Start Scan."));
-    }
-    updateScanSplittingUi();
-
-    // Advance into Stage 4 (Scan execution).
-    enterScanStage();
+    const SessionCache* cache = activeSessionPtr();
+    return cache && cache->planning_complete && cache->planned_path.size() >= 2 &&
+           cache->planned_path_valid && cache->planned_skipped_obstacles == 0;
 }
 
 void PlannerScreen::updateScanSplittingUi() {
@@ -5557,34 +5510,6 @@ void PlannerScreen::updateScanSplittingUi() {
             plan_ready ? QStringLiteral("Divide the planned path into fixed-distance segments.")
                        : QStringLiteral("Generate a coverage plan first."));
     }
-    const bool has_selection = !selectedScanSegmentIndices().empty();
-    const bool path_safe =
-        cache->planned_path_valid && cache->planned_skipped_obstacles == 0;
-    const QString unsafe_tip =
-        !cache->planned_path_valid
-            ? QStringLiteral("Blocked: planned path drives through an obstacle. "
-                             "Edit obstacles/ROI and re-plan.")
-            : QStringLiteral("Blocked: %1 obstacle(s) could not be processed. "
-                             "Edit obstacles and re-plan.")
-                  .arg(cache->planned_skipped_obstacles);
-    if (btn_scan_publish_selected_) {
-        btn_scan_publish_selected_->setEnabled(plan_ready && has_selection && path_safe);
-        btn_scan_publish_selected_->setToolTip(
-            !plan_ready ? QStringLiteral("Generate a coverage plan first.")
-            : !path_safe ? unsafe_tip
-            : !has_selection
-                ? QStringLiteral("Tick one or more segments to publish.")
-                : QStringLiteral("Publish the selected segments to /f2c_waypoints."));
-    }
-    if (btn_scan_start_selected_) {
-        btn_scan_start_selected_->setEnabled(plan_ready && has_selection && path_safe);
-        btn_scan_start_selected_->setToolTip(
-            !plan_ready ? QStringLiteral("Generate a coverage plan first.")
-            : !path_safe ? unsafe_tip
-            : !has_selection ? QStringLiteral("Tick one or more segments to start.")
-                             : QStringLiteral("Start navigating the published segments."));
-    }
-
     if (current_step_ == PlannerStep::ScanSplitting) {
         refreshScanSegmentList();
     }
@@ -5982,9 +5907,8 @@ void PlannerScreen::buildUi() {
                                  96,
                                  false);
     connect(step_scan_.button, &QPushButton::clicked, this, [this]() {
-        const SessionCache* cache = activeSessionPtr();
-        if (kBypassPlannerStageGates || (cache && cache->scan_waypoints_published)) {
-            navigateToStep(PlannerStep::Scan);
+        if (scanStageReady()) {
+            enterScanStage();
         }
     });
     stage_row_layout->addWidget(step_scan_.wrapper, 0, Qt::AlignVCenter);
@@ -6925,74 +6849,6 @@ void PlannerScreen::buildUi() {
     scan_divider->setFixedHeight(1);
     scan_content_layout->addWidget(scan_divider);
 
-    btn_scan_publish_selected_ = new QPushButton(scan_content);
-    btn_scan_publish_selected_->setCursor(Qt::PointingHandCursor);
-    btn_scan_publish_selected_->setFlat(true);
-    btn_scan_publish_selected_->setFixedHeight(40);
-    btn_scan_publish_selected_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    btn_scan_publish_selected_->setStyleSheet(QStringLiteral(
-        "QPushButton { background: #008236; border: none; border-radius: 10px; }"
-        "QPushButton:hover { background: #009644; }"
-        "QPushButton:disabled { background: rgba(0,130,54,0.5); color: rgba(255,255,255,0.7); }"));
-    {
-        auto* publish_layout = new QHBoxLayout(btn_scan_publish_selected_);
-        publish_layout->setContentsMargins(12, 8, 12, 8);
-        publish_layout->setSpacing(8);
-        publish_layout->addStretch(1);
-        lbl_scan_publish_icon_ = new QLabel(btn_scan_publish_selected_);
-        lbl_scan_publish_icon_->setFixedSize(16, 16);
-        lbl_scan_publish_icon_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        lbl_scan_publish_icon_->setStyleSheet(QStringLiteral("background: transparent;"));
-        lbl_scan_publish_icon_->setPixmap(
-            loadSvgPixmap(QStringLiteral(":/assets/missionplanner/publish_selected.svg"),
-                          16,
-                          16,
-                          QStringLiteral("#FFFFFF")));
-        publish_layout->addWidget(lbl_scan_publish_icon_);
-        auto* publish_text = makeTextLabel(
-            btn_scan_publish_selected_,
-            QStringLiteral("Publish selected"),
-            QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 400; color: #FFFFFF;"));
-        publish_layout->addWidget(publish_text);
-        publish_layout->addStretch(1);
-    }
-    applyDropShadow(btn_scan_publish_selected_, 16, 4, QColor(0, 130, 54, 52));
-    scan_content_layout->addWidget(btn_scan_publish_selected_);
-
-    btn_scan_start_selected_ = new QPushButton(scan_content);
-    btn_scan_start_selected_->setCursor(Qt::PointingHandCursor);
-    btn_scan_start_selected_->setFlat(true);
-    btn_scan_start_selected_->setFixedHeight(40);
-    btn_scan_start_selected_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    btn_scan_start_selected_->setStyleSheet(QStringLiteral(
-        "QPushButton { background: #155DFC; border: none; border-radius: 10px; }"
-        "QPushButton:hover { background: #1E6EFF; }"
-        "QPushButton:disabled { background: rgba(21,93,252,0.5); color: rgba(255,255,255,0.7); }"));
-    {
-        auto* start_layout = new QHBoxLayout(btn_scan_start_selected_);
-        start_layout->setContentsMargins(12, 8, 12, 8);
-        start_layout->setSpacing(8);
-        start_layout->addStretch(1);
-        lbl_scan_start_icon_ = new QLabel(btn_scan_start_selected_);
-        lbl_scan_start_icon_->setFixedSize(16, 16);
-        lbl_scan_start_icon_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        lbl_scan_start_icon_->setStyleSheet(QStringLiteral("background: transparent;"));
-        lbl_scan_start_icon_->setPixmap(
-            loadSvgPixmap(QStringLiteral(":/assets/missionplanner/start_selected.svg"),
-                          16,
-                          16,
-                          QStringLiteral("#FFFFFF")));
-        start_layout->addWidget(lbl_scan_start_icon_);
-        auto* start_text = makeTextLabel(
-            btn_scan_start_selected_,
-            QStringLiteral("Start selected"),
-            QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 400; color: #FFFFFF;"));
-        start_layout->addWidget(start_text);
-        start_layout->addStretch(1);
-    }
-    applyDropShadow(btn_scan_start_selected_, 16, 4, QColor(21, 93, 252, 52));
-    scan_content_layout->addWidget(btn_scan_start_selected_);
-
     auto* segment_actions_row = new QWidget(scan_content);
     segment_actions_row->setAttribute(Qt::WA_StyledBackground, true);
     segment_actions_row->setStyleSheet(QStringLiteral("background: transparent;"));
@@ -7744,16 +7600,6 @@ void PlannerScreen::buildUi() {
     if (btn_scan_split_path_) {
         connect(btn_scan_split_path_, &QPushButton::clicked, this, [this]() {
             onSplitPathClicked();
-        });
-    }
-    if (btn_scan_publish_selected_) {
-        connect(btn_scan_publish_selected_, &QPushButton::clicked, this, [this]() {
-            onPublishSelectedClicked();
-        });
-    }
-    if (btn_scan_start_selected_) {
-        connect(btn_scan_start_selected_, &QPushButton::clicked, this, [this]() {
-            onStartSelectedClicked();
         });
     }
     if (list_scan_segments_) {
@@ -8964,6 +8810,12 @@ bool PlannerScreen::publishSegmentForExecution(int segment_index) {
 }
 
 void PlannerScreen::startSegmentExecution(int segment_index, bool resume_action) {
+    // Safety gate (was previously enforced by the now-removed splitting
+    // Publish/Start buttons): never arm autonomy on a plan that crosses an
+    // obstacle or dropped one during planning.
+    if (!ensurePlanSafeForExecution()) {
+        return;
+    }
     SessionCache& cache = activeSession();
     setScanManualOverride(false);
     scan_manual_resume_after_override_ = false;

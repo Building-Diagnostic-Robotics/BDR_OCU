@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "coverage_pipeline.hpp"
+#include "grid_planner.hpp"
 #include "obstacle_detector.hpp"
 #include "preset_manager.hpp"
 
@@ -217,8 +218,7 @@ private:
     enum class ApproachStatus { Ok, AlreadyThere, NoPose, NoRoute };
     struct ApproachResult {
         ApproachStatus status = ApproachStatus::NoPose;
-        PathStateList connector;                     // dc=0 prefix (only if Ok)
-        std::vector<Obstacle2D> corridor_obstacles;  // muted preview layer
+        PathStateList connector;  // dc=0 prefix (only if Ok)
     };
 
     struct SessionCache {
@@ -365,6 +365,9 @@ private:
         CoverageResult coverage;
         ApproachResult approach;
         std::optional<Point2D> approach_pose;
+        // Detected obstacles outside the ROI — drawn muted so the operator can
+        // see what the approach connector is routing around.
+        std::vector<Obstacle2D> out_of_roi_obstacles;
     };
 
     void buildUi();
@@ -442,16 +445,11 @@ private:
     void updateScanSplittingUi();
     std::vector<int> selectedScanSegmentIndices() const;
     PathStateList buildPublishPathFromSegments(const std::vector<int>& indices) const;
-    // Pure, thread-safe approach planner (runs in the Generate worker). Crops a
-    // corridor bbox around robot+goal out of the cloud, detects obstacles there,
-    // merges with the in-ROI obstacles, routes a visibility-graph polyline, and
-    // auto-expands once on failure. Sparse corridor => NoRoute.
+    // Pure, thread-safe approach planner (runs in the Generate worker). Routes
+    // the robot pose -> goal over the shared inflated grid (global obstacles).
+    // Unreachable => NoRoute.
     static ApproachResult computeApproach(std::optional<Point2D> robot_pose,
-                                          Point2D goal,
-                                          Polygon2D roi,
-                                          std::vector<Obstacle2D> roi_obstacles,
-                                          PointCloudPtr cloud,
-                                          double csf_class_threshold_m);
+                                          Point2D goal, const GridPlanner& grid);
     // Builds the [x,y,dc] payload from the cached connector: prefix tagged dc=0
     // (transit), scan path tagged dc=1. Connector is prepended only when it
     // targets this path's first waypoint. Reports status via out_status.
@@ -463,8 +461,10 @@ private:
     // Layer-2 safety gate: blocks publish/start when the active plan is unsafe
     // (path crosses an obstacle or an obstacle was skipped). Shows a red dialog.
     bool ensurePlanSafeForExecution();
-    void onPublishSelectedClicked();
-    void onStartSelectedClicked();
+    // Scan-stage unlock gate: a completed, safe coverage plan is the sole
+    // precondition for entering Stage 4. Publishing now happens entirely in
+    // the Scan stage (per-segment), so it is no longer part of this gate.
+    bool scanStageReady() const;
     void onScanDistanceEdited();
     void onProgressionModeChanged(const QString& mode);
     void invalidateScanSegments(const QString& status_message = QString());
@@ -726,16 +726,12 @@ private:
     QPushButton* btn_progression_automatic_ = nullptr;
     QPushButton* btn_progression_manual_ = nullptr;
     QPushButton* btn_scan_split_path_ = nullptr;
-    QPushButton* btn_scan_publish_selected_ = nullptr;
-    QPushButton* btn_scan_start_selected_ = nullptr;
     QPushButton* btn_segments_select_all_ = nullptr;
     QPushButton* btn_segments_clear_all_ = nullptr;
     QListWidget* list_scan_segments_ = nullptr;
     QLabel* lbl_scan_segments_footer_ = nullptr;
     QLabel* lbl_scan_splitting_status_ = nullptr;
     QLabel* lbl_scan_split_path_icon_ = nullptr;
-    QLabel* lbl_scan_publish_icon_ = nullptr;
-    QLabel* lbl_scan_start_icon_ = nullptr;
     QWidget* scan_progression_toggle_ = nullptr;
     QWidget* preview_placeholder_ = nullptr;
     QWidget* coverage_save_preset_card_ = nullptr;

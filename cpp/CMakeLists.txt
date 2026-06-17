@@ -133,6 +133,7 @@ endif()
 # Header files (for MOC processing)
 set(HEADERS
     include/coverage_pipeline.hpp
+    include/grid_planner.hpp
     include/coverage_geometry.hpp
     include/coverage_stats.hpp
     include/setup_screen.hpp
@@ -204,6 +205,7 @@ set_target_properties(bdr_update_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(PIPELINE_SOURCES
     src/coverage_pipeline.cpp
     src/obstacle_geometry.cpp
+    src/grid_planner.cpp
 )
 
 # Legacy-only sources (recordings / cloud tab UX, teleop dock, session JSON)

@@ -33,6 +33,8 @@ namespace f2c {
 
 namespace f2c_cpp {
 
+class GridPlanner;  // grid_planner.hpp — obstacle-aware connector router
+
 // =============================================================================
 // Basic Types
 // =============================================================================
@@ -362,11 +364,14 @@ std::vector<Point2D> smoothPolylineWithinFreeSpace(
  * @param config Coverage configuration
  * @param roi Optional region of interest (restricts coverage area)
  * @param obstacles List of obstacle polygons to avoid
+ * @param grid Optional pre-built inflated-grid router. When supplied, breached
+ *        inter-swath connectors are routed via JPS instead of straight lines.
  */
 CoverageResult generateCoverage(const Polygon2D& boundary,
                                 const CoverageConfig& config,
                                 const Polygon2D* roi = nullptr,
-                                const std::vector<Obstacle2D>* obstacles = nullptr);
+                                const std::vector<Obstacle2D>* obstacles = nullptr,
+                                const GridPlanner* grid = nullptr);
 
 /**
  * @brief Generate swaths for axial-turn robots (direct swath corners)

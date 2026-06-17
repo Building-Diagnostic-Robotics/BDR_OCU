@@ -5,6 +5,9 @@
 
 #include "coverage_pipeline.hpp"
 
+#include "grid_planner.hpp"
+
+#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -1227,56 +1230,51 @@ static void recomputeAxialHeadings(PathStateList& path) {
 }
 
 // Re-route only the obstacle-crossing connectors of an existing route, leaving
-// its boustrophedon ordering and every clear segment untouched. For each
-// consecutive route segment: routeConnectorThroughFreeSpace returns the segment
-// unchanged when it already has line-of-sight (kept straight), a detour polyline
-// when it would cross an obstacle (arc-filleted and spliced in), or empty when
-// the endpoints are in disconnected free-space components (kept as a straight
-// transit that the Layer-2 gate flags). Order is never changed.
+// its boustrophedon ordering and every clear segment untouched. Per segment:
+// a grid line-of-sight check keeps clear connectors straight (the common case,
+// O(segment)); a breached one is routed via JPS and spliced in; an unreachable
+// pair stays a straight transit that the Layer-2 gate flags. Order never changes.
 static PathStateList buildObstacleAwarePath(const PathStateList& route,
-                                            const std::vector<Obstacle2D>& free_space,
-                                            double smoothing_radius) {
+                                            const GridPlanner& grid) {
     PathStateList path;
     if (route.empty()) return path;
 
-    const double max_r = smoothing_radius;
-    const double min_r = std::max(0.05, smoothing_radius * 0.2);
+    int routed = 0, breached = 0;
+    const auto t0 = std::chrono::steady_clock::now();
 
     path.push_back(route.front());
     for (size_t i = 1; i < route.size(); ++i) {
         const Point2D a = route[i - 1].point;
         const Point2D b = route[i].point;
 
-        std::vector<Point2D> connector;
-        try {
-            connector = routeConnectorThroughFreeSpace(free_space, a, b);
-        } catch (const std::exception& e) {
-            std::cerr << "[Coverage] Connector router failed, keeping straight: "
-                      << e.what() << std::endl;
-            connector.clear();
-        }
-
-        if (connector.size() > 2) {
-            if (max_r > 0.0) {
-                connector = smoothPolylineWithinFreeSpace(connector, free_space, max_r, min_r);
-            }
-            // Endpoints duplicate a / b, so splice interior points only.
-            for (size_t k = 1; k + 1 < connector.size(); ++k) {
-                path.push_back(PathState{connector[k], 0.0});
+        if (!grid.lineOfSight(a, b)) {
+            ++breached;
+            std::vector<Point2D> connector = grid.plan(a, b, 0.5);
+            if (connector.size() > 2) {
+                ++routed;
+                for (size_t k = 1; k + 1 < connector.size(); ++k) {
+                    path.push_back(PathState{connector[k], 0.0});
+                }
             }
         }
-        // size <= 2: direct line of sight (clear) or disconnected (transit) ->
-        // keep the straight segment by emitting just the endpoint below.
         path.push_back(PathState{b, 0.0});
     }
     recomputeAxialHeadings(path);
+
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    std::cerr << "[Coverage] Connector routing: " << (route.size() - 1)
+              << " segments, " << breached << " breached, " << routed
+              << " rerouted in " << ms << " ms\n";
     return path;
 }
 
 CoverageResult generateCoverage(const Polygon2D& boundary,
                                 const CoverageConfig& config,
                                 const Polygon2D* roi,
-                                const std::vector<Obstacle2D>* obstacles) {
+                                const std::vector<Obstacle2D>* obstacles,
+                                const GridPlanner* grid) {
     CoverageResult result;
     
     try {
@@ -1468,15 +1466,12 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
             bool use_axial = config.use_axial_turns || (obstacles && !obstacles->empty());
             
             if (use_axial) {
-                // Layer 1: with obstacles, route each inter-swath connector
-                // through free space instead of straight lines.
+                // Layer 1: with obstacles, route each breached inter-swath
+                // connector through the inflated grid instead of straight lines.
                 const bool route_around_obstacles =
-                    obstacles && !obstacles->empty() && !free_space_regions.empty() &&
-                    !result.route.empty();
+                    grid && grid->valid() && !result.route.empty();
                 if (route_around_obstacles) {
-                    result.path = buildObstacleAwarePath(
-                        result.route, free_space_regions,
-                        config.connector_smoothing_radius);
+                    result.path = buildObstacleAwarePath(result.route, *grid);
                 } else if (!result.route.empty()) {
                     // Route waypoints are already in correct order - use them as path
                     result.path = result.route;
@@ -1644,11 +1639,13 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
 CoverageResult generateCoverage(const Polygon2D& boundary,
                                 const CoverageConfig& config,
                                 const Polygon2D* roi,
-                                const std::vector<Obstacle2D>* obstacles) {
+                                const std::vector<Obstacle2D>* obstacles,
+                                const GridPlanner* grid) {
     CoverageResult result;
     
     // Note: obstacles are not handled in the simple fallback version
     (void)obstacles;
+    (void)grid;
     
     reportProgress(5, "Generating simple coverage...");
     
