@@ -389,6 +389,7 @@ void PlotWidget::startEraseMode() {
     measure_finished_ = false;
     approach_connector_.clear();
     approach_connector_unsafe_ = false;
+    approach_obstacles_.clear();
     selected_obstacle_idx_ = -1;
     erase_mode_ = true;
     erase_hover_idx_ = -1;
@@ -1468,6 +1469,7 @@ void PlotWidget::paintEvent(QPaintEvent* event) {
     }
 
     drawMeasureOverlay(painter);
+    drawApproachObstacles(painter);
     drawApproachConnector(painter);
 }
 
@@ -1513,6 +1515,30 @@ void PlotWidget::setApproachConnector(const std::vector<Point2D>& pts, bool unsa
     approach_connector_ = pts;
     approach_connector_unsafe_ = unsafe;
     update();
+}
+
+void PlotWidget::setApproachObstacles(const std::vector<Obstacle2D>& obstacles) {
+    approach_obstacles_ = obstacles;
+    update();
+}
+
+void PlotWidget::drawApproachObstacles(QPainter& painter) {
+    if (approach_obstacles_.empty()) return;
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    // Muted slate fill/outline: corridor-detected obstacles are context for the
+    // approach connector, visually subordinate to the coverage obstacles.
+    QColor fill(QStringLiteral("#94A3B8"));
+    fill.setAlpha(45);
+    const QPen pen(QColor(148, 163, 184, 140), 1.2, Qt::DashLine);
+    for (const auto& obs : approach_obstacles_) {
+        if (obs.outer.size() < 3) continue;
+        QPolygonF qp;
+        qp.reserve(static_cast<int>(obs.outer.size()));
+        for (const auto& p : obs.outer) qp << worldToScreen(p);
+        painter.setPen(pen);
+        painter.setBrush(fill);
+        painter.drawPolygon(qp);
+    }
 }
 
 void PlotWidget::drawApproachConnector(QPainter& painter) {

@@ -79,6 +79,7 @@ public:
     // Transient robot->start approach connector preview (dotted + arrowheads,
     // visually distinct from the solid coverage path). Empty pts clears it.
     void setApproachConnector(const std::vector<Point2D>& pts, bool unsafe);
+    void setApproachObstacles(const std::vector<Obstacle2D>& obstacles);
 
     void setDarkMode(bool enabled);
     bool isDarkMode() const { return dark_mode_; }
@@ -204,6 +205,7 @@ private:
 
     std::vector<Point2D> approach_connector_;
     bool approach_connector_unsafe_ = false;
+    std::vector<Obstacle2D> approach_obstacles_;
 
     bool erase_mode_ = false;
     int erase_hover_idx_ = -1;
@@ -224,6 +226,7 @@ private:
     void drawActiveSelection(QPainter& painter);
     void drawMeasureOverlay(QPainter& painter);
     void drawApproachConnector(QPainter& painter);
+    void drawApproachObstacles(QPainter& painter);
     int obstacleIndexAt(const Point2D& world) const;
     double distanceToLineSegment(const QPointF& mouse, const QPointF& p1, const QPointF& p2) const;
 };

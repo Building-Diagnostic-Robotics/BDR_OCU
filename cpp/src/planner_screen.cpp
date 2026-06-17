@@ -101,6 +101,14 @@ inline double csfSensitivityToClassThreshold(double sensitivity) {
 // legacy coverage GUI's trail-Z display crop tolerance.
 constexpr double kTrailDisplayCropToleranceM = 0.40;
 
+// Approach corridor: min point density (pts/m^2) for the cropped corridor cloud
+// to count as mapped. Below this we treat the corridor as unmapped/unreliable
+// and refuse to route blind (folds to NoRoute -> warn + publish-anyway).
+constexpr double kMinCorridorDensityPtsPerM2 = 5.0;
+// Drift (m) between the generate-time robot pose and the live pose at publish
+// beyond which the cached connector is considered stale.
+constexpr double kApproachDriftMaxM = 0.50;
+
 constexpr size_t kPreviewTargetPointCount = 180000;
 constexpr double kCoveragePathSpacingMin = 0.20;
 constexpr double kCoveragePathSpacingMax = 1.00;
@@ -2596,9 +2604,18 @@ void PlannerScreen::invalidateCoverageResult(const QString& status_message) {
     cache.planned_path_valid = true;
     cache.planned_skipped_obstacles = 0;
     cache.planned_free_space_regions = 1;
+    cache.planned_approach_status = ApproachStatus::NoPose;
+    cache.planned_approach_connector.clear();
+    cache.planned_approach_corridor_obstacles.clear();
+    cache.planned_approach_goal = Point2D();
+    cache.planned_approach_pose.reset();
     cache.scan_segments.clear();
     cache.scan_splits_dirty = true;
     cache.scan_waypoints_published = false;
+    if (plot_) {
+        plot_->setApproachConnector({}, false);
+        plot_->setApproachObstacles({});
+    }
 
     if (!status_message.isEmpty()) {
         setInlineStatus(status_message, QStringLiteral("#71717B"));
@@ -2677,6 +2694,7 @@ void PlannerScreen::updatePreview() {
         pushScanSegmentsToPlot();
     }
     applyLiveOverlayToPlot();
+    refreshApproachPreview();
     preview_stack_->setCurrentWidget(plot_);
     if (!was_showing_plot) {
         plot_->resetView();
@@ -3988,19 +4006,6 @@ void PlannerScreen::navigateToStep(PlannerStep step) {
             (c.scan_segments.empty() || c.scan_splits_dirty)) {
             onSplitPathClicked();
         }
-        if (!approach_preview_timer_) {
-            approach_preview_timer_ = new QTimer(this);
-            approach_preview_timer_->setInterval(1000);
-            connect(approach_preview_timer_, &QTimer::timeout, this,
-                    &PlannerScreen::refreshApproachPreview);
-        }
-        approach_preview_timer_->start();
-        refreshApproachPreview();
-    } else if (approach_preview_timer_) {
-        approach_preview_timer_->stop();
-        if (plot_) plot_->setApproachConnector({}, false);
-        approach_preview_pose_.reset();
-        approach_preview_goal_.reset();
     }
     // Pre-scan operator checklist gate. Defer with a zero-delay timer so
     // the Scan stage paints once before the modal overlays it, otherwise
@@ -4287,8 +4292,17 @@ void PlannerScreen::startGenerateCoverage() {
         }
     }
 
-    QtConcurrent::run([guard, generation, boundary, cfg, obstacles]() mutable {
+    // Captured for the at-Generate approach connector (planned off-thread).
+    const std::optional<Point2D> approach_pose =
+        live_robot_pose_ ? std::optional<Point2D>(live_robot_pose_->point) : std::nullopt;
+    const PointCloudPtr approach_cloud = cache.raw_cloud;
+    const double approach_csf =
+        csfSensitivityToClassThreshold(cache.coverage_csf_sensitivity);
+
+    QtConcurrent::run([guard, generation, boundary, cfg, obstacles, approach_pose,
+                       approach_cloud, approach_csf]() mutable {
         PlanningResult result;
+        result.approach_pose = approach_pose;
         try {
             const std::vector<Obstacle2D>* obs_ptr = obstacles.empty() ? nullptr : &obstacles;
             result.coverage = generateCoverage(boundary, cfg, nullptr, obs_ptr);
@@ -4296,6 +4310,11 @@ void PlannerScreen::startGenerateCoverage() {
                 result.error = QString::fromStdString(result.coverage.error_message);
             } else {
                 result.success = true;
+                if (!result.coverage.path.empty()) {
+                    result.approach = PlannerScreen::computeApproach(
+                        approach_pose, result.coverage.path.front().point, boundary,
+                        obstacles, approach_cloud, approach_csf);
+                }
             }
         } catch (const std::exception& error) {
             result.error = QString::fromUtf8(error.what());
@@ -4401,6 +4420,12 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
     cache.planned_path_valid = result.coverage.path_valid;
     cache.planned_skipped_obstacles = result.coverage.skipped_obstacles;
     cache.planned_free_space_regions = result.coverage.free_space_regions;
+    cache.planned_approach_status = result.approach.status;
+    cache.planned_approach_connector = result.approach.connector;
+    cache.planned_approach_corridor_obstacles = result.approach.corridor_obstacles;
+    cache.planned_approach_goal =
+        result.coverage.path.empty() ? Point2D() : result.coverage.path.front().point;
+    cache.planned_approach_pose = result.approach_pose;
 
     updatePreview();
     if (plot_ && preview_stack_ && preview_stack_->currentWidget() == plot_) {
@@ -4429,6 +4454,13 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
                            "reachable this run. Re-scan separately if needed.")
                 .arg(units::formatArea(result.coverage.uncovered_area_m2, 1))
                 .arg(cache.planned_free_space_regions - 1),
+            QStringLiteral("#F59E0B"));
+    } else if (cache.planned_approach_status == ApproachStatus::NoRoute) {
+        setInlineStatus(
+            QStringLiteral("Plan ready, but no safe approach to the start was found "
+                           "(robot may be outside the mapped area, or the corridor is "
+                           "blocked/unmapped). You can still publish — the robot will "
+                           "navigate to the start on its own."),
             QStringLiteral("#F59E0B"));
     } else {
         setInlineStatus(QStringLiteral("Generated %1 swaths and %2 path states.")
@@ -5112,34 +5144,19 @@ PathStateList PlannerScreen::buildPublishPathFromSegments(
     return dedupeScanPathStates(combined);
 }
 
-std::vector<Obstacle2D> PlannerScreen::rawObstaclesUnclipped() const {
-    std::vector<Obstacle2D> obstacles;
-    const SessionCache* cache = activeSessionPtr();
-    if (!cache) return obstacles;
-    obstacles.reserve(cache->coverage_obstacles.size());
-    for (const auto& o : cache->coverage_obstacles) {
-        const Obstacle2D& src =
-            o.raw_geometry.outer.size() >= 3 ? o.raw_geometry : o.geometry;
-        if (src.outer.size() >= 3) obstacles.push_back(src);
-    }
-    return obstacles;
-}
-
-PlannerScreen::ApproachConnector
-PlannerScreen::planApproachConnector(const Point2D& goal) const {
-    ApproachConnector out;
-    if (!live_robot_pose_) {
+PlannerScreen::ApproachResult PlannerScreen::computeApproach(
+    std::optional<Point2D> robot_pose, Point2D goal, Polygon2D /*roi*/,
+    std::vector<Obstacle2D> roi_obstacles, PointCloudPtr cloud,
+    double csf_class_threshold_m) {
+    ApproachResult out;
+    if (!robot_pose) {
         out.status = ApproachStatus::NoPose;
         return out;
     }
-    const Point2D start = live_robot_pose_->point;
-    if (std::hypot(start.x - goal.x, start.y - goal.y) < 0.05) {
+    const Point2D start = *robot_pose;
+    const double span = std::hypot(start.x - goal.x, start.y - goal.y);
+    if (span < 0.05) {
         out.status = ApproachStatus::AlreadyThere;
-        return out;
-    }
-    const SessionCache* cache = activeSessionPtr();
-    if (!cache) {
-        out.status = ApproachStatus::NoRoute;
         return out;
     }
 
@@ -5147,49 +5164,76 @@ PlannerScreen::planApproachConnector(const Point2D& goal) const {
     const double clearance = fp.robot_width_m * 0.5 + fp.footprint_margin_m;
     const double min_area = fp.robot_length_m * fp.robot_width_m;
 
-    // Connector free space must NOT be clipped to the ROI (the robot can sit
-    // outside it). Build over a padded bbox of ROI ∪ {start, goal} so the
-    // visibility graph spans the robot and the target.
-    double min_x = std::min(start.x, goal.x), max_x = std::max(start.x, goal.x);
-    double min_y = std::min(start.y, goal.y), max_y = std::max(start.y, goal.y);
-    for (const auto& p : cache->coverage_roi_polygon) {
-        min_x = std::min(min_x, p.x);
-        max_x = std::max(max_x, p.x);
-        min_y = std::min(min_y, p.y);
-        max_y = std::max(max_y, p.y);
-    }
-    const double pad = clearance + 0.5;
-    const Polygon2D bbox = {{min_x - pad, min_y - pad},
-                            {max_x + pad, min_y - pad},
-                            {max_x + pad, max_y + pad},
-                            {min_x - pad, max_y + pad}};
+    // One routing attempt over a corridor bbox of half-width `margin` around the
+    // start->goal extent. Crops the cloud to that bbox, detects obstacles there
+    // (out-of-ROI aware), merges with the in-ROI obstacles, then routes. Sparse
+    // corridor cloud => empty result (caller folds to NoRoute).
+    auto attempt = [&](double margin) -> std::vector<Point2D> {
+        const double min_x = std::min(start.x, goal.x) - margin;
+        const double max_x = std::max(start.x, goal.x) + margin;
+        const double min_y = std::min(start.y, goal.y) - margin;
+        const double max_y = std::max(start.y, goal.y) + margin;
 
-    const std::vector<Obstacle2D> obstacles = rawObstaclesUnclipped();
-    const std::vector<Obstacle2D>* obs_ptr = obstacles.empty() ? nullptr : &obstacles;
-
-    std::vector<Point2D> poly;
-    try {
-        FreeSpaceResult fs =
-            buildFreeSpacePolygons(bbox, nullptr, obs_ptr, clearance, min_area);
-        if (!fs.success || fs.regions.empty()) {
-            out.status = ApproachStatus::NoRoute;
-            return out;
+        std::vector<Obstacle2D> corridor;
+        if (cloud && !cloud->empty()) {
+            PointCloudPtr sub(new PointCloud);
+            sub->reserve(cloud->size());
+            for (const auto& pt : cloud->points) {
+                if (pt.x >= min_x && pt.x <= max_x && pt.y >= min_y && pt.y <= max_y) {
+                    sub->push_back(pt);
+                }
+            }
+            const double area = (max_x - min_x) * (max_y - min_y);
+            if (area <= 1e-6 ||
+                static_cast<double>(sub->size()) / area < kMinCorridorDensityPtsPerM2) {
+                return {};  // sparse/unmapped corridor
+            }
+            ObstacleDetectionParams p;
+            p.csf_classification_threshold_m = csf_class_threshold_m;
+            try {
+                ObstacleDetectionResult det = detectObstaclesAuto(sub, {}, nullptr, p);
+                if (det.success) corridor = std::move(det.obstacles);
+            } catch (const std::exception&) {
+            }
         }
-        poly = routeConnectorThroughFreeSpace(fs.regions, start, goal);
-        if (poly.size() >= 2) {
+        out.corridor_obstacles = corridor;
+
+        std::vector<Obstacle2D> merged = roi_obstacles;
+        merged.insert(merged.end(), corridor.begin(), corridor.end());
+        const std::vector<Obstacle2D>* obs_ptr = merged.empty() ? nullptr : &merged;
+
+        const Polygon2D bbox = {{min_x - clearance, min_y - clearance},
+                                {max_x + clearance, min_y - clearance},
+                                {max_x + clearance, max_y + clearance},
+                                {min_x - clearance, max_y + clearance}};
+        try {
+            FreeSpaceResult fs =
+                buildFreeSpacePolygons(bbox, nullptr, obs_ptr, clearance, min_area);
+            if (!fs.success || fs.regions.empty()) return {};
+            std::vector<Point2D> poly =
+                routeConnectorThroughFreeSpace(fs.regions, start, goal);
+            if (poly.size() < 2) return {};
             poly = smoothPolylineWithinFreeSpace(poly, fs.regions, 0.30, 0.06);
+            if (poly.size() < 2 ||
+                (obs_ptr &&
+                 !validatePathClearsObstacles(poly, obs_ptr, clearance * 0.5).valid)) {
+                return {};
+            }
+            return poly;
+        } catch (const std::exception&) {
+            return {};
         }
-    } catch (const std::exception&) {
+    };
+
+    const double base = std::max(2.0, span * 0.5);
+    std::vector<Point2D> poly = attempt(base);
+    if (poly.size() < 2) poly = attempt(base * 2.0);  // auto-expand once
+    if (poly.size() < 2) {
         out.status = ApproachStatus::NoRoute;
         return out;
     }
-    if (poly.size() < 2 ||
-        (obs_ptr && !validatePathClearsObstacles(poly, obs_ptr, clearance * 0.5).valid)) {
-        out.status = ApproachStatus::NoRoute;
-        return out;
-    }
-    out.path.reserve(poly.size());
-    for (const auto& p : poly) out.path.push_back(PathState(p, 0.0));
+    out.connector.reserve(poly.size());
+    for (const auto& p : poly) out.connector.push_back(PathState(p, 0.0));
     out.status = ApproachStatus::Ok;
     return out;
 }
@@ -5201,17 +5245,29 @@ std::vector<double> PlannerScreen::buildTriplePayloadWithApproach(
         if (out_status) *out_status = ApproachStatus::NoRoute;
         return payload;
     }
-    const ApproachConnector conn = planApproachConnector(path.front().point);
-    if (out_status) *out_status = conn.status;
-    payload.reserve((conn.path.size() + path.size()) * 3);
-    // Transit prefix (dc=0). Drop its final point — it duplicates the first
-    // scan waypoint, which must stay dc=1.
-    if (conn.status == ApproachStatus::Ok && conn.path.size() >= 2) {
-        for (size_t i = 0; i + 1 < conn.path.size(); ++i) {
-            payload.push_back(conn.path[i].point.x);
-            payload.push_back(conn.path[i].point.y);
+    const SessionCache* cache = activeSessionPtr();
+    ApproachStatus status = cache ? cache->planned_approach_status : ApproachStatus::NoPose;
+    // The cached connector targets the coverage path's first waypoint. Only
+    // prepend (and warn) when this publish actually starts there — a mid-path
+    // start (operator deselected the lead segments) gets no stale prefix.
+    const bool targets_this =
+        cache && std::hypot(path.front().point.x - cache->planned_approach_goal.x,
+                            path.front().point.y - cache->planned_approach_goal.y) < 0.05;
+    if (!targets_this) status = ApproachStatus::AlreadyThere;
+    if (out_status) *out_status = status;
+
+    if (status == ApproachStatus::Ok && cache->planned_approach_connector.size() >= 2) {
+        const PathStateList& conn = cache->planned_approach_connector;
+        payload.reserve((conn.size() + path.size()) * 3);
+        // Transit prefix (dc=0); drop the last point — it duplicates the first
+        // scan waypoint, which stays dc=1.
+        for (size_t i = 0; i + 1 < conn.size(); ++i) {
+            payload.push_back(conn[i].point.x);
+            payload.push_back(conn[i].point.y);
             payload.push_back(0.0);
         }
+    } else {
+        payload.reserve(path.size() * 3);
     }
     for (const auto& st : path) {
         payload.push_back(st.point.x);
@@ -5222,54 +5278,52 @@ std::vector<double> PlannerScreen::buildTriplePayloadWithApproach(
 }
 
 bool PlannerScreen::confirmApproachOrAbort(ApproachStatus status) {
-    if (status != ApproachStatus::NoRoute) return true;
-    return BdrMessageBox::question(
-               this,
-               QStringLiteral("No safe approach route"),
-               QStringLiteral(
-                   "Couldn't plan an obstacle-free path from the robot to the start "
-                   "(the robot may be outside the mapped area). Publish anyway? The "
-                   "robot will navigate to the start on its own."),
-               BdrMessageBox::No) == BdrMessageBox::Yes;
+    if (status == ApproachStatus::NoRoute) {
+        return BdrMessageBox::question(
+                   this, QStringLiteral("No safe approach route"),
+                   QStringLiteral(
+                       "Couldn't plan an obstacle-free path from the robot to the start "
+                       "(the robot may be outside the mapped area, or the corridor is "
+                       "blocked/unmapped). Publish anyway? The robot will navigate to "
+                       "the start on its own."),
+                   BdrMessageBox::No) == BdrMessageBox::Yes;
+    }
+    // Drift gate: the connector was planned at Generate time. If the robot has
+    // since moved, the prefix no longer starts at the live pose.
+    const SessionCache* cache = activeSessionPtr();
+    if (status == ApproachStatus::Ok && live_robot_pose_ && cache &&
+        cache->planned_approach_pose &&
+        std::hypot(live_robot_pose_->point.x - cache->planned_approach_pose->x,
+                   live_robot_pose_->point.y - cache->planned_approach_pose->y) >
+            kApproachDriftMaxM) {
+        return BdrMessageBox::question(
+                   this, QStringLiteral("Robot moved since planning"),
+                   QStringLiteral(
+                       "The robot has moved since the approach path was planned. "
+                       "Re-generate coverage paths for an accurate approach, or publish "
+                       "the existing one anyway?"),
+                   BdrMessageBox::No) == BdrMessageBox::Yes;
+    }
+    return true;
 }
 
 void PlannerScreen::refreshApproachPreview() {
     if (!plot_) return;
     const SessionCache* cache = activeSessionPtr();
-    const int idx = firstPendingSelectedSegmentIndex();
-    if (current_step_ != PlannerStep::ScanSplitting || !cache || idx < 0 ||
-        idx >= static_cast<int>(cache->scan_segments.size()) ||
-        cache->scan_segments[idx].path.empty()) {
+    const bool show = cache && cache->planning_complete &&
+                      (current_step_ == PlannerStep::CoveragePlanning ||
+                       current_step_ == PlannerStep::ScanSplitting);
+    if (!show) {
         plot_->setApproachConnector({}, false);
-        approach_preview_pose_.reset();
-        approach_preview_goal_.reset();
+        plot_->setApproachObstacles({});
         return;
     }
-    const Point2D goal = cache->scan_segments[idx].path.front().point;
-
-    // Throttle: skip recompute when neither the goal nor the robot pose
-    // (>0.25 m) has moved since the last preview.
-    if (live_robot_pose_ && approach_preview_pose_ && approach_preview_goal_ &&
-        std::hypot(live_robot_pose_->point.x - approach_preview_pose_->x,
-                   live_robot_pose_->point.y - approach_preview_pose_->y) < 0.25 &&
-        std::hypot(goal.x - approach_preview_goal_->x,
-                   goal.y - approach_preview_goal_->y) < 1e-3) {
-        return;
-    }
-
-    const ApproachConnector conn = planApproachConnector(goal);
-    approach_preview_goal_ = goal;
-    approach_preview_pose_ =
-        live_robot_pose_ ? std::optional<Point2D>(live_robot_pose_->point) : std::nullopt;
-
-    if (conn.status == ApproachStatus::Ok) {
-        std::vector<Point2D> pts;
-        pts.reserve(conn.path.size());
-        for (const auto& st : conn.path) pts.push_back(st.point);
-        plot_->setApproachConnector(pts, false);
-    } else {
-        plot_->setApproachConnector({}, conn.status == ApproachStatus::NoRoute);
-    }
+    plot_->setApproachObstacles(cache->planned_approach_corridor_obstacles);
+    std::vector<Point2D> pts;
+    pts.reserve(cache->planned_approach_connector.size());
+    for (const auto& st : cache->planned_approach_connector) pts.push_back(st.point);
+    plot_->setApproachConnector(
+        pts, cache->planned_approach_status == ApproachStatus::NoRoute);
 }
 
 void PlannerScreen::onScanDistanceEdited() {
