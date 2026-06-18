@@ -1249,7 +1249,9 @@ static PathStateList buildObstacleAwarePath(const PathStateList& route,
 
         if (!grid.lineOfSight(a, b)) {
             ++breached;
-            std::vector<Point2D> connector = grid.plan(a, b, 0.5);
+            // Coverage connectors stay piecewise-straight: skip the clearance
+            // nudge so swath-to-swath transitions don't bow around obstacles.
+            std::vector<Point2D> connector = grid.plan(a, b, 0.5, /*bias_clearance=*/false);
             if (connector.size() > 2) {
                 ++routed;
                 for (size_t k = 1; k + 1 < connector.size(); ++k) {

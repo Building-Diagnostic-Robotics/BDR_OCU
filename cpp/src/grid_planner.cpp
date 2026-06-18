@@ -343,7 +343,8 @@ std::vector<std::pair<int, int>> GridPlanner::jpsCells(int sx, int sy, int gx,
     return {};  // unreachable
 }
 
-std::vector<Point2D> GridPlanner::smooth(const std::vector<Point2D>& pts) const {
+std::vector<Point2D> GridPlanner::smooth(const std::vector<Point2D>& pts,
+                                         bool bias_clearance) const {
     if (pts.size() < 3) return pts;
 
     // Any-angle shortcut: keep the farthest still-visible vertex.
@@ -359,6 +360,11 @@ std::vector<Point2D> GridPlanner::smooth(const std::vector<Point2D>& pts) const 
         i = j;
     }
     if (sc.size() < 3) return sc;
+
+    // Without clearance bias the path stays piecewise-straight (any-angle
+    // shortcut only). Inflated-grid LOS already guarantees >= inflation
+    // standoff, so skipping the nudge costs no safety margin.
+    if (!bias_clearance) return sc;
 
     // Clearance bias: nudge each interior vertex along the local normal toward
     // higher clearance while preserving line-of-sight to both neighbours.
@@ -388,7 +394,7 @@ std::vector<Point2D> GridPlanner::smooth(const std::vector<Point2D>& pts) const 
 }
 
 std::vector<Point2D> GridPlanner::plan(const Point2D& from, const Point2D& to,
-                                       double snap_radius_m) const {
+                                       double snap_radius_m, bool bias_clearance) const {
     if (lethal_.empty()) return {};
     int sx, sy, gx, gy;
     if (!worldToCell(from, sx, sy) || !worldToCell(to, gx, gy)) return {};
@@ -408,7 +414,7 @@ std::vector<Point2D> GridPlanner::plan(const Point2D& from, const Point2D& to,
         if (std::hypot(w.x - poly.back().x, w.y - poly.back().y) > 1e-6) poly.push_back(w);
     }
     if (std::hypot(to.x - poly.back().x, to.y - poly.back().y) > 1e-6) poly.push_back(to);
-    return smooth(poly);
+    return smooth(poly, bias_clearance);
 }
 
 }  // namespace f2c_cpp

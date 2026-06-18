@@ -35,9 +35,13 @@ public:
 
     // Collision-free polyline from @p from to @p to (endpoints inclusive,
     // snapped to the nearest free cell within @p snap_radius_m). Empty when
-    // unreachable or an endpoint cannot be snapped.
+    // unreachable or an endpoint cannot be snapped. When @p bias_clearance is
+    // true the smoother nudges interior vertices toward higher clearance
+    // (centered, slightly curved routes); when false it keeps the any-angle
+    // shortcut result (piecewise-straight legs). Safety is identical either
+    // way — both stay >= inflation from obstacles via the inflated grid.
     std::vector<Point2D> plan(const Point2D& from, const Point2D& to,
-                              double snap_radius_m) const;
+                              double snap_radius_m, bool bias_clearance = true) const;
 
     // True when the straight segment a->b stays entirely in free space.
     bool lineOfSight(const Point2D& a, const Point2D& b) const;
@@ -59,7 +63,7 @@ private:
     int jump(int x, int y, int dx, int dy, int gx, int gy) const;
     std::vector<std::pair<int, int>> prunedDirs(int cur, int parent) const;
     std::vector<std::pair<int, int>> jpsCells(int sx, int sy, int gx, int gy) const;
-    std::vector<Point2D> smooth(const std::vector<Point2D>& pts) const;
+    std::vector<Point2D> smooth(const std::vector<Point2D>& pts, bool bias_clearance) const;
 
     int w_ = 0, h_ = 0;
     double res_ = 0.1;
