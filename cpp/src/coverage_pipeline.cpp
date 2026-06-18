@@ -5,8 +5,6 @@
 
 #include "coverage_pipeline.hpp"
 
-#include "grid_planner.hpp"
-
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -1235,11 +1233,13 @@ static void recomputeAxialHeadings(PathStateList& path) {
 // O(segment)); a breached one is routed via JPS and spliced in; an unreachable
 // pair stays a straight transit that the Layer-2 gate flags. Order never changes.
 static PathStateList buildObstacleAwarePath(const PathStateList& route,
-                                            const GridPlanner& grid) {
+                                            const FreeSpaceConnectorRouter& router,
+                                            int& unroutable_out) {
     PathStateList path;
+    unroutable_out = 0;
     if (route.empty()) return path;
 
-    int routed = 0, breached = 0;
+    int routed = 0, breached = 0, unroutable = 0;
     const auto t0 = std::chrono::steady_clock::now();
 
     path.push_back(route.front());
@@ -1247,17 +1247,21 @@ static PathStateList buildObstacleAwarePath(const PathStateList& route,
         const Point2D a = route[i - 1].point;
         const Point2D b = route[i].point;
 
-        if (!grid.lineOfSight(a, b)) {
+        // route() returns {a,b} when direct LOS is clear, intermediate corner
+        // vertices when it had to go around an obstacle (piecewise-straight,
+        // sharp corners), or empty when no safe connector exists.
+        const std::vector<Point2D> connector = router.route(a, b);
+        if (connector.size() > 2) {
             ++breached;
-            // Coverage connectors stay piecewise-straight: skip the clearance
-            // nudge so swath-to-swath transitions don't bow around obstacles.
-            std::vector<Point2D> connector = grid.plan(a, b, 0.5, /*bias_clearance=*/false);
-            if (connector.size() > 2) {
-                ++routed;
-                for (size_t k = 1; k + 1 < connector.size(); ++k) {
-                    path.push_back(PathState{connector[k], 0.0});
-                }
+            ++routed;
+            for (size_t k = 1; k + 1 < connector.size(); ++k) {
+                path.push_back(PathState{connector[k], 0.0});
             }
+        } else if (connector.empty()) {
+            // No safe route (endpoints in disconnected free-space components).
+            // Fall back to the straight segment; Layer-2 will flag the breach.
+            ++breached;
+            ++unroutable;
         }
         path.push_back(PathState{b, 0.0});
     }
@@ -1268,15 +1272,15 @@ static PathStateList buildObstacleAwarePath(const PathStateList& route,
                         .count();
     std::cerr << "[Coverage] Connector routing: " << (route.size() - 1)
               << " segments, " << breached << " breached, " << routed
-              << " rerouted in " << ms << " ms\n";
+              << " rerouted, " << unroutable << " unroutable in " << ms << " ms\n";
+    unroutable_out = unroutable;
     return path;
 }
 
 CoverageResult generateCoverage(const Polygon2D& boundary,
                                 const CoverageConfig& config,
                                 const Polygon2D* roi,
-                                const std::vector<Obstacle2D>* obstacles,
-                                const GridPlanner* grid) {
+                                const std::vector<Obstacle2D>* obstacles) {
     CoverageResult result;
     
     try {
@@ -1468,12 +1472,26 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
             bool use_axial = config.use_axial_turns || (obstacles && !obstacles->empty());
             
             if (use_axial) {
-                // Layer 1: with obstacles, route each breached inter-swath
-                // connector through the inflated grid instead of straight lines.
-                const bool route_around_obstacles =
-                    grid && grid->valid() && !result.route.empty();
-                if (route_around_obstacles) {
-                    result.path = buildObstacleAwarePath(result.route, *grid);
+                // Layer 1: with obstacles, reroute each breached inter-swath
+                // connector around the sharp-cornered (miter-offset) obstacle
+                // free space, keeping every connector a piecewise-straight leg
+                // with sharp corners (no arc bowing). The visibility graph is
+                // built once and reused across all connectors.
+                std::unique_ptr<FreeSpaceConnectorRouter> connector_router;
+                if (obstacles && !obstacles->empty() && !result.route.empty()) {
+                    FreeSpaceResult fs = buildFreeSpacePolygons(
+                        boundary, roi, obstacles, config.obstacle_clearance,
+                        config.min_coverage_region_area_m2, /*sharp_corners=*/true);
+                    if (fs.success && !fs.regions.empty()) {
+                        connector_router = std::make_unique<FreeSpaceConnectorRouter>(
+                            fs.regions, /*simplify_tol_m=*/0.10);
+                    }
+                }
+                if (connector_router && connector_router->valid()) {
+                    int unroutable = 0;
+                    result.path = buildObstacleAwarePath(result.route, *connector_router,
+                                                         unroutable);
+                    result.connector_unroutable = unroutable;
                 } else if (!result.route.empty()) {
                     // Route waypoints are already in correct order - use them as path
                     result.path = result.route;
@@ -1641,13 +1659,11 @@ CoverageResult generateCoverage(const Polygon2D& boundary,
 CoverageResult generateCoverage(const Polygon2D& boundary,
                                 const CoverageConfig& config,
                                 const Polygon2D* roi,
-                                const std::vector<Obstacle2D>* obstacles,
-                                const GridPlanner* grid) {
+                                const std::vector<Obstacle2D>* obstacles) {
     CoverageResult result;
     
     // Note: obstacles are not handled in the simple fallback version
     (void)obstacles;
-    (void)grid;
     
     reportProgress(5, "Generating simple coverage...");
     

@@ -151,6 +151,12 @@ struct CoverageResult {
     // other substantial components reported to the operator (warn, no block).
     int free_space_regions = 1;
     double uncovered_area_m2 = 0.0;
+    // Inter-swath connectors that breached an obstacle but had no safe route
+    // (endpoints in disconnected free-space components). Such connectors fall
+    // back to a straight segment, which Layer-2 then flags; this count lets the
+    // UI explain the cause (region split by obstacles) instead of a generic
+    // "unsafe plan".
+    int connector_unroutable = 0;
 };
 
 // =============================================================================
@@ -297,7 +303,8 @@ FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
                                        const Polygon2D* roi,
                                        const std::vector<Obstacle2D>* obstacles,
                                        double obstacle_clearance = 0.0,
-                                       double min_region_area_m2 = 0.0);
+                                       double min_region_area_m2 = 0.0,
+                                       bool sharp_corners = false);
 
 /**
  * @brief Result of validating a planned path against the inflated obstacles.
@@ -341,6 +348,38 @@ std::vector<Point2D> routeConnectorThroughFreeSpace(
     const Point2D& to);
 
 /**
+ * @brief Reusable visibility-graph router over a fixed free-space polygon set.
+ *
+ * Builds the static node set (free-space region/hole vertices) and their
+ * mutual visibility graph ONCE, then answers many @c route() queries cheaply by
+ * adding just the two endpoints per call. This is the fast, build-once form of
+ * routeConnectorThroughFreeSpace for inner loops (e.g. one query per breached
+ * inter-swath connector). Feed it a sharp-cornered (miter-offset) free space to
+ * get piecewise-straight connectors with sharp corners. Rings are simplified
+ * (Douglas-Peucker) on construction to keep the graph small on dense contours.
+ */
+class FreeSpaceConnectorRouter {
+public:
+    // @p simplify_tol_m: ring simplification tolerance (m); <= 0 disables.
+    explicit FreeSpaceConnectorRouter(const std::vector<Obstacle2D>& free_space,
+                                      double simplify_tol_m = 0.0);
+    ~FreeSpaceConnectorRouter();
+    FreeSpaceConnectorRouter(const FreeSpaceConnectorRouter&) = delete;
+    FreeSpaceConnectorRouter& operator=(const FreeSpaceConnectorRouter&) = delete;
+
+    bool valid() const;
+
+    // Shortest collision-free polyline from @p from to @p to (endpoints
+    // inclusive). {from,to} when direct line-of-sight is clear; empty when the
+    // endpoints lie in disconnected free-space components.
+    std::vector<Point2D> route(const Point2D& from, const Point2D& to) const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+/**
  * @brief Arc-fillet the interior corners of a polyline, staying in free space.
  *
  * Each interior vertex is rounded with the largest arc up to @p max_radius that
@@ -363,15 +402,14 @@ std::vector<Point2D> smoothPolylineWithinFreeSpace(
  * @param boundary Main field boundary
  * @param config Coverage configuration
  * @param roi Optional region of interest (restricts coverage area)
- * @param obstacles List of obstacle polygons to avoid
- * @param grid Optional pre-built inflated-grid router. When supplied, breached
- *        inter-swath connectors are routed via JPS instead of straight lines.
+ * @param obstacles List of obstacle polygons to avoid. When present, breached
+ *        inter-swath connectors are rerouted as straight legs around the
+ *        sharp-cornered (miter-offset) obstacle free space.
  */
 CoverageResult generateCoverage(const Polygon2D& boundary,
                                 const CoverageConfig& config,
                                 const Polygon2D* roi = nullptr,
-                                const std::vector<Obstacle2D>* obstacles = nullptr,
-                                const GridPlanner* grid = nullptr);
+                                const std::vector<Obstacle2D>* obstacles = nullptr);
 
 /**
  * @brief Generate swaths for axial-turn robots (direct swath corners)

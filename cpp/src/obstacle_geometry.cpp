@@ -11,6 +11,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <queue>
 #include <string>
 #include <vector>
@@ -100,14 +101,23 @@ Obstacle2D bgToObstacle(const BgPolygon& p) {
 }
 
 template <typename Geom>
-BgMultiPolygon buffered(const Geom& g, double dist) {
+BgMultiPolygon buffered(const Geom& g, double dist, bool sharp = false) {
     BgMultiPolygon out;
     bg::strategy::buffer::distance_symmetric<double> ds(dist);
-    bg::strategy::buffer::join_round jr(16);
     bg::strategy::buffer::end_round er(16);
     bg::strategy::buffer::point_circle pc(16);
     bg::strategy::buffer::side_straight ss;
-    bg::buffer(g, out, ds, ss, jr, er, pc);
+    if (sharp) {
+        // Miter joins keep obstacle corners sharp so connectors routed around
+        // them are straight legs. miter_limit caps acute-corner spikes (beyond
+        // it Boost bevels the join) so a thin spike obstacle can't grow an
+        // unbounded needle of blocked space.
+        bg::strategy::buffer::join_miter jm(2.0);
+        bg::buffer(g, out, ds, ss, jm, er, pc);
+    } else {
+        bg::strategy::buffer::join_round jr(16);
+        bg::buffer(g, out, ds, ss, jr, er, pc);
+    }
     for (auto& p : out) bg::correct(p);
     return out;
 }
@@ -158,7 +168,8 @@ bool repairObstacle(const Obstacle2D& obs, BgMultiPolygon& out, std::string& rea
 // Repaired union of every obstacle, optionally inflated by `clearance`.
 // `skipped` (when non-null) accumulates obstacles dropped as unrepairable.
 BgMultiPolygon unionInflatedObstacles(const std::vector<Obstacle2D>& obstacles,
-                                      double clearance, int* skipped) {
+                                      double clearance, int* skipped,
+                                      bool sharp = false) {
     BgMultiPolygon u;
     for (size_t i = 0; i < obstacles.size(); ++i) {
         BgMultiPolygon parts;
@@ -175,7 +186,7 @@ BgMultiPolygon unionInflatedObstacles(const std::vector<Obstacle2D>& obstacles,
             u = std::move(merged);
         }
     }
-    if (!u.empty() && clearance > 0.0) u = buffered(u, clearance);
+    if (!u.empty() && clearance > 0.0) u = buffered(u, clearance, sharp);
     return u;
 }
 
@@ -382,6 +393,139 @@ std::vector<Point2D> routeConnectorThroughFreeSpace(
     return path;
 }
 
+namespace {
+// Douglas-Peucker simplify one closed ring; never returns < 3 vertices (falls
+// back to the sanitized input). Strips sub-tolerance contour noise so the
+// visibility graph stays small.
+Polygon2D simplifyRing(const Polygon2D& ring, double tol) {
+    Polygon2D clean = sanitize(ring);
+    if (tol <= 0.0 || clean.size() < 4) return clean;
+    BgLineString ls;
+    for (const auto& p : clean) ls.push_back(BgPoint(p.x, p.y));
+    ls.push_back(BgPoint(clean.front().x, clean.front().y));  // close the ring
+    BgLineString out;
+    bg::simplify(ls, out, tol);
+    Polygon2D res;
+    res.reserve(out.size());
+    for (const auto& pt : out) res.emplace_back(bg::get<0>(pt), bg::get<1>(pt));
+    if (res.size() >= 2 && nearPoint(res.front(), res.back())) res.pop_back();
+    return res.size() >= 3 ? res : clean;
+}
+}  // namespace
+
+struct FreeSpaceConnectorRouter::Impl {
+    BgMultiPolygon fs;            // simplified free space (LOS checks)
+    std::vector<BgPoint> nodes;   // static graph vertices
+    std::vector<std::vector<std::pair<int, double>>> adj;  // static-static edges
+};
+
+FreeSpaceConnectorRouter::FreeSpaceConnectorRouter(
+    const std::vector<Obstacle2D>& free_space, double simplify_tol_m)
+    : impl_(std::make_unique<Impl>()) {
+    std::vector<Obstacle2D> simplified;
+    simplified.reserve(free_space.size());
+    for (const auto& reg : free_space) {
+        Obstacle2D s;
+        s.outer = simplifyRing(reg.outer, simplify_tol_m);
+        if (s.outer.size() < 3) continue;
+        for (const auto& h : reg.holes) {
+            Polygon2D hs = simplifyRing(h, simplify_tol_m);
+            if (hs.size() >= 3) s.holes.push_back(std::move(hs));
+        }
+        simplified.push_back(std::move(s));
+    }
+
+    impl_->fs = toBgFreeSpace(simplified);
+    if (impl_->fs.empty()) return;
+
+    for (const auto& reg : simplified) {
+        for (const auto& p : reg.outer) impl_->nodes.emplace_back(p.x, p.y);
+        for (const auto& h : reg.holes)
+            for (const auto& p : h) impl_->nodes.emplace_back(p.x, p.y);
+    }
+
+    const int n = static_cast<int>(impl_->nodes.size());
+    impl_->adj.assign(n, {});
+    for (int i = 0; i < n; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            if (segmentInFreeSpace(impl_->nodes[i], impl_->nodes[j], impl_->fs)) {
+                const double w = dist(impl_->nodes[i], impl_->nodes[j]);
+                impl_->adj[i].push_back({j, w});
+                impl_->adj[j].push_back({i, w});
+            }
+        }
+    }
+}
+
+FreeSpaceConnectorRouter::~FreeSpaceConnectorRouter() = default;
+
+bool FreeSpaceConnectorRouter::valid() const { return impl_ && !impl_->fs.empty(); }
+
+std::vector<Point2D> FreeSpaceConnectorRouter::route(const Point2D& from,
+                                                     const Point2D& to) const {
+    if (!valid()) return {};
+    const BgPoint a(from.x, from.y), b(to.x, to.y);
+    if (segmentInFreeSpace(a, b, impl_->fs)) return {from, to};
+
+    const int n = static_cast<int>(impl_->nodes.size());
+    const int A = n, B = n + 1, N = n + 2;
+
+    // Endpoint-to-static visibility (the only dynamic edges per query).
+    std::vector<char> visA(n, 0), visB(n, 0);
+    std::vector<double> wA(n, 0.0), wB(n, 0.0);
+    for (int i = 0; i < n; ++i) {
+        if (segmentInFreeSpace(a, impl_->nodes[i], impl_->fs)) {
+            visA[i] = 1;
+            wA[i] = dist(a, impl_->nodes[i]);
+        }
+        if (segmentInFreeSpace(b, impl_->nodes[i], impl_->fs)) {
+            visB[i] = 1;
+            wB[i] = dist(b, impl_->nodes[i]);
+        }
+    }
+
+    constexpr double kInf = std::numeric_limits<double>::max();
+    std::vector<double> d(N, kInf);
+    std::vector<int> prev(N, -1);
+    d[A] = 0.0;
+    using QE = std::pair<double, int>;
+    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+    pq.push({0.0, A});
+
+    auto relax = [&](int u, int v, double w) {
+        if (d[u] + w < d[v]) {
+            d[v] = d[u] + w;
+            prev[v] = u;
+            pq.push({d[v], v});
+        }
+    };
+
+    while (!pq.empty()) {
+        auto [du, u] = pq.top();
+        pq.pop();
+        if (du > d[u]) continue;
+        if (u == B) break;
+        if (u < n) {
+            for (const auto& [v, w] : impl_->adj[u]) relax(u, v, w);
+            if (visA[u]) relax(u, A, wA[u]);
+            if (visB[u]) relax(u, B, wB[u]);
+        } else if (u == A) {
+            for (int i = 0; i < n; ++i)
+                if (visA[i]) relax(A, i, wA[i]);
+        }
+    }
+    if (d[B] >= kInf) return {};  // disconnected components
+
+    std::vector<Point2D> path;
+    for (int cur = B; cur != -1; cur = prev[cur]) {
+        if (cur == A) path.push_back(from);
+        else if (cur == B) path.push_back(to);
+        else path.emplace_back(bg::get<0>(impl_->nodes[cur]), bg::get<1>(impl_->nodes[cur]));
+    }
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+
 std::vector<Point2D> smoothPolylineWithinFreeSpace(
     const std::vector<Point2D>& polyline,
     const std::vector<Obstacle2D>& free_space,
@@ -476,7 +620,8 @@ FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
                                        const Polygon2D* roi,
                                        const std::vector<Obstacle2D>* obstacles,
                                        double obstacle_clearance,
-                                       double min_region_area_m2) {
+                                       double min_region_area_m2,
+                                       bool sharp_corners) {
     FreeSpaceResult r;
 
     Polygon2D bclean = sanitize(boundary);
@@ -527,8 +672,8 @@ FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,
     }
 
     if (obstacles && !obstacles->empty()) {
-        BgMultiPolygon inflated =
-            unionInflatedObstacles(*obstacles, obstacle_clearance, &r.skipped_obstacles);
+        BgMultiPolygon inflated = unionInflatedObstacles(
+            *obstacles, obstacle_clearance, &r.skipped_obstacles, sharp_corners);
 
         if (!inflated.empty()) {
             BgMultiPolygon after;

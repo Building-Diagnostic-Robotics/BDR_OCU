@@ -4379,10 +4379,13 @@ void PlannerScreen::startGenerateCoverage() {
             }
             const GridPlanner* gptr = grid.valid() ? &grid : nullptr;
 
-            // 3. Coverage (grid-routed connectors) + approach connector.
+            // 3. Coverage (straight-leg connectors around obstacles) + approach
+            //    connector. The grid is used only by the curved approach path;
+            //    coverage connectors route via the sharp-cornered visibility
+            //    graph inside generateCoverage.
             tick("Routing coverage paths around obstacles...");
             const std::vector<Obstacle2D>* obs_ptr = obstacles.empty() ? nullptr : &obstacles;
-            result.coverage = generateCoverage(boundary, cfg, nullptr, obs_ptr, gptr);
+            result.coverage = generateCoverage(boundary, cfg, nullptr, obs_ptr);
             if (!result.coverage.success) {
                 result.error = QString::fromStdString(result.coverage.error_message);
             } else {
@@ -4512,7 +4515,12 @@ void PlannerScreen::applyPlanningResult(quint64 generation, const PlanningResult
     if (!cache.planned_path_valid || cache.planned_skipped_obstacles > 0) {
         QString why;
         if (!cache.planned_path_valid) {
-            why = QStringLiteral("path drives through an obstacle");
+            if (result.coverage.connector_unroutable > 0) {
+                why = QStringLiteral("obstacles split the area into disconnected "
+                                     "pieces — no safe path between some swaths");
+            } else {
+                why = QStringLiteral("path drives through an obstacle");
+            }
         }
         if (cache.planned_skipped_obstacles > 0) {
             if (!why.isEmpty()) why += QStringLiteral("; ");
