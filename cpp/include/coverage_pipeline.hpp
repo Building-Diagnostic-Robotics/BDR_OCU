@@ -33,8 +33,6 @@ namespace f2c {
 
 namespace f2c_cpp {
 
-class GridPlanner;  // grid_planner.hpp — obstacle-aware connector router
-
 // =============================================================================
 // Basic Types
 // =============================================================================
@@ -84,11 +82,6 @@ struct CoverageConfig {
     // Safety standoff (m) inflated around the obstacle union before it is
     // subtracted from the work area. 0 = no clearance (raw obstacle footprint).
     double obstacle_clearance = 0.0;
-    // Layer-1 obstacle-aware routing: inter-swath connectors are routed through
-    // free space (visibility graph) instead of straight lines. Corners are
-    // arc-filleted up to this radius (m), shrinking to fit tight corridors.
-    // 0 disables filleting (sharp polyline corners).
-    double connector_smoothing_radius = 0.0;
     // Free-space components smaller than this (m^2) are discarded as unscannable
     // slivers before planning. Coverage then runs on the single largest
     // surviving component; other substantial components are reported as
@@ -333,30 +326,16 @@ PathValidation validatePathClearsObstacles(const std::vector<Point2D>& path_poin
                                            double obstacle_clearance = 0.0);
 
 /**
- * @brief Shortest collision-free connector between two points through free space.
- *
- * @p free_space is the navigable area (region outers with obstacle holes), i.e.
- * the output of buildFreeSpacePolygons. Builds a visibility graph over the
- * free-space vertices plus @p from / @p to and returns the shortest polyline
- * (inclusive of both endpoints) that stays inside the free space. Returns an
- * empty vector when @p from and @p to lie in disconnected components (no safe
- * connector exists). Throws std::exception only on internal geometry failure.
- */
-std::vector<Point2D> routeConnectorThroughFreeSpace(
-    const std::vector<Obstacle2D>& free_space,
-    const Point2D& from,
-    const Point2D& to);
-
-/**
  * @brief Reusable visibility-graph router over a fixed free-space polygon set.
  *
  * Builds the static node set (free-space region/hole vertices) and their
  * mutual visibility graph ONCE, then answers many @c route() queries cheaply by
- * adding just the two endpoints per call. This is the fast, build-once form of
- * routeConnectorThroughFreeSpace for inner loops (e.g. one query per breached
+ * adding just the two endpoints per call (e.g. one query per breached
  * inter-swath connector). Feed it a sharp-cornered (miter-offset) free space to
  * get piecewise-straight connectors with sharp corners. Rings are simplified
  * (Douglas-Peucker) on construction to keep the graph small on dense contours.
+ * @p free_space is the navigable area (region outers with obstacle holes), i.e.
+ * the output of buildFreeSpacePolygons.
  */
 class FreeSpaceConnectorRouter {
 public:
@@ -378,20 +357,6 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
-
-/**
- * @brief Arc-fillet the interior corners of a polyline, staying in free space.
- *
- * Each interior vertex is rounded with the largest arc up to @p max_radius that
- * (a) fits the two adjacent segments and (b) stays within @p free_space. The
- * radius is shrunk toward @p min_radius to fit tight corridors; if even
- * @p min_radius will not fit, the sharp corner is kept. Endpoints are preserved.
- */
-std::vector<Point2D> smoothPolylineWithinFreeSpace(
-    const std::vector<Point2D>& polyline,
-    const std::vector<Obstacle2D>& free_space,
-    double max_radius,
-    double min_radius);
 
 // =============================================================================
 // Coverage Generation

@@ -219,25 +219,6 @@ double dist(const BgPoint& p, const BgPoint& q) {
     return std::hypot(bg::get<0>(p) - bg::get<0>(q), bg::get<1>(p) - bg::get<1>(q));
 }
 
-// Sample the minor arc from t1 to t2 about center, radius r (excludes endpoints).
-std::vector<Point2D> sampleArc(const Point2D& center, const Point2D& t1,
-                               const Point2D& t2, double r) {
-    double a1 = std::atan2(t1.y - center.y, t1.x - center.x);
-    double a2 = std::atan2(t2.y - center.y, t2.x - center.x);
-    double sweep = a2 - a1;
-    while (sweep > M_PI) sweep -= 2.0 * M_PI;
-    while (sweep < -M_PI) sweep += 2.0 * M_PI;
-
-    const int steps = std::max(1, static_cast<int>(std::ceil(std::fabs(sweep) / (M_PI / 18.0))));
-    std::vector<Point2D> out;
-    out.reserve(steps);
-    for (int k = 1; k < steps; ++k) {
-        double a = a1 + sweep * (static_cast<double>(k) / steps);
-        out.push_back(Point2D(center.x + r * std::cos(a), center.y + r * std::sin(a)));
-    }
-    return out;
-}
-
 }  // namespace
 
 std::vector<Obstacle2D> clipObstacleToPolygon(const Obstacle2D& obstacle,
@@ -325,72 +306,6 @@ PathValidation validatePathClearsObstacles(const std::vector<Point2D>& path_poin
     }
     v.valid = (v.crossing_segments == 0);
     return v;
-}
-
-std::vector<Point2D> routeConnectorThroughFreeSpace(
-    const std::vector<Obstacle2D>& free_space,
-    const Point2D& from,
-    const Point2D& to) {
-    BgMultiPolygon fs = toBgFreeSpace(free_space);
-    if (fs.empty()) return {};
-
-    const BgPoint a(from.x, from.y);
-    const BgPoint b(to.x, to.y);
-
-    // Fast path: direct line of sight needs no graph search.
-    if (segmentInFreeSpace(a, b, fs)) return {from, to};
-
-    // Nodes: from(0), to(1), then every region/hole vertex.
-    std::vector<BgPoint> nodes;
-    nodes.push_back(a);
-    nodes.push_back(b);
-    for (const auto& reg : free_space) {
-        for (const auto& p : reg.outer) nodes.push_back(BgPoint(p.x, p.y));
-        for (const auto& h : reg.holes)
-            for (const auto& p : h) nodes.push_back(BgPoint(p.x, p.y));
-    }
-    const size_t n = nodes.size();
-
-    std::vector<std::vector<std::pair<size_t, double>>> adj(n);
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i + 1; j < n; ++j) {
-            if (segmentInFreeSpace(nodes[i], nodes[j], fs)) {
-                const double w = dist(nodes[i], nodes[j]);
-                adj[i].push_back({j, w});
-                adj[j].push_back({i, w});
-            }
-        }
-    }
-
-    constexpr double kInf = std::numeric_limits<double>::max();
-    std::vector<double> d(n, kInf);
-    std::vector<size_t> prev(n, std::numeric_limits<size_t>::max());
-    d[0] = 0.0;
-    using QE = std::pair<double, size_t>;
-    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
-    pq.push({0.0, 0});
-    while (!pq.empty()) {
-        auto [du, u] = pq.top();
-        pq.pop();
-        if (du > d[u]) continue;
-        if (u == 1) break;
-        for (const auto& [v, w] : adj[u]) {
-            if (d[u] + w < d[v]) {
-                d[v] = d[u] + w;
-                prev[v] = u;
-                pq.push({d[v], v});
-            }
-        }
-    }
-    if (d[1] >= kInf) return {};  // disconnected components
-
-    std::vector<Point2D> path;
-    for (size_t cur = 1; cur != std::numeric_limits<size_t>::max(); cur = prev[cur]) {
-        path.push_back(Point2D(bg::get<0>(nodes[cur]), bg::get<1>(nodes[cur])));
-        if (cur == 0) break;
-    }
-    std::reverse(path.begin(), path.end());
-    return path;
 }
 
 namespace {
@@ -524,96 +439,6 @@ std::vector<Point2D> FreeSpaceConnectorRouter::route(const Point2D& from,
     }
     std::reverse(path.begin(), path.end());
     return path;
-}
-
-std::vector<Point2D> smoothPolylineWithinFreeSpace(
-    const std::vector<Point2D>& polyline,
-    const std::vector<Obstacle2D>& free_space,
-    double max_radius,
-    double min_radius) {
-    if (polyline.size() < 3 || max_radius <= 0.0) return polyline;
-    BgMultiPolygon fs = toBgFreeSpace(free_space);
-    if (fs.empty()) return polyline;
-
-    const double min_r = std::max(1e-3, min_radius);
-
-    std::vector<Point2D> out;
-    out.reserve(polyline.size() * 2);
-    out.push_back(polyline.front());
-
-    for (size_t i = 1; i + 1 < polyline.size(); ++i) {
-        const Point2D& p0 = polyline[i - 1];
-        const Point2D& p1 = polyline[i];
-        const Point2D& p2 = polyline[i + 1];
-
-        double v1x = p0.x - p1.x, v1y = p0.y - p1.y;
-        double v2x = p2.x - p1.x, v2y = p2.y - p1.y;
-        const double l1 = std::hypot(v1x, v1y);
-        const double l2 = std::hypot(v2x, v2y);
-        if (l1 < 1e-9 || l2 < 1e-9) {
-            out.push_back(p1);
-            continue;
-        }
-        v1x /= l1; v1y /= l1; v2x /= l2; v2y /= l2;
-
-        const double cosang = std::clamp(v1x * v2x + v1y * v2y, -1.0, 1.0);
-        const double angle = std::acos(cosang);  // interior angle at the corner
-        if (angle > M_PI - 1e-3 || angle < 1e-3) {
-            out.push_back(p1);  // nearly straight or a spike — nothing to round
-            continue;
-        }
-
-        const double half = angle / 2.0;
-        const double tan_half = std::tan(half);
-        const double sin_half = std::sin(half);
-        const double max_t = std::min(l1, l2) * 0.5;
-
-        double bx = v1x + v2x, by = v1y + v2y;
-        const double bl = std::hypot(bx, by);
-        if (bl < 1e-9) {
-            out.push_back(p1);
-            continue;
-        }
-        bx /= bl; by /= bl;
-
-        bool placed = false;
-        for (double r = max_radius; r >= min_r - 1e-9; r *= 0.6) {
-            const double t = r / tan_half;
-            if (t > max_t) continue;  // doesn't fit segment lengths — shrink
-
-            const Point2D t1{p1.x + v1x * t, p1.y + v1y * t};
-            const Point2D t2{p1.x + v2x * t, p1.y + v2y * t};
-            const double center_d = r / sin_half;
-            const Point2D c{p1.x + bx * center_d, p1.y + by * center_d};
-
-            std::vector<Point2D> arc = sampleArc(c, t1, t2, r);
-
-            std::vector<Point2D> fillet;
-            fillet.reserve(arc.size() + 2);
-            fillet.push_back(t1);
-            for (const auto& p : arc) fillet.push_back(p);
-            fillet.push_back(t2);
-
-            bool inside = true;
-            for (size_t k = 1; k < fillet.size(); ++k) {
-                if (!segmentInFreeSpace(BgPoint(fillet[k - 1].x, fillet[k - 1].y),
-                                        BgPoint(fillet[k].x, fillet[k].y), fs)) {
-                    inside = false;
-                    break;
-                }
-            }
-            if (inside) {
-                for (const auto& p : fillet) out.push_back(p);
-                placed = true;
-                break;
-            }
-            if (r <= min_r + 1e-9) break;
-        }
-        if (!placed) out.push_back(p1);
-    }
-
-    out.push_back(polyline.back());
-    return out;
 }
 
 FreeSpaceResult buildFreeSpacePolygons(const Polygon2D& boundary,

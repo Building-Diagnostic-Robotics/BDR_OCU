@@ -20,8 +20,7 @@ using f2c_cpp::buildFreeSpacePolygons;
 using f2c_cpp::clipObstacleToPolygon;
 using f2c_cpp::subtractPolygonFromObstacle;
 using f2c_cpp::validatePathClearsObstacles;
-using f2c_cpp::routeConnectorThroughFreeSpace;
-using f2c_cpp::smoothPolylineWithinFreeSpace;
+using f2c_cpp::FreeSpaceConnectorRouter;
 
 namespace {
 
@@ -258,7 +257,9 @@ TEST(FreeSpace, SliverRegionFilteredByMinArea) {
 
 TEST(Route, DirectLineOfSightIsTwoPoints) {
     std::vector<Obstacle2D> fs = {{rect(0, 0, 10, 10), {}}};
-    auto p = routeConnectorThroughFreeSpace(fs, {1, 1}, {9, 9});
+    FreeSpaceConnectorRouter router(fs);
+    ASSERT_TRUE(router.valid());
+    auto p = router.route({1, 1}, {9, 9});
     ASSERT_EQ(p.size(), 2u);
     EXPECT_NEAR(p.front().x, 1, 1e-9);
     EXPECT_NEAR(p.back().y, 9, 1e-9);
@@ -269,7 +270,9 @@ TEST(Route, RoutesAroundObstacleHole) {
     region.outer = rect(0, 0, 10, 10);
     region.holes = {rect(4, 4, 6, 6)};  // obstacle in the middle
     std::vector<Obstacle2D> fs = {region};
-    auto p = routeConnectorThroughFreeSpace(fs, {2, 5}, {8, 5});
+    FreeSpaceConnectorRouter router(fs);
+    ASSERT_TRUE(router.valid());
+    auto p = router.route({2, 5}, {8, 5});
     ASSERT_GE(p.size(), 3u);  // straight line blocked -> detours
     EXPECT_NEAR(p.front().x, 2, 1e-9);
     EXPECT_NEAR(p.back().x, 8, 1e-9);
@@ -282,24 +285,30 @@ TEST(Route, RoutesAroundObstacleHole) {
 
 TEST(Route, DisconnectedComponentsReturnEmpty) {
     std::vector<Obstacle2D> fs = {{rect(0, 0, 4, 4), {}}, {rect(10, 10, 14, 14), {}}};
-    auto p = routeConnectorThroughFreeSpace(fs, {2, 2}, {12, 12});
+    FreeSpaceConnectorRouter router(fs);
+    ASSERT_TRUE(router.valid());
+    auto p = router.route({2, 2}, {12, 12});
     EXPECT_TRUE(p.empty());
 }
 
-TEST(Smooth, RoundsRightAngleCornerAndKeepsEndpoints) {
-    std::vector<Obstacle2D> fs = {{rect(0, 0, 10, 10), {}}};
-    std::vector<Point2D> poly = {{1, 5}, {5, 5}, {5, 1}};  // 90-degree corner
-    auto s = smoothPolylineWithinFreeSpace(poly, fs, 1.0, 0.1);
-    EXPECT_GT(s.size(), poly.size());
-    EXPECT_NEAR(s.front().x, 1, 1e-9);
-    EXPECT_NEAR(s.front().y, 5, 1e-9);
-    EXPECT_NEAR(s.back().x, 5, 1e-9);
-    EXPECT_NEAR(s.back().y, 1, 1e-9);
-    bool sharp_corner_present = false;
-    for (const auto& q : s) {
-        if (std::hypot(q.x - 5.0, q.y - 5.0) < 1e-6) sharp_corner_present = true;
+TEST(Route, CornersAreSharpVerticesNotArcs) {
+    // Detour around a central obstacle must turn at obstacle corners (sharp
+    // vertices), never inserting interpolated arc points.
+    Obstacle2D region;
+    region.outer = rect(0, 0, 10, 10);
+    region.holes = {rect(4, 4, 6, 6)};
+    std::vector<Obstacle2D> fs = {region};
+    FreeSpaceConnectorRouter router(fs);
+    ASSERT_TRUE(router.valid());
+    auto p = router.route({2, 5}, {8, 5});
+    ASSERT_GE(p.size(), 3u);
+    // Every intermediate vertex coincides with a hole corner (x or y in {4,6}).
+    for (size_t i = 1; i + 1 < p.size(); ++i) {
+        const bool on_corner =
+            (std::fabs(p[i].x - 4.0) < 1e-6 || std::fabs(p[i].x - 6.0) < 1e-6) &&
+            (std::fabs(p[i].y - 4.0) < 1e-6 || std::fabs(p[i].y - 6.0) < 1e-6);
+        EXPECT_TRUE(on_corner) << "intermediate vertex " << i << " is not a corner";
     }
-    EXPECT_FALSE(sharp_corner_present);
 }
 
 TEST(Clip, ConcaveClipSplitsObstacleIntoPieces) {

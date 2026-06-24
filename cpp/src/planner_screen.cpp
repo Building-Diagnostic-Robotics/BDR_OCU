@@ -4281,10 +4281,6 @@ void PlannerScreen::startGenerateCoverage() {
         // the plan or trip the multi-region warning.
         cfg.min_coverage_region_area_m2 = fp.robot_length_m * fp.robot_width_m;
     }
-    // Layer 1: arc-fillet radius for obstacle-routed connectors. Kept small —
-    // Roofus is skid-steer and can turn nearly in place; the router shrinks it
-    // further to fit tight corridors. Separate from cfg.turn_radius (Dubins).
-    cfg.connector_smoothing_radius = 0.30;
     // Feed the FULL (unclipped) obstacle shapes to the pipeline: it subtracts
     // them from the ROI∩boundary work area, so any out-of-ROI portion is
     // ignored while every in-ROI part is removed. Passing the display-clipped
