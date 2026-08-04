@@ -2,6 +2,7 @@
 
 #include "arcgis_key_gen.hpp"
 
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
@@ -56,6 +57,14 @@ bool TileService::isCached(int z, int x, int y) const {
     return QFileInfo::exists(tilePath(z, x, y));
 }
 
+bool TileService::isFailedRecently(int z, int x, int y) const {
+    const auto it = failed_.constFind(tileKey(z, x, y));
+    if (it == failed_.constEnd()) {
+        return false;
+    }
+    return QDateTime::currentMSecsSinceEpoch() - it.value() < kFailedRetryMs;
+}
+
 QPixmap TileService::cachedTile(int z, int x, int y) {
     const QString key = tileKey(z, x, y);
     if (QPixmap* cached = memory_cache_.object(key)) {
@@ -77,10 +86,12 @@ QPixmap TileService::cachedTile(int z, int x, int y) {
 
 void TileService::fetch(int z, int x, int y) {
     const QString key = tileKey(z, x, y);
-    if (inflight_.contains(key) || isCached(z, x, y)) {
+    if (inflight_.contains(key) || isCached(z, x, y) ||
+        isFailedRecently(z, x, y)) {
         return;
     }
     if (!hasApiKey()) {
+        failed_.insert(key, QDateTime::currentMSecsSinceEpoch());
         emit tileFailed(z, x, y);
         return;
     }
@@ -105,6 +116,10 @@ void TileService::fetch(int z, int x, int y) {
             reply->header(QNetworkRequest::ContentTypeHeader).toString();
         if (reply->error() != QNetworkReply::NoError ||
             !content_type.startsWith(QLatin1String("image"))) {
+            // Typical cause: zoom level beyond the imagery's native LOD for
+            // this area (the service 404s). Remember it so the paint loop
+            // stops re-requesting and falls back to ancestor tiles.
+            failed_.insert(key, QDateTime::currentMSecsSinceEpoch());
             emit tileFailed(z, x, y);
             return;
         }

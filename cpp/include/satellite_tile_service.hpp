@@ -11,6 +11,7 @@
 #pragma once
 
 #include <QCache>
+#include <QHash>
 #include <QObject>
 #include <QPixmap>
 #include <QSet>
@@ -31,6 +32,14 @@ public:
     /** Memory-then-disk lookup. Returns a null pixmap when not cached. */
     QPixmap cachedTile(int z, int x, int y);
     bool isCached(int z, int x, int y) const;
+
+    /**
+     * True when a recent fetch of this tile failed (usually: the zoom level
+     * exceeds the imagery's native LOD for the area and the service 404s).
+     * Failed tiles are retried after kFailedRetryMs in case it was a
+     * transient network error instead.
+     */
+    bool isFailedRecently(int z, int x, int y) const;
 
     /** Async fetch into the disk cache. No-op if cached or already in flight. */
     void fetch(int z, int x, int y);
@@ -55,10 +64,13 @@ signals:
 private:
     QString tilePath(int z, int x, int y) const;
 
+    static constexpr qint64 kFailedRetryMs = 60 * 1000;
+
     QNetworkAccessManager* nam_ = nullptr;
     QString cache_root_;
     QCache<QString, QPixmap> memory_cache_{512};
     QSet<QString> inflight_;
+    QHash<QString, qint64> failed_;  // tile key -> wall ms of last failure
 };
 
 }  // namespace f2c_cpp

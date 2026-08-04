@@ -38,6 +38,17 @@ SatelliteMapWidget::SatelliteMapWidget(TileService* tiles, QWidget* parent)
     setFocusPolicy(Qt::ClickFocus);
     connect(tiles_, &TileService::tileReady, this,
             [this](int, int, int) { update(); });
+    // Overzoom fallback chain: when a tile fails (usually because the zoom
+    // exceeds the imagery's native LOD), pull its parent so paintTiles()
+    // always has an ancestor to scale up. Cascades until a level that
+    // exists; bounded by kMinZoom and the service's failed-tile memory.
+    connect(tiles_, &TileService::tileFailed, this,
+            [this](int z, int x, int y) {
+                if (z > kMinZoom) {
+                    tiles_->fetch(z - 1, x >> 1, y >> 1);
+                }
+                update();
+            });
 }
 
 // ---- View state -------------------------------------------------------------
@@ -311,6 +322,7 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
     const int ty1 = int(std::floor((top + height()) / kTileSize));
 
     painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     for (int ty = ty0; ty <= ty1; ++ty) {
         if (ty < 0 || ty >= n) {
             continue;
@@ -322,14 +334,37 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
             const QPixmap tile = tiles_->cachedTile(zoom_, wrapped, ty);
             if (!tile.isNull()) {
                 painter.drawPixmap(dest, tile);
-            } else {
+                continue;
+            }
+            // Overzoom / not-yet-fetched fallback: draw the matching
+            // sub-rect of the nearest cached ancestor scaled up, so the
+            // map never blanks past the imagery's native LOD.
+            bool drew_fallback = false;
+            for (int up = 1; up <= 7 && zoom_ - up >= kMinZoom; ++up) {
+                const int az = zoom_ - up;
+                const int ax = wrapped >> up;
+                const int ay = ty >> up;
+                const QPixmap ancestor = tiles_->cachedTile(az, ax, ay);
+                if (ancestor.isNull()) {
+                    continue;
+                }
+                const int sub = kTileSize >> up;
+                const QRectF source((wrapped - (ax << up)) * sub,
+                                    (ty - (ay << up)) * sub, sub, sub);
+                painter.drawPixmap(
+                    QRectF(dest, QSizeF(kTileSize, kTileSize)), ancestor,
+                    source);
+                drew_fallback = true;
+                break;
+            }
+            if (!drew_fallback) {
                 painter.fillRect(QRectF(dest, QSizeF(kTileSize, kTileSize)),
                                  QColor(0x14, 0x17, 0x1b));
                 painter.setPen(QColor(0x22, 0x27, 0x2d));
                 painter.drawRect(
                     QRectF(dest, QSizeF(kTileSize - 1, kTileSize - 1)));
-                tiles_->fetch(zoom_, wrapped, ty);
             }
+            tiles_->fetch(zoom_, wrapped, ty);
         }
     }
     painter.setRenderHint(QPainter::Antialiasing, true);
