@@ -946,6 +946,9 @@ void AppShellWindow::goToStage6() {
     if (!stage6_) {
         return;
     }
+    // Seed the top-bar battery pill from the dashboard's last sample —
+    // same reasoning as the Stage 4/5 transitions.
+    stage6_->setTopBatteryState(last_battery_pct_, last_battery_stale_);
     stack_->setCurrentWidget(stage6_);
 }
 
@@ -4133,6 +4136,9 @@ void AppShellWindow::onDashboardBatteryStateChanged(double pct, bool stale) {
     }
     if (stage5_ && stack_ && stack_->currentWidget() == stage5_) {
         stage5_->setTopBatteryState(pct, stale);
+    }
+    if (stage6_ && stack_ && stack_->currentWidget() == stage6_) {
+        stage6_->setTopBatteryState(pct, stale);
     }
 }
 

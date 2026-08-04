@@ -1,9 +1,18 @@
 /**
  * @file satellite_screen.hpp
- * @brief Stage 6 — Satellite Coverage: office/onsite ROI planning on Esri
- *        imagery, robot-anchored ROI export, autonomous coverage launch, and
- *        live mission overlay. Self-contained like the other staged screens;
- *        AppShellWindow only routes navigation and dark mode.
+ * @brief Stage 6 — ROI Coverage planning + autonomous mission screen.
+ *
+ * Two canvas modes on one screen: Satellite (Esri imagery) and Measured
+ * (CAD grid, tape-measurement planning). Opened by the Start New Scan flow
+ * (ScanSetupDialog -> MissionMetadataDialog) or the Dashboard "Plan Job"
+ * card (planning-only trim).
+ *
+ * No Figma frame exists for this surface. Construction follows the staged
+ * screens' vocabulary: 49px top bar with the Stage 4/5 SVG back button and
+ * makePlannerStatusItem-style pills (Battery / BOT / state / motors chip),
+ * a 320px LEFT rail of cards, zinc palette (#18181b cards, #27272a inputs,
+ * #00BC7D accent) in dark mode per MissionMetadataDialog, tokens-light
+ * equivalents in light mode, Arimo per-element typography throughout.
  *
  * Robot-side counterpart: `robot_autonomous_coverage.launch.py` on the
  * pilot_ws `spline_tracing` line (see feature/ocu-satellite-roi for the
@@ -53,6 +62,10 @@ public:
     /** Office preplanning trim: mission/teleop hidden, Send unavailable. */
     void configureForPlanning();
 
+    /** Mirrors the Dashboard MQTT battery sample onto the top-bar pill
+        (same contract as ExplorationScreen/PlannerScreen). */
+    void setTopBatteryState(double pct, bool stale);
+
     /** True while a mission launch is active (blocks app close, like scans). */
     bool missionActive() const;
     /** Safe teardown for app close: autonomy off, disarm, kill launches. */
@@ -67,12 +80,13 @@ protected:
 
 private:
     QWidget* buildTopBar();
-    QWidget* buildToolbar();
-    QWidget* buildSidePanel();
-    QWidget* buildPlanCard();
-    QWidget* buildMissionCard();
-    QWidget* buildTeleopCard();
-    void applyStyles();
+    QWidget* buildLeftRail();
+    QWidget* buildPlanCard(QWidget* parent);
+    QWidget* buildMissionCard(QWidget* parent);
+    QWidget* buildTeleopCard(QWidget* parent);
+    QWidget* buildLogCard(QWidget* parent);
+    void applyTheme();
+    void applyModeVisibility();
 
     void refreshJobsCombo(const QString& select_id = QString());
     void loadJob(const Job& job);
@@ -86,10 +100,11 @@ private:
     void onEstop();
 
     void publishTeleopTick();
-    void updateLinkPill();
+    void updateBotPill();
     void updateStatePill();
+    void setBotPill(const QString& text, const QColor& color);
     void setStatePill(const QString& text, const QColor& color);
-    void setLinkPill(const QString& text, const QColor& color);
+    void setMotorsChip(const QString& text, const QColor& color);
     void appendLog(const QString& line);
     bool confirmDialog(const QString& title, const QString& body,
                        const QString& accept_label);
@@ -104,18 +119,23 @@ private:
     QString current_job_id_;
 
     // Top bar.
-    QLabel* link_pill_dot_ = nullptr;
-    QLabel* link_pill_text_ = nullptr;
-    QLabel* state_pill_dot_ = nullptr;
-    QLabel* state_pill_text_ = nullptr;
-
-    // Toolbar.
-    QComboBox* jobs_combo_ = nullptr;
-    QLineEdit* address_edit_ = nullptr;
+    QLabel* lbl_title_ = nullptr;
+    QLabel* lbl_top_battery_ = nullptr;
+    QLabel* lbl_bot_dot_ = nullptr;
+    QLabel* lbl_bot_text_ = nullptr;
+    QLabel* lbl_state_dot_ = nullptr;
+    QLabel* lbl_state_text_ = nullptr;
+    QWidget* motors_chip_ = nullptr;
+    QLabel* lbl_motors_dot_ = nullptr;
+    QLabel* lbl_motors_text_ = nullptr;
 
     // Plan card.
+    QComboBox* jobs_combo_ = nullptr;
+    QWidget* jobs_combo_row_ = nullptr;
     QLineEdit* job_name_ = nullptr;
     QLineEdit* job_address_ = nullptr;
+    QWidget* geo_tools_host_ = nullptr;  // address search + download (geo-only)
+    QLineEdit* address_edit_ = nullptr;
     QPushButton* add_roi_button_ = nullptr;
     QPushButton* place_robot_button_ = nullptr;
     QDoubleSpinBox* roi_length_ = nullptr;
@@ -123,8 +143,10 @@ private:
     QDoubleSpinBox* roi_heading_ = nullptr;
     QDoubleSpinBox* robot_heading_ = nullptr;
     QLabel* robot_pos_label_ = nullptr;
+    QPushButton* save_button_ = nullptr;
 
     // Mission card.
+    QWidget* mission_card_ = nullptr;
     QLabel* reason_label_ = nullptr;
     QProgressBar* coverage_bar_ = nullptr;
     QLabel* segment_label_ = nullptr;
@@ -136,6 +158,7 @@ private:
     QPushButton* estop_button_ = nullptr;
 
     // Teleop card.
+    QWidget* teleop_card_ = nullptr;
     QCheckBox* teleop_check_ = nullptr;
     QSlider* teleop_speed_ = nullptr;
     QLabel* teleop_speed_label_ = nullptr;
@@ -151,11 +174,6 @@ private:
 
     PlanMode plan_mode_ = PlanMode::Satellite;
     bool planning_only_ = false;
-    QWidget* mission_card_ = nullptr;
-    QWidget* teleop_card_ = nullptr;
-    QWidget* geo_tools_host_ = nullptr;  // address search + download (geo-only)
-
-    void applyModeVisibility();
 };
 
 }  // namespace f2c_cpp

@@ -1,3 +1,15 @@
+/**
+ * @file satellite_screen.cpp
+ * @brief Implementation of Stage 6 — ROI Coverage planning + mission.
+ *
+ * Construction mirrors the staged screens: file-local SVG/pill factories
+ * (same shapes as exploration_screen.cpp / planner_screen.cpp), named
+ * pixel constants, per-element Arimo styling, object-name-scoped QSS only
+ * (no bare-selector cascading rules). Dark palette is the zinc family the
+ * modals and planner use (#18181b / #27272a / #3f3f47, #00BC7D accent);
+ * light mode follows the dashboard's white-card language.
+ */
+
 #include "satellite_screen.hpp"
 
 #include "satellite_download_dialog.hpp"
@@ -7,7 +19,6 @@
 #include "satellite_ros_link.hpp"
 #include "satellite_tile_service.hpp"
 #include "settings_constants.hpp"
-#include "ui_theme_constants.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -15,16 +26,19 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSlider>
+#include <QSvgRenderer>
 #include <QTimer>
 #include <QUuid>
 #include <QVBoxLayout>
@@ -35,36 +49,174 @@ namespace f2c_cpp {
 
 namespace {
 
+// ---- Layout constants (Stage 4/5 conventions) -------------------------------
+constexpr int kTopBarHeight = 49;
+constexpr int kTopStatusItemHeight = 20;
+constexpr int kTopStatusBatteryMinWidth = 52;
+constexpr int kTopStatusPillMinWidth = 69;
+constexpr int kTopStatusMotorsChipMinWidth = 96;
+constexpr int kTopStatusMotorsChipHeight = 20;
+constexpr int kLeftRailWidth = 320;
+constexpr int kSendButtonHeight = 44;
+constexpr int kEstopButtonHeight = 48;
+
 constexpr const char* kSatViewLatKey = "satellite/center_lat";
 constexpr const char* kSatViewLonKey = "satellite/center_lon";
 constexpr const char* kSatViewZoomKey = "satellite/zoom";
-constexpr const char* kSatLastJobKey = "satellite/last_job";
 
 constexpr double kDefaultLat = 39.5;
 constexpr double kDefaultLon = -98.35;
 constexpr int kDefaultZoom = 5;
 constexpr double kTeleopAngularSpeed = 1.0;  // rad/s
 
+// ---- Palette (dark = zinc family per MissionMetadataDialog / planner) -------
+constexpr const char* kAccent = "#00BC7D";
+constexpr const char* kAccentHover = "#00A86D";
+constexpr const char* kEstopRed = "#E7000B";
+constexpr const char* kEstopRedHover = "#C10007";
+constexpr const char* kAmber = "#F0B100";
+
+QString mutedColor(bool dark) {
+    return dark ? QStringLiteral("#9F9FA9") : QStringLiteral("#6B7280");
+}
+
+QString textColor(bool dark) {
+    return dark ? QStringLiteral("#FAFAFA") : QStringLiteral("#1E2939");
+}
+
+/** Pill text style — the Stage 4/5 kInitialStatus14 shape. */
+QString statusTextStyle(const QString& color) {
+    return QStringLiteral(
+               "font-family: 'Arimo'; font-size: 14px; font-weight: 400; "
+               "color: %1;")
+        .arg(color);
+}
+
+/** SVG loader with stroke AND fill retint (superset of the screens'
+    loadSvgPixmap — the status dot is fill-based, the icons stroke-based). */
+QPixmap loadTintedSvg(const QString& resource_path, int w, int h,
+                      const QString& color = QString()) {
+    QFile file(resource_path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return QPixmap();
+    }
+    QByteArray data = file.readAll();
+    file.close();
+    if (!color.isEmpty()) {
+        for (const QByteArray needle : {QByteArrayLiteral("stroke=\""),
+                                        QByteArrayLiteral("fill=\"")}) {
+            int index = data.indexOf(needle);
+            while (index >= 0) {
+                const int value_start = index + needle.size();
+                const int value_end = data.indexOf('"', value_start);
+                if (value_end <= value_start) {
+                    break;
+                }
+                const QByteArray value =
+                    data.mid(value_start, value_end - value_start);
+                if (value != "none") {
+                    data = data.left(value_start) + color.toUtf8() +
+                           data.mid(value_end);
+                }
+                index = data.indexOf(needle, value_start);
+            }
+        }
+    }
+    QSvgRenderer renderer(data);
+    if (!renderer.isValid()) {
+        return QPixmap();
+    }
+    QPixmap pixmap(w, h);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    renderer.render(&painter);
+    return pixmap;
+}
+
+QLabel* makeStatusIconLabel(QWidget* parent, const QString& resource_path,
+                            int size, const QString& color = QString()) {
+    auto* label = new QLabel(parent);
+    label->setFixedSize(size, size);
+    label->setAlignment(Qt::AlignCenter);
+    label->setAttribute(Qt::WA_TranslucentBackground, true);
+    label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    label->setStyleSheet(QStringLiteral("background: transparent;"));
+    label->setPixmap(loadTintedSvg(resource_path, size, size, color));
+    return label;
+}
+
+QLabel* makeStatusTextLabel(QWidget* parent, const QString& text,
+                            const QString& style) {
+    auto* label = new QLabel(text, parent);
+    label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    label->setAttribute(Qt::WA_TranslucentBackground, true);
+    label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    label->setStyleSheet(style + QStringLiteral(" background: transparent;"));
+    return label;
+}
+
+/** Stage 4/5 status pill: icon + text with a fixed minimum width. */
+QWidget* makeStatusItem(QWidget* parent, const QString& resource_path,
+                        int icon_size, const QString& text, int minimum_width,
+                        const QString& text_style, QLabel** out_icon,
+                        QLabel** out_label) {
+    auto* item = new QWidget(parent);
+    item->setFixedHeight(kTopStatusItemHeight);
+    item->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    if (minimum_width > 0) {
+        item->setMinimumWidth(minimum_width);
+    }
+    auto* layout = new QHBoxLayout(item);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+    auto* icon = makeStatusIconLabel(item, resource_path, icon_size);
+    layout->addWidget(icon, 0, Qt::AlignVCenter);
+    auto* label = makeStatusTextLabel(item, text, text_style);
+    layout->addWidget(label, 0, Qt::AlignVCenter);
+    layout->addStretch(1);
+    if (out_icon) {
+        *out_icon = icon;
+    }
+    if (out_label) {
+        *out_label = label;
+    }
+    return item;
+}
+
+/** Rail-card section header: Arimo 700 12, letter-spaced, muted. */
+QLabel* makeCardHeader(const QString& text, QWidget* parent) {
+    auto* label = new QLabel(text, parent);
+    label->setObjectName("SatCardHeader");
+    return label;
+}
+
+/** Field row: muted 12px label left, field right — the rail's form shape. */
+QWidget* makeFieldRow(const QString& label_text, QWidget* field,
+                      QWidget* parent) {
+    auto* row = new QWidget(parent);
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+    auto* label = new QLabel(label_text, row);
+    label->setObjectName("SatFieldLabel");
+    label->setMinimumWidth(104);
+    layout->addWidget(label, 0, Qt::AlignVCenter);
+    layout->addWidget(field, 1);
+    return row;
+}
+
 QDoubleSpinBox* makeSpin(double min, double max, double step, int decimals,
                          const QString& suffix) {
     auto* spin = new QDoubleSpinBox;
+    spin->setObjectName("SatInput");
     spin->setRange(min, max);
     spin->setSingleStep(step);
     spin->setDecimals(decimals);
     spin->setSuffix(suffix);
     spin->setKeyboardTracking(false);
+    spin->setFixedHeight(36);
     return spin;
-}
-
-void stylePillPair(QLabel* dot, QLabel* text, const QString& label,
-                   const QColor& color) {
-    dot->setStyleSheet(QStringLiteral(
-        "background: %1; border-radius: 4px; min-width: 8px; max-width: 8px; "
-        "min-height: 8px; max-height: 8px;").arg(color.name()));
-    text->setText(label);
-    text->setStyleSheet(QStringLiteral(
-        "font-family: 'Arimo'; font-size: 14px; font-weight: 600; color: %1;")
-        .arg(color.name()));
 }
 
 }  // namespace
@@ -82,17 +234,16 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
     root->addWidget(buildTopBar());
-    root->addWidget(buildToolbar());
 
     auto* content = new QWidget(this);
     auto* content_layout = new QHBoxLayout(content);
     content_layout->setContentsMargins(0, 0, 0, 0);
     content_layout->setSpacing(0);
+    content_layout->addWidget(buildLeftRail());
     content_layout->addWidget(map_, 1);
-    content_layout->addWidget(buildSidePanel());
     root->addWidget(content, 1);
 
-    // ---- Map <-> panel sync ----
+    // ---- Map <-> rail sync ----
     connect(map_, &SatelliteMapWidget::roiChanged, this, [this] {
         const RoiRect roi = map_->roi();
         for (QDoubleSpinBox* spin : {roi_length_, roi_width_, roi_heading_}) {
@@ -139,6 +290,15 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 appendLog(QStringLiteral("[axis] %1%2")
                               .arg(ok ? QString() : QStringLiteral("FAILED: "))
                               .arg(detail));
+                if (ok && detail.contains(QStringLiteral("state now"))) {
+                    if (detail.endsWith(QStringLiteral("8"))) {
+                        setMotorsChip(QStringLiteral("MOTORS ARMED"),
+                                      QColor(kAccent));
+                    } else if (detail.endsWith(QStringLiteral("1"))) {
+                        setMotorsChip(QStringLiteral("MOTORS DISARMED"),
+                                      QColor(mutedColor(dark_mode_)));
+                    }
+                }
             });
 
     // ---- Mission lifecycle ----
@@ -155,12 +315,14 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 estop_button_->setEnabled(active);
                 add_roi_button_->setEnabled(!active);
                 place_robot_button_->setEnabled(!active);
+                save_button_->setEnabled(!active);
                 if (!active) {
                     autonomy_on_ = false;
                     autonomy_button_->setText(QStringLiteral("Start Autonomy"));
                     map_->clearMissionAnchor();
                     map_->clearTelemetry();
-                    setStatePill(QStringLiteral("NO MISSION"), satpal::border());
+                    setStatePill(QStringLiteral("NO MISSION"),
+                                 QColor(mutedColor(dark_mode_)));
                     reason_label_->clear();
                     coverage_bar_->setVisible(false);
                 }
@@ -175,11 +337,12 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     slow_timer_ = new QTimer(this);
     slow_timer_->setInterval(1000);
     connect(slow_timer_, &QTimer::timeout, this,
-            &SatelliteScreen::updateLinkPill);
+            &SatelliteScreen::updateBotPill);
     slow_timer_->start();
 
-    setStatePill(QStringLiteral("NO MISSION"), satpal::border());
-    setLinkPill(QStringLiteral("ROS OFFLINE"), satpal::border());
+    setStatePill(QStringLiteral("NO MISSION"), QColor(mutedColor(true)));
+    setBotPill(QStringLiteral("BOT —"), QColor(mutedColor(true)));
+    setMotorsChip(QStringLiteral("MOTORS —"), QColor(mutedColor(true)));
     send_button_->setEnabled(true);
     end_button_->setEnabled(false);
     autonomy_button_->setEnabled(false);
@@ -187,7 +350,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     disarm_button_->setEnabled(false);
     estop_button_->setEnabled(false);
 
-    applyStyles();
+    applyTheme();
 
     QString ros_error;
     if (ros_->start(&ros_error)) {
@@ -202,8 +365,9 @@ SatelliteScreen::~SatelliteScreen() {
     settings.setValue(kSatViewLatKey, map_->centerLat());
     settings.setValue(kSatViewLonKey, map_->centerLon());
     settings.setValue(kSatViewZoomKey, map_->zoom());
-    settings.setValue(kSatLastJobKey, current_job_id_);
 }
+
+// ---- Public API ---------------------------------------------------------------
 
 bool SatelliteScreen::missionActive() const {
     return mission_->missionActive();
@@ -218,26 +382,9 @@ void SatelliteScreen::shutdownMission() {
     mission_->teardownMission();
 }
 
-void SatelliteScreen::showEvent(QShowEvent* event) {
-    QWidget::showEvent(event);
-    if (!view_initialized_) {
-        view_initialized_ = true;
-        // Restore the last map view only when nothing was configured —
-        // configureForScan(job) already centered on the plan's ROI.
-        if (current_job_id_.isEmpty() && !map_->roi().valid) {
-            QSettings settings(kSettingsOrgName, kSettingsAppName);
-            map_->setView(
-                settings.value(kSatViewLatKey, kDefaultLat).toDouble(),
-                settings.value(kSatViewLonKey, kDefaultLon).toDouble(),
-                settings.value(kSatViewZoomKey, kDefaultZoom).toInt());
-        }
-    }
-}
-
 void SatelliteScreen::configureForScan(const Job& job) {
     planning_only_ = false;
-    plan_mode_ =
-        job.isMeasured() ? PlanMode::Measured : PlanMode::Satellite;
+    plan_mode_ = job.isMeasured() ? PlanMode::Measured : PlanMode::Satellite;
     refreshJobsCombo(job.id);  // selects + loads the plan
     applyModeVisibility();
 }
@@ -260,10 +407,22 @@ void SatelliteScreen::configureForPlanning() {
 void SatelliteScreen::applyModeVisibility() {
     const bool measured = plan_mode_ == PlanMode::Measured;
     map_->setImageryEnabled(!measured);
+    if (lbl_title_) {
+        lbl_title_->setText(planning_only_
+                                ? QStringLiteral("Plan Job")
+                                : (measured
+                                       ? QStringLiteral("Measured ROI Scan")
+                                       : QStringLiteral("Satellite ROI Scan")));
+    }
     if (geo_tools_host_) {
         // Address search / tile download are geographic tools — meaningless
         // on the measured (grid) canvas.
         geo_tools_host_->setVisible(!measured);
+    }
+    if (jobs_combo_row_) {
+        // In the scan flow the plan was already chosen in ScanSetupDialog;
+        // the in-screen selector is an office (planning-only) affordance.
+        jobs_combo_row_->setVisible(planning_only_);
     }
     if (mission_card_) {
         mission_card_->setVisible(!planning_only_);
@@ -273,20 +432,73 @@ void SatelliteScreen::applyModeVisibility() {
     }
 }
 
-// ---- UI construction --------------------------------------------------------
+void SatelliteScreen::setTopBatteryState(double pct, bool stale) {
+    if (!lbl_top_battery_) {
+        return;
+    }
+    if (stale || std::isnan(pct)) {
+        lbl_top_battery_->setText(QStringLiteral("—%"));
+        lbl_top_battery_->setStyleSheet(
+            statusTextStyle(mutedColor(dark_mode_)) +
+            QStringLiteral(" background: transparent;"));
+        return;
+    }
+    QString color = textColor(dark_mode_);
+    if (pct < 10.0) {
+        color = QLatin1String(kEstopRed);
+    } else if (pct < 20.0) {
+        color = QLatin1String(kAmber);
+    }
+    lbl_top_battery_->setText(QStringLiteral("%1%").arg(qRound(pct)));
+    lbl_top_battery_->setStyleSheet(
+        statusTextStyle(color) + QStringLiteral(" background: transparent;"));
+}
+
+void SatelliteScreen::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    if (!view_initialized_) {
+        view_initialized_ = true;
+        // Restore the last map view only when nothing was configured —
+        // configureForScan(job) already centered on the plan's ROI.
+        if (current_job_id_.isEmpty() && !map_->roi().valid) {
+            QSettings settings(kSettingsOrgName, kSettingsAppName);
+            map_->setView(
+                settings.value(kSatViewLatKey, kDefaultLat).toDouble(),
+                settings.value(kSatViewLonKey, kDefaultLon).toDouble(),
+                settings.value(kSatViewZoomKey, kDefaultZoom).toInt());
+        }
+    }
+}
+
+// ---- UI construction ------------------------------------------------------------
 
 QWidget* SatelliteScreen::buildTopBar() {
     auto* top_bar = new QWidget(this);
     top_bar->setObjectName("SatTopBar");
-    top_bar->setFixedHeight(49);
+    top_bar->setFixedHeight(kTopBarHeight);
     auto* layout = new QHBoxLayout(top_bar);
     layout->setContentsMargins(24, 0, 24, 0);
     layout->setSpacing(8);
 
-    auto* back = new QPushButton(QStringLiteral("‹  Dashboard"), top_bar);
+    // Back button — the Stage 4/5 SVG construction (back_vector_a/b).
+    auto* back = new QPushButton(top_bar);
     back->setObjectName("SatBackButton");
     back->setCursor(Qt::PointingHandCursor);
-    back->setFixedHeight(28);
+    back->setFixedSize(40, 28);
+    auto* back_layout = new QHBoxLayout(back);
+    back_layout->setContentsMargins(12, 6, 12, 6);
+    back_layout->setSpacing(0);
+    auto* back_icon = new QWidget(back);
+    back_icon->setFixedSize(16, 16);
+    auto* back_head = makeStatusIconLabel(
+        back_icon, QStringLiteral(":/assets/exploration/back_vector_a.svg"), 11);
+    back_head->setFixedSize(6, 11);
+    back_head->move(3, 2);
+    auto* back_line = makeStatusIconLabel(
+        back_icon, QStringLiteral(":/assets/exploration/back_vector_b.svg"), 11);
+    back_line->setFixedSize(11, 2);
+    back_line->move(3, 7);
+    back_layout->addWidget(back_icon, 0, Qt::AlignCenter);
     connect(back, &QPushButton::clicked, this, [this] {
         if (mission_->missionActive()) {
             appendLog(QStringLiteral(
@@ -297,166 +509,176 @@ QWidget* SatelliteScreen::buildTopBar() {
     });
     layout->addWidget(back, 0, Qt::AlignVCenter);
 
-    auto* title = new QLabel(QStringLiteral("Satellite Coverage"), top_bar);
-    title->setObjectName("SatTitle");
-    layout->addWidget(title, 0, Qt::AlignVCenter);
+    lbl_title_ = new QLabel(QStringLiteral("Satellite ROI Scan"), top_bar);
+    lbl_title_->setObjectName("SatTitle");
+    layout->addWidget(lbl_title_, 0, Qt::AlignVCenter);
     layout->addStretch(1);
 
-    auto makePill = [top_bar](QLabel** dot_out, QLabel** text_out) {
-        auto* host = new QWidget(top_bar);
-        auto* pill_layout = new QHBoxLayout(host);
-        pill_layout->setContentsMargins(0, 0, 0, 0);
-        pill_layout->setSpacing(8);
-        auto* dot = new QLabel(host);
-        dot->setFixedSize(8, 8);
-        auto* text = new QLabel(host);
-        pill_layout->addWidget(dot, 0, Qt::AlignVCenter);
-        pill_layout->addWidget(text, 0, Qt::AlignVCenter);
-        *dot_out = dot;
-        *text_out = text;
-        return host;
-    };
-    layout->addWidget(makePill(&link_pill_dot_, &link_pill_text_));
-    layout->addSpacing(16);
-    layout->addWidget(makePill(&state_pill_dot_, &state_pill_text_));
+    // Status pills (right-aligned, 24px spacing like Stage 4/5).
+    auto* status_host = new QWidget(top_bar);
+    status_host->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    auto* status_layout = new QHBoxLayout(status_host);
+    status_layout->setContentsMargins(0, 0, 0, 0);
+    status_layout->setSpacing(24);
+
+    const QString muted_style = statusTextStyle(mutedColor(true));
+    status_layout->addWidget(makeStatusItem(
+        status_host, QStringLiteral(":/assets/missionplanner/battery.svg"), 16,
+        QStringLiteral("—%"), kTopStatusBatteryMinWidth, muted_style, nullptr,
+        &lbl_top_battery_));
+    status_layout->addWidget(makeStatusItem(
+        status_host, QStringLiteral(":/assets/missionplanner/status_dot.svg"),
+        8, QStringLiteral("BOT —"), kTopStatusPillMinWidth, muted_style,
+        &lbl_bot_dot_, &lbl_bot_text_));
+    status_layout->addWidget(makeStatusItem(
+        status_host, QStringLiteral(":/assets/missionplanner/status_dot.svg"),
+        8, QStringLiteral("NO MISSION"), kTopStatusPillMinWidth, muted_style,
+        &lbl_state_dot_, &lbl_state_text_));
+
+    // Motors chip — the Stage 4/5 96x20 bordered chip.
+    motors_chip_ = new QWidget(status_host);
+    motors_chip_->setObjectName("SatMotorsChip");
+    motors_chip_->setFixedSize(kTopStatusMotorsChipMinWidth,
+                               kTopStatusMotorsChipHeight);
+    motors_chip_->setAttribute(Qt::WA_StyledBackground, true);
+    auto* motors_layout = new QHBoxLayout(motors_chip_);
+    motors_layout->setContentsMargins(9, 1, 9, 1);
+    motors_layout->setSpacing(6);
+    lbl_motors_dot_ = makeStatusIconLabel(
+        motors_chip_, QStringLiteral(":/assets/missionplanner/status_dot.svg"),
+        6, mutedColor(true));
+    motors_layout->addWidget(lbl_motors_dot_, 0, Qt::AlignVCenter);
+    lbl_motors_text_ = makeStatusTextLabel(
+        motors_chip_, QStringLiteral("MOTORS —"),
+        QStringLiteral("font-family: 'Arimo'; font-size: 10px; "
+                       "font-weight: 700; letter-spacing: 0.5px; color: %1;")
+            .arg(mutedColor(true)));
+    motors_layout->addWidget(lbl_motors_text_, 0, Qt::AlignVCenter);
+    status_layout->addWidget(motors_chip_);
+
+    layout->addWidget(status_host, 0, Qt::AlignVCenter);
     return top_bar;
 }
 
-QWidget* SatelliteScreen::buildToolbar() {
-    auto* toolbar = new QWidget(this);
-    toolbar->setObjectName("SatToolbar");
-    toolbar->setFixedHeight(52);
-    auto* layout = new QHBoxLayout(toolbar);
-    layout->setContentsMargins(24, 8, 24, 8);
+QWidget* SatelliteScreen::buildLeftRail() {
+    auto* rail_content = new QWidget;
+    rail_content->setObjectName("SatRail");
+    auto* layout = new QVBoxLayout(rail_content);
+    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setSpacing(12);
+    layout->addWidget(buildPlanCard(rail_content));
+    mission_card_ = buildMissionCard(rail_content);
+    layout->addWidget(mission_card_);
+    teleop_card_ = buildTeleopCard(rail_content);
+    layout->addWidget(teleop_card_);
+    layout->addWidget(buildLogCard(rail_content));
+    layout->addStretch(1);
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setObjectName("SatRailScroll");
+    scroll->setWidget(rail_content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setFixedWidth(kLeftRailWidth);
+    return scroll;
+}
+
+QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
+    auto* card = new QWidget(parent);
+    card->setObjectName("SatCard");
+    card->setAttribute(Qt::WA_StyledBackground, true);
+    auto* layout = new QVBoxLayout(card);
+    layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
+    layout->addWidget(makeCardHeader(QStringLiteral("PLAN"), card));
 
-    auto* jobs_label = new QLabel(QStringLiteral("Job"), toolbar);
-    jobs_label->setObjectName("SatMuted");
-    layout->addWidget(jobs_label);
-
-    jobs_combo_ = new QComboBox(toolbar);
-    jobs_combo_->setMinimumWidth(220);
+    // Plan selector — office (planning-only) affordance.
+    jobs_combo_ = new QComboBox(card);
+    jobs_combo_->setObjectName("SatInput");
+    jobs_combo_->setFixedHeight(36);
     connect(jobs_combo_, QOverload<int>::of(&QComboBox::activated), this,
             [this](int index) {
                 const QString id = jobs_combo_->itemData(index).toString();
                 for (const Job& job : jobs_) {
                     if (job.id == id) {
+                        plan_mode_ = job.isMeasured() ? PlanMode::Measured
+                                                      : PlanMode::Satellite;
                         loadJob(job);
+                        applyModeVisibility();
                         return;
                     }
                 }
                 newJob();
             });
-    layout->addWidget(jobs_combo_);
+    jobs_combo_row_ = makeFieldRow(QStringLiteral("Saved plan"), jobs_combo_, card);
+    layout->addWidget(jobs_combo_row_);
 
-    auto* new_button = new QPushButton(QStringLiteral("New"), toolbar);
-    connect(new_button, &QPushButton::clicked, this, &SatelliteScreen::newJob);
-    layout->addWidget(new_button);
+    job_name_ = new QLineEdit(card);
+    job_name_->setObjectName("SatInput");
+    job_name_->setPlaceholderText(QStringLiteral("Building / job name"));
+    job_name_->setFixedHeight(36);
+    layout->addWidget(job_name_);
 
-    auto* save_button = new QPushButton(QStringLiteral("Save Job"), toolbar);
-    connect(save_button, &QPushButton::clicked, this,
-            &SatelliteScreen::saveJob);
-    layout->addWidget(save_button);
-    layout->addSpacing(16);
+    job_address_ = new QLineEdit(card);
+    job_address_->setObjectName("SatInput");
+    job_address_->setPlaceholderText(QStringLiteral("Address (reference)"));
+    job_address_->setFixedHeight(36);
+    layout->addWidget(job_address_);
 
-    geo_tools_host_ = new QWidget(toolbar);
-    auto* geo_layout = new QHBoxLayout(geo_tools_host_);
+    // Geographic tools (satellite canvas only).
+    geo_tools_host_ = new QWidget(card);
+    auto* geo_layout = new QVBoxLayout(geo_tools_host_);
     geo_layout->setContentsMargins(0, 0, 0, 0);
     geo_layout->setSpacing(8);
-
-    address_edit_ = new QLineEdit(geo_tools_host_);
-    address_edit_->setPlaceholderText(
-        QStringLiteral("Address or \"lat, lon\""));
-    address_edit_->setMinimumWidth(240);
+    auto* search_row = new QWidget(geo_tools_host_);
+    auto* search_layout = new QHBoxLayout(search_row);
+    search_layout->setContentsMargins(0, 0, 0, 0);
+    search_layout->setSpacing(8);
+    address_edit_ = new QLineEdit(search_row);
+    address_edit_->setObjectName("SatInput");
+    address_edit_->setPlaceholderText(QStringLiteral("Find address or \"lat, lon\""));
+    address_edit_->setFixedHeight(36);
     connect(address_edit_, &QLineEdit::returnPressed, this,
             &SatelliteScreen::onGoToAddress);
-    geo_layout->addWidget(address_edit_, 1);
-
-    auto* go = new QPushButton(QStringLiteral("Go"), geo_tools_host_);
+    search_layout->addWidget(address_edit_, 1);
+    auto* go = new QPushButton(QStringLiteral("Go"), search_row);
+    go->setObjectName("SatButton");
+    go->setFixedHeight(36);
+    go->setCursor(Qt::PointingHandCursor);
     connect(go, &QPushButton::clicked, this, &SatelliteScreen::onGoToAddress);
-    geo_layout->addWidget(go);
-
+    search_layout->addWidget(go);
+    geo_layout->addWidget(search_row);
     auto* download =
         new QPushButton(QStringLiteral("Download Area…"), geo_tools_host_);
+    download->setObjectName("SatButton");
+    download->setFixedHeight(36);
+    download->setCursor(Qt::PointingHandCursor);
     connect(download, &QPushButton::clicked, this,
             &SatelliteScreen::onDownloadArea);
     geo_layout->addWidget(download);
+    layout->addWidget(geo_tools_host_);
 
-    layout->addWidget(geo_tools_host_, 1);
-    return toolbar;
-}
-
-QWidget* SatelliteScreen::buildSidePanel() {
-    auto* content = new QWidget;
-    content->setObjectName("SatPanel");
-    auto* layout = new QVBoxLayout(content);
-    layout->setContentsMargins(12, 12, 12, 12);
-    layout->setSpacing(12);
-    layout->addWidget(buildPlanCard());
-    mission_card_ = buildMissionCard();
-    layout->addWidget(mission_card_);
-    teleop_card_ = buildTeleopCard();
-    layout->addWidget(teleop_card_);
-
-    log_view_ = new QPlainTextEdit(content);
-    log_view_->setObjectName("SatLog");
-    log_view_->setReadOnly(true);
-    log_view_->setMaximumBlockCount(600);
-    log_view_->setFixedHeight(110);
-    layout->addWidget(log_view_);
-    layout->addStretch(1);
-
-    auto* scroll = new QScrollArea(this);
-    scroll->setObjectName("SatPanelScroll");
-    scroll->setWidget(content);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setFixedWidth(356);
-    return scroll;
-}
-
-QWidget* SatelliteScreen::buildPlanCard() {
-    auto* card = new QWidget;
-    card->setObjectName("SatCard");
-    auto* layout = new QVBoxLayout(card);
-    layout->setContentsMargins(16, 14, 16, 14);
-    layout->setSpacing(8);
-
-    auto* title = new QLabel(QStringLiteral("PLAN"), card);
-    title->setObjectName("SatCardTitle");
-    layout->addWidget(title);
-
-    job_name_ = new QLineEdit(card);
-    job_name_->setPlaceholderText(QStringLiteral("Building / job name"));
-    job_address_ = new QLineEdit(card);
-    job_address_->setPlaceholderText(QStringLiteral("Address (reference)"));
-    layout->addWidget(job_name_);
-    layout->addWidget(job_address_);
-
-    auto* buttons = new QHBoxLayout;
-    add_roi_button_ = new QPushButton(QStringLiteral("Add ROI"), card);
-    place_robot_button_ = new QPushButton(QStringLiteral("Place Robot"), card);
+    auto* draw_row = new QWidget(card);
+    auto* draw_layout = new QHBoxLayout(draw_row);
+    draw_layout->setContentsMargins(0, 0, 0, 0);
+    draw_layout->setSpacing(8);
+    add_roi_button_ = new QPushButton(QStringLiteral("Add ROI"), draw_row);
+    place_robot_button_ = new QPushButton(QStringLiteral("Place Robot"), draw_row);
+    for (QPushButton* button : {add_roi_button_, place_robot_button_}) {
+        button->setObjectName("SatButton");
+        button->setFixedHeight(36);
+        button->setCursor(Qt::PointingHandCursor);
+        draw_layout->addWidget(button, 1);
+    }
     connect(add_roi_button_, &QPushButton::clicked, this,
             [this] { map_->addRoiAtViewCenter(); });
     connect(place_robot_button_, &QPushButton::clicked, this, [this] {
         map_->armMarkerPlacement();
         appendLog(QStringLiteral(
-            "[plan] click the map where the robot physically sits"));
+            "[plan] click the canvas where the robot physically sits"));
     });
-    buttons->addWidget(add_roi_button_);
-    buttons->addWidget(place_robot_button_);
-    layout->addLayout(buttons);
-
-    auto addRow = [&](const QString& label, QWidget* field) {
-        auto* row = new QHBoxLayout;
-        auto* text = new QLabel(label, card);
-        text->setObjectName("SatMuted");
-        text->setMinimumWidth(110);
-        row->addWidget(text);
-        row->addWidget(field, 1);
-        layout->addLayout(row);
-    };
+    layout->addWidget(draw_row);
 
     roi_length_ = makeSpin(2.0, 500.0, 0.5, 1, QStringLiteral(" m"));
     roi_width_ = makeSpin(2.0, 500.0, 0.5, 1, QStringLiteral(" m"));
@@ -464,10 +686,11 @@ QWidget* SatelliteScreen::buildPlanCard() {
     roi_heading_->setWrapping(true);
     robot_heading_ = makeSpin(0.0, 359.9, 1.0, 1, QStringLiteral(" °"));
     robot_heading_->setWrapping(true);
-    addRow(QStringLiteral("ROI along"), roi_length_);
-    addRow(QStringLiteral("ROI across"), roi_width_);
-    addRow(QStringLiteral("ROI heading"), roi_heading_);
-    addRow(QStringLiteral("Robot heading"), robot_heading_);
+    layout->addWidget(makeFieldRow(QStringLiteral("ROI along"), roi_length_, card));
+    layout->addWidget(makeFieldRow(QStringLiteral("ROI across"), roi_width_, card));
+    layout->addWidget(makeFieldRow(QStringLiteral("ROI heading"), roi_heading_, card));
+    layout->addWidget(
+        makeFieldRow(QStringLiteral("Robot heading"), robot_heading_, card));
 
     const auto pushRoi = [this] {
         RoiRect roi = map_->roi();
@@ -496,47 +719,66 @@ QWidget* SatelliteScreen::buildPlanCard() {
             });
 
     robot_pos_label_ = new QLabel(QStringLiteral("Robot: not placed"), card);
-    robot_pos_label_->setObjectName("SatMuted");
+    robot_pos_label_->setObjectName("SatFieldLabel");
     robot_pos_label_->setWordWrap(true);
     layout->addWidget(robot_pos_label_);
+
+    save_button_ = new QPushButton(QStringLiteral("Save Plan"), card);
+    save_button_->setObjectName("SatButton");
+    save_button_->setFixedHeight(36);
+    save_button_->setCursor(Qt::PointingHandCursor);
+    connect(save_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::saveJob);
+    layout->addWidget(save_button_);
     return card;
 }
 
-QWidget* SatelliteScreen::buildMissionCard() {
-    auto* card = new QWidget;
+QWidget* SatelliteScreen::buildMissionCard(QWidget* parent) {
+    auto* card = new QWidget(parent);
     card->setObjectName("SatCard");
+    card->setAttribute(Qt::WA_StyledBackground, true);
     auto* layout = new QVBoxLayout(card);
-    layout->setContentsMargins(16, 14, 16, 14);
+    layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
-
-    auto* title = new QLabel(QStringLiteral("MISSION"), card);
-    title->setObjectName("SatCardTitle");
-    layout->addWidget(title);
+    layout->addWidget(makeCardHeader(QStringLiteral("MISSION"), card));
 
     reason_label_ = new QLabel(card);
-    reason_label_->setObjectName("SatMuted");
+    reason_label_->setObjectName("SatFieldLabel");
     reason_label_->setWordWrap(true);
     layout->addWidget(reason_label_);
 
     coverage_bar_ = new QProgressBar(card);
+    coverage_bar_->setObjectName("SatCoverage");
     coverage_bar_->setRange(0, 1000);
     coverage_bar_->setFormat(QStringLiteral("coverage %p%"));
+    coverage_bar_->setFixedHeight(18);
     coverage_bar_->setVisible(false);
     layout->addWidget(coverage_bar_);
 
     segment_label_ = new QLabel(card);
-    segment_label_->setObjectName("SatMuted");
+    segment_label_->setObjectName("SatFieldLabel");
     layout->addWidget(segment_label_);
 
     send_button_ = new QPushButton(QStringLiteral("Send to Robot"), card);
-    send_button_->setObjectName("SatPrimaryButton");
-    send_button_->setMinimumHeight(38);
+    send_button_->setObjectName("SatSendButton");
+    send_button_->setFixedHeight(kSendButtonHeight);
+    send_button_->setCursor(Qt::PointingHandCursor);
     connect(send_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onSendMission);
     layout->addWidget(send_button_);
 
-    auto* row1 = new QHBoxLayout;
-    autonomy_button_ = new QPushButton(QStringLiteral("Start Autonomy"), card);
+    auto* row1 = new QWidget(card);
+    auto* row1_layout = new QHBoxLayout(row1);
+    row1_layout->setContentsMargins(0, 0, 0, 0);
+    row1_layout->setSpacing(8);
+    autonomy_button_ = new QPushButton(QStringLiteral("Start Autonomy"), row1);
+    end_button_ = new QPushButton(QStringLiteral("End Mission"), row1);
+    for (QPushButton* button : {autonomy_button_, end_button_}) {
+        button->setObjectName("SatButton");
+        button->setFixedHeight(36);
+        button->setCursor(Qt::PointingHandCursor);
+        row1_layout->addWidget(button, 1);
+    }
     connect(autonomy_button_, &QPushButton::clicked, this, [this] {
         autonomy_on_ = !autonomy_on_;
         autonomy_button_->setText(autonomy_on_
@@ -550,16 +792,22 @@ QWidget* SatelliteScreen::buildMissionCard() {
             teleop_check_->setChecked(false);
         }
     });
-    end_button_ = new QPushButton(QStringLiteral("End Mission"), card);
     connect(end_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onEndMission);
-    row1->addWidget(autonomy_button_);
-    row1->addWidget(end_button_);
-    layout->addLayout(row1);
+    layout->addWidget(row1);
 
-    auto* row2 = new QHBoxLayout;
-    arm_button_ = new QPushButton(QStringLiteral("Arm Motors"), card);
-    disarm_button_ = new QPushButton(QStringLiteral("Disarm"), card);
+    auto* row2 = new QWidget(card);
+    auto* row2_layout = new QHBoxLayout(row2);
+    row2_layout->setContentsMargins(0, 0, 0, 0);
+    row2_layout->setSpacing(8);
+    arm_button_ = new QPushButton(QStringLiteral("Arm Motors"), row2);
+    disarm_button_ = new QPushButton(QStringLiteral("Disarm"), row2);
+    for (QPushButton* button : {arm_button_, disarm_button_}) {
+        button->setObjectName("SatButton");
+        button->setFixedHeight(36);
+        button->setCursor(Qt::PointingHandCursor);
+        row2_layout->addWidget(button, 1);
+    }
     connect(arm_button_, &QPushButton::clicked, this, [this] {
         ros_->requestAxisState(RosLink::kAxisClosedLoop);
         appendLog(QStringLiteral("[cmd] arm (CLOSED_LOOP_CONTROL)"));
@@ -568,31 +816,29 @@ QWidget* SatelliteScreen::buildMissionCard() {
         ros_->requestAxisState(RosLink::kAxisIdle);
         appendLog(QStringLiteral("[cmd] disarm (IDLE)"));
     });
-    row2->addWidget(arm_button_);
-    row2->addWidget(disarm_button_);
-    layout->addLayout(row2);
+    layout->addWidget(row2);
 
     estop_button_ = new QPushButton(QStringLiteral("EMERGENCY STOP"), card);
     estop_button_->setObjectName("SatEstopButton");
-    estop_button_->setMinimumHeight(46);
+    estop_button_->setFixedHeight(kEstopButtonHeight);
+    estop_button_->setCursor(Qt::PointingHandCursor);
     connect(estop_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onEstop);
     layout->addWidget(estop_button_);
     return card;
 }
 
-QWidget* SatelliteScreen::buildTeleopCard() {
-    auto* card = new QWidget;
+QWidget* SatelliteScreen::buildTeleopCard(QWidget* parent) {
+    auto* card = new QWidget(parent);
     card->setObjectName("SatCard");
+    card->setAttribute(Qt::WA_StyledBackground, true);
     auto* layout = new QVBoxLayout(card);
-    layout->setContentsMargins(16, 14, 16, 14);
+    layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
-
-    auto* title = new QLabel(QStringLiteral("TELEOP"), card);
-    title->setObjectName("SatCardTitle");
-    layout->addWidget(title);
+    layout->addWidget(makeCardHeader(QStringLiteral("TELEOP"), card));
 
     teleop_check_ = new QCheckBox(QStringLiteral("Enable keyboard teleop"), card);
+    teleop_check_->setObjectName("SatCheck");
     connect(teleop_check_, &QCheckBox::toggled, this, [this](bool enabled) {
         pressed_keys_.clear();
         if (enabled) {
@@ -607,91 +853,179 @@ QWidget* SatelliteScreen::buildTeleopCard() {
     });
     layout->addWidget(teleop_check_);
 
-    auto* row = new QHBoxLayout;
-    auto* label = new QLabel(QStringLiteral("Speed"), card);
-    label->setObjectName("SatMuted");
-    teleop_speed_ = new QSlider(Qt::Horizontal, card);
+    auto* row = new QWidget(card);
+    auto* row_layout = new QHBoxLayout(row);
+    row_layout->setContentsMargins(0, 0, 0, 0);
+    row_layout->setSpacing(8);
+    auto* label = new QLabel(QStringLiteral("Speed"), row);
+    label->setObjectName("SatFieldLabel");
+    teleop_speed_ = new QSlider(Qt::Horizontal, row);
+    teleop_speed_->setObjectName("SatSlider");
     teleop_speed_->setRange(10, 80);
     teleop_speed_->setValue(35);
-    teleop_speed_label_ = new QLabel(QStringLiteral("0.35 m/s"), card);
-    teleop_speed_label_->setObjectName("SatMuted");
+    teleop_speed_label_ = new QLabel(QStringLiteral("0.35 m/s"), row);
+    teleop_speed_label_->setObjectName("SatFieldLabel");
     connect(teleop_speed_, &QSlider::valueChanged, this, [this](int value) {
         teleop_speed_label_->setText(
             QStringLiteral("%1 m/s").arg(value / 100.0, 0, 'f', 2));
     });
-    row->addWidget(label);
-    row->addWidget(teleop_speed_, 1);
-    row->addWidget(teleop_speed_label_);
-    layout->addLayout(row);
+    row_layout->addWidget(label);
+    row_layout->addWidget(teleop_speed_, 1);
+    row_layout->addWidget(teleop_speed_label_);
+    layout->addWidget(row);
     return card;
 }
 
-void SatelliteScreen::applyStyles() {
-    const UiThemeTokens t = uiThemeTokens(dark_mode_);
+QWidget* SatelliteScreen::buildLogCard(QWidget* parent) {
+    auto* card = new QWidget(parent);
+    card->setObjectName("SatCard");
+    card->setAttribute(Qt::WA_StyledBackground, true);
+    auto* layout = new QVBoxLayout(card);
+    layout->setContentsMargins(16, 14, 16, 16);
+    layout->setSpacing(8);
+    layout->addWidget(makeCardHeader(QStringLiteral("LOG"), card));
+
+    log_view_ = new QPlainTextEdit(card);
+    log_view_->setObjectName("SatLog");
+    log_view_->setReadOnly(true);
+    log_view_->setMaximumBlockCount(600);
+    log_view_->setFixedHeight(104);
+    log_view_->setFrameShape(QFrame::NoFrame);
+    layout->addWidget(log_view_);
+    return card;
+}
+
+// ---- Theming --------------------------------------------------------------------
+
+void SatelliteScreen::applyTheme() {
+    const bool dark = dark_mode_;
+    const QString page_bg = dark ? QStringLiteral("#0b0b0b")
+                                 : QStringLiteral("#F9FAFB");
+    const QString surface = dark ? QStringLiteral("#18181b")
+                                 : QStringLiteral("#FFFFFF");
+    const QString surface_border = dark ? QStringLiteral("#27272a")
+                                        : QStringLiteral("#D1D5DC");
+    const QString card_border = dark ? QStringLiteral("#3f3f47")
+                                     : QStringLiteral("#D1D5DC");
+    const QString input_bg = dark ? QStringLiteral("#27272a")
+                                  : QStringLiteral("#FFFFFF");
+    const QString input_border = dark ? QStringLiteral("#3f3f47")
+                                      : QStringLiteral("#D1D5DC");
+    const QString button_bg = dark ? QStringLiteral("#3f3f47")
+                                   : QStringLiteral("#FFFFFF");
+    const QString button_hover = dark ? QStringLiteral("#4a4a52")
+                                      : QStringLiteral("#F3F4F6");
+    const QString log_bg = dark ? QStringLiteral("#101014")
+                                : QStringLiteral("#F1F5F9");
+    const QString text = textColor(dark);
+    const QString muted = mutedColor(dark);
+
+    // Every rule is scoped to an object name — no cascading bare selectors.
     setStyleSheet(QStringLiteral(R"QSS(
-QWidget#SatelliteScreen { background: %1; }
-QWidget#SatTopBar { background: %2; border-bottom: 1px solid %3; }
-QWidget#SatToolbar { background: %2; border-bottom: 1px solid %3; }
-QWidget#SatPanel { background: %1; }
-QScrollArea#SatPanelScroll { background: %1; border: none; border-left: 1px solid %3; }
-QWidget#SatCard { background: %2; border: 1px solid %3; border-radius: 10px; }
-QLabel { color: %4; font-family: 'Arimo'; font-size: 13px; }
-QLabel#SatTitle { font-family: 'Arimo'; font-weight: 700; font-size: 16px; color: %4; }
-QLabel#SatCardTitle {
-    font-family: 'Arimo'; font-weight: 700; font-size: 11px;
-    letter-spacing: 1px; color: %5;
+#SatelliteScreen { background-color: %1; }
+#SatTopBar { background-color: %2; border-bottom: 1px solid %3; }
+#SatTitle {
+    font-family: 'Arimo'; font-weight: 700; font-size: 16px; color: %4;
+    background: transparent;
 }
-QLabel#SatMuted { color: %5; font-family: 'Arimo'; font-size: 12px; }
-QPushButton {
-    background: transparent; border: 1px solid %3; border-radius: 6px;
-    padding: 6px 12px; color: %4; font-family: 'Arimo'; font-size: 13px;
+#SatBackButton {
+    background-color: transparent; border: 1px solid %5; border-radius: 8px;
 }
-QPushButton:hover { border-color: %6; color: %6; }
-QPushButton:disabled { color: %5; border-color: %3; }
-QPushButton#SatBackButton { border: none; color: %5; font-size: 14px; }
-QPushButton#SatBackButton:hover { color: %4; }
-QPushButton#SatPrimaryButton {
-    background: %6; border-color: %6; color: #FFFFFF; font-weight: 700;
+#SatBackButton:hover { background-color: %6; }
+#SatMotorsChip {
+    background-color: transparent; border: 1px solid %5; border-radius: 10px;
 }
-QPushButton#SatPrimaryButton:hover { background: %7; }
-QPushButton#SatPrimaryButton:disabled { background: %3; border-color: %3; color: %5; }
+#SatRailScroll { background-color: %1; border: none; border-right: 1px solid %3; }
+#SatRail { background-color: %1; }
+#SatCard {
+    background-color: %2; border: 1px solid %5; border-radius: 10px;
+}
+#SatCardHeader {
+    font-family: 'Arimo'; font-weight: 700; font-size: 12px;
+    letter-spacing: 0.5px; color: %7; background: transparent;
+}
+#SatFieldLabel {
+    font-family: 'Arimo'; font-size: 12px; color: %7; background: transparent;
+}
+QLineEdit#SatInput, QDoubleSpinBox#SatInput, QComboBox#SatInput {
+    background-color: %8; border: 1px solid %9; border-radius: 10px;
+    padding: 0 12px; font-family: 'Arimo'; font-size: 14px; color: %4;
+    selection-background-color: rgba(0, 188, 125, 0.30);
+}
+QLineEdit#SatInput:focus, QDoubleSpinBox#SatInput:focus,
+QComboBox#SatInput:focus { border-color: #00BC7D; }
+QComboBox#SatInput::drop-down { border: none; width: 24px; }
+QComboBox#SatInput QAbstractItemView {
+    background-color: %8; border: 1px solid %9; color: %4;
+    selection-background-color: rgba(0, 188, 125, 0.30);
+}
+QPushButton#SatButton {
+    background-color: %10; border: 1px solid %9; border-radius: 10px;
+    font-family: 'Arimo'; font-weight: 600; font-size: 13px; color: %4;
+    padding: 0 12px;
+}
+QPushButton#SatButton:hover { background-color: %11; }
+QPushButton#SatButton:disabled { color: %7; background-color: transparent; }
+QPushButton#SatSendButton {
+    background-color: #00BC7D; border: none; border-radius: 10px;
+    font-family: 'Arimo'; font-weight: 700; font-size: 14px; color: #FFFFFF;
+}
+QPushButton#SatSendButton:hover { background-color: #00A86D; }
+QPushButton#SatSendButton:disabled { background-color: %10; color: %7; }
 QPushButton#SatEstopButton {
-    background: %8; border-color: %8; color: #FFFFFF;
-    font-weight: 800; font-size: 14px; letter-spacing: 1px;
+    background-color: #E7000B; border: none; border-radius: 10px;
+    font-family: 'Arimo'; font-weight: 800; font-size: 14px;
+    letter-spacing: 1px; color: #FFFFFF;
 }
-QPushButton#SatEstopButton:disabled { background: %3; border-color: %3; color: %5; }
-QLineEdit, QDoubleSpinBox, QComboBox {
-    background: %9; border: 1px solid %3; border-radius: 6px;
-    padding: 5px 8px; color: %4; font-family: 'Arimo'; font-size: 13px;
+QPushButton#SatEstopButton:hover { background-color: #C10007; }
+QPushButton#SatEstopButton:disabled { background-color: %10; color: %7; }
+QCheckBox#SatCheck {
+    font-family: 'Arimo'; font-size: 13px; color: %4; background: transparent;
 }
-QLineEdit:focus, QDoubleSpinBox:focus, QComboBox:focus { border-color: %6; }
-QComboBox::drop-down { border: none; width: 22px; }
-QComboBox QAbstractItemView {
-    background: %2; border: 1px solid %3; color: %4;
-    selection-background-color: %3;
+QCheckBox#SatCheck::indicator {
+    width: 16px; height: 16px; border: 1px solid %9; border-radius: 4px;
+    background-color: %8;
 }
-QCheckBox { color: %4; font-family: 'Arimo'; font-size: 13px; }
-QSlider::groove:horizontal { height: 4px; background: %3; border-radius: 2px; }
-QSlider::handle:horizontal {
-    width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; background: %6;
+QCheckBox#SatCheck::indicator:checked {
+    background-color: #00BC7D; border-color: #00BC7D;
 }
-QProgressBar {
-    background: %9; border: 1px solid %3; border-radius: 6px;
-    text-align: center; color: %4; font-family: 'Arimo'; font-size: 11px;
+QSlider#SatSlider::groove:horizontal {
+    height: 4px; background: %9; border-radius: 2px;
 }
-QProgressBar::chunk { background: %6; border-radius: 5px; }
+QSlider#SatSlider::handle:horizontal {
+    width: 14px; height: 14px; margin: -5px 0; border-radius: 7px;
+    background: #00BC7D;
+}
+QProgressBar#SatCoverage {
+    background-color: %8; border: 1px solid %9; border-radius: 6px;
+    text-align: center; font-family: 'Arimo'; font-size: 11px; color: %4;
+}
+QProgressBar#SatCoverage::chunk { background-color: #00BC7D; border-radius: 5px; }
 QPlainTextEdit#SatLog {
-    background: %9; border: 1px solid %3; border-radius: 8px;
-    color: %5; font-family: monospace; font-size: 11px;
+    background-color: %12; border: 1px solid %9; border-radius: 8px;
+    color: %7; font-family: monospace; font-size: 11px;
 }
 )QSS")
-            .arg(t.bg, t.card_bg, t.border, t.text, t.muted, t.accent,
-                 t.accent_hover, t.danger, t.log_bg));
+            .arg(page_bg,           // %1
+                 surface,           // %2
+                 surface_border,    // %3
+                 text,              // %4
+                 card_border,       // %5
+                 button_hover,      // %6
+                 muted,             // %7
+                 input_bg,          // %8
+                 input_border)      // %9
+            .arg(button_bg,         // %10
+                 button_hover,      // %11
+                 log_bg));          // %12
 }
 
 void SatelliteScreen::setDarkMode(bool dark_mode) {
     dark_mode_ = dark_mode;
-    applyStyles();
+    applyTheme();
+    // Re-render the dynamic pill colors against the new palette.
+    updateBotPill();
+    updateStatePill();
 }
 
 // ---- Jobs -------------------------------------------------------------------
@@ -724,7 +1058,7 @@ void SatelliteScreen::loadJob(const Job& job) {
     if (job.roi.valid) {
         map_->setView(job.roi.center.lat, job.roi.center.lon, 19);
     }
-    appendLog(QStringLiteral("[job] loaded '%1'").arg(job.name));
+    appendLog(QStringLiteral("[plan] loaded '%1'").arg(job.name));
 }
 
 void SatelliteScreen::newJob() {
@@ -742,10 +1076,13 @@ void SatelliteScreen::saveJob() {
     Job job;
     job.name = job_name_->text().trimmed();
     if (job.name.isEmpty()) {
-        appendLog(QStringLiteral("[job] give the job a name before saving"));
+        appendLog(QStringLiteral("[plan] give the plan a name before saving"));
         return;
     }
     job.address = job_address_->text().trimmed();
+    job.mode = QString::fromLatin1(plan_mode_ == PlanMode::Measured
+                                       ? Job::kModeMeasured
+                                       : Job::kModeSatellite);
     job.roi = map_->roi();
     job.robot = map_->marker();
     job.updated = QDateTime::currentDateTime();
@@ -758,18 +1095,19 @@ void SatelliteScreen::saveJob() {
         for (const Job& existing : jobs_) {
             if (existing.id == job.id) {
                 job.created = existing.created;
+                job.last_executed_at = existing.last_executed_at;
                 break;
             }
         }
     }
     QString error;
     if (!job_store_.save(job, &error)) {
-        appendLog(QStringLiteral("[job] save failed: %1").arg(error));
+        appendLog(QStringLiteral("[plan] save failed: %1").arg(error));
         return;
     }
     current_job_id_ = job.id;
     refreshJobsCombo(job.id);
-    appendLog(QStringLiteral("[job] saved '%1'").arg(job.name));
+    appendLog(QStringLiteral("[plan] saved '%1'").arg(job.name));
 }
 
 // ---- Navigation -------------------------------------------------------------
@@ -813,32 +1151,39 @@ void SatelliteScreen::onDownloadArea() {
 
 bool SatelliteScreen::confirmDialog(const QString& title, const QString& body,
                                     const QString& accept_label) {
-    const UiThemeTokens t = uiThemeTokens(dark_mode_);
     QDialog dialog(this);
     dialog.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
     dialog.setModal(true);
     dialog.setMinimumWidth(430);
+    dialog.setObjectName("SatConfirmDialog");
+    // Modals are dark-only across the app (see MissionMetadataDialog).
     dialog.setStyleSheet(QStringLiteral(
-        "QDialog { background: %1; border: 1px solid %2; border-radius: 10px; }"
-        "QLabel { color: %3; font-family: 'Arimo'; }"
-        "QPushButton { background: transparent; border: 1px solid %2; "
-        "border-radius: 6px; padding: 7px 16px; color: %3; font-family: 'Arimo'; }"
-        "QPushButton#Accept { background: %4; border-color: %4; color: white; "
-        "font-weight: 700; }")
-            .arg(t.card_bg, t.border, t.text, t.accent));
+        "#SatConfirmDialog { background-color: #18181b; "
+        "border: 1px solid #27272a; border-radius: 10px; }"
+        "QLabel { color: #FAFAFA; font-family: 'Arimo'; "
+        "background: transparent; }"
+        "QPushButton { background-color: #3f3f47; border: none; "
+        "border-radius: 10px; padding: 10px 20px; color: #FAFAFA; "
+        "font-family: 'Arimo'; font-weight: 600; font-size: 14px; }"
+        "QPushButton:hover { background-color: #4a4a52; }"
+        "QPushButton#Accept { background-color: #00BC7D; color: #FFFFFF; "
+        "font-weight: 700; }"
+        "QPushButton#Accept:hover { background-color: #00A86D; }"));
     auto* layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(20, 16, 20, 16);
+    layout->setContentsMargins(24, 20, 24, 20);
     layout->setSpacing(12);
 
     auto* title_label = new QLabel(title, &dialog);
-    QFont title_font = title_label->font();
-    title_font.setPointSizeF(title_font.pointSizeF() + 3);
-    title_font.setBold(true);
-    title_label->setFont(title_font);
+    title_label->setStyleSheet(QStringLiteral(
+        "font-family: 'Arimo'; font-weight: 700; font-size: 20px; "
+        "color: #FAFAFA; background: transparent;"));
     layout->addWidget(title_label);
 
     auto* body_label = new QLabel(body, &dialog);
     body_label->setWordWrap(true);
+    body_label->setStyleSheet(QStringLiteral(
+        "font-family: 'Arimo'; font-size: 14px; color: #D4D4D8; "
+        "background: transparent;"));
     layout->addWidget(body_label);
 
     auto* buttons = new QHBoxLayout;
@@ -883,7 +1228,7 @@ void SatelliteScreen::onSendMission() {
         return;
     }
     map_->setMissionAnchor(marker);
-    setStatePill(QStringLiteral("LAUNCHING"), satpal::warning());
+    setStatePill(QStringLiteral("LAUNCHING"), QColor(kAmber));
     reason_label_->setText(
         QStringLiteral("Waiting for autonomy stack… Arm motors, then Start "
                        "Autonomy when the plan appears."));
@@ -905,7 +1250,7 @@ void SatelliteScreen::onEstop() {
     ros_->requestAxisState(RosLink::kAxisIdle);
     appendLog(
         QStringLiteral("[E-STOP] autonomy disabled + axis IDLE requested"));
-    setStatePill(QStringLiteral("E-STOP"), satpal::danger());
+    setStatePill(QStringLiteral("E-STOP"), QColor(kEstopRed));
 }
 
 // ---- Teleop -----------------------------------------------------------------
@@ -969,33 +1314,64 @@ void SatelliteScreen::publishTeleopTick() {
 
 // ---- Status surfaces ----------------------------------------------------------
 
-void SatelliteScreen::setLinkPill(const QString& text, const QColor& color) {
-    stylePillPair(link_pill_dot_, link_pill_text_, text, color);
+void SatelliteScreen::setBotPill(const QString& text, const QColor& color) {
+    if (!lbl_bot_dot_ || !lbl_bot_text_) {
+        return;
+    }
+    lbl_bot_dot_->setPixmap(loadTintedSvg(
+        QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8,
+        color.name()));
+    lbl_bot_text_->setText(text);
+    lbl_bot_text_->setStyleSheet(statusTextStyle(color.name()) +
+                                 QStringLiteral(" background: transparent;"));
 }
 
 void SatelliteScreen::setStatePill(const QString& text, const QColor& color) {
-    stylePillPair(state_pill_dot_, state_pill_text_, text, color);
+    if (!lbl_state_dot_ || !lbl_state_text_) {
+        return;
+    }
+    lbl_state_dot_->setPixmap(loadTintedSvg(
+        QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8,
+        color.name()));
+    lbl_state_text_->setText(text);
+    lbl_state_text_->setStyleSheet(statusTextStyle(color.name()) +
+                                   QStringLiteral(" background: transparent;"));
 }
 
-void SatelliteScreen::updateLinkPill() {
+void SatelliteScreen::setMotorsChip(const QString& text, const QColor& color) {
+    if (!lbl_motors_dot_ || !lbl_motors_text_) {
+        return;
+    }
+    lbl_motors_dot_->setPixmap(loadTintedSvg(
+        QStringLiteral(":/assets/missionplanner/status_dot.svg"), 6, 6,
+        color.name()));
+    lbl_motors_text_->setText(text);
+    lbl_motors_text_->setStyleSheet(
+        QStringLiteral("font-family: 'Arimo'; font-size: 10px; "
+                       "font-weight: 700; letter-spacing: 0.5px; color: %1; "
+                       "background: transparent;")
+            .arg(color.name()));
+}
+
+void SatelliteScreen::updateBotPill() {
     if (!ros_->isRunning()) {
-        setLinkPill(QStringLiteral("ROS OFFLINE"), satpal::border());
+        setBotPill(QStringLiteral("BOT —"), QColor(mutedColor(dark_mode_)));
         return;
     }
     const OdomSnapshot odom = ros_->odomSnapshot();
     if (!odom.valid) {
-        setLinkPill(QStringLiteral("BOT —"), satpal::border());
+        setBotPill(QStringLiteral("BOT —"), QColor(mutedColor(dark_mode_)));
         return;
     }
     const qint64 age_ms = QDateTime::currentMSecsSinceEpoch() - odom.wall_ms;
     if (age_ms < 2500) {
-        setLinkPill(QStringLiteral("BOT LIVE"), satpal::accent());
+        setBotPill(QStringLiteral("BOT LIVE"), QColor(kAccent));
     } else if (age_ms < 10000) {
-        setLinkPill(QStringLiteral("BOT SYNCING %1s").arg(age_ms / 1000),
-                    satpal::warning());
+        setBotPill(QStringLiteral("BOT SYNCING %1s").arg(age_ms / 1000),
+                   QColor(kAmber));
     } else {
-        setLinkPill(QStringLiteral("BOT OFFLINE %1s").arg(age_ms / 1000),
-                    satpal::danger());
+        setBotPill(QStringLiteral("BOT OFFLINE %1s").arg(age_ms / 1000),
+                   QColor(kEstopRed));
     }
 }
 
@@ -1005,17 +1381,17 @@ void SatelliteScreen::updateStatePill() {
         return;
     }
     const QString state = status.state.toUpper();
-    QColor color = satpal::border();
+    QColor color(mutedColor(dark_mode_));
     if (state == QLatin1String("RUNNING")) {
-        color = satpal::accent();
+        color = QColor(kAccent);
     } else if (state == QLatin1String("BLOCKED")) {
-        color = satpal::danger();
+        color = QColor(kEstopRed);
     } else if (state == QLatin1String("PAUSED") ||
                state == QLatin1String("REPLANNING") ||
                state.contains(QLatin1String("COLLECTION"))) {
-        color = satpal::warning();
+        color = QColor(kAmber);
     } else if (state == QLatin1String("COMPLETE")) {
-        color = satpal::info();
+        color = QColor(0x2B, 0x7F, 0xFF);
     }
     setStatePill(status.mode.isEmpty()
                      ? state
@@ -1024,8 +1400,7 @@ void SatelliteScreen::updateStatePill() {
     reason_label_->setText(status.reason);
     if (status.coverage >= 0.0) {
         coverage_bar_->setVisible(true);
-        coverage_bar_->setValue(
-            int(qBound(0.0, status.coverage, 1.0) * 1000));
+        coverage_bar_->setValue(int(qBound(0.0, status.coverage, 1.0) * 1000));
     }
 }
 
