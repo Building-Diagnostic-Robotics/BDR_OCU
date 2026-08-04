@@ -1,0 +1,10 @@
+// Generated at CMake configure time — do not edit, do not commit.
+// The value comes from -DBDR_ARCGIS_API_KEY, the BDR_ARCGIS_API_KEY
+// environment variable, or satellite_ocu/config/arcgis_key.txt.
+#pragma once
+
+namespace f2c_cpp {
+
+inline constexpr const char* kArcgisApiKey = "@BDR_ARCGIS_API_KEY@";
+
+}  // namespace f2c_cpp

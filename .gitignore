@@ -1,9 +1,14 @@
 # Build artefacts
 build/
 cpp/build/
+cpp/build-dev/
 _ros_ws/
 _f2c_build/
 _f2c_install/
+
+# Secrets — the ArcGIS key is baked into the binary at build time and must
+# never be committed (see cpp/CMakeLists.txt "ArcGIS Location Platform").
+cpp/config/arcgis_key.txt
 
 # CMake
 CMakeCache.txt

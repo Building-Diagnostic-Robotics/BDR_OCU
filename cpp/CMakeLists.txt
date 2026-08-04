@@ -142,6 +142,13 @@ set(HEADERS
     include/dashboard_screen.hpp
     include/exploration_screen.hpp
     include/planner_screen.hpp
+    include/satellite_screen.hpp
+    include/satellite_map_widget.hpp
+    include/satellite_tile_service.hpp
+    include/satellite_ros_link.hpp
+    include/satellite_mission_controller.hpp
+    include/satellite_download_dialog.hpp
+    include/satellite_job_model.hpp
     include/plot_widget.hpp
     include/obstacle_detector.hpp
     include/transfer_manager.hpp
@@ -254,9 +261,44 @@ set(GUI_SOURCES
     src/units_system.cpp
     src/link_health_monitor.cpp
     src/robot_reachability_probe.cpp
+    src/satellite_job_model.cpp
+    src/satellite_tile_service.cpp
+    src/satellite_ros_link.cpp
+    src/satellite_mission_controller.cpp
+    src/satellite_map_widget.cpp
+    src/satellite_download_dialog.cpp
+    src/satellite_screen.cpp
     src/main.cpp
     resources.qrc
 )
+
+# ---------------------------------------------------------------------------
+# ArcGIS Location Platform API key for the Stage 6 satellite basemap —
+# injected at build time so the key ships inside the binary and never lives
+# in a committed file. Resolution: -DBDR_ARCGIS_API_KEY, then the
+# environment, then the gitignored cpp/config/arcgis_key.txt.
+# ---------------------------------------------------------------------------
+set(BDR_ARCGIS_API_KEY "" CACHE STRING "ArcGIS Location Platform API key")
+if(BDR_ARCGIS_API_KEY STREQUAL "" AND DEFINED ENV{BDR_ARCGIS_API_KEY})
+    set(BDR_ARCGIS_API_KEY "$ENV{BDR_ARCGIS_API_KEY}")
+endif()
+if(BDR_ARCGIS_API_KEY STREQUAL "")
+    set(_bdr_key_file "${CMAKE_CURRENT_SOURCE_DIR}/config/arcgis_key.txt")
+    if(EXISTS "${_bdr_key_file}")
+        file(READ "${_bdr_key_file}" BDR_ARCGIS_API_KEY)
+        string(STRIP "${BDR_ARCGIS_API_KEY}" BDR_ARCGIS_API_KEY)
+    endif()
+endif()
+if(BDR_ARCGIS_API_KEY STREQUAL "")
+    message(WARNING
+        "BDR_ARCGIS_API_KEY is empty — Stage 6 satellite tile downloads "
+        "will be disabled (cached tiles still render).")
+endif()
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/arcgis_key_gen.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/arcgis_key_gen.hpp"
+    @ONLY)
+include_directories("${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # If QCustomPlot is available, add it
 if(USE_QCUSTOMPLOT)
@@ -337,6 +379,7 @@ find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(odrive_can REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -344,7 +387,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 # Add ROS2 includes and libraries
 include_directories(${rclcpp_INCLUDE_DIRS})
 target_link_libraries(bdr_coverage_planner ${rclcpp_LIBRARIES})
-ament_target_dependencies(bdr_coverage_planner rclcpp std_msgs std_srvs geometry_msgs sensor_msgs nav_msgs odrive_can tf2 tf2_geometry_msgs)
+ament_target_dependencies(bdr_coverage_planner rclcpp std_msgs std_srvs geometry_msgs sensor_msgs nav_msgs visualization_msgs odrive_can tf2 tf2_geometry_msgs)
 
 # ---------------------------------------------------------------------------
 # bdr-update-runner — external Qt binary that owns the OTA download +

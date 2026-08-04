@@ -353,6 +353,12 @@ DashboardScreen::DashboardScreen(QWidget* parent)
     connect(btn_calibrate_tilt_, &QPushButton::clicked, this, &DashboardScreen::onCalibrateTiltRequested);
     actionsRow->addWidget(btn_calibrate_tilt_, 1);
 
+    btn_satellite_coverage_ = makeActionButton(actionsCard, "DashboardBtnSatellite", "#0E7490", "#0E7490",
+        ":/assets/dashboard/location_pin.svg", "Satellite Coverage", "Plan a ROI on imagery and run autonomy");
+    connect(btn_satellite_coverage_, &QPushButton::clicked, this,
+            &DashboardScreen::satelliteCoverageRequested);
+    actionsRow->addWidget(btn_satellite_coverage_, 1);
+
     actionsLayout->addLayout(actionsRow);
     contentLayout->addWidget(actionsCard);
 

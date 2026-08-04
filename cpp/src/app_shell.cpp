@@ -53,6 +53,7 @@
 #include "dev_flags.hpp"
 #include "exploration_screen.hpp"
 #include "planner_screen.hpp"
+#include "satellite_screen.hpp"
 #include "robot_registry.hpp"
 #include "setup_screen.hpp"
 #include "settings_constants.hpp"
@@ -938,6 +939,25 @@ void AppShellWindow::goToStage5() {
     // creates a fresh client per call (see comment there for why).
 }
 
+void AppShellWindow::goToStage6() {
+    ensureStage6();
+    if (!stage6_) {
+        return;
+    }
+    stack_->setCurrentWidget(stage6_);
+}
+
+void AppShellWindow::ensureStage6() {
+    if (stage6_) {
+        return;
+    }
+    stage6_ = new SatelliteScreen(this);
+    stack_->addWidget(stage6_);
+    connect(stage6_, &SatelliteScreen::backRequested, this,
+            &AppShellWindow::goToStage3);
+    stage6_->setDarkMode(dark_mode_);
+}
+
 void AppShellWindow::onThemeToggleChanged(bool dark_mode) {
     setDarkMode(dark_mode);
     QSettings settings(f2c_cpp::kSettingsOrgName, f2c_cpp::kSettingsAppName);
@@ -991,6 +1011,9 @@ void AppShellWindow::setDarkMode(bool dark_mode) {
     }
     if (stage5_) {
         stage5_->setDarkMode(dark_mode_);
+    }
+    if (stage6_) {
+        stage6_->setDarkMode(dark_mode_);
     }
 }
 
@@ -1191,6 +1214,7 @@ void AppShellWindow::ensureStage3() {
     connect(stage3_, &DashboardScreen::runDiagnosticsRequested, this, &AppShellWindow::goToStage2);
     connect(stage3_, &DashboardScreen::startNewScanRequested, this, &AppShellWindow::onStartNewScan);
     connect(stage3_, &DashboardScreen::viewRecordingsRequested, this, &AppShellWindow::onUploadDataRequested);
+    connect(stage3_, &DashboardScreen::satelliteCoverageRequested, this, &AppShellWindow::goToStage6);
     // Mirror the dashboard's MQTT battery state onto the Stage 4 /
     // Stage 5 top-bar pills.  Dashboard owns the subprocess + JSON
     // parsing; AppShell only caches the latest sample and pushes it
@@ -1458,11 +1482,13 @@ void AppShellWindow::closeEvent(QCloseEvent* event) {
     // active scan).  Stage 1-3 close paths skip the dialog: there is
     // nothing on the robot to tear down.  Per operator: "after Start
     // Mapping the close must be gated".
+    const bool satellite_mission_active = stage6_ && stage6_->missionActive();
     const bool launch_active =
         exploration_launch_in_progress_ ||
         exploration_launch_ready_ ||
         laptop_launch_started_ ||
-        robot_launch_started_;
+        robot_launch_started_ ||
+        satellite_mission_active;
     if (!launch_active) {
         QMainWindow::closeEvent(event);
         return;
@@ -1492,6 +1518,9 @@ void AppShellWindow::closeEvent(QCloseEvent* event) {
     // robot's UDC has had a chance to call seekcamera_manager_destroy()
     // and we won't wedge the Seek SDK across OCU restarts.
     qInfo("[AppShell] closeEvent accepted: running synchronous launch teardown before quit");
+    if (satellite_mission_active) {
+        stage6_->shutdownMission();
+    }
     performExplorationPipelineTeardown();
 
     QMainWindow::closeEvent(event);

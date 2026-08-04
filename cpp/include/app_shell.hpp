@@ -43,6 +43,7 @@ namespace f2c_cpp {
 class DashboardScreen;
 class ExplorationScreen;
 class PlannerScreen;
+class SatelliteScreen;
 class SetupScreen;
 class StartupScreen;
 class UpdateBanner;
@@ -100,6 +101,7 @@ private slots:
     void goToStage3();
     void goToStage4();
     void goToStage5();
+    void goToStage6();
     void onThemeToggleChanged(bool dark_mode);
 
     void onStartNewScan();
@@ -167,6 +169,7 @@ private:
     void ensureStage3();
     void ensureStage4();
     void ensureStage5();
+    void ensureStage6();
     void setupWindowControls();
     void updateWindowControlsPosition();
     void updateWindowControlsTheme();
@@ -385,6 +388,7 @@ private:
     DashboardScreen* stage3_ = nullptr;
     ExplorationScreen* stage4_ = nullptr;
     PlannerScreen* stage5_ = nullptr;
+    SatelliteScreen* stage6_ = nullptr;
 
     // Lazily constructed cloud upload dialog (Stage 3 quick-action).
     // Lives across openings so it can carry probe state in-process if

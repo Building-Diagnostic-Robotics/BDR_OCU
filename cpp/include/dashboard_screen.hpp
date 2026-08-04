@@ -41,6 +41,8 @@ signals:
     void startNewScanRequested();
     void runDiagnosticsRequested();
     void viewRecordingsRequested();
+    /** Stage 6: satellite-imagery ROI planning + autonomous coverage. */
+    void satelliteCoverageRequested();
 
     /**
      * Emitted on every battery state change so AppShell can mirror the
@@ -148,6 +150,7 @@ private:
     QPushButton* btn_run_diagnostics_ = nullptr;
     QPushButton* btn_view_recordings_ = nullptr;
     QPushButton* btn_calibrate_tilt_ = nullptr;
+    QPushButton* btn_satellite_coverage_ = nullptr;
 
     QLabel* lbl_robot_id_value_ = nullptr;
     QLabel* lbl_firmware_value_ = nullptr;
