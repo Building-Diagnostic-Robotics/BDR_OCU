@@ -149,6 +149,7 @@ set(HEADERS
     include/satellite_mission_controller.hpp
     include/satellite_download_dialog.hpp
     include/satellite_job_model.hpp
+    include/components/scan_setup_dialog.hpp
     include/plot_widget.hpp
     include/obstacle_detector.hpp
     include/transfer_manager.hpp
@@ -249,6 +250,7 @@ set(GUI_SOURCES
     src/components/tilt_calibration_dialog.cpp
     src/components/pre_scan_checklist_dialog.cpp
     src/components/mission_metadata_dialog.cpp
+    src/components/scan_setup_dialog.cpp
     src/components/offline_finalize_dialog.cpp
     src/components/fpv_camera_view.cpp
     src/components/auto_hide_scroll_bar.cpp

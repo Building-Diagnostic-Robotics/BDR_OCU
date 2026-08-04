@@ -53,6 +53,11 @@ SatelliteMapWidget::SatelliteMapWidget(TileService* tiles, QWidget* parent)
 
 // ---- View state -------------------------------------------------------------
 
+void SatelliteMapWidget::setImageryEnabled(bool enabled) {
+    imagery_enabled_ = enabled;
+    update();
+}
+
 void SatelliteMapWidget::setView(double lat, double lon, int zoom) {
     center_nx_ = geo::lonToNormX(lon);
     center_ny_ = geo::latToNormY(lat);
@@ -311,6 +316,12 @@ void SatelliteMapWidget::paintEvent(QPaintEvent*) {
 }
 
 void SatelliteMapWidget::paintTiles(QPainter& painter) {
+    if (!imagery_enabled_) {
+        // Measured mode: plain surface (CAD grid rendering lands with the
+        // measured-canvas component).
+        painter.fillRect(rect(), QColor(0x10, 0x10, 0x14));
+        return;
+    }
     const int n = 1 << zoom_;
     const double world_px = double(kTileSize) * n;
     const double left = center_nx_ * world_px - width() / 2.0;
@@ -569,7 +580,10 @@ void SatelliteMapWidget::paintChrome(QPainter& painter) {
                          ? QStringLiteral("%1 km").arg(chosen / 1000.0)
                          : QStringLiteral("%1 m").arg(chosen));
 
-    // Attribution (ToS requirement, bottom-right).
+    // Attribution (ToS requirement, bottom-right; imagery surfaces only).
+    if (!imagery_enabled_) {
+        return;
+    }
     const QString attribution = QLatin1String(kAttribution);
     QFont attr_font = font();
     attr_font.setPointSizeF(8.0);

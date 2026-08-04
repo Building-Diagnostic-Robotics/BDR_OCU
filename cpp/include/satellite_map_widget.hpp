@@ -33,6 +33,14 @@ public:
     double centerLon() const;
     int zoom() const { return zoom_; }
 
+    /**
+     * Measured (grid) mode: disables tile fetching/painting and the Esri
+     * attribution — the canvas becomes a plain metric surface. ROI/marker
+     * editing, overlays, and the export math are unaffected (they operate
+     * on ground meters either way).
+     */
+    void setImageryEnabled(bool enabled);
+
     // ---- Plan objects ----
     RoiRect roi() const { return roi_; }
     void setRoi(const RoiRect& roi);
@@ -109,6 +117,7 @@ private:
     void emitViewChanged();
 
     TileService* tiles_;
+    bool imagery_enabled_ = true;
     double center_nx_ = 0.5;
     double center_ny_ = 0.5;
     int zoom_ = 5;

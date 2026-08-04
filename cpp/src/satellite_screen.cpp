@@ -222,11 +222,54 @@ void SatelliteScreen::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
     if (!view_initialized_) {
         view_initialized_ = true;
-        QSettings settings(kSettingsOrgName, kSettingsAppName);
-        map_->setView(settings.value(kSatViewLatKey, kDefaultLat).toDouble(),
-                      settings.value(kSatViewLonKey, kDefaultLon).toDouble(),
-                      settings.value(kSatViewZoomKey, kDefaultZoom).toInt());
-        refreshJobsCombo(settings.value(kSatLastJobKey).toString());
+        // Restore the last map view only when nothing was configured —
+        // configureForScan(job) already centered on the plan's ROI.
+        if (current_job_id_.isEmpty() && !map_->roi().valid) {
+            QSettings settings(kSettingsOrgName, kSettingsAppName);
+            map_->setView(
+                settings.value(kSatViewLatKey, kDefaultLat).toDouble(),
+                settings.value(kSatViewLonKey, kDefaultLon).toDouble(),
+                settings.value(kSatViewZoomKey, kDefaultZoom).toInt());
+        }
+    }
+}
+
+void SatelliteScreen::configureForScan(const Job& job) {
+    planning_only_ = false;
+    plan_mode_ =
+        job.isMeasured() ? PlanMode::Measured : PlanMode::Satellite;
+    refreshJobsCombo(job.id);  // selects + loads the plan
+    applyModeVisibility();
+}
+
+void SatelliteScreen::configureForScan(PlanMode mode) {
+    planning_only_ = false;
+    plan_mode_ = mode;
+    refreshJobsCombo(QString());
+    newJob();
+    applyModeVisibility();
+}
+
+void SatelliteScreen::configureForPlanning() {
+    planning_only_ = true;
+    plan_mode_ = PlanMode::Satellite;
+    refreshJobsCombo(current_job_id_);
+    applyModeVisibility();
+}
+
+void SatelliteScreen::applyModeVisibility() {
+    const bool measured = plan_mode_ == PlanMode::Measured;
+    map_->setImageryEnabled(!measured);
+    if (geo_tools_host_) {
+        // Address search / tile download are geographic tools — meaningless
+        // on the measured (grid) canvas.
+        geo_tools_host_->setVisible(!measured);
+    }
+    if (mission_card_) {
+        mission_card_->setVisible(!planning_only_);
+    }
+    if (teleop_card_) {
+        teleop_card_->setVisible(!planning_only_);
     }
 }
 
@@ -316,22 +359,30 @@ QWidget* SatelliteScreen::buildToolbar() {
     layout->addWidget(save_button);
     layout->addSpacing(16);
 
-    address_edit_ = new QLineEdit(toolbar);
+    geo_tools_host_ = new QWidget(toolbar);
+    auto* geo_layout = new QHBoxLayout(geo_tools_host_);
+    geo_layout->setContentsMargins(0, 0, 0, 0);
+    geo_layout->setSpacing(8);
+
+    address_edit_ = new QLineEdit(geo_tools_host_);
     address_edit_->setPlaceholderText(
         QStringLiteral("Address or \"lat, lon\""));
     address_edit_->setMinimumWidth(240);
     connect(address_edit_, &QLineEdit::returnPressed, this,
             &SatelliteScreen::onGoToAddress);
-    layout->addWidget(address_edit_, 1);
+    geo_layout->addWidget(address_edit_, 1);
 
-    auto* go = new QPushButton(QStringLiteral("Go"), toolbar);
+    auto* go = new QPushButton(QStringLiteral("Go"), geo_tools_host_);
     connect(go, &QPushButton::clicked, this, &SatelliteScreen::onGoToAddress);
-    layout->addWidget(go);
+    geo_layout->addWidget(go);
 
-    auto* download = new QPushButton(QStringLiteral("Download Area…"), toolbar);
+    auto* download =
+        new QPushButton(QStringLiteral("Download Area…"), geo_tools_host_);
     connect(download, &QPushButton::clicked, this,
             &SatelliteScreen::onDownloadArea);
-    layout->addWidget(download);
+    geo_layout->addWidget(download);
+
+    layout->addWidget(geo_tools_host_, 1);
     return toolbar;
 }
 
@@ -342,8 +393,10 @@ QWidget* SatelliteScreen::buildSidePanel() {
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(12);
     layout->addWidget(buildPlanCard());
-    layout->addWidget(buildMissionCard());
-    layout->addWidget(buildTeleopCard());
+    mission_card_ = buildMissionCard();
+    layout->addWidget(mission_card_);
+    teleop_card_ = buildTeleopCard();
+    layout->addWidget(teleop_card_);
 
     log_view_ = new QPlainTextEdit(content);
     log_view_->setObjectName("SatLog");

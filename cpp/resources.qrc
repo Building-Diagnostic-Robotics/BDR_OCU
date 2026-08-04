@@ -14,6 +14,11 @@
     <file alias="dashboard/battery.svg">../App resource/icons/battery.svg</file>
     <file alias="dashboard/settings.svg">../App resource/icons/settings.svg</file>
     <file alias="dashboard/logout.svg">../App resource/icons/logout_icon.svg</file>
+    <file alias="dashboard/plan_job.svg">../App resource/icons/plan_job.svg</file>
+
+    <!-- Scan Setup modal (mode/plan selector) icons -->
+    <file alias="scansetup/measured.svg">../App resource/icons/scan_measured.svg</file>
+    <file alias="scansetup/satellite.svg">../App resource/icons/scan_satellite.svg</file>
 
     <!-- Exploration frame assets (Figma node 58:2) -->
     <file alias="exploration/fpv_feed.svg">../App resource/icons/exploration_fpv_feed.svg</file>

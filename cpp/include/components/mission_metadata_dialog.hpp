@@ -43,6 +43,13 @@ class MissionMetadataDialog : public QDialog {
 public:
     explicit MissionMetadataDialog(QWidget* parent = nullptr);
 
+    /**
+     * Prefill the building name (used when a saved plan was selected in the
+     * ScanSetupDialog — the plan's name seeds the building field, remaining
+     * fully editable). Overrides the QSettings-restored value.
+     */
+    void setInitialBuildingName(const QString& name);
+
     /** Building name as typed by the operator (raw, untrimmed of leading/trailing space). */
     QString buildingName() const;
 

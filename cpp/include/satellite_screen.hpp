@@ -39,10 +39,19 @@ class SatelliteScreen : public QWidget {
     Q_OBJECT
 
 public:
+    enum class PlanMode { Satellite, Measured };
+
     explicit SatelliteScreen(QWidget* parent = nullptr);
     ~SatelliteScreen() override;
 
     void setDarkMode(bool dark_mode);
+
+    /** Onsite execution of a saved plan (mode comes from the plan). */
+    void configureForScan(const Job& job);
+    /** Onsite execution starting from an empty plan of the given mode. */
+    void configureForScan(PlanMode mode);
+    /** Office preplanning trim: mission/teleop hidden, Send unavailable. */
+    void configureForPlanning();
 
     /** True while a mission launch is active (blocks app close, like scans). */
     bool missionActive() const;
@@ -139,6 +148,14 @@ private:
     bool autonomy_on_ = false;
     bool dark_mode_ = false;
     bool view_initialized_ = false;
+
+    PlanMode plan_mode_ = PlanMode::Satellite;
+    bool planning_only_ = false;
+    QWidget* mission_card_ = nullptr;
+    QWidget* teleop_card_ = nullptr;
+    QWidget* geo_tools_host_ = nullptr;  // address search + download (geo-only)
+
+    void applyModeVisibility();
 };
 
 }  // namespace f2c_cpp

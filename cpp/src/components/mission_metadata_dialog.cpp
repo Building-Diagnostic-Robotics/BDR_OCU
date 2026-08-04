@@ -95,6 +95,12 @@ void MissionMetadataDialog::showEvent(QShowEvent* event) {
 // Public accessors
 // ---------------------------------------------------------------------------
 
+void MissionMetadataDialog::setInitialBuildingName(const QString& name) {
+    if (edit_building_ && !name.trimmed().isEmpty()) {
+        edit_building_->setText(name.trimmed());
+    }
+}
+
 QString MissionMetadataDialog::buildingName() const {
     return edit_building_ ? edit_building_->text().trimmed() : QString();
 }

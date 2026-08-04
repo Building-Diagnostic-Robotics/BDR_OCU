@@ -54,6 +54,8 @@
 #include "exploration_screen.hpp"
 #include "planner_screen.hpp"
 #include "satellite_screen.hpp"
+#include "satellite_job_model.hpp"
+#include "components/scan_setup_dialog.hpp"
 #include "robot_registry.hpp"
 #include "setup_screen.hpp"
 #include "settings_constants.hpp"
@@ -1214,7 +1216,14 @@ void AppShellWindow::ensureStage3() {
     connect(stage3_, &DashboardScreen::runDiagnosticsRequested, this, &AppShellWindow::goToStage2);
     connect(stage3_, &DashboardScreen::startNewScanRequested, this, &AppShellWindow::onStartNewScan);
     connect(stage3_, &DashboardScreen::viewRecordingsRequested, this, &AppShellWindow::onUploadDataRequested);
-    connect(stage3_, &DashboardScreen::satelliteCoverageRequested, this, &AppShellWindow::goToStage6);
+    connect(stage3_, &DashboardScreen::planJobRequested, this, [this]() {
+        // Office preplanning: planning-only trim, no Send/mission surface.
+        ensureStage6();
+        if (stage6_) {
+            stage6_->configureForPlanning();
+        }
+        goToStage6();
+    });
     // Mirror the dashboard's MQTT battery state onto the Stage 4 /
     // Stage 5 top-bar pills.  Dashboard owns the subprocess + JSON
     // parsing; AppShell only caches the latest sample and pushes it
@@ -1297,22 +1306,17 @@ void AppShellWindow::ensureStage5() {
 // ---------------------------------------------------------------------------
 
 void AppShellWindow::onStartNewScan() {
-    // Intercept the Dashboard "Start New Scan" CTA with the New Scan
-    // Information modal (Building / Operator / Units). On Cancel or X
-    // close, the operator stays on the Dashboard with no transition and
-    // no robot contact. On Proceed, MissionMetadataDialog has already
-    // persisted the values to QSettings and updated UnitsProvider — we
-    // just advance to Stage 4. The OCU never calls /dc/start itself —
-    // the autonomous controller fires it after Stage 5 Planner Start
-    // Scan publishes autonomy_enable=true. The metadata is pushed to
-    // /data_collection_coordinator/set_parameters by
-    // sendDataCollectorSessionMetadata in onPlannerScanStartRequested,
-    // gated so autonomy_enable cannot fire if the push fails.
+    // Start New Scan flow: ScanSetupDialog (pick a saved plan, or one of
+    // the two ROI modes) -> MissionMetadataDialog (building prefilled from
+    // the plan when one was chosen) -> Stage 6 planning screen configured
+    // for the selection. The classic Stage 4/5 exploration route is no
+    // longer reachable from here — autonomous ROI coverage replaces it.
+    // Cancel at either dialog leaves the operator on the Dashboard with no
+    // transition and no robot contact.
     //
-    // Backdrop blur on the Dashboard mirrors the
+    // A single backdrop blur session spans both dialogs (mirrors the
     // PlannerScreen::showScanPreflightDialog pattern in
-    // planner_screen.cpp:5202 so the operator's eye is drawn to the
-    // modal.
+    // planner_screen.cpp:5202).
     QWidget* backdrop = nullptr;
     if (stage3_) {
         backdrop = stage3_;
@@ -1326,29 +1330,73 @@ void AppShellWindow::onStartNewScan() {
         blur->setBlurRadius(14.0);
         backdrop->setGraphicsEffect(blur);
     }
+    const auto remove_blur = [backdrop]() {
+        if (backdrop) {
+            backdrop->setGraphicsEffect(nullptr);
+        }
+    };
+    const auto center_dialog = [this](QDialog* dialog) {
+        QPointer<QDialog> guard(dialog);
+        QTimer::singleShot(0, dialog, [this, guard]() {
+            if (!guard) return;
+            const QPoint top_left = mapToGlobal(QPoint(
+                (width() - guard->width()) / 2,
+                (height() - guard->height()) / 2));
+            guard->move(top_left);
+        });
+    };
 
-    auto* dialog = new MissionMetadataDialog(this);
-    QPointer<MissionMetadataDialog> guard(dialog);
-    QTimer::singleShot(0, dialog, [this, guard]() {
-        if (!guard) return;
-        const QPoint top_left = mapToGlobal(QPoint(
-            (width() - guard->width()) / 2,
-            (height() - guard->height()) / 2));
-        guard->move(top_left);
-    });
-
-    const int rc = dialog->exec();
-
-    if (backdrop) {
-        backdrop->setGraphicsEffect(nullptr);
+    // ---- 1. Plan / mode selection ----
+    JobStore job_store;
+    auto* setup = new ScanSetupDialog(job_store.loadAll(), this);
+    center_dialog(setup);
+    const int setup_rc = setup->exec();
+    const ScanSetupDialog::Choice choice = setup->choice();
+    const Job selected_job = setup->selectedJob();
+    setup->deleteLater();
+    if (setup_rc != QDialog::Accepted ||
+        choice == ScanSetupDialog::Choice::Cancelled) {
+        remove_blur();
+        return;
     }
-    dialog->deleteLater();
 
+    // ---- 2. Scan metadata (building / operator / units) ----
+    // On Proceed the dialog persists to QSettings and updates
+    // UnitsProvider. The OCU never calls /dc/start itself — the autonomous
+    // controller fires it once autonomy_enable goes true; the metadata
+    // params are pushed to /data_collection_coordinator before that gate
+    // opens (see the Stage 6 Send path).
+    auto* dialog = new MissionMetadataDialog(this);
+    if (choice == ScanSetupDialog::Choice::ExistingPlan) {
+        dialog->setInitialBuildingName(selected_job.name);
+    }
+    center_dialog(dialog);
+    const int rc = dialog->exec();
+    remove_blur();
+    dialog->deleteLater();
     if (rc != QDialog::Accepted) {
         return;
     }
 
-    goToStage4();
+    // ---- 3. Planning screen, configured for the selection ----
+    ensureStage6();
+    if (!stage6_) {
+        return;
+    }
+    switch (choice) {
+        case ScanSetupDialog::Choice::ExistingPlan:
+            stage6_->configureForScan(selected_job);
+            break;
+        case ScanSetupDialog::Choice::NewMeasuredPlan:
+            stage6_->configureForScan(SatelliteScreen::PlanMode::Measured);
+            break;
+        case ScanSetupDialog::Choice::NewSatellitePlan:
+            stage6_->configureForScan(SatelliteScreen::PlanMode::Satellite);
+            break;
+        case ScanSetupDialog::Choice::Cancelled:
+            return;
+    }
+    goToStage6();
 }
 
 void AppShellWindow::onUploadDataRequested() {

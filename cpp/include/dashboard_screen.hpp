@@ -41,8 +41,12 @@ signals:
     void startNewScanRequested();
     void runDiagnosticsRequested();
     void viewRecordingsRequested();
-    /** Stage 6: satellite-imagery ROI planning + autonomous coverage. */
-    void satelliteCoverageRequested();
+    /**
+     * Office preplanning: opens the Stage 6 planning screen in
+     * planning-only trim (no Send / mission controls). Onsite execution
+     * goes through startNewScanRequested -> ScanSetupDialog instead.
+     */
+    void planJobRequested();
 
     /**
      * Emitted on every battery state change so AppShell can mirror the
@@ -150,7 +154,7 @@ private:
     QPushButton* btn_run_diagnostics_ = nullptr;
     QPushButton* btn_view_recordings_ = nullptr;
     QPushButton* btn_calibrate_tilt_ = nullptr;
-    QPushButton* btn_satellite_coverage_ = nullptr;
+    QPushButton* btn_plan_job_ = nullptr;
 
     QLabel* lbl_robot_id_value_ = nullptr;
     QLabel* lbl_firmware_value_ = nullptr;

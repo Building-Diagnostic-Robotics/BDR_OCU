@@ -54,13 +54,25 @@ struct RoiRect {
 };
 
 struct Job {
+    /** Planning canvas the plan was authored on — determines the mode the
+        planning screen opens in when the plan is executed. */
+    static constexpr const char* kModeSatellite = "satellite";
+    static constexpr const char* kModeMeasured = "measured";
+
     QString id;          // filesystem-safe slug, unique
     QString name;        // operator-facing building/job name
     QString address;     // free text, for reference
+    QString mode = QString::fromLatin1(kModeSatellite);
     RoiRect roi;
     geo::GeoPose robot;  // planned robot placement (the anchor at Send)
     QDateTime created;
     QDateTime updated;
+    QDateTime last_executed_at;  // stamped when a mission actually launches
+
+    bool isMeasured() const {
+        return mode == QLatin1String(kModeMeasured);
+    }
+    bool executed() const { return last_executed_at.isValid(); }
 
     QJsonObject toJson() const;
     static Job fromJson(const QJsonObject& obj);

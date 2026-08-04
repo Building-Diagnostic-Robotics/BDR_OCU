@@ -27,14 +27,18 @@ QJsonObject Job::toJson() const {
     robot_obj["heading_deg"] = robot.heading_deg;
 
     QJsonObject obj;
-    obj["schema"] = 1;
+    obj["schema"] = 2;
     obj["id"] = id;
     obj["name"] = name;
     obj["address"] = address;
+    obj["mode"] = mode;
     obj["roi"] = roi_obj;
     obj["robot"] = robot_obj;
     obj["created"] = created.toString(Qt::ISODate);
     obj["updated"] = updated.toString(Qt::ISODate);
+    if (last_executed_at.isValid()) {
+        obj["last_executed_at"] = last_executed_at.toString(Qt::ISODate);
+    }
     return obj;
 }
 
@@ -60,6 +64,11 @@ Job Job::fromJson(const QJsonObject& obj) {
 
     job.created = QDateTime::fromString(obj.value("created").toString(), Qt::ISODate);
     job.updated = QDateTime::fromString(obj.value("updated").toString(), Qt::ISODate);
+    // Schema 1 files predate the mode field — they were all satellite plans.
+    job.mode = obj.value("mode").toString(
+        QString::fromLatin1(kModeSatellite));
+    job.last_executed_at = QDateTime::fromString(
+        obj.value("last_executed_at").toString(), Qt::ISODate);
     return job;
 }
 
