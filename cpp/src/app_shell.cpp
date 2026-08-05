@@ -725,6 +725,51 @@ AppShellWindow::AppShellWindow(QWidget* parent)
             }
         });
     }
+    // BDR_REWIRE: dev-only Stage 6 screenshot hook. BDR_DEV_STAGE6_SHOT=<png>
+    // jumps straight to the satellite/measured planning screen, renders it
+    // offscreen, saves a PNG, and exits — the agent-side visual feedback
+    // loop for design iteration without a robot or an operator. Optional:
+    // BDR_DEV_STAGE6_SHOT_DARK=1 (dark theme), BDR_DEV_STAGE6_SHOT_MODE=
+    // measured|scan (default: planning-only satellite trim).
+    // See docs/DEV_BYPASSES.md.
+    if (!qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
+        const QString shot_path =
+            qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed();
+        const bool shot_dark =
+            qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_DARK").trimmed() ==
+            QStringLiteral("1");
+        const QString shot_mode =
+            qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_MODE").trimmed();
+        QTimer::singleShot(300, this, [this, shot_dark, shot_mode]() {
+            resize(1440, 860);
+            setDarkMode(shot_dark);
+            ensureStage6();
+            if (stage6_) {
+                if (shot_mode == QStringLiteral("measured")) {
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Measured);
+                } else if (shot_mode == QStringLiteral("scan")) {
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
+                } else {
+                    stage6_->configureForPlanning();
+                }
+            }
+            goToStage6();
+        });
+        // BDR_DEV_STAGE6_SHOT_TOGGLE=1: flip the theme after the screen is
+        // up, so the shot captures the post-toggle restyle path.
+        if (qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_TOGGLE").trimmed() ==
+            QStringLiteral("1")) {
+            QTimer::singleShot(3500, this, [this, shot_dark]() {
+                setDarkMode(!shot_dark);
+            });
+        }
+        QTimer::singleShot(5000, this, [this, shot_path]() {
+            grab().save(shot_path);
+            QApplication::quit();
+        });
+    }
     qApp->installEventFilter(this);
 
     // Phase 9: emit bootHealthy on the next event-loop tick. Using

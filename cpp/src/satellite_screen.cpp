@@ -38,6 +38,7 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QSlider>
+#include <QStyle>
 #include <QSvgRenderer>
 #include <QTimer>
 #include <QUuid>
@@ -353,7 +354,10 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     disarm_button_->setEnabled(false);
     estop_button_->setEnabled(false);
 
-    applyTheme();
+    // NOTE: no applyTheme() here. AppShellWindow::ensureStage6() always
+    // calls setDarkMode() immediately after construction; applying a
+    // default-theme stylesheet first left the scroll-area subtree polished
+    // with the wrong palette (observed: light rail under a dark top bar).
 
     QString ros_error;
     if (ros_->start(&ros_error)) {
@@ -1031,6 +1035,16 @@ QPlainTextEdit#SatLog {
     qss.replace(QStringLiteral("@INPUT_BG@"), input_bg);
     qss.replace(QStringLiteral("@LOG_BG@"), log_bg);
     setStyleSheet(qss);
+
+    // Replacing an ancestor stylesheet does not reliably repolish widgets
+    // inside the QScrollArea subtree (observed: rail keeping the previous
+    // palette). Force a deterministic repolish of every descendant.
+    const QList<QWidget*> descendants = findChildren<QWidget*>();
+    for (QWidget* child : descendants) {
+        child->style()->unpolish(child);
+        child->style()->polish(child);
+    }
+    update();
 }
 
 void SatelliteScreen::setDarkMode(bool dark_mode) {
