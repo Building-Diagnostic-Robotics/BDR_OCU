@@ -56,6 +56,9 @@ constexpr int kTopStatusBatteryMinWidth = 52;
 constexpr int kTopStatusPillMinWidth = 69;
 constexpr int kTopStatusMotorsChipMinWidth = 96;
 constexpr int kTopStatusMotorsChipHeight = 20;
+// Floating window controls (theme toggle + min/max/close) overlay the
+// top-right corner — same reservation Stage 4/5 make.
+constexpr int kTopStatusWindowControlsReservedWidth = 184;
 constexpr int kLeftRailWidth = 320;
 constexpr int kSendButtonHeight = 44;
 constexpr int kEstopButtonHeight = 48;
@@ -436,6 +439,8 @@ void SatelliteScreen::setTopBatteryState(double pct, bool stale) {
     if (!lbl_top_battery_) {
         return;
     }
+    last_batt_pct_ = pct;
+    last_batt_stale_ = stale;
     if (stale || std::isnan(pct)) {
         lbl_top_battery_->setText(QStringLiteral("—%"));
         lbl_top_battery_->setStyleSheet(
@@ -475,6 +480,7 @@ void SatelliteScreen::showEvent(QShowEvent* event) {
 QWidget* SatelliteScreen::buildTopBar() {
     auto* top_bar = new QWidget(this);
     top_bar->setObjectName("SatTopBar");
+    top_bar->setAttribute(Qt::WA_StyledBackground, true);
     top_bar->setFixedHeight(kTopBarHeight);
     auto* layout = new QHBoxLayout(top_bar);
     layout->setContentsMargins(24, 0, 24, 0);
@@ -557,12 +563,14 @@ QWidget* SatelliteScreen::buildTopBar() {
     status_layout->addWidget(motors_chip_);
 
     layout->addWidget(status_host, 0, Qt::AlignVCenter);
+    layout->addSpacing(kTopStatusWindowControlsReservedWidth);
     return top_bar;
 }
 
 QWidget* SatelliteScreen::buildLeftRail() {
     auto* rail_content = new QWidget;
     rail_content->setObjectName("SatRail");
+    rail_content->setAttribute(Qt::WA_StyledBackground, true);
     auto* layout = new QVBoxLayout(rail_content);
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(12);
@@ -581,6 +589,9 @@ QWidget* SatelliteScreen::buildLeftRail() {
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setFixedWidth(kLeftRailWidth);
+    // The viewport must not paint its default Base brush over the rail's
+    // themed background.
+    scroll->viewport()->setAutoFillBackground(false);
     return scroll;
 }
 
@@ -921,111 +932,123 @@ void SatelliteScreen::applyTheme() {
     const QString muted = mutedColor(dark);
 
     // Every rule is scoped to an object name — no cascading bare selectors.
-    setStyleSheet(QStringLiteral(R"QSS(
-#SatelliteScreen { background-color: %1; }
-#SatTopBar { background-color: %2; border-bottom: 1px solid %3; }
+    // Named-token substitution (not QString::arg chains) so a missed
+    // placeholder can never silently truncate the theme.
+    QString qss = QStringLiteral(R"QSS(
+#SatelliteScreen { background-color: @PAGE@; }
+#SatTopBar { background-color: @SURFACE@; border-bottom: 1px solid @SURFACE_BORDER@; }
 #SatTitle {
-    font-family: 'Arimo'; font-weight: 700; font-size: 16px; color: %4;
+    font-family: 'Arimo'; font-weight: 700; font-size: 16px; color: @TEXT@;
     background: transparent;
 }
 #SatBackButton {
-    background-color: transparent; border: 1px solid %5; border-radius: 8px;
+    background-color: transparent; border: 1px solid @CARD_BORDER@; border-radius: 8px;
 }
-#SatBackButton:hover { background-color: %6; }
+#SatBackButton:hover { background-color: @BUTTON_HOVER@; }
 #SatMotorsChip {
-    background-color: transparent; border: 1px solid %5; border-radius: 10px;
+    background-color: transparent; border: 1px solid @CARD_BORDER@; border-radius: 10px;
 }
-#SatRailScroll { background-color: %1; border: none; border-right: 1px solid %3; }
-#SatRail { background-color: %1; }
+#SatRailScroll { background-color: @PAGE@; border: none; border-right: 1px solid @SURFACE_BORDER@; }
+#SatRail { background-color: @PAGE@; }
 #SatCard {
-    background-color: %2; border: 1px solid %5; border-radius: 10px;
+    background-color: @SURFACE@; border: 1px solid @CARD_BORDER@; border-radius: 10px;
 }
 #SatCardHeader {
     font-family: 'Arimo'; font-weight: 700; font-size: 12px;
-    letter-spacing: 0.5px; color: %7; background: transparent;
+    letter-spacing: 0.5px; color: @MUTED@; background: transparent;
 }
 #SatFieldLabel {
-    font-family: 'Arimo'; font-size: 12px; color: %7; background: transparent;
+    font-family: 'Arimo'; font-size: 12px; color: @MUTED@; background: transparent;
 }
 QLineEdit#SatInput, QDoubleSpinBox#SatInput, QComboBox#SatInput {
-    background-color: %8; border: 1px solid %9; border-radius: 10px;
-    padding: 0 12px; font-family: 'Arimo'; font-size: 14px; color: %4;
+    background-color: @INPUT_BG@; border: 1px solid @INPUT_BORDER@; border-radius: 10px;
+    padding: 0 12px; font-family: 'Arimo'; font-size: 14px; color: @TEXT@;
     selection-background-color: rgba(0, 188, 125, 0.30);
 }
 QLineEdit#SatInput:focus, QDoubleSpinBox#SatInput:focus,
 QComboBox#SatInput:focus { border-color: #00BC7D; }
 QComboBox#SatInput::drop-down { border: none; width: 24px; }
 QComboBox#SatInput QAbstractItemView {
-    background-color: %8; border: 1px solid %9; color: %4;
+    background-color: @INPUT_BG@; border: 1px solid @INPUT_BORDER@; color: @TEXT@;
     selection-background-color: rgba(0, 188, 125, 0.30);
 }
 QPushButton#SatButton {
-    background-color: %10; border: 1px solid %9; border-radius: 10px;
-    font-family: 'Arimo'; font-weight: 600; font-size: 13px; color: %4;
+    background-color: @BUTTON_BG@; border: 1px solid @INPUT_BORDER@; border-radius: 10px;
+    font-family: 'Arimo'; font-weight: 600; font-size: 13px; color: @TEXT@;
     padding: 0 12px;
 }
-QPushButton#SatButton:hover { background-color: %11; }
-QPushButton#SatButton:disabled { color: %7; background-color: transparent; }
+QPushButton#SatButton:hover { background-color: @BUTTON_HOVER@; }
+QPushButton#SatButton:disabled { color: @MUTED@; background-color: transparent; }
 QPushButton#SatSendButton {
     background-color: #00BC7D; border: none; border-radius: 10px;
     font-family: 'Arimo'; font-weight: 700; font-size: 14px; color: #FFFFFF;
 }
 QPushButton#SatSendButton:hover { background-color: #00A86D; }
-QPushButton#SatSendButton:disabled { background-color: %10; color: %7; }
+QPushButton#SatSendButton:disabled { background-color: @BUTTON_BG@; color: @MUTED@; }
 QPushButton#SatEstopButton {
     background-color: #E7000B; border: none; border-radius: 10px;
     font-family: 'Arimo'; font-weight: 800; font-size: 14px;
     letter-spacing: 1px; color: #FFFFFF;
 }
 QPushButton#SatEstopButton:hover { background-color: #C10007; }
-QPushButton#SatEstopButton:disabled { background-color: %10; color: %7; }
+QPushButton#SatEstopButton:disabled { background-color: @BUTTON_BG@; color: @MUTED@; }
 QCheckBox#SatCheck {
-    font-family: 'Arimo'; font-size: 13px; color: %4; background: transparent;
+    font-family: 'Arimo'; font-size: 13px; color: @TEXT@; background: transparent;
 }
 QCheckBox#SatCheck::indicator {
-    width: 16px; height: 16px; border: 1px solid %9; border-radius: 4px;
-    background-color: %8;
+    width: 16px; height: 16px; border: 1px solid @INPUT_BORDER@; border-radius: 4px;
+    background-color: @INPUT_BG@;
 }
 QCheckBox#SatCheck::indicator:checked {
     background-color: #00BC7D; border-color: #00BC7D;
 }
 QSlider#SatSlider::groove:horizontal {
-    height: 4px; background: %9; border-radius: 2px;
+    height: 4px; background: @INPUT_BORDER@; border-radius: 2px;
 }
 QSlider#SatSlider::handle:horizontal {
     width: 14px; height: 14px; margin: -5px 0; border-radius: 7px;
     background: #00BC7D;
 }
 QProgressBar#SatCoverage {
-    background-color: %8; border: 1px solid %9; border-radius: 6px;
-    text-align: center; font-family: 'Arimo'; font-size: 11px; color: %4;
+    background-color: @INPUT_BG@; border: 1px solid @INPUT_BORDER@; border-radius: 6px;
+    text-align: center; font-family: 'Arimo'; font-size: 11px; color: @TEXT@;
 }
 QProgressBar#SatCoverage::chunk { background-color: #00BC7D; border-radius: 5px; }
 QPlainTextEdit#SatLog {
-    background-color: %12; border: 1px solid %9; border-radius: 8px;
-    color: %7; font-family: monospace; font-size: 11px;
+    background-color: @LOG_BG@; border: 1px solid @INPUT_BORDER@; border-radius: 8px;
+    color: @MUTED@; font-family: monospace; font-size: 11px;
 }
-)QSS")
-            .arg(page_bg,           // %1
-                 surface,           // %2
-                 surface_border,    // %3
-                 text,              // %4
-                 card_border,       // %5
-                 button_hover,      // %6
-                 muted,             // %7
-                 input_bg,          // %8
-                 input_border)      // %9
-            .arg(button_bg,         // %10
-                 button_hover,      // %11
-                 log_bg));          // %12
+)QSS");
+    qss.replace(QStringLiteral("@PAGE@"), page_bg);
+    qss.replace(QStringLiteral("@SURFACE_BORDER@"), surface_border);
+    qss.replace(QStringLiteral("@SURFACE@"), surface);
+    qss.replace(QStringLiteral("@TEXT@"), text);
+    qss.replace(QStringLiteral("@CARD_BORDER@"), card_border);
+    qss.replace(QStringLiteral("@BUTTON_HOVER@"), button_hover);
+    qss.replace(QStringLiteral("@BUTTON_BG@"), button_bg);
+    qss.replace(QStringLiteral("@MUTED@"), muted);
+    qss.replace(QStringLiteral("@INPUT_BORDER@"), input_border);
+    qss.replace(QStringLiteral("@INPUT_BG@"), input_bg);
+    qss.replace(QStringLiteral("@LOG_BG@"), log_bg);
+    setStyleSheet(qss);
 }
 
 void SatelliteScreen::setDarkMode(bool dark_mode) {
+    const QString old_muted = mutedColor(dark_mode_);
     dark_mode_ = dark_mode;
     applyTheme();
-    // Re-render the dynamic pill colors against the new palette.
-    updateBotPill();
-    updateStatePill();
+    // Re-render every dynamic surface against the new palette. Pills whose
+    // color was the old palette's muted tone follow to the new muted tone;
+    // semantic colors (accent/amber/red) are theme-independent.
+    const auto remap = [&](const QColor& color) {
+        return color.name().compare(old_muted, Qt::CaseInsensitive) == 0
+                   ? QColor(mutedColor(dark_mode_))
+                   : color;
+    };
+    setBotPill(bot_text_, remap(bot_color_));
+    setStatePill(state_text_, remap(state_color_));
+    setMotorsChip(motors_text_, remap(motors_color_));
+    setTopBatteryState(last_batt_pct_, last_batt_stale_);
 }
 
 // ---- Jobs -------------------------------------------------------------------
@@ -1318,6 +1341,8 @@ void SatelliteScreen::setBotPill(const QString& text, const QColor& color) {
     if (!lbl_bot_dot_ || !lbl_bot_text_) {
         return;
     }
+    bot_text_ = text;
+    bot_color_ = color;
     lbl_bot_dot_->setPixmap(loadTintedSvg(
         QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8,
         color.name()));
@@ -1330,6 +1355,8 @@ void SatelliteScreen::setStatePill(const QString& text, const QColor& color) {
     if (!lbl_state_dot_ || !lbl_state_text_) {
         return;
     }
+    state_text_ = text;
+    state_color_ = color;
     lbl_state_dot_->setPixmap(loadTintedSvg(
         QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8,
         color.name()));
@@ -1342,6 +1369,8 @@ void SatelliteScreen::setMotorsChip(const QString& text, const QColor& color) {
     if (!lbl_motors_dot_ || !lbl_motors_text_) {
         return;
     }
+    motors_text_ = text;
+    motors_color_ = color;
     lbl_motors_dot_->setPixmap(loadTintedSvg(
         QStringLiteral(":/assets/missionplanner/status_dot.svg"), 6, 6,
         color.name()));

@@ -174,6 +174,17 @@ private:
 
     PlanMode plan_mode_ = PlanMode::Satellite;
     bool planning_only_ = false;
+
+    // Last-rendered pill states, kept so setDarkMode() can re-render every
+    // dynamic surface against the new palette.
+    double last_batt_pct_ = 0.0;
+    bool last_batt_stale_ = true;
+    QString bot_text_;
+    QColor bot_color_;
+    QString state_text_;
+    QColor state_color_;
+    QString motors_text_;
+    QColor motors_color_;
 };
 
 }  // namespace f2c_cpp
