@@ -2,6 +2,7 @@
 
 #include "satellite_palette.hpp"
 #include "satellite_tile_service.hpp"
+#include "units_system.hpp"
 
 #include <QMouseEvent>
 #include <QPainter>
@@ -38,6 +39,9 @@ SatelliteMapWidget::SatelliteMapWidget(TileService* tiles, QWidget* parent)
     setFocusPolicy(Qt::ClickFocus);
     connect(tiles_, &TileService::tileReady, this,
             [this](int, int, int) { update(); });
+    // Dimension chips + scale bar are unit-aware; repaint on toggle.
+    connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
+            [this](Units) { update(); });
     // Overzoom fallback chain: when a tile fails (usually because the zoom
     // exceeds the imagery's native LOD), pull its parent so paintTiles()
     // always has an ancestor to scale up. Cascades until a level that
@@ -55,13 +59,14 @@ SatelliteMapWidget::SatelliteMapWidget(TileService* tiles, QWidget* parent)
 
 void SatelliteMapWidget::setImageryEnabled(bool enabled) {
     imagery_enabled_ = enabled;
+    zoom_ = qBound(kMinZoom, zoom_, maxZoomNow());
     update();
 }
 
 void SatelliteMapWidget::setView(double lat, double lon, int zoom) {
     center_nx_ = geo::lonToNormX(lon);
     center_ny_ = geo::latToNormY(lat);
-    zoom_ = qBound(kMinZoom, zoom, kMaxZoom);
+    zoom_ = qBound(kMinZoom, zoom, maxZoomNow());
     clampCenter();
     update();
     emitViewChanged();
@@ -236,9 +241,13 @@ QPointF SatelliteMapWidget::markerArrowTipScreen() const {
 // ---- Hit testing ------------------------------------------------------------
 
 SatelliteMapWidget::Drag SatelliteMapWidget::hitTest(const QPointF& pos,
-                                                     int* corner_index) const {
+                                                     int* corner_index,
+                                                     int* edge_index) const {
     if (corner_index) {
         *corner_index = -1;
+    }
+    if (edge_index) {
+        *edge_index = -1;
     }
     if (edit_locked_) {
         return Drag::Pan;
@@ -265,6 +274,25 @@ SatelliteMapWidget::Drag SatelliteMapWidget::hitTest(const QPointF& pos,
                 return Drag::ResizeRoiCorner;
             }
         }
+        // Edge hit (roof-edge toggle) — checked before the interior so the
+        // boundary band isn't swallowed by MoveRoi. Corners already won.
+        for (int i = 0; i < corners.size(); ++i) {
+            const QLineF edge(corners[i], corners[(i + 1) % corners.size()]);
+            const QPointF ab = edge.p2() - edge.p1();
+            const double len_sq = QPointF::dotProduct(ab, ab);
+            if (len_sq < 1.0) {
+                continue;
+            }
+            const double t = qBound(
+                0.0, QPointF::dotProduct(pos - edge.p1(), ab) / len_sq, 1.0);
+            const QPointF closest = edge.p1() + ab * t;
+            if (QLineF(pos, closest).length() <= 6.0) {
+                if (edge_index) {
+                    *edge_index = i;
+                }
+                return Drag::EdgeTogglePending;
+            }
+        }
         QPainterPath path;
         path.addPolygon(QPolygonF(corners));
         if (path.contains(pos)) {
@@ -272,6 +300,17 @@ SatelliteMapWidget::Drag SatelliteMapWidget::hitTest(const QPointF& pos,
         }
     }
     return Drag::Pan;
+}
+
+geo::GeoPoint SatelliteMapWidget::maybeSnap(const geo::GeoPoint& point) const {
+    if (imagery_enabled_) {
+        return point;  // snapping against ±5 m imagery is meaningless
+    }
+    const geo::GeoPoint origin{0.0, 0.0};
+    const QPointF enu = geo::enuFromGeo(origin, point);
+    constexpr double kSnapM = 0.1;
+    return geo::geoFromEnu(origin, std::round(enu.x() / kSnapM) * kSnapM,
+                           std::round(enu.y() / kSnapM) * kSnapM);
 }
 
 void SatelliteMapWidget::updateCursorShape(const QPointF& pos) {
@@ -282,6 +321,7 @@ void SatelliteMapWidget::updateCursorShape(const QPointF& pos) {
     switch (hitTest(pos, nullptr)) {
         case Drag::RotateMarker:
         case Drag::RotateRoi:
+        case Drag::EdgeTogglePending:
             setCursor(Qt::PointingHandCursor);
             break;
         case Drag::ResizeRoiCorner:
@@ -317,9 +357,7 @@ void SatelliteMapWidget::paintEvent(QPaintEvent*) {
 
 void SatelliteMapWidget::paintTiles(QPainter& painter) {
     if (!imagery_enabled_) {
-        // Measured mode: plain surface (CAD grid rendering lands with the
-        // measured-canvas component).
-        painter.fillRect(rect(), QColor(0x10, 0x10, 0x14));
+        paintGrid(painter);
         return;
     }
     const int n = 1 << zoom_;
@@ -379,6 +417,78 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
         }
     }
     painter.setRenderHint(QPainter::Antialiasing, true);
+}
+
+void SatelliteMapWidget::paintGrid(QPainter& painter) {
+    // Measured (CAD) canvas: adaptive metric grid on a dark drafting
+    // surface. Minor lines pick the smallest step that stays >= 24 px on
+    // screen; major lines every 5 minors carry meter labels.
+    painter.fillRect(rect(), QColor(0x10, 0x10, 0x14));
+    const double mpp = metersPerPixelNow();
+
+    double minor_m = 0.1;
+    const double steps[] = {0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0};
+    for (double step : steps) {
+        if (step / mpp >= 24.0) {
+            minor_m = step;
+            break;
+        }
+        minor_m = step;
+    }
+    const double major_m = minor_m * 5.0;
+
+    // Visible ENU window around the grid origin (the measured anchor).
+    const geo::GeoPoint origin{0.0, 0.0};
+    const QPointF enu_tl =
+        geo::enuFromGeo(origin, geoFromScreen(QPointF(0, 0)));
+    const QPointF enu_br = geo::enuFromGeo(
+        origin, geoFromScreen(QPointF(width(), height())));
+    const double e_min = std::min(enu_tl.x(), enu_br.x());
+    const double e_max = std::max(enu_tl.x(), enu_br.x());
+    const double n_min = std::min(enu_tl.y(), enu_br.y());
+    const double n_max = std::max(enu_tl.y(), enu_br.y());
+
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    const QColor minor_color(255, 255, 255, 13);
+    const QColor major_color(255, 255, 255, 26);
+    for (double e = std::floor(e_min / minor_m) * minor_m; e <= e_max;
+         e += minor_m) {
+        const bool major =
+            std::abs(std::remainder(e, major_m)) < minor_m * 0.25;
+        const QPointF top =
+            screenFromGeo(geo::geoFromEnu(origin, e, n_max));
+        const QPointF bottom =
+            screenFromGeo(geo::geoFromEnu(origin, e, n_min));
+        painter.setPen(QPen(major ? major_color : minor_color, 1));
+        painter.drawLine(top, bottom);
+    }
+    for (double n = std::floor(n_min / minor_m) * minor_m; n <= n_max;
+         n += minor_m) {
+        const bool major =
+            std::abs(std::remainder(n, major_m)) < minor_m * 0.25;
+        const QPointF left =
+            screenFromGeo(geo::geoFromEnu(origin, e_min, n));
+        const QPointF right =
+            screenFromGeo(geo::geoFromEnu(origin, e_max, n));
+        painter.setPen(QPen(major ? major_color : minor_color, 1));
+        painter.drawLine(left, right);
+    }
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    // Robot-frame axes once the marker is placed: the operator's reminder
+    // that the drawn world is anchored to the robot at FAST-LIO init.
+    if (marker_.valid) {
+        const QPointF base = markerScreenPos();
+        const double rad = marker_.heading_deg * geo::kDegToRad;
+        const QPointF fwd(std::sin(rad), -std::cos(rad));
+        const QPointF left(-fwd.y(), fwd.x());
+        QColor axis(0x00, 0xBC, 0x7D, 70);
+        painter.setPen(QPen(axis, 1, Qt::DashLine));
+        painter.drawLine(base - fwd * 2000.0, base + fwd * 2000.0);
+        axis.setAlpha(40);
+        painter.setPen(QPen(axis, 1, Qt::DashLine));
+        painter.drawLine(base - left * 2000.0, base + left * 2000.0);
+    }
 }
 
 void SatelliteMapWidget::paintTelemetry(QPainter& painter) {
@@ -466,9 +576,24 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
     QColor edge = satpal::accent();
 
     painter.setBrush(fill);
-    painter.setPen(QPen(edge, 2.0, edit_locked_ ? Qt::SolidLine : Qt::DashLine));
+    painter.setPen(Qt::NoPen);
     painter.drawPolygon(poly);
     painter.setBrush(Qt::NoBrush);
+
+    // Per-edge stroke: interior limits in accent (dashed while editable);
+    // marked roof edges — physical fall hazards — hazard-red, solid,
+    // heavier. Edge i = corner i -> corner (i+1)%4.
+    for (int i = 0; i < 4; ++i) {
+        if (roi_.roof_edges[size_t(i)]) {
+            painter.setPen(
+                QPen(satpal::danger(), 3.0, Qt::SolidLine, Qt::RoundCap));
+        } else {
+            painter.setPen(QPen(edge, 2.0,
+                                edit_locked_ ? Qt::SolidLine : Qt::DashLine,
+                                Qt::RoundCap));
+        }
+        painter.drawLine(corners[i], corners[(i + 1) % 4]);
+    }
 
     // Heading tick on the forward edge (midpoint corners[0]..corners[3]).
     const QPointF fwd_mid = (corners[0] + corners[3]) / 2.0;
@@ -507,10 +632,11 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
         painter.drawText(box, Qt::AlignCenter, text);
     };
     // Length label on a side edge (corners[0]-[1]); width on forward edge.
+    // ANSI-aware per the units rules — operators toggle between missions.
     drawDim((corners[0] + corners[1]) / 2.0,
-            QStringLiteral("%1 m").arg(roi_.length_m, 0, 'f', 1));
+            units::formatLength(roi_.length_m, 1));
     drawDim((corners[3] + corners[0]) / 2.0,
-            QStringLiteral("%1 m").arg(roi_.width_m, 0, 'f', 1));
+            units::formatLength(roi_.width_m, 1));
 }
 
 void SatelliteMapWidget::paintMarker(QPainter& painter) {
@@ -555,17 +681,21 @@ void SatelliteMapWidget::paintMarker(QPainter& painter) {
 }
 
 void SatelliteMapWidget::paintChrome(QPainter& painter) {
-    // Scale bar (bottom-left).
+    // Scale bar (bottom-left) — steps chosen in the operator's display
+    // unit so the label reads as a round number in either system.
     const double mpp = metersPerPixelNow();
-    double target_m = 100.0 * mpp;
-    const double steps[] = {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000};
+    const bool metric = UnitsProvider::instance()->isMetric();
+    const double unit_m = metric ? 1.0 : 1.0 / units::kFeetPerMeter;
+    const double target_units = 100.0 * mpp / unit_m;
+    const double steps[] = {0.5, 1, 2,  5,   10,  20,   50,  100,
+                            200, 500, 1000, 2000, 5000, 10000};
     double chosen = steps[0];
     for (double step : steps) {
-        if (step <= target_m) {
+        if (step <= target_units) {
             chosen = step;
         }
     }
-    const double bar_px = chosen / mpp;
+    const double bar_px = chosen * unit_m / mpp;
     const QPointF base(14, height() - 18);
     painter.setPen(QPen(satpal::text(), 2));
     painter.drawLine(base, base + QPointF(bar_px, 0));
@@ -574,11 +704,16 @@ void SatelliteMapWidget::paintChrome(QPainter& painter) {
     QFont small = font();
     small.setPointSizeF(9.0);
     painter.setFont(small);
+    QString label;
+    if (metric) {
+        label = chosen >= 1000.0
+                    ? QStringLiteral("%1 km").arg(chosen / 1000.0)
+                    : QStringLiteral("%1 m").arg(chosen);
+    } else {
+        label = QStringLiteral("%1 ft").arg(chosen);
+    }
     painter.drawText(QRectF(base.x(), base.y() - 20, bar_px, 14),
-                     Qt::AlignCenter,
-                     chosen >= 1000.0
-                         ? QStringLiteral("%1 km").arg(chosen / 1000.0)
-                         : QStringLiteral("%1 m").arg(chosen));
+                     Qt::AlignCenter, label);
 
     // Attribution (ToS requirement, bottom-right; imagery surfaces only).
     if (!imagery_enabled_) {
@@ -604,7 +739,7 @@ void SatelliteMapWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (place_marker_armed_ && !edit_locked_) {
-        const geo::GeoPoint point = geoFromScreen(event->pos());
+        const geo::GeoPoint point = maybeSnap(geoFromScreen(event->pos()));
         marker_.lat = point.lat;
         marker_.lon = point.lon;
         if (!marker_.valid && roi_.valid) {
@@ -617,7 +752,8 @@ void SatelliteMapWidget::mousePressEvent(QMouseEvent* event) {
         emit markerChanged();
         return;
     }
-    drag_ = hitTest(event->pos(), &drag_corner_);
+    drag_ = hitTest(event->pos(), &drag_corner_, &drag_edge_);
+    drag_press_pos_ = event->pos();
     drag_last_ = event->pos();
     updateCursorShape(event->pos());
 }
@@ -643,19 +779,23 @@ void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
         }
         case Drag::MoveRoi: {
             const QPointF enu(delta.x() * mpp, -delta.y() * mpp);
-            roi_.center = geo::geoFromEnu(roi_.center, enu.x(), enu.y());
+            roi_.center =
+                maybeSnap(geo::geoFromEnu(roi_.center, enu.x(), enu.y()));
             emit roiChanged();
             break;
         }
         case Drag::MoveMarker: {
             const QPointF enu(delta.x() * mpp, -delta.y() * mpp);
-            const geo::GeoPoint moved = geo::geoFromEnu(
-                geo::GeoPoint{marker_.lat, marker_.lon}, enu.x(), enu.y());
+            const geo::GeoPoint moved = maybeSnap(geo::geoFromEnu(
+                geo::GeoPoint{marker_.lat, marker_.lon}, enu.x(), enu.y()));
             marker_.lat = moved.lat;
             marker_.lon = moved.lon;
             emit markerChanged();
             break;
         }
+        case Drag::EdgeTogglePending:
+            // Toggles on release; a real drag from an edge does nothing.
+            break;
         case Drag::RotateMarker: {
             const QPointF base = markerScreenPos();
             const QPointF v = pos - base;
@@ -694,15 +834,24 @@ void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
 
 void SatelliteMapWidget::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
+        if (drag_ == Drag::EdgeTogglePending && drag_edge_ >= 0 &&
+            drag_edge_ < 4 &&
+            (event->pos() - drag_press_pos_).manhattanLength() <= 4) {
+            roi_.roof_edges[size_t(drag_edge_)] =
+                !roi_.roof_edges[size_t(drag_edge_)];
+            update();
+            emit roiChanged();
+        }
         drag_ = Drag::None;
         drag_corner_ = -1;
+        drag_edge_ = -1;
         updateCursorShape(event->pos());
     }
 }
 
 void SatelliteMapWidget::wheelEvent(QWheelEvent* event) {
     const int dz = event->angleDelta().y() > 0 ? 1 : -1;
-    const int new_zoom = qBound(kMinZoom, zoom_ + dz, kMaxZoom);
+    const int new_zoom = qBound(kMinZoom, zoom_ + dz, maxZoomNow());
     if (new_zoom == zoom_) {
         return;
     }

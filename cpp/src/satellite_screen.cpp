@@ -19,6 +19,7 @@
 #include "satellite_ros_link.hpp"
 #include "satellite_tile_service.hpp"
 #include "settings_constants.hpp"
+#include "units_system.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -72,6 +73,24 @@ constexpr double kDefaultLat = 39.5;
 constexpr double kDefaultLon = -98.35;
 constexpr int kDefaultZoom = 5;
 constexpr double kTeleopAngularSpeed = 1.0;  // rad/s
+
+// Measured plans live in a fictional geo frame anchored at the reference
+// origin — the operator only ever sees meters.
+constexpr int kMeasuredDefaultZoom = 21;
+
+/** Spin display value -> meters, honoring the operator's unit system. */
+double spinToMeters(double display_value) {
+    return UnitsProvider::instance()->isMetric()
+               ? display_value
+               : units::feetToMeters(display_value);
+}
+
+/** Meters -> spin display value. */
+double metersToSpin(double meters) {
+    return UnitsProvider::instance()->isMetric()
+               ? meters
+               : units::metersToFeet(meters);
+}
 
 // ---- Palette (dark = zinc family per MissionMetadataDialog / planner) -------
 constexpr const char* kAccent = "#00BC7D";
@@ -268,13 +287,29 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             spin->blockSignals(true);
             spin->setEnabled(roi.valid && !mission_->missionActive());
         }
-        roi_length_->setValue(roi.length_m);
-        roi_width_->setValue(roi.width_m);
+        roi_length_->setValue(metersToSpin(roi.length_m));
+        roi_width_->setValue(metersToSpin(roi.width_m));
         roi_heading_->setValue(roi.heading_deg);
         for (QDoubleSpinBox* spin : {roi_length_, roi_width_, roi_heading_}) {
             spin->blockSignals(false);
         }
     });
+    // Units toggle: re-suffix + re-display the length fields (values stay
+    // SI in the model; only the presentation flips — house rule).
+    connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
+            [this](Units) {
+                const RoiRect roi = map_->roi();
+                for (QDoubleSpinBox* spin : {roi_length_, roi_width_}) {
+                    spin->blockSignals(true);
+                    spin->setSuffix(QStringLiteral(" ") +
+                                    units::lengthUnitSuffix());
+                }
+                roi_length_->setValue(metersToSpin(roi.length_m));
+                roi_width_->setValue(metersToSpin(roi.width_m));
+                for (QDoubleSpinBox* spin : {roi_length_, roi_width_}) {
+                    spin->blockSignals(false);
+                }
+            });
     connect(map_, &SatelliteMapWidget::markerChanged, this, [this] {
         const geo::GeoPose marker = map_->marker();
         robot_heading_->blockSignals(true);
@@ -416,6 +451,35 @@ void SatelliteScreen::configureForScan(PlanMode mode) {
     refreshJobsCombo(QString());
     newJob();
     applyModeVisibility();
+    if (mode == PlanMode::Measured) {
+        // The measured canvas opens centered on its reference origin at a
+        // scale where a typical roof fills the view (~60 m across).
+        map_->setView(0.0, 0.0, kMeasuredDefaultZoom);
+    }
+}
+
+void SatelliteScreen::devSeedDemoPlan() {
+    if (plan_mode_ == PlanMode::Satellite) {
+        // Somewhere real with buildings so the ROI reads against imagery.
+        map_->setView(43.6007, -116.2497, 19);
+    }
+    map_->addRoiAtViewCenter();
+    RoiRect roi = map_->roi();
+    roi.length_m = 24.0;
+    roi.width_m = 16.0;
+    roi.heading_deg = 20.0;
+    roi.roof_edges[0] = true;
+    roi.roof_edges[2] = true;
+    map_->setRoi(roi);
+    emit map_->roiChanged();
+    geo::GeoPose marker;
+    const geo::GeoPoint at = geo::geoFromEnu(roi.center, -6.0, -4.0);
+    marker.lat = at.lat;
+    marker.lon = at.lon;
+    marker.heading_deg = 20.0;
+    marker.valid = true;
+    map_->setMarker(marker);
+    emit map_->markerChanged();
 }
 
 void SatelliteScreen::configureForPlanning() {
@@ -709,8 +773,10 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     });
     layout->addWidget(draw_row);
 
-    roi_length_ = makeSpin(2.0, 500.0, 0.5, 1, QStringLiteral(" m"));
-    roi_width_ = makeSpin(2.0, 500.0, 0.5, 1, QStringLiteral(" m"));
+    const QString length_suffix =
+        QStringLiteral(" ") + units::lengthUnitSuffix();
+    roi_length_ = makeSpin(2.0, 2000.0, 0.5, 1, length_suffix);
+    roi_width_ = makeSpin(2.0, 2000.0, 0.5, 1, length_suffix);
     roi_heading_ = makeSpin(0.0, 359.9, 1.0, 1, QStringLiteral(" °"));
     roi_heading_->setWrapping(true);
     robot_heading_ = makeSpin(0.0, 359.9, 1.0, 1, QStringLiteral(" °"));
@@ -726,8 +792,9 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
         if (!roi.valid) {
             return;
         }
-        roi.length_m = roi_length_->value();
-        roi.width_m = roi_width_->value();
+        // Spins display the operator's units; the model stays SI.
+        roi.length_m = spinToMeters(roi_length_->value());
+        roi.width_m = spinToMeters(roi_width_->value());
         roi.heading_deg = roi_heading_->value();
         map_->setRoi(roi);
     };
@@ -751,6 +818,15 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     robot_pos_label_->setObjectName("SatFieldLabel");
     robot_pos_label_->setWordWrap(true);
     layout->addWidget(robot_pos_label_);
+
+    auto* edge_hint = new QLabel(
+        QStringLiteral("Tap an ROI edge to mark it as a roof edge — red "
+                       "edges are physical fall hazards and get a larger "
+                       "setback."),
+        card);
+    edge_hint->setObjectName("SatFieldLabel");
+    edge_hint->setWordWrap(true);
+    layout->addWidget(edge_hint);
 
     save_button_ = new QPushButton(QStringLiteral("Save Plan"), card);
     save_button_->setObjectName("SatButton");
@@ -1111,7 +1187,10 @@ void SatelliteScreen::loadJob(const Job& job) {
     emit map_->roiChanged();
     emit map_->markerChanged();
     if (job.roi.valid) {
-        map_->setView(job.roi.center.lat, job.roi.center.lon, 19);
+        map_->setView(job.roi.center.lat, job.roi.center.lon,
+                      job.isMeasured() ? kMeasuredDefaultZoom : 19);
+    } else if (job.isMeasured()) {
+        map_->setView(0.0, 0.0, kMeasuredDefaultZoom);
     }
     appendLog(QStringLiteral("[plan] loaded '%1'").arg(job.name));
 }

@@ -15,6 +15,8 @@
 #include <QString>
 #include <QVector>
 
+#include <array>
+
 namespace f2c_cpp {
 
 /**
@@ -27,6 +29,15 @@ struct RoiRect {
     double width_m = 15.0;
     double heading_deg = 0.0;
     bool valid = false;
+
+    /**
+     * Per-edge roof-edge marking. Edge i runs corner i -> corner (i+1)%4
+     * in corners() order. Marked edges are physical fall hazards: rendered
+     * hazard-red on the canvas and (once the robot-side roi_edge_flags
+     * parameter lands) given a larger boundary clearance by the coverage
+     * manager. Unmarked edges are virtual limits well inside the roof.
+     */
+    std::array<bool, 4> roof_edges{{false, false, false, false}};
 
     /** Four corners as geo points, CCW. */
     QVector<geo::GeoPoint> corners() const {

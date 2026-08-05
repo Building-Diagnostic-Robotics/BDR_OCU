@@ -62,6 +62,10 @@ public:
     /** Office preplanning trim: mission/teleop hidden, Send unavailable. */
     void configureForPlanning();
 
+    /** Dev screenshot hook: seeds a demo ROI (roof edges marked) + robot
+        marker so canvas rendering can be verified headlessly. */
+    void devSeedDemoPlan();
+
     /** Mirrors the Dashboard MQTT battery sample onto the top-bar pill
         (same contract as ExplorationScreen/PlannerScreen). */
     void setTopBatteryState(double pct, bool stale);

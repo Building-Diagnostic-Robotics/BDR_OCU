@@ -67,6 +67,10 @@ public:
 
     static constexpr int kMinZoom = 3;
     static constexpr int kMaxZoom = 20;
+    /** The grid canvas has no imagery-resolution ceiling — allow zooming to
+        centimeter scale for small roofs. */
+    static constexpr int kMaxZoomGrid = 23;
+    int maxZoomNow() const { return imagery_enabled_ ? kMaxZoom : kMaxZoomGrid; }
 
 signals:
     void viewChanged(double lat, double lon, int zoom);
@@ -89,6 +93,7 @@ private:
         RotateRoi,
         MoveMarker,
         RotateMarker,
+        EdgeTogglePending,  // pressed on an ROI edge; toggles on release
     };
 
     // Coordinate helpers (valid during paint/mouse handling).
@@ -104,10 +109,14 @@ private:
     QPointF markerScreenPos() const;
     QPointF markerArrowTipScreen() const;
 
-    Drag hitTest(const QPointF& pos, int* corner_index) const;
+    Drag hitTest(const QPointF& pos, int* corner_index,
+                 int* edge_index = nullptr) const;
     void updateCursorShape(const QPointF& pos);
+    /** 0.1 m position snapping — measured (grid) canvas only. */
+    geo::GeoPoint maybeSnap(const geo::GeoPoint& point) const;
 
     void paintTiles(QPainter& painter);
+    void paintGrid(QPainter& painter);
     void paintTelemetry(QPainter& painter);
     void paintRoi(QPainter& painter);
     void paintMarker(QPainter& painter);
@@ -136,6 +145,8 @@ private:
 
     Drag drag_ = Drag::None;
     int drag_corner_ = -1;
+    int drag_edge_ = -1;
+    QPoint drag_press_pos_;
     QPoint drag_last_;
 };
 

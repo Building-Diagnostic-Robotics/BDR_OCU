@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QDirIterator>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -19,6 +20,11 @@ QJsonObject Job::toJson() const {
     roi_obj["length_m"] = roi.length_m;
     roi_obj["width_m"] = roi.width_m;
     roi_obj["heading_deg"] = roi.heading_deg;
+    QJsonArray roof_edges;
+    for (bool marked : roi.roof_edges) {
+        roof_edges.append(marked ? 1 : 0);
+    }
+    roi_obj["roof_edges"] = roof_edges;
 
     QJsonObject robot_obj;
     robot_obj["valid"] = robot.valid;
@@ -55,6 +61,10 @@ Job Job::fromJson(const QJsonObject& obj) {
     job.roi.length_m = roi_obj.value("length_m").toDouble(20.0);
     job.roi.width_m = roi_obj.value("width_m").toDouble(15.0);
     job.roi.heading_deg = roi_obj.value("heading_deg").toDouble(0.0);
+    const QJsonArray roof_edges = roi_obj.value("roof_edges").toArray();
+    for (int i = 0; i < 4 && i < roof_edges.size(); ++i) {
+        job.roi.roof_edges[size_t(i)] = roof_edges[i].toInt(0) != 0;
+    }
 
     const QJsonObject robot_obj = obj.value("robot").toObject();
     job.robot.valid = robot_obj.value("valid").toBool(false);
