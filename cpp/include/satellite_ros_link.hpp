@@ -81,6 +81,22 @@ public:
     /** ODrive axis state: 1 = IDLE (disarm), 8 = CLOSED_LOOP_CONTROL (arm). */
     void requestAxisState(int state);
 
+    /**
+     * Push building/operator/units to /data_collection_coordinator as
+     * string parameters — the autonomy arming gate (same contract as the
+     * classic flow's sendDataCollectorSessionMetadata: the caller must
+     * hard-block autonomy_enable until on_complete(true)).
+     *
+     * Non-blocking: if the coordinator's parameter service is not ready
+     * the callback fires false immediately (the caller retries on a
+     * timer while the robot stack boots). Callback is marshalled to the
+     * GUI thread.
+     */
+    void pushSessionMetadata(const QString& building_name,
+                             const QString& operator_name,
+                             const QString& units_preference,
+                             std::function<void(bool ok)> on_complete);
+
     // Telemetry snapshots (safe from GUI thread).
     GridSnapshot gridSnapshot() const;
     PolylineSet pathSnapshot() const;

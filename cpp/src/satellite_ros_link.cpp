@@ -11,11 +11,14 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <odrive_can/srv/axis_state.hpp>
+#include <rcl_interfaces/msg/parameter.hpp>
+#include <rcl_interfaces/srv/set_parameters.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include <algorithm>
 #include <cmath>
 
 namespace f2c_cpp {
@@ -51,6 +54,8 @@ public:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr segment_sub;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr left_axis;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr right_axis;
+    rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr
+        coordinator_params;
 };
 
 RosLink::RosLink(QObject* parent) : QObject(parent), impl_(new Impl) {}
@@ -232,6 +237,9 @@ bool RosLink::start(QString* error) {
         impl_->right_axis =
             impl_->node->create_client<odrive_can::srv::AxisState>(
                 "/right/request_axis_state");
+        impl_->coordinator_params =
+            impl_->node->create_client<rcl_interfaces::srv::SetParameters>(
+                "/data_collection_coordinator/set_parameters");
     } catch (const std::exception& exc) {
         if (error) {
             *error = QString::fromUtf8(exc.what());
@@ -323,6 +331,69 @@ void RosLink::requestAxisState(int state) {
     };
     send(impl_->left_axis, QStringLiteral("left"));
     send(impl_->right_axis, QStringLiteral("right"));
+}
+
+void RosLink::pushSessionMetadata(const QString& building_name,
+                                  const QString& operator_name,
+                                  const QString& units_preference,
+                                  std::function<void(bool ok)> on_complete) {
+    // Marshal every completion onto the GUI thread (this object's thread).
+    const auto complete = [this, on_complete](bool ok) {
+        if (!on_complete) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            this, [on_complete, ok]() { on_complete(ok); },
+            Qt::QueuedConnection);
+    };
+
+    if (!running_ || !impl_->coordinator_params) {
+        complete(false);
+        return;
+    }
+    // Non-blocking readiness check — the caller retries while the robot
+    // stack boots, so a not-yet-available service is a normal miss.
+    if (!impl_->coordinator_params->service_is_ready()) {
+        complete(false);
+        return;
+    }
+
+    // Push raw strings — the coordinator owns the slugifier (see
+    // sendDataCollectorSessionMetadata in app_shell.cpp for the rationale).
+    const auto make_string_param = [](const char* name, const QString& value) {
+        rcl_interfaces::msg::Parameter p;
+        p.name = name;
+        p.value.type = rcl_interfaces::msg::ParameterType::PARAMETER_STRING;
+        p.value.string_value = value.toStdString();
+        return p;
+    };
+    auto request =
+        std::make_shared<rcl_interfaces::srv::SetParameters::Request>();
+    request->parameters.reserve(3);
+    request->parameters.push_back(
+        make_string_param("building_name", building_name));
+    request->parameters.push_back(
+        make_string_param("operator_name", operator_name));
+    request->parameters.push_back(
+        make_string_param("units_preference", units_preference));
+
+    impl_->coordinator_params->async_send_request(
+        request,
+        [complete](rclcpp::Client<rcl_interfaces::srv::SetParameters>::
+                       SharedFuture future) {
+            bool ok = false;
+            try {
+                const auto response = future.get();
+                ok = response &&
+                     response->results.size() == 3 &&
+                     std::all_of(response->results.begin(),
+                                 response->results.end(),
+                                 [](const auto& r) { return r.successful; });
+            } catch (const std::exception&) {
+                ok = false;
+            }
+            complete(ok);
+        });
 }
 
 GridSnapshot RosLink::gridSnapshot() const {

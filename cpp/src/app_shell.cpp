@@ -1030,6 +1030,40 @@ void AppShellWindow::ensureStage6() {
     stack_->addWidget(stage6_);
     connect(stage6_, &SatelliteScreen::backRequested, this,
             &AppShellWindow::goToStage3);
+    // Layered link model for the Stage 6 BOT pill: the screen stamps the
+    // monitor from its ROS callbacks; AppShell arms the monitor + the
+    // ICMP/TCP-22 reachability probe for the mission's lifetime. The probe
+    // must target the same host Send SSHes to (house rule — otherwise the
+    // layered model probes the wrong IP forever).
+    stage6_->attachLinkHealthMonitor(link_monitor_);
+    connect(stage6_, &SatelliteScreen::missionActiveChanged, this,
+            [this](bool active) {
+                if (active) {
+                    if (link_monitor_) {
+                        link_monitor_->arm();
+                    }
+                    ResolvedRobotSshTarget target;
+                    if (reachability_probe_ &&
+                        resolveRobotSshTargetFromSettings(&target)) {
+                        reachability_probe_->arm(target.host);
+                    }
+                    return;
+                }
+                // Don't tear down link tracking that an exploration launch
+                // still owns.
+                const bool exploration_active =
+                    exploration_launch_in_progress_ ||
+                    exploration_launch_ready_ || laptop_launch_started_ ||
+                    robot_launch_started_;
+                if (!exploration_active) {
+                    if (link_monitor_) {
+                        link_monitor_->disarm();
+                    }
+                    if (reachability_probe_) {
+                        reachability_probe_->disarm();
+                    }
+                }
+            });
     stage6_->setDarkMode(dark_mode_);
 }
 

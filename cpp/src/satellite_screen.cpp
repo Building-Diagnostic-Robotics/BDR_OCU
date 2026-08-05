@@ -12,6 +12,7 @@
 
 #include "satellite_screen.hpp"
 
+#include "link_health_monitor.hpp"
 #include "satellite_download_dialog.hpp"
 #include "satellite_map_widget.hpp"
 #include "satellite_mission_controller.hpp"
@@ -324,17 +325,31 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     });
 
     // ---- ROS telemetry -> map + pills ----
-    connect(ros_, &RosLink::gridUpdated, this,
-            [this] { map_->setGrid(ros_->gridSnapshot()); });
-    connect(ros_, &RosLink::pathUpdated, this,
-            [this] { map_->setPath(ros_->pathSnapshot()); });
-    connect(ros_, &RosLink::swathsUpdated, this,
-            [this] { map_->setSwaths(ros_->swathsSnapshot()); });
-    connect(ros_, &RosLink::odomUpdated, this,
-            [this] { map_->setOdom(ros_->odomSnapshot()); });
-    connect(ros_, &RosLink::statusUpdated, this,
-            [this] { updateStatePill(); });
+    // Every handler stamps the app's LinkHealthMonitor (house rule: a new
+    // subscriber that doesn't stamp makes the monitor go OFFLINE during a
+    // healthy session that only uses that topic).
+    connect(ros_, &RosLink::gridUpdated, this, [this] {
+        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+        map_->setGrid(ros_->gridSnapshot());
+    });
+    connect(ros_, &RosLink::pathUpdated, this, [this] {
+        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+        map_->setPath(ros_->pathSnapshot());
+    });
+    connect(ros_, &RosLink::swathsUpdated, this, [this] {
+        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+        map_->setSwaths(ros_->swathsSnapshot());
+    });
+    connect(ros_, &RosLink::odomUpdated, this, [this] {
+        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::Odom);
+        map_->setOdom(ros_->odomSnapshot());
+    });
+    connect(ros_, &RosLink::statusUpdated, this, [this] {
+        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+        updateStatePill();
+    });
     connect(ros_, &RosLink::segmentStatusUpdated, this, [this] {
+        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
         segment_label_->setText(
             QStringLiteral("Segment: %1").arg(ros_->lastSegmentStatus()));
     });
@@ -362,7 +377,9 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 map_->setEditLocked(active);
                 send_button_->setEnabled(!active);
                 end_button_->setEnabled(active);
-                autonomy_button_->setEnabled(active);
+                // Autonomy stays hard-blocked until the metadata push
+                // lands (same arming-gate rule as the classic flow).
+                autonomy_button_->setEnabled(active && metadata_pushed_);
                 arm_button_->setEnabled(active);
                 disarm_button_->setEnabled(active);
                 estop_button_->setEnabled(active);
@@ -370,6 +387,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 place_robot_button_->setEnabled(!active);
                 save_button_->setEnabled(!active);
                 if (!active) {
+                    stopMetadataPushLoop();
                     autonomy_on_ = false;
                     autonomy_button_->setText(QStringLiteral("Start Autonomy"));
                     map_->clearMissionAnchor();
@@ -379,6 +397,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     reason_label_->clear();
                     coverage_bar_->setVisible(false);
                 }
+                emit missionActiveChanged(active);
             });
 
     teleop_timer_ = new QTimer(this);
@@ -386,6 +405,11 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     connect(teleop_timer_, &QTimer::timeout, this,
             &SatelliteScreen::publishTeleopTick);
     qApp->installEventFilter(this);
+
+    metadata_timer_ = new QTimer(this);
+    metadata_timer_->setInterval(3000);
+    connect(metadata_timer_, &QTimer::timeout, this,
+            &SatelliteScreen::attemptMetadataPush);
 
     slow_timer_ = new QTimer(this);
     slow_timer_->setInterval(1000);
@@ -436,6 +460,57 @@ void SatelliteScreen::shutdownMission() {
     ros_->publishAutonomyEnable(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
     mission_->teardownMission();
+}
+
+void SatelliteScreen::attachLinkHealthMonitor(LinkHealthMonitor* monitor) {
+    link_monitor_ = monitor;
+}
+
+void SatelliteScreen::startMetadataPushLoop() {
+    metadata_pushed_ = false;
+    metadata_attempts_ = 0;
+    autonomy_button_->setEnabled(false);
+    attemptMetadataPush();
+    metadata_timer_->start();
+}
+
+void SatelliteScreen::stopMetadataPushLoop() {
+    metadata_timer_->stop();
+}
+
+void SatelliteScreen::attemptMetadataPush() {
+    if (metadata_pushed_ || !mission_->missionActive()) {
+        stopMetadataPushLoop();
+        return;
+    }
+    ++metadata_attempts_;
+    QSettings settings(kSettingsOrgName, kSettingsAppName);
+    const QString building =
+        settings.value(kSettingsBuildingNameKey).toString();
+    const QString operator_name =
+        settings.value(kSettingsOperatorNameKey).toString();
+    const QString units_pref =
+        units::toString(UnitsProvider::instance()->units());
+    ros_->pushSessionMetadata(
+        building, operator_name, units_pref, [this](bool ok) {
+            if (!mission_->missionActive() || metadata_pushed_) {
+                return;
+            }
+            if (ok) {
+                metadata_pushed_ = true;
+                stopMetadataPushLoop();
+                autonomy_button_->setEnabled(true);
+                appendLog(QStringLiteral(
+                    "[send] session metadata accepted by coordinator"));
+                reason_label_->setText(QStringLiteral(
+                    "Robot stack ready. Arm motors, then Start Autonomy."));
+            } else if (metadata_attempts_ % 5 == 1) {
+                appendLog(QStringLiteral(
+                              "[send] waiting for coordinator (metadata "
+                              "push, attempt %1)…")
+                              .arg(metadata_attempts_));
+            }
+        });
 }
 
 void SatelliteScreen::configureForScan(const Job& job) {
@@ -1364,8 +1439,23 @@ void SatelliteScreen::onSendMission() {
     map_->setMissionAnchor(marker);
     setStatePill(QStringLiteral("LAUNCHING"), QColor(kAmber));
     reason_label_->setText(
-        QStringLiteral("Waiting for autonomy stack… Arm motors, then Start "
-                       "Autonomy when the plan appears."));
+        QStringLiteral("Launching robot stack… Start Autonomy unlocks once "
+                       "the session metadata push is accepted."));
+    // The arming gate: autonomy stays locked until the coordinator accepts
+    // building/operator/units (retried while the stack boots).
+    startMetadataPushLoop();
+
+    // Stamp the plan as executed — drives the "LAST RUN" chip in the
+    // Scan Setup list.
+    if (!current_job_id_.isEmpty()) {
+        for (Job& job : jobs_) {
+            if (job.id == current_job_id_) {
+                job.last_executed_at = QDateTime::currentDateTime();
+                job_store_.save(job);
+                break;
+            }
+        }
+    }
 }
 
 void SatelliteScreen::onEndMission() {
@@ -1494,6 +1584,29 @@ void SatelliteScreen::setMotorsChip(const QString& text, const QColor& color) {
 }
 
 void SatelliteScreen::updateBotPill() {
+    // Preferred: the app's layered link model (topic freshness + network
+    // reachability) while a mission has the monitor armed. Wording matches
+    // the Stage 4/5 BOT pill states.
+    if (link_monitor_ && link_monitor_->isArmed()) {
+        const qint64 in_state_s = link_monitor_->msInCurrentState() / 1000;
+        switch (link_monitor_->state()) {
+            case LinkHealthMonitor::State::Healthy:
+                setBotPill(QStringLiteral("BOT LIVE"), QColor(kAccent));
+                return;
+            case LinkHealthMonitor::State::Reconnecting:
+                setBotPill(QStringLiteral("BOT LIVE - SYNCING %1s")
+                               .arg(in_state_s),
+                           QColor(kAmber));
+                return;
+            case LinkHealthMonitor::State::Disconnected:
+                setBotPill(QStringLiteral("BOT OFFLINE %1s").arg(in_state_s),
+                           QColor(kEstopRed));
+                return;
+            case LinkHealthMonitor::State::Idle:
+                break;  // fall through to the odometry-age fallback
+        }
+    }
+    // Fallback (no monitor / pre-arm): raw odometry age.
     if (!ros_->isRunning()) {
         setBotPill(QStringLiteral("BOT —"), QColor(mutedColor(dark_mode_)));
         return;

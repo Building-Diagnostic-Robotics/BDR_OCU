@@ -39,6 +39,7 @@ class QTimer;
 
 namespace f2c_cpp {
 
+class LinkHealthMonitor;
 class MissionController;
 class RosLink;
 class SatelliteMapWidget;
@@ -70,6 +71,14 @@ public:
         (same contract as ExplorationScreen/PlannerScreen). */
     void setTopBatteryState(double pct, bool stale);
 
+    /**
+     * Attach the app's LinkHealthMonitor (owned by AppShellWindow). The
+     * screen stamps it from every ROS callback per the house rule and the
+     * BOT pill derives from its layered state while armed; without it (or
+     * pre-arm) the pill falls back to raw odometry age.
+     */
+    void attachLinkHealthMonitor(LinkHealthMonitor* monitor);
+
     /** True while a mission launch is active (blocks app close, like scans). */
     bool missionActive() const;
     /** Safe teardown for app close: autonomy off, disarm, kill launches. */
@@ -77,6 +86,9 @@ public:
 
 signals:
     void backRequested();
+    /** Mission launch lifecycle — AppShell arms/disarms the link monitor
+        and reachability probe on this. */
+    void missionActiveChanged(bool active);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -104,6 +116,9 @@ private:
     void onEstop();
 
     void publishTeleopTick();
+    void startMetadataPushLoop();
+    void stopMetadataPushLoop();
+    void attemptMetadataPush();
     void updateBotPill();
     void updateStatePill();
     void setBotPill(const QString& text, const QColor& color);
@@ -171,6 +186,10 @@ private:
 
     QTimer* teleop_timer_ = nullptr;
     QTimer* slow_timer_ = nullptr;
+    QTimer* metadata_timer_ = nullptr;
+    int metadata_attempts_ = 0;
+    bool metadata_pushed_ = false;
+    LinkHealthMonitor* link_monitor_ = nullptr;
     QSet<int> pressed_keys_;
     bool autonomy_on_ = false;
     bool dark_mode_ = false;
