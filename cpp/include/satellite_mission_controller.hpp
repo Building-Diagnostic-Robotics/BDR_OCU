@@ -45,6 +45,9 @@ public:
     static QString roiVerticesArgument(const RoiRect& roi,
                                        const geo::GeoPose& robot);
 
+    /** Per-edge roof flags "[0,1,0,0]" (edge i = corner i -> i+1). */
+    static QString roiEdgeFlagsArgument(const RoiRect& roi);
+
     bool missionActive() const { return mission_active_; }
     RobotTarget target() const { return target_; }
 

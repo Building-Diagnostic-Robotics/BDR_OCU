@@ -10,6 +10,8 @@
 #include <QJsonObject>
 #include <QStandardPaths>
 
+#include <algorithm>
+
 namespace f2c_cpp {
 
 namespace {
@@ -99,6 +101,14 @@ QString MissionController::roiVerticesArgument(const RoiRect& roi,
     return QStringLiteral("[%1]").arg(values.join(QStringLiteral(",")));
 }
 
+QString MissionController::roiEdgeFlagsArgument(const RoiRect& roi) {
+    QStringList values;
+    for (bool marked : roi.roof_edges) {
+        values << (marked ? QStringLiteral("1") : QStringLiteral("0"));
+    }
+    return QStringLiteral("[%1]").arg(values.join(QStringLiteral(",")));
+}
+
 bool MissionController::startMission(const RoiRect& roi,
                                      const geo::GeoPose& robot,
                                      QString* error) {
@@ -156,11 +166,27 @@ bool MissionController::startMission(const RoiRect& roi,
         cleanup.start("ssh", args);
         cleanup.waitForFinished(8000);
     }
+    QString launch_args = QStringLiteral("roi_vertices:='%1'").arg(roi_arg);
+    const bool any_roof_edge =
+        std::any_of(roi.roof_edges.begin(), roi.roof_edges.end(),
+                    [](bool marked) { return marked; });
+    if (any_roof_edge) {
+        // Only send when edges are actually marked: the argument requires
+        // a robot build carrying the roi_edge_flags declaration
+        // (pilot_ws feature/ocu-satellite-roi) — unmarked plans stay
+        // compatible with older robot builds.
+        launch_args += QStringLiteral(" roi_edge_flags:='%1'")
+                           .arg(roiEdgeFlagsArgument(roi));
+        emit logLine(QStringLiteral(
+            "[send] roof-edge flags %1 (requires robot build with "
+            "roi_edge_flags support)")
+                         .arg(roiEdgeFlagsArgument(roi)));
+    }
     QString remote_script = QString::fromLatin1(kEnvPreamble) +
         QStringLiteral(
             "ros2 launch pilot_control robot_autonomous_coverage.launch.py "
-            "roi_vertices:='%1'")
-            .arg(roi_arg);
+            "%1")
+            .arg(launch_args);
     const QString remote_cmd =
         QStringLiteral("bash -lc \"%1\"")
             .arg(remote_script.replace(QLatin1Char('"'), QLatin1String("\\\"")));
