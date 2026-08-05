@@ -740,9 +740,32 @@ AppShellWindow::AppShellWindow(QWidget* parent)
             QStringLiteral("1");
         const QString shot_mode =
             qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_MODE").trimmed();
-        QTimer::singleShot(300, this, [this, shot_dark, shot_mode]() {
+        // BDR_DEV_STAGE6_SHOT_STAGE=3|4|5 renders another stage instead —
+        // used for side-by-side design-language comparison shots.
+        const int shot_stage =
+            qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_STAGE").trimmed().toInt();
+        QTimer::singleShot(300, this, [this, shot_dark, shot_mode,
+                                       shot_stage]() {
             resize(1440, 860);
             setDarkMode(shot_dark);
+            if (shot_stage == 3) {
+                if (robot_id_.isEmpty()) {
+                    robot_id_ = QStringLiteral("DevScreenshotBot");
+                }
+                goToStage3();
+                return;
+            }
+            if (shot_stage == 4) {
+                goToStage4();
+                return;
+            }
+            if (shot_stage == 5) {
+                goToStage5();
+                if (stage5_) {
+                    stage5_->devForceJumpToScanStep();
+                }
+                return;
+            }
             ensureStage6();
             if (stage6_) {
                 if (shot_mode == QStringLiteral("measured")) {

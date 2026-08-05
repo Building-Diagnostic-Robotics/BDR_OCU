@@ -62,7 +62,7 @@ constexpr int kTopStatusMotorsChipHeight = 20;
 constexpr int kTopStatusWindowControlsReservedWidth = 184;
 constexpr int kLeftRailWidth = 320;
 constexpr int kSendButtonHeight = 44;
-constexpr int kEstopButtonHeight = 48;
+constexpr int kEstopButtonHeight = 44;
 
 constexpr const char* kSatViewLatKey = "satellite/center_lat";
 constexpr const char* kSatViewLonKey = "satellite/center_lon";
@@ -188,11 +188,25 @@ QWidget* makeStatusItem(QWidget* parent, const QString& resource_path,
     return item;
 }
 
-/** Rail-card section header: Arimo 700 12, letter-spaced, muted. */
-QLabel* makeCardHeader(const QString& text, QWidget* parent) {
-    auto* label = new QLabel(text, parent);
+/** Rail-card section header — the Mission Planner pattern: 16px accent
+    icon + Title Case Arimo 700 14. */
+QWidget* makeCardHeader(const QString& icon_alias, const QString& text,
+                        QWidget* parent) {
+    auto* row = new QWidget(parent);
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 4);
+    layout->setSpacing(8);
+    auto* icon = new QLabel(row);
+    icon->setFixedSize(16, 16);
+    icon->setAlignment(Qt::AlignCenter);
+    icon->setAttribute(Qt::WA_TranslucentBackground, true);
+    icon->setStyleSheet(QStringLiteral("background: transparent;"));
+    icon->setPixmap(loadTintedSvg(icon_alias, 16, 16, QLatin1String(kAccent)));
+    layout->addWidget(icon, 0, Qt::AlignVCenter);
+    auto* label = new QLabel(text, row);
     label->setObjectName("SatCardHeader");
-    return label;
+    layout->addWidget(label, 1, Qt::AlignVCenter);
+    return row;
 }
 
 /** Field row: muted 12px label left, field right — the rail's form shape. */
@@ -606,7 +620,7 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
-    layout->addWidget(makeCardHeader(QStringLiteral("PLAN"), card));
+    layout->addWidget(makeCardHeader(QStringLiteral(":/assets/exploration/map.svg"), QStringLiteral("Plan"), card));
 
     // Plan selector — office (planning-only) affordance.
     jobs_combo_ = new QComboBox(card);
@@ -755,7 +769,7 @@ QWidget* SatelliteScreen::buildMissionCard(QWidget* parent) {
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
-    layout->addWidget(makeCardHeader(QStringLiteral("MISSION"), card));
+    layout->addWidget(makeCardHeader(QStringLiteral(":/assets/exploration/start_scan.svg"), QStringLiteral("Mission"), card));
 
     reason_label_ = new QLabel(card);
     reason_label_->setObjectName("SatFieldLabel");
@@ -833,7 +847,7 @@ QWidget* SatelliteScreen::buildMissionCard(QWidget* parent) {
     });
     layout->addWidget(row2);
 
-    estop_button_ = new QPushButton(QStringLiteral("EMERGENCY STOP"), card);
+    estop_button_ = new QPushButton(QStringLiteral("Emergency Stop"), card);
     estop_button_->setObjectName("SatEstopButton");
     estop_button_->setFixedHeight(kEstopButtonHeight);
     estop_button_->setCursor(Qt::PointingHandCursor);
@@ -850,7 +864,7 @@ QWidget* SatelliteScreen::buildTeleopCard(QWidget* parent) {
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
-    layout->addWidget(makeCardHeader(QStringLiteral("TELEOP"), card));
+    layout->addWidget(makeCardHeader(QStringLiteral(":/assets/exploration/telemetry.svg"), QStringLiteral("Teleop"), card));
 
     teleop_check_ = new QCheckBox(QStringLiteral("Enable keyboard teleop"), card);
     teleop_check_->setObjectName("SatCheck");
@@ -898,7 +912,7 @@ QWidget* SatelliteScreen::buildLogCard(QWidget* parent) {
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
-    layout->addWidget(makeCardHeader(QStringLiteral("LOG"), card));
+    layout->addWidget(makeCardHeader(QStringLiteral(":/assets/exploration/standby.svg"), QStringLiteral("Log"), card));
 
     log_view_ = new QPlainTextEdit(card);
     log_view_->setObjectName("SatLog");
@@ -942,7 +956,7 @@ void SatelliteScreen::applyTheme() {
 #SatelliteScreen { background-color: @PAGE@; }
 #SatTopBar { background-color: @SURFACE@; border-bottom: 1px solid @SURFACE_BORDER@; }
 #SatTitle {
-    font-family: 'Arimo'; font-weight: 700; font-size: 16px; color: @TEXT@;
+    font-family: 'Arimo'; font-weight: 700; font-size: 18px; color: @TEXT@;
     background: transparent;
 }
 #SatBackButton {
@@ -958,8 +972,8 @@ void SatelliteScreen::applyTheme() {
     background-color: @SURFACE@; border: 1px solid @CARD_BORDER@; border-radius: 10px;
 }
 #SatCardHeader {
-    font-family: 'Arimo'; font-weight: 700; font-size: 12px;
-    letter-spacing: 0.5px; color: @MUTED@; background: transparent;
+    font-family: 'Arimo'; font-weight: 700; font-size: 14px;
+    color: @TEXT@; background: transparent;
 }
 #SatFieldLabel {
     font-family: 'Arimo'; font-size: 12px; color: @MUTED@; background: transparent;
@@ -990,12 +1004,14 @@ QPushButton#SatSendButton {
 QPushButton#SatSendButton:hover { background-color: #00A86D; }
 QPushButton#SatSendButton:disabled { background-color: @BUTTON_BG@; color: @MUTED@; }
 QPushButton#SatEstopButton {
-    background-color: #E7000B; border: none; border-radius: 10px;
-    font-family: 'Arimo'; font-weight: 800; font-size: 14px;
-    letter-spacing: 1px; color: #FFFFFF;
+    background-color: rgba(231, 0, 11, 0.12); border: 1px solid #E7000B;
+    border-radius: 10px; font-family: 'Arimo'; font-weight: 700;
+    font-size: 14px; color: @ESTOP_TEXT@;
 }
-QPushButton#SatEstopButton:hover { background-color: #C10007; }
-QPushButton#SatEstopButton:disabled { background-color: @BUTTON_BG@; color: @MUTED@; }
+QPushButton#SatEstopButton:hover { background-color: rgba(231, 0, 11, 0.24); }
+QPushButton#SatEstopButton:disabled {
+    background-color: transparent; border-color: @INPUT_BORDER@; color: @MUTED@;
+}
 QCheckBox#SatCheck {
     font-family: 'Arimo'; font-size: 13px; color: @TEXT@; background: transparent;
 }
@@ -1034,6 +1050,8 @@ QPlainTextEdit#SatLog {
     qss.replace(QStringLiteral("@INPUT_BORDER@"), input_border);
     qss.replace(QStringLiteral("@INPUT_BG@"), input_bg);
     qss.replace(QStringLiteral("@LOG_BG@"), log_bg);
+    qss.replace(QStringLiteral("@ESTOP_TEXT@"),
+                dark ? QStringLiteral("#FF6467") : QStringLiteral("#E7000B"));
     setStyleSheet(qss);
 
     // Replacing an ancestor stylesheet does not reliably repolish widgets
