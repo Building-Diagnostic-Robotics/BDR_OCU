@@ -75,9 +75,13 @@ bool RosLink::start(QString* error) {
         impl_->cmd_vel_pub =
             impl_->node->create_publisher<geometry_msgs::msg::Twist>(
                 "/cmd_vel", 10);
+        // Match the robot's state_qos (RELIABLE, VOLATILE, depth 1). A
+        // one-shot default-QoS publish is easy for the coverage manager
+        // to miss while it is still constructing; the screen latches.
+        auto enable_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
         impl_->autonomy_pub =
             impl_->node->create_publisher<std_msgs::msg::Bool>(
-                "/mpc_autonomy_enable", 10);
+                "/mpc_autonomy_enable", enable_qos);
 
         // Matches the manager's map_qos (BEST_EFFORT, VOLATILE, depth 1).
         auto grid_qos = rclcpp::QoS(1).best_effort().durability_volatile();

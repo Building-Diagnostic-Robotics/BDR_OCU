@@ -5,8 +5,10 @@
  * Mirrors the main OCU's process model:
  *  - laptop side: `ros2 launch pilot_control laptop_teleop.launch.py`
  *    (zenoh bridge + host_teleop, which supplies the 10 Hz safety heartbeat)
- *  - robot side: ssh -tt ... `ros2 launch pilot_control
- *    robot_autonomous_coverage.launch.py roi_vertices:='[...]'`
+ *  - robot side: ssh -tt ... `set -f; ros2 launch
+ *    pilot_control robot_autonomous_coverage.launch.py
+ *    roi_vertices:=[x1,y1,...]`  (no `$` env expansion — the outer ssh
+ *    `bash -c` would eat `$BDR_ROI_VERTICES` before the inner script ran)
  *
  * Robot host/user come from the same robots.json the main OCU reads.
  */

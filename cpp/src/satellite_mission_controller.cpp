@@ -166,7 +166,17 @@ bool MissionController::startMission(const RoiRect& roi,
         cleanup.start("ssh", args);
         cleanup.waitForFinished(8000);
     }
-    QString launch_args = QStringLiteral("roi_vertices:='%1'").arg(roi_arg);
+    // Pass the YAML list as a bare launch arg. Do NOT wrap it in
+    // `$BDR_ROI_VERTICES`: the ssh remote is `bash -c` of a double-quoted
+    // `bash -lc "..."`, so `$BDR_ROI_VERTICES` expands in the outer
+    // shell (unset → empty) before `export` ever runs. An empty
+    // `roi_vertices:=` either kills the manager on yaml parse or silently
+    // substitutes the default 20×20 box.
+    //
+    // `[...]` is safe here: no spaces (one argv), the inner -lc string is
+    // double-quoted (no glob), and `set -f` covers a dropped quote layer.
+    QString remote_script = QString::fromLatin1(kEnvPreamble) +
+        QStringLiteral("set -f; ");
     const bool any_roof_edge =
         std::any_of(roi.roof_edges.begin(), roi.roof_edges.end(),
                     [](bool marked) { return marked; });
@@ -174,19 +184,21 @@ bool MissionController::startMission(const RoiRect& roi,
         // Only send when edges are actually marked: the argument requires
         // a robot build carrying the roi_edge_flags declaration
         // (pilot_ws feature/ocu-satellite-roi) — unmarked plans stay
-        // compatible with older robot builds.
-        launch_args += QStringLiteral(" roi_edge_flags:='%1'")
-                           .arg(roiEdgeFlagsArgument(roi));
+        // compatible with older robot builds (including autonomy).
         emit logLine(QStringLiteral(
             "[send] roof-edge flags %1 (requires robot build with "
             "roi_edge_flags support)")
                          .arg(roiEdgeFlagsArgument(roi)));
     }
-    QString remote_script = QString::fromLatin1(kEnvPreamble) +
-        QStringLiteral(
-            "ros2 launch pilot_control robot_autonomous_coverage.launch.py "
-            "%1")
-            .arg(launch_args);
+    remote_script += QStringLiteral(
+                         "ros2 launch pilot_control "
+                         "robot_autonomous_coverage.launch.py "
+                         "roi_vertices:=%1")
+                         .arg(roi_arg);
+    if (any_roof_edge) {
+        remote_script += QStringLiteral(" roi_edge_flags:=%1")
+                             .arg(roiEdgeFlagsArgument(roi));
+    }
     const QString remote_cmd =
         QStringLiteral("bash -lc \"%1\"")
             .arg(remote_script.replace(QLatin1Char('"'), QLatin1String("\\\"")));

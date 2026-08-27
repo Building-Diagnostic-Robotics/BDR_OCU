@@ -116,6 +116,9 @@ private:
     void onEstop();
 
     void publishTeleopTick();
+    void setAutonomyEnabled(bool enabled);
+    void startAutonomyLatch();
+    void stopAutonomyLatch();
     void startMetadataPushLoop();
     void stopMetadataPushLoop();
     void attemptMetadataPush();
@@ -187,8 +190,11 @@ private:
     QTimer* teleop_timer_ = nullptr;
     QTimer* slow_timer_ = nullptr;
     QTimer* metadata_timer_ = nullptr;
+    QTimer* autonomy_latch_timer_ = nullptr;
+    QTimer* manager_watch_timer_ = nullptr;
     int metadata_attempts_ = 0;
     bool metadata_pushed_ = false;
+    bool manager_occupancy_seen_ = false;
     LinkHealthMonitor* link_monitor_ = nullptr;
     QSet<int> pressed_keys_;
     bool autonomy_on_ = false;

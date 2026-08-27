@@ -2,7 +2,9 @@
  * @file ros_link.hpp
  * @brief ROS2 node bridging the satellite OCU to the autonomy stack.
  *
- * Publishes:  /cmd_vel (teleop), /mpc_autonomy_enable
+ * Publishes:  /cmd_vel (teleop), /mpc_autonomy_enable (RELIABLE, depth 1;
+ *             the screen latches this at 2 Hz — autonomy's manager only
+ *             starts planning on a false→true edge and the topic is volatile)
  * Subscribes: /coverage/global_occupancy, /coverage/planned_path,
  *             /coverage/planned_swaths, /coverage/status,
  *             /scan_segment_status, /Odometry_tilt_corrected_diff

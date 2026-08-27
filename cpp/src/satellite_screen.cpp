@@ -331,6 +331,11 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     connect(ros_, &RosLink::gridUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
         map_->setGrid(ros_->gridSnapshot());
+        if (!manager_occupancy_seen_ && ros_->gridSnapshot().revision > 0) {
+            manager_occupancy_seen_ = true;
+            appendLog(QStringLiteral(
+                "[ros] coverage occupancy received — manager is live"));
+        }
     });
     connect(ros_, &RosLink::pathUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
@@ -388,7 +393,12 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 save_button_->setEnabled(!active);
                 if (!active) {
                     stopMetadataPushLoop();
+                    stopAutonomyLatch();
+                    if (manager_watch_timer_) {
+                        manager_watch_timer_->stop();
+                    }
                     autonomy_on_ = false;
+                    manager_occupancy_seen_ = false;
                     autonomy_button_->setText(QStringLiteral("Start Autonomy"));
                     map_->clearMissionAnchor();
                     map_->clearTelemetry();
@@ -410,6 +420,31 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     metadata_timer_->setInterval(3000);
     connect(metadata_timer_, &QTimer::timeout, this,
             &SatelliteScreen::attemptMetadataPush);
+
+    // autonomy's /mpc_autonomy_enable is VOLATILE keep_last(1). A single
+    // publish is lost if the coverage manager is still in its ctor when
+    // the operator clicks Start (coordinator comes up first and unlocks
+    // the button). Latch at 2 Hz so the false→true edge cannot be missed.
+    autonomy_latch_timer_ = new QTimer(this);
+    autonomy_latch_timer_->setInterval(500);
+    connect(autonomy_latch_timer_, &QTimer::timeout, this, [this] {
+        if (autonomy_on_ && ros_->isRunning()) {
+            ros_->publishAutonomyEnable(true);
+        }
+    });
+
+    manager_watch_timer_ = new QTimer(this);
+    manager_watch_timer_->setSingleShot(true);
+    manager_watch_timer_->setInterval(20000);
+    connect(manager_watch_timer_, &QTimer::timeout, this, [this] {
+        if (mission_->missionActive() && !manager_occupancy_seen_) {
+            appendLog(QStringLiteral(
+                "[send] no /coverage/global_occupancy after 20 s — the "
+                "coverage manager may have died on roi_vertices parse. "
+                "On the robot look for "
+                "'Coverage horizon manager started'"));
+        }
+    });
 
     slow_timer_ = new QTimer(this);
     slow_timer_->setInterval(1000);
@@ -457,7 +492,7 @@ void SatelliteScreen::shutdownMission() {
     if (!mission_->missionActive()) {
         return;
     }
-    ros_->publishAutonomyEnable(false);
+    setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
     mission_->teardownMission();
 }
@@ -960,17 +995,7 @@ QWidget* SatelliteScreen::buildMissionCard(QWidget* parent) {
         row1_layout->addWidget(button, 1);
     }
     connect(autonomy_button_, &QPushButton::clicked, this, [this] {
-        autonomy_on_ = !autonomy_on_;
-        autonomy_button_->setText(autonomy_on_
-                                      ? QStringLiteral("Pause Autonomy")
-                                      : QStringLiteral("Start Autonomy"));
-        ros_->publishAutonomyEnable(autonomy_on_);
-        appendLog(QStringLiteral("[cmd] autonomy_enable=%1")
-                      .arg(autonomy_on_ ? QStringLiteral("true")
-                                        : QStringLiteral("false")));
-        if (autonomy_on_) {
-            teleop_check_->setChecked(false);
-        }
+        setAutonomyEnabled(!autonomy_on_);
     });
     connect(end_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onEndMission);
@@ -1444,6 +1469,8 @@ void SatelliteScreen::onSendMission() {
     // The arming gate: autonomy stays locked until the coordinator accepts
     // building/operator/units (retried while the stack boots).
     startMetadataPushLoop();
+    manager_occupancy_seen_ = false;
+    manager_watch_timer_->start();
 
     // Stamp the plan as executed — drives the "LAST RUN" chip in the
     // Scan Setup list.
@@ -1470,7 +1497,7 @@ void SatelliteScreen::onEndMission() {
 }
 
 void SatelliteScreen::onEstop() {
-    ros_->publishAutonomyEnable(false);
+    setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
     appendLog(
         QStringLiteral("[E-STOP] autonomy disabled + axis IDLE requested"));
@@ -1508,6 +1535,43 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
         pressed_keys_.remove(key);
     }
     return true;
+}
+
+void SatelliteScreen::setAutonomyEnabled(bool enabled) {
+    const bool rising = enabled && !autonomy_on_;
+    autonomy_on_ = enabled;
+    autonomy_button_->setText(autonomy_on_
+                                  ? QStringLiteral("Pause Autonomy")
+                                  : QStringLiteral("Start Autonomy"));
+    if (autonomy_on_) {
+        teleop_check_->setChecked(false);
+        // Force a false→true edge. The manager only starts planning on
+        // that edge; a lone true can be dropped while it is still
+        // constructing, and later trues are ignored.
+        if (rising) {
+            ros_->publishAutonomyEnable(false);
+        }
+        ros_->publishAutonomyEnable(true);
+        startAutonomyLatch();
+    } else {
+        stopAutonomyLatch();
+        ros_->publishAutonomyEnable(false);
+    }
+    appendLog(QStringLiteral("[cmd] autonomy_enable=%1")
+                  .arg(autonomy_on_ ? QStringLiteral("true")
+                                    : QStringLiteral("false")));
+}
+
+void SatelliteScreen::startAutonomyLatch() {
+    if (autonomy_latch_timer_ && !autonomy_latch_timer_->isActive()) {
+        autonomy_latch_timer_->start();
+    }
+}
+
+void SatelliteScreen::stopAutonomyLatch() {
+    if (autonomy_latch_timer_) {
+        autonomy_latch_timer_->stop();
+    }
 }
 
 void SatelliteScreen::publishTeleopTick() {
