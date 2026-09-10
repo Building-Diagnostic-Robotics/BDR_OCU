@@ -124,6 +124,9 @@ private:
     void saveJob();
 
     void onGoToAddress();
+    /** Recentres on the best known robot position: confirmed anchor, else
+        the map-collection GPS seed, else the saved plan's seed. */
+    void onFindRobot();
     void onDownloadArea();
     /** Points the tile service at a job's offline pyramid + zoom ceiling. */
     void applyImageryManifest(const TileService::SiteManifest& manifest,
@@ -216,6 +219,7 @@ private:
     QDoubleSpinBox* roi_heading_ = nullptr;
     QDoubleSpinBox* robot_heading_ = nullptr;
     QLabel* robot_pos_label_ = nullptr;
+    QPushButton* find_robot_button_ = nullptr;
     QLabel* imagery_label_ = nullptr;  // source capture date / GSD (geo only)
     QPushButton* save_button_ = nullptr;
 

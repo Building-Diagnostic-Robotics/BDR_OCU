@@ -1111,6 +1111,19 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     connect(go, &QPushButton::clicked, this, &SatelliteScreen::onGoToAddress);
     search_layout->addWidget(go);
     geo_layout->addWidget(search_row);
+    // In the field the operator opens a plan and needs the canvas on the
+    // robot, not on wherever the plan was last panned to in the office. The
+    // seed fix from map collection is the only position we have before the
+    // correspondence fit lands, so it drives this.
+    find_robot_button_ =
+        new QPushButton(QStringLiteral("Find Robot"), geo_tools_host_);
+    find_robot_button_->setObjectName("SatButton");
+    find_robot_button_->setFixedHeight(36);
+    find_robot_button_->setCursor(Qt::PointingHandCursor);
+    connect(find_robot_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onFindRobot);
+    geo_layout->addWidget(find_robot_button_);
+
     auto* download =
         new QPushButton(QStringLiteral("Download Area…"), geo_tools_host_);
     download->setObjectName("SatButton");
@@ -1788,6 +1801,38 @@ void SatelliteScreen::refreshImageryInfo() {
                                          : QString()));
             }
         });
+}
+
+void SatelliteScreen::onFindRobot() {
+    // Best-to-worst: the confirmed marker (post-alignment, survey grade),
+    // this session's collection fix, then the seed saved with the plan.
+    const geo::GeoPose marker = map_->marker();
+    GpsFix seed = capture_gps_;
+    if (!seed.valid) {
+        for (const Job& job : jobs_) {
+            if (job.id == current_job_id_) {
+                seed = job.gps;
+                break;
+            }
+        }
+    }
+    const int zoom = std::max(map_->zoom(), 19);
+    if (marker.valid) {
+        map_->setView(marker.lat, marker.lon, zoom);
+        appendLog(QStringLiteral("[geo] centred on the aligned robot anchor"));
+        return;
+    }
+    if (seed.valid) {
+        map_->setView(seed.lat, seed.lon, zoom);
+        appendLog(QStringLiteral("[geo] centred on the GPS seed (%1, hacc %2)")
+                      .arg(seed.fix_type.isEmpty()
+                               ? QStringLiteral("fix")
+                               : seed.fix_type)
+                      .arg(units::formatLength(seed.hacc_m, 2)));
+        return;
+    }
+    appendLog(QStringLiteral(
+        "[geo] no robot position yet — collect a map or place the marker"));
 }
 
 void SatelliteScreen::onDownloadArea() {
