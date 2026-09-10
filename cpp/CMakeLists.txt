@@ -150,6 +150,8 @@ set(HEADERS
     include/satellite_download_dialog.hpp
     include/satellite_job_model.hpp
     include/similarity_2d.hpp
+    include/pan_zoom_image.hpp
+    include/satellite_map_capture.hpp
     include/components/scan_setup_dialog.hpp
     include/plot_widget.hpp
     include/obstacle_detector.hpp
@@ -266,6 +268,8 @@ set(GUI_SOURCES
     src/robot_reachability_probe.cpp
     src/satellite_job_model.cpp
     src/similarity_2d.cpp
+    src/pan_zoom_image.cpp
+    src/satellite_map_capture.cpp
     src/satellite_tile_service.cpp
     src/satellite_ros_link.cpp
     src/satellite_mission_controller.cpp

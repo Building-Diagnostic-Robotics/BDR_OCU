@@ -505,6 +505,14 @@ bool TileService::writeSiteManifest(const QString& path,
         obj["min_date"] = m.min_date.toString(Qt::ISODate);
     }
     obj["stitch"] = m.stitch_relpath;
+    if (m.stitch_bounds.isValid()) {
+        QJsonArray bounds;
+        bounds.append(m.stitch_bounds.x());
+        bounds.append(m.stitch_bounds.y());
+        bounds.append(m.stitch_bounds.width());
+        bounds.append(m.stitch_bounds.height());
+        obj["stitch_bounds"] = bounds;
+    }
     obj["cached"] = m.cached;
     QDir().mkpath(QFileInfo(path).absolutePath());
     QSaveFile file(path);
@@ -533,8 +541,28 @@ TileService::SiteManifest TileService::readSiteManifest(const QString& path) {
     m.wayback_release = obj.value("wayback_release").toString();
     m.min_date = QDate::fromString(obj.value("min_date").toString(), Qt::ISODate);
     m.stitch_relpath = obj.value("stitch").toString();
+    const QJsonArray bounds = obj.value("stitch_bounds").toArray();
+    if (bounds.size() == 4) {
+        m.stitch_bounds = QRectF(bounds[0].toDouble(), bounds[1].toDouble(),
+                                 bounds[2].toDouble(), bounds[3].toDouble());
+    }
     m.cached = obj.value("cached").toBool(false);
     return m;
+}
+
+geo::GeoPoint TileService::geoFromStitchPixel(const SiteManifest& manifest,
+                                              const QSize& image_size,
+                                              const QPointF& px) {
+    if (!manifest.stitch_bounds.isValid() || image_size.isEmpty()) {
+        return geo::GeoPoint{};
+    }
+    const double u = px.x() / double(image_size.width());
+    const double v = px.y() / double(image_size.height());
+    const double nx = manifest.stitch_bounds.x() +
+                      u * manifest.stitch_bounds.width();
+    const double ny = manifest.stitch_bounds.y() +
+                      v * manifest.stitch_bounds.height();
+    return geo::GeoPoint{geo::normYToLat(ny), geo::normXToLon(nx)};
 }
 
 bool TileService::stitchArea(double lat, double lon, double radius_m, int zoom,

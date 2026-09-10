@@ -338,10 +338,12 @@ void DownloadAreaDialog::finishDownload() {
         QDir().mkpath(assets_dir_);
         const QString stitch_path =
             assets_dir_ + QStringLiteral("/site.jpg");
+        QRectF stitch_bounds;
         const bool stitched = tiles_->stitchArea(
             lat_spin_->value(), lon_spin_->value(), radius_spin_->value(),
-            max_zoom_spin_->value(), stitch_path);
+            max_zoom_spin_->value(), stitch_path, &stitch_bounds);
         TileService::SiteManifest m;
+        m.stitch_bounds = stitch_bounds;
         m.lat = lat_spin_->value();
         m.lon = lon_spin_->value();
         m.radius_m = radius_spin_->value();

@@ -18,6 +18,8 @@
 
 #pragma once
 
+#include "satellite_geo_math.hpp"
+
 #include <QCache>
 #include <QDate>
 #include <QHash>
@@ -153,8 +155,19 @@ public:
         QString wayback_release;
         QDate min_date;
         QString stitch_relpath;
+        /**
+         * Normalized Web Mercator extent of the stitch: [min_nx, min_ny,
+         * width, height] in [0,1]. This is what georeferences `site.jpg`, so
+         * the alignment fit can turn a stitch pixel into a lat/lon.
+         */
+        QRectF stitch_bounds;
         bool cached = false;
     };
+
+    /** Stitch pixel -> geographic point, using a manifest's stitch_bounds. */
+    static geo::GeoPoint geoFromStitchPixel(const SiteManifest& manifest,
+                                            const QSize& image_size,
+                                            const QPointF& px);
 
     bool writeSiteManifest(const QString& path, const SiteManifest& m) const;
     static SiteManifest readSiteManifest(const QString& path);

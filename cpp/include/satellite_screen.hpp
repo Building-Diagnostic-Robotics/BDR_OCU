@@ -22,9 +22,13 @@
 #pragma once
 
 #include "satellite_job_model.hpp"
+#include "satellite_map_capture.hpp"
 #include "satellite_tile_service.hpp"
+#include "similarity_2d.hpp"
 
 #include <QDate>
+#include <QImage>
+#include <QRectF>
 #include <QSet>
 #include <QWidget>
 
@@ -33,16 +37,19 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
+class QListWidget;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QSlider;
+class QStackedWidget;
 class QTimer;
 
 namespace f2c_cpp {
 
 class LinkHealthMonitor;
 class MissionController;
+class PanZoomImageWidget;
 class RosLink;
 class SatelliteMapWidget;
 
@@ -67,6 +74,9 @@ public:
     /** Dev screenshot hook: seeds a demo ROI (roof edges marked) + robot
         marker so canvas rendering can be verified headlessly. */
     void devSeedDemoPlan();
+    /** Dev screenshot hook: fakes a collected map + site image and opens the
+        correspondence picker (or, with `review`, a solved alignment). */
+    void devSeedDemoAlignment(bool review);
 
     /** Mirrors the Dashboard MQTT battery sample onto the top-bar pill
         (same contract as ExplorationScreen/PlannerScreen). */
@@ -99,6 +109,9 @@ private:
     QWidget* buildTopBar();
     QWidget* buildLeftRail();
     QWidget* buildPlanCard(QWidget* parent);
+    QWidget* buildAlignCard(QWidget* parent);
+    QWidget* buildCorrespondPage();
+    QWidget* buildAlignReviewPage();
     QWidget* buildMissionCard(QWidget* parent);
     QWidget* buildTeleopCard(QWidget* parent);
     QWidget* buildLogCard(QWidget* parent);
@@ -115,6 +128,31 @@ private:
     /** Points the tile service at a job's offline pyramid + zoom ceiling. */
     void applyImageryManifest(const TileService::SiteManifest& manifest,
                               const QString& assets_dir);
+
+    // ---- Alignment (robot map <-> satellite imagery) ----
+    void onCollectMap();
+    void onMapCaptured(const MapCapture& capture);
+    void showCorrespondPage();
+    void onSatellitePicked(QPointF image_pt);
+    void onPcdPicked(QPointF image_pt);
+    void onUndoCorrespondence();
+    void onDeleteSelectedCorrespondence();
+    void onClearCorrespondences();
+    void onAlignClicked();
+    void onReselectAlignment();
+    void onConfirmAlignment();
+    void refreshCorrespondenceMarkers();
+    void updateCorrespondenceUi();
+    void updateAlignCardUi();
+    /** Loads the job's stitched site.jpg + manifest for picking. Empty on ok. */
+    QString loadSiteImage();
+    /**
+     * Correspondences needed before Align unlocks. A GPS seed independently
+     * pins position and (usually) heading, so three well-spread pairs are
+     * enough to solve scale; without it the fit has to find everything from
+     * the picks alone and needs the extra redundancy.
+     */
+    int minCorrespondences() const;
     /**
      * Refresh the source-imagery provenance label for the current view.
      * Driven off the existing 1 Hz slow_timer_ and gated by
@@ -180,6 +218,43 @@ private:
     QLabel* robot_pos_label_ = nullptr;
     QLabel* imagery_label_ = nullptr;  // source capture date / GSD (geo only)
     QPushButton* save_button_ = nullptr;
+
+    // Align card + pages.
+    struct Correspondence {
+        QPointF sat_px;  // stitched site.jpg pixel
+        QPointF pcd_m;   // robot_init metres
+    };
+
+    QWidget* align_card_ = nullptr;
+    QPushButton* collect_map_button_ = nullptr;
+    QPushButton* correspond_button_ = nullptr;
+    QLabel* align_status_ = nullptr;
+
+    QStackedWidget* canvas_stack_ = nullptr;
+    QWidget* correspond_page_ = nullptr;
+    QWidget* align_review_page_ = nullptr;
+    PanZoomImageWidget* sat_pick_ = nullptr;
+    PanZoomImageWidget* pcd_pick_ = nullptr;
+    PanZoomImageWidget* review_view_ = nullptr;
+    QListWidget* corr_list_ = nullptr;
+    QLabel* corr_status_ = nullptr;
+    QLabel* review_status_ = nullptr;
+    QPushButton* corr_undo_button_ = nullptr;
+    QPushButton* corr_delete_button_ = nullptr;
+    QPushButton* corr_clear_button_ = nullptr;
+    QPushButton* align_button_ = nullptr;
+
+    MapCaptureRunner* map_capture_ = nullptr;
+    QImage sat_image_;
+    TileService::SiteManifest site_manifest_;
+    QImage pcd_image_;
+    QRectF pcd_bounds_m_;
+    GpsFix capture_gps_;
+    QVector<Correspondence> correspondences_;
+    QPointF pending_sat_px_;
+    bool have_pending_sat_ = false;
+    Similarity2D pcd_to_sat_;
+    double align_rmse_m_ = 0.0;
 
     // Last resolved imagery provenance for the current view. Stamped into the
     // Job on save so a plan carries forward what it was drawn against.

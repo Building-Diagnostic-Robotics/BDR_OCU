@@ -14,6 +14,8 @@
 
 #include "link_health_monitor.hpp"
 #include "satellite_download_dialog.hpp"
+#include "pan_zoom_image.hpp"
+#include "satellite_map_capture.hpp"
 #include "satellite_map_widget.hpp"
 #include "satellite_mission_controller.hpp"
 #include "satellite_palette.hpp"
@@ -33,6 +35,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QProgressBar>
@@ -40,6 +43,7 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QSlider>
+#include <QStackedWidget>
 #include <QStyle>
 #include <QSvgRenderer>
 #include <QTimer>
@@ -278,8 +282,26 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     content_layout->setContentsMargins(0, 0, 0, 0);
     content_layout->setSpacing(0);
     content_layout->addWidget(buildLeftRail());
-    content_layout->addWidget(map_, 1);
+    // One canvas area, three pages: the plan map, the correspondence picker,
+    // and the alignment review. The rail stays put across all three so the
+    // operator never loses the mission controls mid-alignment.
+    canvas_stack_ = new QStackedWidget(content);
+    canvas_stack_->addWidget(map_);
+    correspond_page_ = buildCorrespondPage();
+    canvas_stack_->addWidget(correspond_page_);
+    align_review_page_ = buildAlignReviewPage();
+    canvas_stack_->addWidget(align_review_page_);
+    content_layout->addWidget(canvas_stack_, 1);
     root->addWidget(content, 1);
+
+    map_capture_ = new MapCaptureRunner(this);
+    connect(map_capture_, &MapCaptureRunner::progress, this,
+            [this](const QString& message) {
+                align_status_->setText(message);
+                appendLog(QStringLiteral("[align] %1").arg(message));
+            });
+    connect(map_capture_, &MapCaptureRunner::finished, this,
+            &SatelliteScreen::onMapCaptured);
 
     // ---- Map <-> rail sync ----
     connect(map_, &SatelliteMapWidget::roiChanged, this, [this] {
@@ -405,6 +427,10 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 place_robot_button_->setEnabled(!active);
                 clear_roi_button_->setEnabled(!active);
                 save_button_->setEnabled(!active);
+                updateAlignCardUi();
+                if (active) {
+                    canvas_stack_->setCurrentWidget(map_);
+                }
                 if (!active) {
                     stopMetadataPushLoop();
                     stopAutonomyLatch();
@@ -621,6 +647,53 @@ void SatelliteScreen::devSeedDemoPlan() {
     emit map_->markerChanged();
 }
 
+void SatelliteScreen::devSeedDemoAlignment(bool review) {
+    // Synthetic stand-ins so the picker's layout, markers and turn-taking can
+    // be shot without a robot or a cached site.
+    QImage sat(900, 700, QImage::Format_RGB32);
+    sat.fill(QColor(0x2a, 0x33, 0x28));
+    QPainter sp(&sat);
+    sp.setPen(QPen(QColor(0x6b, 0x72, 0x64), 3));
+    sp.drawRect(240, 180, 380, 260);
+    sp.drawLine(0, 520, 900, 500);
+    sp.end();
+    sat_image_ = sat;
+    site_manifest_.stitch_bounds = QRectF(0.25, 0.35, 0.0004, 0.0003);
+
+    QRectF bounds(-14.0, -10.0, 28.0, 20.0);
+    QImage pcd(560, 400, QImage::Format_ARGB32);
+    pcd.fill(Qt::transparent);
+    QPainter pp(&pcd);
+    pp.setPen(QPen(QColor(210, 210, 210, 200), 2));
+    pp.drawRect(80, 60, 400, 280);
+    pp.end();
+    pcd_image_ = pcd;
+    pcd_bounds_m_ = bounds;
+
+    capture_gps_.valid = true;
+    capture_gps_.lat = 43.600664;
+    capture_gps_.lon = -116.249774;
+    capture_gps_.fix_type = QStringLiteral("rtk_fixed");
+    capture_gps_.hacc_m = 0.021;
+
+    correspondences_.clear();
+    const QVector<QPair<QPointF, QPointF>> pairs{
+        {{240, 180}, {-10.0, 7.0}},
+        {{620, 180}, {10.0, 7.0}},
+        {{620, 440}, {10.0, -7.0}},
+        {{240, 440}, {-10.0, -7.0}},
+    };
+    for (const auto& pair : pairs) {
+        correspondences_.append(Correspondence{pair.first, pair.second});
+    }
+    updateCorrespondenceUi();
+    canvas_stack_->setCurrentWidget(correspond_page_);
+    if (review) {
+        onAlignClicked();
+    }
+    updateAlignCardUi();
+}
+
 void SatelliteScreen::configureForPlanning() {
     planning_only_ = true;
     plan_mode_ = PlanMode::Satellite;
@@ -659,6 +732,9 @@ void SatelliteScreen::applyModeVisibility() {
     if (teleop_card_) {
         teleop_card_->setVisible(!planning_only_);
     }
+    // Aligning needs both a robot and real imagery, so the card is hidden on
+    // the measured canvas and in the office planning trim.
+    updateAlignCardUi();
 }
 
 void SatelliteScreen::setTopBatteryState(double pct, bool stale) {
@@ -801,6 +877,8 @@ QWidget* SatelliteScreen::buildLeftRail() {
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(12);
     layout->addWidget(buildPlanCard(rail_content));
+    align_card_ = buildAlignCard(rail_content);
+    layout->addWidget(align_card_);
     mission_card_ = buildMissionCard(rail_content);
     layout->addWidget(mission_card_);
     teleop_card_ = buildTeleopCard(rail_content);
@@ -819,6 +897,153 @@ QWidget* SatelliteScreen::buildLeftRail() {
     // themed background.
     scroll->viewport()->setAutoFillBackground(false);
     return scroll;
+}
+
+QWidget* SatelliteScreen::buildAlignCard(QWidget* parent) {
+    auto* card = new QWidget(parent);
+    card->setObjectName("SatCard");
+    card->setAttribute(Qt::WA_StyledBackground, true);
+    auto* layout = new QVBoxLayout(card);
+    layout->setContentsMargins(16, 14, 16, 16);
+    layout->setSpacing(8);
+    layout->addWidget(
+        makeCardHeader(QStringLiteral(":/assets/exploration/telemetry.svg"),
+                       QStringLiteral("Align to Robot Map"), card));
+
+    collect_map_button_ =
+        new QPushButton(QStringLiteral("Collect Map from Robot"), card);
+    correspond_button_ =
+        new QPushButton(QStringLiteral("Pick Correspondences"), card);
+    for (QPushButton* button : {collect_map_button_, correspond_button_}) {
+        button->setObjectName("SatButton");
+        button->setFixedHeight(36);
+        button->setCursor(Qt::PointingHandCursor);
+        layout->addWidget(button);
+    }
+    connect(collect_map_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onCollectMap);
+    connect(correspond_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::showCorrespondPage);
+
+    align_status_ = new QLabel(card);
+    align_status_->setObjectName("SatFieldLabel");
+    align_status_->setWordWrap(true);
+    layout->addWidget(align_status_);
+    return card;
+}
+
+QWidget* SatelliteScreen::buildCorrespondPage() {
+    auto* page = new QWidget;
+    page->setObjectName("SatCanvasPage");
+    page->setAttribute(Qt::WA_StyledBackground, true);
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
+
+    auto* actions = new QWidget(page);
+    auto* actions_layout = new QHBoxLayout(actions);
+    actions_layout->setContentsMargins(0, 0, 0, 0);
+    actions_layout->setSpacing(8);
+    auto* back = new QPushButton(QStringLiteral("← Plan"), actions);
+    corr_undo_button_ = new QPushButton(QStringLiteral("Undo"), actions);
+    corr_delete_button_ = new QPushButton(QStringLiteral("Delete"), actions);
+    corr_clear_button_ = new QPushButton(QStringLiteral("Clear"), actions);
+    for (QPushButton* button :
+         {back, corr_undo_button_, corr_delete_button_, corr_clear_button_}) {
+        button->setObjectName("SatButton");
+        button->setFixedHeight(32);
+        button->setCursor(Qt::PointingHandCursor);
+        actions_layout->addWidget(button);
+    }
+    actions_layout->addStretch(1);
+    align_button_ = new QPushButton(QStringLiteral("Align"), actions);
+    align_button_->setObjectName("SatSendButton");
+    align_button_->setFixedHeight(32);
+    align_button_->setCursor(Qt::PointingHandCursor);
+    align_button_->setEnabled(false);
+    actions_layout->addWidget(align_button_);
+    layout->addWidget(actions);
+
+    connect(back, &QPushButton::clicked, this,
+            [this] { canvas_stack_->setCurrentWidget(map_); });
+    connect(corr_undo_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onUndoCorrespondence);
+    connect(corr_delete_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onDeleteSelectedCorrespondence);
+    connect(corr_clear_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onClearCorrespondences);
+    connect(align_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onAlignClicked);
+
+    auto* split = new QWidget(page);
+    auto* split_layout = new QHBoxLayout(split);
+    split_layout->setContentsMargins(0, 0, 0, 0);
+    split_layout->setSpacing(8);
+    sat_pick_ = new PanZoomImageWidget(split);
+    pcd_pick_ = new PanZoomImageWidget(split);
+    // The point-cloud raster is sparse single-pixel hits; smoothing averages
+    // them into the transparent background and they disappear.
+    pcd_pick_->setSmoothScaling(false);
+    split_layout->addWidget(sat_pick_, 1);
+    split_layout->addWidget(pcd_pick_, 1);
+    layout->addWidget(split, 1);
+
+    connect(sat_pick_, &PanZoomImageWidget::pointPicked, this,
+            &SatelliteScreen::onSatellitePicked);
+    connect(pcd_pick_, &PanZoomImageWidget::pointPicked, this,
+            &SatelliteScreen::onPcdPicked);
+
+    corr_list_ = new QListWidget(page);
+    corr_list_->setObjectName("SatCorrList");
+    corr_list_->setMaximumHeight(110);
+    layout->addWidget(corr_list_);
+
+    corr_status_ = new QLabel(page);
+    corr_status_->setObjectName("SatFieldLabel");
+    corr_status_->setWordWrap(true);
+    layout->addWidget(corr_status_);
+    return page;
+}
+
+QWidget* SatelliteScreen::buildAlignReviewPage() {
+    auto* page = new QWidget;
+    page->setObjectName("SatCanvasPage");
+    page->setAttribute(Qt::WA_StyledBackground, true);
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
+
+    review_status_ = new QLabel(page);
+    review_status_->setObjectName("SatFieldLabel");
+    review_status_->setWordWrap(true);
+    layout->addWidget(review_status_);
+
+    review_view_ = new PanZoomImageWidget(page);
+    layout->addWidget(review_view_, 1);
+
+    auto* actions = new QWidget(page);
+    auto* actions_layout = new QHBoxLayout(actions);
+    actions_layout->setContentsMargins(0, 0, 0, 0);
+    actions_layout->setSpacing(8);
+    auto* reselect =
+        new QPushButton(QStringLiteral("Reselect correspondences"), actions);
+    reselect->setObjectName("SatButton");
+    reselect->setFixedHeight(36);
+    reselect->setCursor(Qt::PointingHandCursor);
+    actions_layout->addWidget(reselect);
+    actions_layout->addStretch(1);
+    auto* confirm = new QPushButton(QStringLiteral("Confirm alignment"), actions);
+    confirm->setObjectName("SatSendButton");
+    confirm->setFixedHeight(36);
+    confirm->setCursor(Qt::PointingHandCursor);
+    actions_layout->addWidget(confirm);
+    layout->addWidget(actions);
+
+    connect(reselect, &QPushButton::clicked, this,
+            &SatelliteScreen::onReselectAlignment);
+    connect(confirm, &QPushButton::clicked, this,
+            &SatelliteScreen::onConfirmAlignment);
+    return page;
 }
 
 QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
@@ -1281,6 +1506,14 @@ QPlainTextEdit#SatLog {
     background-color: @LOG_BG@; border: 1px solid @INPUT_BORDER@; border-radius: 8px;
     color: @MUTED@; font-family: monospace; font-size: 11px;
 }
+#SatCanvasPage { background-color: @PAGE@; }
+QListWidget#SatCorrList {
+    background-color: @LOG_BG@; border: 1px solid @INPUT_BORDER@; border-radius: 8px;
+    color: @TEXT@; font-family: 'Arimo'; font-size: 12px;
+}
+QListWidget#SatCorrList::item:selected {
+    background-color: rgba(0, 188, 125, 0.30); color: @TEXT@;
+}
 )QSS");
     qss.replace(QStringLiteral("@PAGE@"), page_bg);
     qss.replace(QStringLiteral("@SURFACE_BORDER@"), surface_border);
@@ -1623,6 +1856,363 @@ void SatelliteScreen::applyImageryManifest(
     // Past the prefetched ceiling there is nothing on disk and no internet on
     // the roof, so the canvas must not let the operator zoom into blanks.
     tiles_->setMaxZoomCap(manifest.max_zoom);
+}
+
+// ---- Alignment --------------------------------------------------------------
+
+int SatelliteScreen::minCorrespondences() const {
+    return capture_gps_.valid ? 3 : 5;
+}
+
+QString SatelliteScreen::loadSiteImage() {
+    if (current_job_id_.isEmpty()) {
+        return QStringLiteral(
+            "Save the plan first — the site image lives with the job.");
+    }
+    const QString assets = job_store_.assetsDir(current_job_id_);
+    site_manifest_ = TileService::readSiteManifest(
+        assets + QStringLiteral("/imagery.json"));
+    if (site_manifest_.stitch_relpath.isEmpty()) {
+        return QStringLiteral(
+            "No stitched site image yet — run Download Area first.");
+    }
+    if (!sat_image_.load(assets + QLatin1Char('/') +
+                         site_manifest_.stitch_relpath)) {
+        return QStringLiteral("Could not read the stitched site image.");
+    }
+    if (!site_manifest_.stitch_bounds.isValid()) {
+        // Without the Web Mercator extent a fit maps into pixels that mean
+        // nothing geographically, so the confirm step could not place the
+        // robot. Older manifests predate the field.
+        sat_image_ = QImage();
+        return QStringLiteral(
+            "The cached site image has no geographic bounds — re-run "
+            "Download Area to regenerate it.");
+    }
+    return QString();
+}
+
+void SatelliteScreen::onCollectMap() {
+    if (map_capture_->busy()) {
+        map_capture_->cancel();
+        return;
+    }
+    const QString image_error = loadSiteImage();
+    if (!image_error.isEmpty()) {
+        align_status_->setText(image_error);
+        appendLog(QStringLiteral("[align] %1").arg(image_error));
+        return;
+    }
+    QString target_error;
+    const RobotTarget target =
+        MissionController::resolveRobotTarget(&target_error);
+    if (!target.valid) {
+        align_status_->setText(target_error);
+        return;
+    }
+    if (!confirmDialog(
+            QStringLiteral("Collect Map from Robot"),
+            QStringLiteral(
+                "The robot will ARM ITS MOTORS, turn 360° in place, then "
+                "drive a short forward/back leg to resolve a GPS heading.\n\n"
+                "Confirm the area around the robot is clear."),
+            QStringLiteral("Collect Map"))) {
+        return;
+    }
+    const QString local_dir = job_store_.assetsDir(current_job_id_) +
+                              QStringLiteral("/robot_map");
+    QString error;
+    if (!map_capture_->start(target.host, target.ssh_user, local_dir, &error)) {
+        align_status_->setText(error);
+        appendLog(QStringLiteral("[align] %1").arg(error));
+        return;
+    }
+    collect_map_button_->setText(QStringLiteral("Cancel Collection"));
+    updateAlignCardUi();
+}
+
+void SatelliteScreen::onMapCaptured(const MapCapture& capture) {
+    collect_map_button_->setText(QStringLiteral("Collect Map from Robot"));
+    if (!capture.valid()) {
+        align_status_->setText(capture.error);
+        appendLog(QStringLiteral("[align] %1").arg(capture.error));
+        updateAlignCardUi();
+        return;
+    }
+    pcd_image_ = capture.image;
+    pcd_bounds_m_ = capture.bounds_m;
+    capture_gps_ = capture.gps;
+    correspondences_.clear();
+    have_pending_sat_ = false;
+    pcd_to_sat_ = Similarity2D{};
+    align_rmse_m_ = 0.0;
+
+    if (capture_gps_.valid && !current_job_id_.isEmpty()) {
+        for (Job& job : jobs_) {
+            if (job.id == current_job_id_) {
+                job.gps = capture_gps_;
+                job_store_.save(job);
+                break;
+            }
+        }
+    }
+    appendLog(QStringLiteral("[align] map collected: %1 (%2)")
+                  .arg(capture.label,
+                       capture_gps_.valid
+                           ? QStringLiteral("GPS %1, %2")
+                                 .arg(capture_gps_.lat, 0, 'f', 6)
+                                 .arg(capture_gps_.lon, 0, 'f', 6)
+                           : QStringLiteral("no GPS fix")));
+    updateAlignCardUi();
+    showCorrespondPage();
+}
+
+void SatelliteScreen::showCorrespondPage() {
+    const QString image_error = loadSiteImage();
+    if (!image_error.isEmpty()) {
+        align_status_->setText(image_error);
+        return;
+    }
+    if (pcd_image_.isNull()) {
+        align_status_->setText(
+            QStringLiteral("Collect the robot map first."));
+        return;
+    }
+    updateCorrespondenceUi();
+    canvas_stack_->setCurrentWidget(correspond_page_);
+}
+
+void SatelliteScreen::onSatellitePicked(QPointF image_pt) {
+    if (have_pending_sat_) {
+        return;
+    }
+    pending_sat_px_ = image_pt;
+    have_pending_sat_ = true;
+    updateCorrespondenceUi();
+}
+
+void SatelliteScreen::onPcdPicked(QPointF image_pt) {
+    if (!have_pending_sat_) {
+        return;
+    }
+    Correspondence pair;
+    pair.sat_px = pending_sat_px_;
+    pair.pcd_m = pcdImageToWorld(pcd_bounds_m_, pcd_image_.size(), image_pt);
+    correspondences_.append(pair);
+    have_pending_sat_ = false;
+    updateCorrespondenceUi();
+}
+
+void SatelliteScreen::onUndoCorrespondence() {
+    if (have_pending_sat_) {
+        have_pending_sat_ = false;
+    } else if (!correspondences_.isEmpty()) {
+        correspondences_.removeLast();
+    }
+    updateCorrespondenceUi();
+}
+
+void SatelliteScreen::onDeleteSelectedCorrespondence() {
+    const int row = corr_list_->currentRow();
+    if (row < 0 || row >= correspondences_.size()) {
+        return;
+    }
+    correspondences_.removeAt(row);
+    updateCorrespondenceUi();
+}
+
+void SatelliteScreen::onClearCorrespondences() {
+    correspondences_.clear();
+    have_pending_sat_ = false;
+    updateCorrespondenceUi();
+}
+
+void SatelliteScreen::refreshCorrespondenceMarkers() {
+    QVector<QPointF> sat_points;
+    QVector<QPointF> pcd_points;
+    QVector<int> numbers;
+    for (int i = 0; i < correspondences_.size(); ++i) {
+        sat_points.append(correspondences_[i].sat_px);
+        pcd_points.append(worldToPcdImage(pcd_bounds_m_, pcd_image_.size(),
+                                          correspondences_[i].pcd_m));
+        numbers.append(i + 1);
+    }
+    sat_pick_->setMarkers(sat_points, numbers);
+    pcd_pick_->setMarkers(pcd_points, numbers);
+    sat_pick_->setPendingMarker(pending_sat_px_, have_pending_sat_);
+}
+
+void SatelliteScreen::updateCorrespondenceUi() {
+    sat_pick_->setImage(sat_image_);
+    pcd_pick_->setImage(pcd_image_);
+    // Strict alternation: satellite first, then the matching map point. The
+    // inactive pane is dimmed and refuses clicks so a pair can never be
+    // half-formed on the wrong side.
+    sat_pick_->setPickEnabled(!have_pending_sat_);
+    pcd_pick_->setPickEnabled(have_pending_sat_);
+    sat_pick_->setDimmed(have_pending_sat_);
+    pcd_pick_->setDimmed(!have_pending_sat_);
+    const int next = correspondences_.size() + 1;
+    sat_pick_->setStatusText(
+        have_pending_sat_
+            ? QStringLiteral("Satellite point %1 picked").arg(next)
+            : QStringLiteral("Click satellite point %1").arg(next));
+    pcd_pick_->setStatusText(
+        have_pending_sat_
+            ? QStringLiteral("Click the same feature on the map (%1)").arg(next)
+            : QStringLiteral("Waiting for satellite point %1").arg(next));
+    refreshCorrespondenceMarkers();
+
+    corr_list_->clear();
+    for (int i = 0; i < correspondences_.size(); ++i) {
+        const Correspondence& c = correspondences_[i];
+        corr_list_->addItem(
+            QStringLiteral("%1  sat (%2, %3)  <->  map (%4, %5)")
+                .arg(i + 1)
+                .arg(c.sat_px.x(), 0, 'f', 0)
+                .arg(c.sat_px.y(), 0, 'f', 0)
+                .arg(units::formatLength(c.pcd_m.x(), 2),
+                     units::formatLength(c.pcd_m.y(), 2)));
+    }
+    const int required = minCorrespondences();
+    corr_undo_button_->setEnabled(have_pending_sat_ ||
+                                  !correspondences_.isEmpty());
+    corr_delete_button_->setEnabled(!correspondences_.isEmpty());
+    corr_clear_button_->setEnabled(!correspondences_.isEmpty());
+    align_button_->setEnabled(correspondences_.size() >= required);
+    corr_status_->setText(
+        QStringLiteral("Pairs: %1 / %2 required%3")
+            .arg(correspondences_.size())
+            .arg(required)
+            .arg(capture_gps_.valid
+                     ? QStringLiteral(
+                           "  (GPS seed present — 3 well-spread pairs suffice)")
+                     : QStringLiteral(
+                           "  (no GPS seed — 5 pairs needed for a trusted fit)")));
+}
+
+void SatelliteScreen::onAlignClicked() {
+    if (correspondences_.size() < minCorrespondences()) {
+        return;
+    }
+    QVector<QPointF> pcd;
+    QVector<QPointF> sat;
+    pcd.reserve(correspondences_.size());
+    sat.reserve(correspondences_.size());
+    for (const Correspondence& c : correspondences_) {
+        pcd.append(c.pcd_m);
+        sat.append(c.sat_px);
+    }
+    const auto fit = estimateSimilarity2D(pcd, sat);
+    if (!fit || !fit->transform.valid) {
+        align_status_->setText(QStringLiteral(
+            "Could not estimate a 2D transform. Spread the points around "
+            "the site and try again."));
+        return;
+    }
+    pcd_to_sat_ = fit->transform;
+    align_rmse_m_ = fit->rmse_m;
+
+    const QPointF origin_px = pcd_to_sat_.apply(QPointF(0.0, 0.0));
+    const QPointF x_axis_px = pcd_to_sat_.apply(QPointF(1.0, 0.0));
+    const QPointF dir = x_axis_px - origin_px;
+    review_view_->setImage(sat_image_);
+    review_view_->setRobotPose(origin_px, std::atan2(dir.y(), dir.x()), true);
+    review_view_->fitToView();
+
+    review_status_->setText(
+        QStringLiteral(
+            "Fit: %1 from %2 pairs.  RMSE %3.  Image scale %4 px/m.\n"
+            "Check the robot marker sits where the robot actually stood.")
+            .arg(pcd_to_sat_.reflected
+                     ? QStringLiteral("scale, rotation, reflection")
+                     : QStringLiteral("scale, rotation"))
+            .arg(correspondences_.size())
+            .arg(units::formatLength(align_rmse_m_, 3))
+            .arg(pcd_to_sat_.scalePxPerM(), 0, 'f', 2));
+    canvas_stack_->setCurrentWidget(align_review_page_);
+}
+
+void SatelliteScreen::onReselectAlignment() {
+    pcd_to_sat_ = Similarity2D{};
+    updateCorrespondenceUi();
+    canvas_stack_->setCurrentWidget(correspond_page_);
+}
+
+void SatelliteScreen::onConfirmAlignment() {
+    if (!pcd_to_sat_.valid || sat_image_.isNull()) {
+        return;
+    }
+    // The fit's product is a surveyed robot anchor. robot_init (0,0) maps to
+    // a stitch pixel, and the manifest's Web Mercator bounds turn that pixel
+    // into a lat/lon — so the operator no longer eyeballs "Place Robot", and
+    // every ROI vertex exported at Send inherits the fit's accuracy.
+    const QPointF origin_px = pcd_to_sat_.apply(QPointF(0.0, 0.0));
+    const QPointF x_axis_px = pcd_to_sat_.apply(QPointF(1.0, 0.0));
+    const geo::GeoPoint origin = TileService::geoFromStitchPixel(
+        site_manifest_, sat_image_.size(), origin_px);
+    const geo::GeoPoint ahead = TileService::geoFromStitchPixel(
+        site_manifest_, sat_image_.size(), x_axis_px);
+
+    geo::GeoPose marker;
+    marker.lat = origin.lat;
+    marker.lon = origin.lon;
+    const QPointF enu = geo::enuFromGeo(origin, ahead);
+    marker.heading_deg =
+        std::fmod(std::atan2(enu.x(), enu.y()) / geo::kDegToRad + 360.0, 360.0);
+    marker.valid = true;
+    map_->setMarker(marker);
+    emit map_->markerChanged();
+    map_->setView(origin.lat, origin.lon, map_->zoom());
+
+    if (!current_job_id_.isEmpty()) {
+        for (Job& job : jobs_) {
+            if (job.id == current_job_id_) {
+                job.robot = marker;
+                job.alignment = pcd_to_sat_;
+                job.align_rmse_m = align_rmse_m_;
+                job_store_.save(job);
+                break;
+            }
+        }
+    }
+    appendLog(QStringLiteral(
+                  "[align] confirmed — robot anchored at %1, %2 heading %3° "
+                  "(RMSE %4)")
+                  .arg(origin.lat, 0, 'f', 7)
+                  .arg(origin.lon, 0, 'f', 7)
+                  .arg(marker.heading_deg, 0, 'f', 1)
+                  .arg(units::formatLength(align_rmse_m_, 3)));
+    updateAlignCardUi();
+    canvas_stack_->setCurrentWidget(map_);
+}
+
+void SatelliteScreen::updateAlignCardUi() {
+    const bool measured = plan_mode_ == PlanMode::Measured;
+    if (align_card_) {
+        align_card_->setVisible(!measured && !planning_only_);
+    }
+    const bool busy = map_capture_ && map_capture_->busy();
+    collect_map_button_->setEnabled(!mission_->missionActive());
+    correspond_button_->setEnabled(!busy && !pcd_image_.isNull() &&
+                                   !mission_->missionActive());
+    if (busy) {
+        return;  // the runner's progress messages own the label
+    }
+    if (pcd_to_sat_.valid) {
+        align_status_->setText(
+            QStringLiteral("Aligned from %1 pairs, RMSE %2.")
+                .arg(correspondences_.size())
+                .arg(units::formatLength(align_rmse_m_, 3)));
+    } else if (!pcd_image_.isNull()) {
+        align_status_->setText(
+            QStringLiteral("Map collected%1 — pick correspondences to align.")
+                .arg(capture_gps_.valid ? QStringLiteral(" with a GPS seed")
+                                        : QString()));
+    } else {
+        align_status_->setText(QStringLiteral(
+            "Collect a robot map to anchor the plan to real imagery."));
+    }
 }
 
 // ---- Mission ----------------------------------------------------------------

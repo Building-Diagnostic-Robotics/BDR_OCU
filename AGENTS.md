@@ -748,6 +748,35 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  clients, `pushSessionMetadata` (coordinator SetParameters).
 - `components/scan_setup_dialog.{hpp,cpp}` — the mode/plan selector modal.
 
+### Alignment: robot map -> satellite imagery
+
+GPS alone is a seed, not an answer. The accuracy step is an operator-picked
+correspondence fit, ported from the legacy `AutonomyScreen`:
+
+1. **Collect Map from Robot** (`satellite_map_capture.{hpp,cpp}`,
+ `MapCaptureRunner`) SSHes `robot_map_collection.launch.py`: arm, 360° spin,
+ forward/back GPS baseline, save map + `*_final_pose.yaml`. The remote script
+ backgrounds the launch and polls for a manifest newer than the one on disk,
+ then SIGINTs the tree itself — `ros2 launch` frequently never returns
+ because Fast-LIO, Livox and the ODrive nodes ignore the shutdown request.
+ The PCD and pose come back over `scp`, the cloud is re-origined on the
+ robot's final pose, and `renderTopDownAlphaDensity` rasterises it.
+2. **Pick Correspondences** shows the stitched `site.jpg` and the top-down
+ raster side by side in two `PanZoomImageWidget`s, strictly alternating
+ satellite-then-map so a pair can never half-form on the wrong side.
+3. **Align** runs `estimateSimilarity2D(pcd_m, sat_px)`. Minimum pairs is
+ **3 with a GPS seed, 5 without** (`SatelliteScreen::minCorrespondences`) —
+ the seed independently pins position and usually heading, so the fit only
+ has to find scale.
+4. **Confirm** turns the fit into a surveyed robot anchor: robot_init (0,0)
+ maps to a stitch pixel, and the manifest's `stitch_bounds` (normalized Web
+ Mercator) turns that pixel into a lat/lon + heading, which becomes the ROI
+ marker. Every exported ROI vertex inherits that accuracy.
+
+The `(image, bounds_m)` pair IS the point cloud's scale bookkeeping — there
+is no metres-per-pixel member. Convert with `pcdImageToWorld` /
+`worldToPcdImage`. Raster row 0 is **max northing**, so both helpers flip Y.
+
 ### Offline imagery (office prefetch)
 
 The field has no internet, so the whole site pyramid is downloaded in the
@@ -796,8 +825,17 @@ dropdown for pinning a dated mosaic release.
  OCU deliberately does not call /dc/finalize_mission here yet. Revisit
  before customer delivery.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
- (`_DARK`, `_MODE=measured|scan`, `_STAGE=3|4|5`, `_TOGGLE` modifiers) —
- the agent-side visual verification loop. See docs/DEV_BYPASSES.md.
+ (`_DARK`, `_MODE=measured|scan|correspond|review`, `_STAGE=3|4|5`,
+ `_TOGGLE` modifiers) — the agent-side visual verification loop. See
+ docs/DEV_BYPASSES.md.
+- `PanZoomImageWidget` re-fits on resize until the operator pans or zooms
+ (`user_adjusted_`). Do not go back to a one-shot fit: `setImage()` runs
+ before layout has sized the pane, so the image ends up tiny in a corner
+ of a pane that later grew.
+- `SiteManifest::stitch_bounds` is load-bearing for alignment — without the
+ Web Mercator extent a fit lands in pixels that mean nothing geographically
+ and Confirm cannot place the robot. `loadSiteImage()` refuses manifests
+ that lack it rather than silently producing a bad anchor.
 - Robot-side counterpart lives on pilot_ws branch
  `feature/ocu-satellite-roi` (worktree `~/BDR_data/pilot_ws_ocu_worktree`):
  `/coverage/status` 2 Hz JSON publisher + zenoh allowlist entry +
