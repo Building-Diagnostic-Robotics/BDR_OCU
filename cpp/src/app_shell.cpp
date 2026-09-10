@@ -772,6 +772,11 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     stage6_->configureForScan(
                         SatelliteScreen::PlanMode::Measured);
                     stage6_->devSeedDemoPlan();
+                } else if (shot_mode == QStringLiteral("measured_map")) {
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Measured);
+                    stage6_->devSeedDemoPlan();
+                    stage6_->devSeedDemoAlignment(false);
                 } else if (shot_mode == QStringLiteral("scan")) {
                     stage6_->configureForScan(
                         SatelliteScreen::PlanMode::Satellite);

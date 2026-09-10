@@ -73,6 +73,16 @@ public:
     void setOdom(const OdomSnapshot& odom);
     void clearTelemetry();
 
+    /**
+     * Backdrop for the measured canvas: a top-down raster of the collected
+     * robot map, positioned by its extent in robot_init metres. The measured
+     * grid origin IS robot_init (0,0), so world x maps to grid east and world
+     * y to grid north with no extra bookkeeping. Ignored on the imagery
+     * canvas, where the satellite tiles are the backdrop.
+     */
+    void setMapRaster(const QImage& image, const QRectF& bounds_m);
+    void clearMapRaster();
+
     static constexpr int kMinZoom = 3;
     static constexpr int kMaxZoom = 20;
     /** The grid canvas has no imagery-resolution ceiling — allow zooming to
@@ -112,6 +122,7 @@ private:
     geo::GeoPoint geoFromScreen(const QPointF& pos) const;
     QPointF screenFromBody(const QPointF& body) const;
     double metersPerPixelNow() const;
+    void paintMapRaster(QPainter& painter);
 
     // Overlay geometry in screen space.
     QVector<QPointF> roiCornerScreenPoints() const;
@@ -157,6 +168,9 @@ private:
     PolylineSet swaths_;
     OdomSnapshot odom_;
     QVector<QPointF> trail_;  // body-frame breadcrumbs
+
+    QImage map_raster_;      // collected robot map, top-down
+    QRectF map_raster_m_;    // its extent in robot_init metres
 
     Drag drag_ = Drag::None;
     int drag_corner_ = -1;

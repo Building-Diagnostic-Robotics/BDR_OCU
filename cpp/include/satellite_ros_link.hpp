@@ -26,6 +26,7 @@
 #include <QVector>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -57,6 +58,14 @@ struct OdomSnapshot {
     bool valid = false;
 };
 
+/** Latest ODrive axis state per side, with arrival stamps for staleness. */
+struct MotorStatus {
+    int left_axis_state = 0;
+    int right_axis_state = 0;
+    qint64 left_wall_ms = 0;
+    qint64 right_wall_ms = 0;
+};
+
 struct CoverageStatus {
     QString state;    // executor state string ("running", "blocked", ...)
     QString mode;     // horizon mode ("TRACKING", "PIVOT", ...)
@@ -84,6 +93,14 @@ public:
     void requestAxisState(int state);
 
     /**
+     * Calls /dc/finalize_mission — stops continuous GNSS and stamps
+     * mission_finalized_at into mission_config.json. Non-blocking; the
+     * callback is marshalled to the GUI thread and fires false (rather than
+     * hanging) when the service never appears.
+     */
+    void finalizeMission(std::function<void(bool ok, QString detail)> on_done);
+
+    /**
      * Push building/operator/units to /data_collection_coordinator as
      * string parameters — the autonomy arming gate (same contract as the
      * classic flow's sendDataCollectorSessionMetadata: the caller must
@@ -106,9 +123,13 @@ public:
     OdomSnapshot odomSnapshot() const;
     CoverageStatus coverageStatus() const;
     QString lastSegmentStatus() const;
+    MotorStatus motorStatus() const;
+    /** True when both axes report IDLE on fresh controller_status. */
+    bool motorsIdle() const;
 
     static constexpr int kAxisIdle = 1;
     static constexpr int kAxisClosedLoop = 8;
+    static constexpr qint64 kControllerStatusStaleMs = 1500;
 
 signals:
     void gridUpdated();
@@ -117,6 +138,7 @@ signals:
     void odomUpdated();
     void statusUpdated();
     void segmentStatusUpdated();
+    void motorStatusUpdated();
     void axisResult(bool ok, const QString& detail);
 
 private:
@@ -134,6 +156,7 @@ private:
     OdomSnapshot odom_;
     CoverageStatus status_;
     QString segment_status_;
+    MotorStatus motors_;
 };
 
 }  // namespace f2c_cpp

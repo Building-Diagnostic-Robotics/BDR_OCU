@@ -522,11 +522,43 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
     painter.setRenderHint(QPainter::Antialiasing, true);
 }
 
+void SatelliteMapWidget::setMapRaster(const QImage& image,
+                                      const QRectF& bounds_m) {
+    map_raster_ = image;
+    map_raster_m_ = bounds_m;
+    update();
+}
+
+void SatelliteMapWidget::clearMapRaster() {
+    map_raster_ = QImage();
+    map_raster_m_ = QRectF();
+    update();
+}
+
+void SatelliteMapWidget::paintMapRaster(QPainter& painter) {
+    if (map_raster_.isNull() || map_raster_m_.isEmpty()) {
+        return;
+    }
+    // Raster row 0 is max northing, so the image's top-left corner is the
+    // NW corner of the extent: (min_x, max_y). ENU axes align with screen
+    // axes in this projection, so an axis-aligned blit is exact.
+    const geo::GeoPoint origin{0.0, 0.0};
+    const QPointF nw = screenFromGeo(geo::geoFromEnu(
+        origin, map_raster_m_.left(), map_raster_m_.bottom()));
+    const QPointF se = screenFromGeo(geo::geoFromEnu(
+        origin, map_raster_m_.right(), map_raster_m_.top()));
+    painter.drawImage(QRectF(nw, se).normalized(), map_raster_);
+}
+
 void SatelliteMapWidget::paintGrid(QPainter& painter) {
     // Measured (CAD) canvas: adaptive metric grid on a dark drafting
     // surface. Minor lines pick the smallest step that stays >= 24 px on
     // screen; major lines every 5 minors carry meter labels.
     painter.fillRect(rect(), QColor(0x10, 0x10, 0x14));
+    // Under the grid, not over it: the grid lines are what the operator
+    // measures against, and the cloud's transparent gaps let them read
+    // through anyway.
+    paintMapRaster(painter);
     const double mpp = metersPerPixelNow();
 
     double minor_m = 0.1;

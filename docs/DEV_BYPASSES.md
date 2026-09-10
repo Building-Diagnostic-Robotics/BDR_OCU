@@ -323,7 +323,7 @@ enumerates all sites.
 - [ ] `BDR_DEV_STAGE6_SHOT=<png path>` — jumps to the Stage 6 planning
       screen on startup, renders offscreen, saves a PNG, and exits.
       Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
-      `BDR_DEV_STAGE6_SHOT_MODE=measured|scan|correspond|review`,
+      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|correspond|review`,
       `BDR_DEV_STAGE6_SHOT_STAGE=3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`.
       `correspond`/`review` call `SatelliteScreen::devSeedDemoAlignment()`,
       which fakes a collected robot map and a stitched site image so the

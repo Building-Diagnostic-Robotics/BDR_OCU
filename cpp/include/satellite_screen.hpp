@@ -164,7 +164,20 @@ private:
      */
     void refreshImageryInfo();
     void onSendMission();
-    void onEndMission();
+    /**
+     * Operator-facing mission end. Branches on the strict link state: normal
+     * path when we can talk to the robot, OfflineFinalizeDialog when we
+     * genuinely cannot. Mirrors the Stage 5 contract.
+     */
+    void onCompleteMission();
+    /** Disarm wait -> /dc/finalize_mission -> teardown. */
+    void executeCompleteMissionNormalPath();
+    /** finalize_mission_local.py over SSH, then teardown. No RPCs. */
+    void executeCompleteMissionSshFallback();
+    /** Requests IDLE and polls motorsIdle() up to a ceiling, then continues. */
+    void beginMotorsIdleWait(std::function<void(bool timed_out)> on_done);
+    /** True only in genuine Disconnected — Reconnecting does not count. */
+    bool isRobotLinkUnreachable() const;
     void onEstop();
 
     void publishTeleopTick();
@@ -179,6 +192,8 @@ private:
     void setBotPill(const QString& text, const QColor& color);
     void setStatePill(const QString& text, const QColor& color);
     void setMotorsChip(const QString& text, const QColor& color);
+    /** Drives the motors chip from live controller_status. */
+    void updateMotorsChip();
     void appendLog(const QString& line);
     bool confirmDialog(const QString& title, const QString& body,
                        const QString& accept_label);
@@ -247,6 +262,10 @@ private:
     QPushButton* corr_delete_button_ = nullptr;
     QPushButton* corr_clear_button_ = nullptr;
     QPushButton* align_button_ = nullptr;
+
+    QTimer* motors_idle_timer_ = nullptr;
+    int motors_idle_ticks_ = 0;
+    bool complete_mission_in_flight_ = false;
 
     MapCaptureRunner* map_capture_ = nullptr;
     QImage sat_image_;

@@ -10,12 +10,14 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <odrive_can/msg/controller_status.hpp>
 #include <odrive_can/srv/axis_state.hpp>
 #include <rcl_interfaces/msg/parameter.hpp>
 #include <rcl_interfaces/srv/set_parameters.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <algorithm>
@@ -52,10 +54,15 @@ public:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr status_sub;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr segment_sub;
+    rclcpp::Subscription<odrive_can::msg::ControllerStatus>::SharedPtr
+        left_status_sub;
+    rclcpp::Subscription<odrive_can::msg::ControllerStatus>::SharedPtr
+        right_status_sub;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr left_axis;
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr right_axis;
     rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr
         coordinator_params;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr dc_finalize_mission;
 };
 
 RosLink::RosLink(QObject* parent) : QObject(parent), impl_(new Impl) {}
@@ -235,6 +242,35 @@ bool RosLink::start(QString* error) {
                     emit segmentStatusUpdated();
                 });
 
+        // Real axis feedback, so Complete Mission can wait for the motors to
+        // actually reach IDLE instead of assuming the request landed. Also
+        // stamps the link monitor's ControllerStatus source.
+        const auto status_qos = rclcpp::QoS(rclcpp::KeepLast(50)).reliable();
+        impl_->left_status_sub =
+            impl_->node->create_subscription<odrive_can::msg::ControllerStatus>(
+                "/left/controller_status", status_qos,
+                [this](odrive_can::msg::ControllerStatus::ConstSharedPtr msg) {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        motors_.left_axis_state = int(msg->axis_state);
+                        motors_.left_wall_ms =
+                            QDateTime::currentMSecsSinceEpoch();
+                    }
+                    emit motorStatusUpdated();
+                });
+        impl_->right_status_sub =
+            impl_->node->create_subscription<odrive_can::msg::ControllerStatus>(
+                "/right/controller_status", status_qos,
+                [this](odrive_can::msg::ControllerStatus::ConstSharedPtr msg) {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        motors_.right_axis_state = int(msg->axis_state);
+                        motors_.right_wall_ms =
+                            QDateTime::currentMSecsSinceEpoch();
+                    }
+                    emit motorStatusUpdated();
+                });
+
         impl_->left_axis =
             impl_->node->create_client<odrive_can::srv::AxisState>(
                 "/left/request_axis_state");
@@ -244,6 +280,9 @@ bool RosLink::start(QString* error) {
         impl_->coordinator_params =
             impl_->node->create_client<rcl_interfaces::srv::SetParameters>(
                 "/data_collection_coordinator/set_parameters");
+        impl_->dc_finalize_mission =
+            impl_->node->create_client<std_srvs::srv::Trigger>(
+                "/dc/finalize_mission");
     } catch (const std::exception& exc) {
         if (error) {
             *error = QString::fromUtf8(exc.what());
@@ -428,6 +467,64 @@ CoverageStatus RosLink::coverageStatus() const {
 QString RosLink::lastSegmentStatus() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return segment_status_;
+}
+
+MotorStatus RosLink::motorStatus() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return motors_;
+}
+
+bool RosLink::motorsIdle() const {
+    const MotorStatus motors = motorStatus();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // Stale status is not proof of IDLE — a dead CAN bus would otherwise read
+    // as "disarmed" while the axes are still in closed loop.
+    if (motors.left_wall_ms <= 0 || motors.right_wall_ms <= 0) {
+        return false;
+    }
+    if (now - motors.left_wall_ms > kControllerStatusStaleMs ||
+        now - motors.right_wall_ms > kControllerStatusStaleMs) {
+        return false;
+    }
+    return motors.left_axis_state == kAxisIdle &&
+           motors.right_axis_state == kAxisIdle;
+}
+
+void RosLink::finalizeMission(
+    std::function<void(bool ok, QString detail)> on_done) {
+    const auto complete = [this, on_done](bool ok, const QString& detail) {
+        if (!on_done) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            this, [on_done, ok, detail]() { on_done(ok, detail); },
+            Qt::QueuedConnection);
+    };
+    if (!running_ || !impl_->dc_finalize_mission) {
+        complete(false, QStringLiteral("ROS link not running"));
+        return;
+    }
+    // Discovery may not have settled if the operator completes immediately
+    // after launch. A brief wait, then give up rather than block teardown.
+    if (!impl_->dc_finalize_mission->wait_for_service(
+            std::chrono::milliseconds(250))) {
+        complete(false, QStringLiteral("/dc/finalize_mission unavailable"));
+        return;
+    }
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    (void)impl_->dc_finalize_mission->async_send_request(
+        request,
+        [complete](
+            rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+            try {
+                auto result = future.get();
+                complete(result && result->success,
+                         result ? QString::fromStdString(result->message)
+                                : QStringLiteral("null response"));
+            } catch (const std::exception& exc) {
+                complete(false, QString::fromUtf8(exc.what()));
+            }
+        });
 }
 
 }  // namespace f2c_cpp

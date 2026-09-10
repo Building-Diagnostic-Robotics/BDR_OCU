@@ -100,11 +100,6 @@ QString MissionController::roiVerticesArgument(const RoiPolygon& poly,
     return QStringLiteral("[%1]").arg(values.join(QStringLiteral(",")));
 }
 
-QString MissionController::roiVerticesArgument(const RoiRect& roi,
-                                               const geo::GeoPose& robot) {
-    return roiVerticesArgument(RoiPolygon::fromRect(roi), robot);
-}
-
 QString MissionController::roiEdgeFlagsArgument(const RoiPolygon& poly) {
     QStringList values;
     const int n = poly.vertices.size();
@@ -114,16 +109,6 @@ QString MissionController::roiEdgeFlagsArgument(const RoiPolygon& poly) {
         values << (marked ? QStringLiteral("1") : QStringLiteral("0"));
     }
     return QStringLiteral("[%1]").arg(values.join(QStringLiteral(",")));
-}
-
-QString MissionController::roiEdgeFlagsArgument(const RoiRect& roi) {
-    return roiEdgeFlagsArgument(RoiPolygon::fromRect(roi));
-}
-
-bool MissionController::startMission(const RoiRect& roi,
-                                     const geo::GeoPose& robot,
-                                     QString* error) {
-    return startMission(RoiPolygon::fromRect(roi), robot, error);
 }
 
 bool MissionController::startMission(const RoiPolygon& poly,

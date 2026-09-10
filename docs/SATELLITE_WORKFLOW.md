@@ -93,6 +93,22 @@ accepts building, operator and units. That push is the arming gate; a failed
 push must not let a scan start, because the data would land in an unlabelled
 folder.
 
+## Completing the mission
+
+**Complete Mission** disables autonomy, waits for both axes to actually
+report IDLE (up to 6 s — killing the launch tree does not by itself disarm
+them), calls `/dc/finalize_mission` so the robot stops continuous GNSS and
+stamps `mission_finalized_at`, then tears down both launch trees.
+
+If the link is genuinely offline, you get the offline finalize dialog
+instead: wait for reconnect, finalize over SSH, or cancel. SSH-finalize runs
+`finalize_mission_local.py` on the robot, which rescans the mission folder
+and writes the finalize metadata without needing ROS at all. Cancelling is a
+legitimate choice — the robot auto-finalizes after 10 minutes idle.
+
+Merely reconnecting does not pop that dialog. A few seconds of Zenoh
+rediscovery is not a reason to make the operator choose a recovery path.
+
 ## Measured mode
 
 Same screen, same polygon tooling, no imagery. The canvas is an adaptive
@@ -100,6 +116,13 @@ metric grid anchored at a fixed reference origin with 0.1 m snapping, for
 sites where the operator has real measurements and satellite imagery would
 only add error. Address search, tile download and imagery provenance are
 hidden because they mean nothing there.
+
+Anchoring works differently and more simply: **Collect Map from Robot** still
+runs, but there is no correspondence step. The measured grid origin *is*
+`robot_init`, so the collected map already sits in the canvas frame — it is
+drawn as a backdrop under the grid, the robot marker is placed at the origin,
+and the operator draws the ROI around the cloud. The GPS fix from collection
+is recorded with the plan for reference and for **Find Robot**.
 
 ## Where things live
 
@@ -117,7 +140,7 @@ hidden because they mean nothing there.
 
 ## Known gaps
 
-- Mission end relies on the robot's 10-minute auto-finalize watchdog; the OCU
-  does not call `/dc/finalize_mission` from this stage yet.
 - Wayback release pinning is exposed but only useful in the office, where
   there is bandwidth to compare releases.
+- The robot must be running the `cliff-on-autonomy` build for the roof-edge
+  setback and the `/coverage/status` state pill to be live.

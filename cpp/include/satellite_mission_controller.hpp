@@ -6,7 +6,7 @@
  *  - laptop side: `ros2 launch pilot_control laptop_teleop.launch.py`
  *    (zenoh bridge + host_teleop, which supplies the 10 Hz safety heartbeat)
  *  - robot side: ssh -tt ... `set -f; ros2 launch
- *    pilot_control robot_autonomous_coverage.launch.py
+ *    pilot_control robot_autonomous_coverage_director.launch.py
  *    roi_vertices:=[x1,y1,...]`  (no `$` env expansion — the outer ssh
  *    `bash -c` would eat `$BDR_ROI_VERTICES` before the inner script ran)
  *
@@ -43,22 +43,22 @@ public:
     /**
      * ROI corners -> robot_init body-frame flat list "[x1,y1,x2,y2,...]".
      * The robot marker pose is the anchor: body x = marker heading.
+     *
+     * Polygon-only on purpose. A RoiRect overload here would silently drop
+     * every vertex past the fourth for any authored shape, so callers must
+     * convert with RoiPolygon::fromRect() at the boundary and see that they
+     * are doing it.
      */
-    static QString roiVerticesArgument(const RoiRect& roi,
-                                       const geo::GeoPose& robot);
     static QString roiVerticesArgument(const RoiPolygon& poly,
                                        const geo::GeoPose& robot);
 
     /** Per-edge roof flags "[0,1,0,0]" (edge i = corner i -> i+1). */
-    static QString roiEdgeFlagsArgument(const RoiRect& roi);
     static QString roiEdgeFlagsArgument(const RoiPolygon& poly);
 
     bool missionActive() const { return mission_active_; }
     RobotTarget target() const { return target_; }
 
     /** Starts laptop launch + SSH robot launch. Emits log/state signals. */
-    bool startMission(const RoiRect& roi, const geo::GeoPose& robot,
-                      QString* error = nullptr);
     bool startMission(const RoiPolygon& poly, const geo::GeoPose& robot,
                       QString* error = nullptr);
 

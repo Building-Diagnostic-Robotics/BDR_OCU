@@ -807,6 +807,10 @@ dropdown for pinning a dated mosaic release.
  manager resolves flags to segments BEFORE `Polygon.buffer(0)` (which may
  reorder rings). Marked edges get `roof_edge_clearance` (0.5 m default)
  planning setback robot-side; physical keep-out still wins.
+- `MissionController`'s send helpers are **polygon-only by design**. The
+ `RoiRect` overloads were removed: they silently dropped every vertex past
+ the fourth. Callers convert with `RoiPolygon::fromRect()` at the boundary
+ so the lossy step stays visible. Do not re-add them.
 - **`RoiPolygon` is the authored geometry, `RoiRect` is not.** Anything
  that sends, saves, or renders the ROI must read `map_->polygon()` and
  fall back to `RoiPolygon::fromRect()` only when no polygon exists. Do
@@ -821,9 +825,25 @@ dropdown for pinning a dated mosaic release.
  cell and notifies **every** waiting callback. Do not go back to dropping
  coalesced callers: the download dialog gates its whole prefetch on that
  callback, so a dropped one hangs the download forever.
-- Mission end is watchdog-finalized (robot's 10-min auto-finalize) — the
- OCU deliberately does not call /dc/finalize_mission here yet. Revisit
- before customer delivery.
+- **Complete Mission** runs the same data-first contract as Stage 5, but
+ self-contained on this screen (Stage 6 owns its own rclcpp node and launch
+ orchestration, so it cannot reuse AppShell's `exploration_ros_node_`
+ clients). `onCompleteMission` branches on `isRobotLinkUnreachable()`
+ (strict — Disconnected only):
+ - reachable → `executeCompleteMissionNormalPath()`: `beginMotorsIdleWait`
+ (request IDLE, poll `RosLink::motorsIdle()`, 6 s ceiling) →
+ `RosLink::finalizeMission()` (/dc/finalize_mission, 250 ms discovery
+ wait then give up) → `teardownMission()`.
+ - Disconnected → `OfflineFinalizeDialog`, same three CTAs as Stage 5;
+ `FinalizeOverSsh` runs `finalize_mission_local.py` via **direct
+ `python3`** and skips both the disarm wait and the RPC.
+ Cancel is legitimate: the robot's 10-min idle watchdog is the net.
+- `RosLink::motorsIdle()` requires **fresh** controller_status on both
+ axes. Do not relax that to "state == IDLE" alone — a dead CAN bus would
+ then read as disarmed while the axes are still in closed loop.
+- The motors chip is driven by `updateMotorsChip()` from live
+ controller_status, not by the axis-state RPC's ack. The request being
+ accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
  (`_DARK`, `_MODE=measured|scan|correspond|review`, `_STAGE=3|4|5`,
  `_TOGGLE` modifiers) — the agent-side visual verification loop. See

@@ -14,6 +14,7 @@
 
 #include "link_health_monitor.hpp"
 #include "satellite_download_dialog.hpp"
+#include "components/offline_finalize_dialog.hpp"
 #include "pan_zoom_image.hpp"
 #include "satellite_map_capture.hpp"
 #include "satellite_map_widget.hpp"
@@ -99,6 +100,7 @@ double metersToSpin(double meters) {
 
 // ---- Palette (dark = zinc family per MissionMetadataDialog / planner) -------
 constexpr const char* kAccent = "#00BC7D";
+constexpr const char* kWarnAmber = "#F59E0B";
 constexpr const char* kAccentHover = "#00A86D";
 constexpr const char* kEstopRed = "#E7000B";
 constexpr const char* kEstopRedHover = "#C10007";
@@ -386,6 +388,12 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     connect(ros_, &RosLink::statusUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
         updateStatePill();
+    });
+    connect(ros_, &RosLink::motorStatusUpdated, this, [this] {
+        if (link_monitor_) {
+            link_monitor_->stamp(LinkHealthMonitor::Source::ControllerStatus);
+        }
+        updateMotorsChip();
     });
     connect(ros_, &RosLink::segmentStatusUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
@@ -675,6 +683,19 @@ void SatelliteScreen::devSeedDemoAlignment(bool review) {
     capture_gps_.lon = -116.249774;
     capture_gps_.fix_type = QStringLiteral("rtk_fixed");
     capture_gps_.hacc_m = 0.021;
+    if (plan_mode_ == PlanMode::Measured) {
+        // Mirror onMapCaptured: measured mode anchors at the grid origin and
+        // stays on the canvas — there is nothing to align against.
+        map_->setMapRaster(pcd_image_, pcd_bounds_m_);
+        geo::GeoPose marker;
+        marker.heading_deg = 90.0;
+        marker.valid = true;
+        map_->setMarker(marker);
+        emit map_->markerChanged();
+        map_->setView(0.0, 0.0, map_->zoom());
+        updateAlignCardUi();
+        return;
+    }
 
     correspondences_.clear();
     const QVector<QPair<QPointF, QPointF>> pairs{
@@ -810,7 +831,7 @@ QWidget* SatelliteScreen::buildTopBar() {
     connect(back, &QPushButton::clicked, this, [this] {
         if (mission_->missionActive()) {
             appendLog(QStringLiteral(
-                "[nav] mission active — End Mission before leaving"));
+                "[nav] mission active — Complete Mission before leaving"));
             return;
         }
         emit backRequested();
@@ -1292,7 +1313,7 @@ QWidget* SatelliteScreen::buildMissionCard(QWidget* parent) {
     row1_layout->setContentsMargins(0, 0, 0, 0);
     row1_layout->setSpacing(8);
     autonomy_button_ = new QPushButton(QStringLiteral("Start Autonomy"), row1);
-    end_button_ = new QPushButton(QStringLiteral("End Mission"), row1);
+    end_button_ = new QPushButton(QStringLiteral("Complete Mission"), row1);
     for (QPushButton* button : {autonomy_button_, end_button_}) {
         button->setObjectName("SatButton");
         button->setFixedHeight(36);
@@ -1303,7 +1324,7 @@ QWidget* SatelliteScreen::buildMissionCard(QWidget* parent) {
         setAutonomyEnabled(!autonomy_on_);
     });
     connect(end_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::onEndMission);
+            &SatelliteScreen::onCompleteMission);
     layout->addWidget(row1);
 
     auto* row2 = new QWidget(card);
@@ -1942,11 +1963,15 @@ void SatelliteScreen::onCollectMap() {
         map_capture_->cancel();
         return;
     }
-    const QString image_error = loadSiteImage();
-    if (!image_error.isEmpty()) {
-        align_status_->setText(image_error);
-        appendLog(QStringLiteral("[align] %1").arg(image_error));
-        return;
+    // Measured mode has nothing to align against, so it needs no site image —
+    // the collected map lands directly in the grid frame.
+    if (plan_mode_ != PlanMode::Measured) {
+        const QString image_error = loadSiteImage();
+        if (!image_error.isEmpty()) {
+            align_status_->setText(image_error);
+            appendLog(QStringLiteral("[align] %1").arg(image_error));
+            return;
+        }
     }
     QString target_error;
     const RobotTarget target =
@@ -1992,13 +2017,37 @@ void SatelliteScreen::onMapCaptured(const MapCapture& capture) {
     pcd_to_sat_ = Similarity2D{};
     align_rmse_m_ = 0.0;
 
-    if (capture_gps_.valid && !current_job_id_.isEmpty()) {
+    geo::GeoPose marker;
+    const bool measured = plan_mode_ == PlanMode::Measured;
+    if (measured) {
+        // No imagery to align against, and none needed: the measured grid
+        // origin IS robot_init, so the collected map already sits in the
+        // canvas frame. Anchor the marker there and let the operator draw the
+        // ROI around the cloud. Heading 90 makes grid east == robot +x, which
+        // is what the body-frame export at Send assumes.
+        map_->setMapRaster(pcd_image_, pcd_bounds_m_);
+        marker.lat = 0.0;
+        marker.lon = 0.0;
+        marker.heading_deg = 90.0;
+        marker.valid = true;
+        map_->setMarker(marker);
+        emit map_->markerChanged();
+        map_->setView(0.0, 0.0, map_->zoom());
+    }
+
+    if (!current_job_id_.isEmpty()) {
         for (Job& job : jobs_) {
-            if (job.id == current_job_id_) {
-                job.gps = capture_gps_;
-                job_store_.save(job);
-                break;
+            if (job.id != current_job_id_) {
+                continue;
             }
+            if (capture_gps_.valid) {
+                job.gps = capture_gps_;
+            }
+            if (measured) {
+                job.robot = marker;
+            }
+            job_store_.save(job);
+            break;
         }
     }
     appendLog(QStringLiteral("[align] map collected: %1 (%2)")
@@ -2009,7 +2058,9 @@ void SatelliteScreen::onMapCaptured(const MapCapture& capture) {
                                  .arg(capture_gps_.lon, 0, 'f', 6)
                            : QStringLiteral("no GPS fix")));
     updateAlignCardUi();
-    showCorrespondPage();
+    if (!measured) {
+        showCorrespondPage();
+    }
 }
 
 void SatelliteScreen::showCorrespondPage() {
@@ -2235,14 +2286,33 @@ void SatelliteScreen::onConfirmAlignment() {
 void SatelliteScreen::updateAlignCardUi() {
     const bool measured = plan_mode_ == PlanMode::Measured;
     if (align_card_) {
-        align_card_->setVisible(!measured && !planning_only_);
+        // Collecting a map needs a robot, so the card is useless in the office
+        // planning trim. Measured mode keeps it — it just skips the
+        // correspondence step.
+        align_card_->setVisible(!planning_only_);
     }
     const bool busy = map_capture_ && map_capture_->busy();
     collect_map_button_->setEnabled(!mission_->missionActive());
+    correspond_button_->setVisible(!measured);
     correspond_button_->setEnabled(!busy && !pcd_image_.isNull() &&
                                    !mission_->missionActive());
     if (busy) {
         return;  // the runner's progress messages own the label
+    }
+    if (measured) {
+        align_status_->setText(
+            pcd_image_.isNull()
+                ? QStringLiteral(
+                      "Collect a robot map to place the robot at the grid "
+                      "origin, then draw the ROI around it.")
+                : QStringLiteral(
+                      "Robot at grid origin%1 — draw the ROI around it.")
+                      .arg(capture_gps_.valid
+                               ? QStringLiteral(" (GPS %1, %2)")
+                                     .arg(capture_gps_.lat, 0, 'f', 6)
+                                     .arg(capture_gps_.lon, 0, 'f', 6)
+                               : QString()));
+        return;
     }
     if (pcd_to_sat_.valid) {
         align_status_->setText(
@@ -2368,15 +2438,149 @@ void SatelliteScreen::onSendMission() {
     }
 }
 
-void SatelliteScreen::onEndMission() {
-    if (!confirmDialog(
-            QStringLiteral("End Mission"),
-            QStringLiteral("Autonomy will be disabled, motors disarmed, and "
-                           "both launch trees stopped."),
-            QStringLiteral("End Mission"))) {
+bool SatelliteScreen::isRobotLinkUnreachable() const {
+    return link_monitor_ && link_monitor_->isArmed() &&
+           link_monitor_->state() == LinkHealthMonitor::State::Disconnected;
+}
+
+void SatelliteScreen::onCompleteMission() {
+    if (complete_mission_in_flight_) {
         return;
     }
-    shutdownMission();
+    if (!confirmDialog(
+            QStringLiteral("Complete Mission"),
+            QStringLiteral(
+                "Autonomy will be disabled, the motors disarmed, the mission "
+                "finalized on the robot, and both launch trees stopped."),
+            QStringLiteral("Complete Mission"))) {
+        return;
+    }
+    complete_mission_in_flight_ = true;
+    setAutonomyEnabled(false);
+
+    // Data-first branch. On a truly dead link the disarm wait and the
+    // finalize RPC would burn ~10 s on dead calls and still leave
+    // mission_finalized_at null — the data IS on disk, the operator just
+    // needs a way to land the metadata. Strict check: Reconnecting is a few
+    // seconds of patience, not a reason to pop a modal.
+    if (isRobotLinkUnreachable()) {
+        appendLog(QStringLiteral(
+            "[mission] link offline — offering offline finalize"));
+        OfflineFinalizeDialog dialog(link_monitor_, this);
+        dialog.move(mapToGlobal(rect().center()) - dialog.rect().center());
+        dialog.exec();
+        switch (dialog.chosen()) {
+            case OfflineFinalizeDialog::Choice::Cancelled:
+                // The robot's 10-minute idle watchdog is the safety net for an
+                // abandoned mission, so staying put is a legitimate choice.
+                appendLog(QStringLiteral(
+                    "[mission] complete cancelled — robot watchdog will "
+                    "finalize if the mission is abandoned"));
+                complete_mission_in_flight_ = false;
+                return;
+            case OfflineFinalizeDialog::Choice::WaitReconnected:
+                appendLog(QStringLiteral(
+                    "[mission] link recovered while waiting — normal path"));
+                executeCompleteMissionNormalPath();
+                return;
+            case OfflineFinalizeDialog::Choice::FinalizeOverSsh:
+                executeCompleteMissionSshFallback();
+                return;
+        }
+        complete_mission_in_flight_ = false;
+        return;
+    }
+    executeCompleteMissionNormalPath();
+}
+
+void SatelliteScreen::beginMotorsIdleWait(
+    std::function<void(bool timed_out)> on_done) {
+    ros_->requestAxisState(RosLink::kAxisIdle);
+    if (!motors_idle_timer_) {
+        motors_idle_timer_ = new QTimer(this);
+        motors_idle_timer_->setInterval(100);
+    }
+    motors_idle_ticks_ = 0;
+    disconnect(motors_idle_timer_, &QTimer::timeout, nullptr, nullptr);
+    connect(motors_idle_timer_, &QTimer::timeout, this, [this, on_done] {
+        ++motors_idle_ticks_;
+        if (ros_->motorsIdle()) {
+            motors_idle_timer_->stop();
+            on_done(false);
+            return;
+        }
+        // 100 ms x 60 = 6 s ceiling. Killing the launch tree does not by
+        // itself disarm the axes, so it is worth waiting — but never at the
+        // cost of stranding the operator on this screen.
+        if (motors_idle_ticks_ >= 60) {
+            motors_idle_timer_->stop();
+            on_done(true);
+        }
+    });
+    motors_idle_timer_->start();
+}
+
+void SatelliteScreen::executeCompleteMissionNormalPath() {
+    appendLog(QStringLiteral("[mission] disarming motors…"));
+    beginMotorsIdleWait([this](bool timed_out) {
+        appendLog(timed_out
+                      ? QStringLiteral("[mission] motors did not confirm IDLE "
+                                       "within 6 s — continuing")
+                      : QStringLiteral("[mission] motors IDLE"));
+        ros_->finalizeMission([this](bool ok, const QString& detail) {
+            appendLog(ok ? QStringLiteral("[mission] finalized: %1").arg(detail)
+                         : QStringLiteral(
+                               "[mission] finalize failed (%1) — the robot's "
+                               "idle watchdog will finalize instead")
+                               .arg(detail));
+            mission_->teardownMission();
+            complete_mission_in_flight_ = false;
+        });
+    });
+}
+
+void SatelliteScreen::executeCompleteMissionSshFallback() {
+    QString error;
+    const RobotTarget target = MissionController::resolveRobotTarget(&error);
+    if (target.valid) {
+        // Non-interactive SSH does not source the ROS env, so `ros2` is not on
+        // PATH. finalize_mission_local.py is pure file I/O with no rclpy
+        // import, so invoking python3 directly is both correct and sufficient.
+        const QString script =
+            QStringLiteral("/home/%1/pilot_ws/install/pilot_control/lib/"
+                           "pilot_control/finalize_mission_local.py")
+                .arg(target.ssh_user);
+        QProcess proc;
+        QStringList args;
+        args << "-o" << "ConnectTimeout=4"
+             << "-o" << "StrictHostKeyChecking=no"
+             << "-o" << "UserKnownHostsFile=/dev/null"
+             << "-o" << "BatchMode=yes"
+             << QStringLiteral("%1@%2").arg(target.ssh_user, target.host)
+             << QStringLiteral("python3 %1").arg(script);
+        proc.start(QStringLiteral("ssh"), args);
+        if (!proc.waitForFinished(8000)) {
+            proc.kill();
+            proc.waitForFinished(500);
+            appendLog(QStringLiteral(
+                "[mission] offline finalize timed out (>8 s)"));
+        } else {
+            appendLog(QStringLiteral("[mission] offline finalize rc=%1 %2")
+                          .arg(proc.exitCode())
+                          .arg(QString::fromUtf8(
+                                   proc.readAllStandardOutput().trimmed())));
+        }
+    } else {
+        appendLog(
+            QStringLiteral("[mission] no robot host resolved (%1) — skipping "
+                           "remote finalize")
+                .arg(error));
+    }
+    // Skip the disarm wait and the finalize RPC; both would just time out on
+    // a dead link. Killing the launch tree disarms via the controller's exit
+    // handlers.
+    mission_->teardownMission();
+    complete_mission_in_flight_ = false;
 }
 
 void SatelliteScreen::onEstop() {
@@ -2511,6 +2715,37 @@ void SatelliteScreen::setStatePill(const QString& text, const QColor& color) {
     lbl_state_text_->setText(text);
     lbl_state_text_->setStyleSheet(statusTextStyle(color.name()) +
                                    QStringLiteral(" background: transparent;"));
+}
+
+void SatelliteScreen::updateMotorsChip() {
+    // Real controller_status wins over the axis-state RPC's optimistic ack:
+    // the request being accepted is not the same as the axes having moved.
+    const MotorStatus motors = ros_->motorStatus();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool fresh =
+        motors.left_wall_ms > 0 && motors.right_wall_ms > 0 &&
+        now - motors.left_wall_ms <= RosLink::kControllerStatusStaleMs &&
+        now - motors.right_wall_ms <= RosLink::kControllerStatusStaleMs;
+    if (!fresh) {
+        setMotorsChip(QStringLiteral("MOTORS —"),
+                      QColor(mutedColor(dark_mode_)));
+        return;
+    }
+    if (motors.left_axis_state == RosLink::kAxisClosedLoop &&
+        motors.right_axis_state == RosLink::kAxisClosedLoop) {
+        setMotorsChip(QStringLiteral("MOTORS ARMED"), QColor(kAccent));
+    } else if (motors.left_axis_state == RosLink::kAxisIdle &&
+               motors.right_axis_state == RosLink::kAxisIdle) {
+        setMotorsChip(QStringLiteral("MOTORS DISARMED"),
+                      QColor(mutedColor(dark_mode_)));
+    } else {
+        // Split state (one axis armed, one not) is worth surfacing rather
+        // than rounding to either extreme.
+        setMotorsChip(QStringLiteral("MOTORS %1/%2")
+                          .arg(motors.left_axis_state)
+                          .arg(motors.right_axis_state),
+                      QColor(kWarnAmber));
+    }
 }
 
 void SatelliteScreen::setMotorsChip(const QString& text, const QColor& color) {
