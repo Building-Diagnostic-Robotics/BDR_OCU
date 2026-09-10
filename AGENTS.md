@@ -838,6 +838,11 @@ dropdown for pinning a dated mosaic release.
  `FinalizeOverSsh` runs `finalize_mission_local.py` via **direct
  `python3`** and skips both the disarm wait and the RPC.
  Cancel is legitimate: the robot's 10-min idle watchdog is the net.
+ **Complete Mission is deliberately NOT link-gated here** (it enables on
+ mission-active alone). Stage 5 disables it on link loss and treats its
+ strict check as defence-in-depth; Stage 6 instead wants the offline dialog
+ to be reachable, because that dialog is the only way to land finalize
+ metadata on a dead link. Do not add a link gate to `end_button_`.
 - `RosLink::motorsIdle()` requires **fresh** controller_status on both
  axes. Do not relax that to "state == IDLE" alone — a dead CAN bus would
  then read as disarmed while the axes are still in closed loop.
