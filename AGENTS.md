@@ -849,6 +849,8 @@ dropdown for pinning a dated mosaic release.
 - `docs/DEV_BYPASSES.md` — the re-wiring checklist (see above).
 - `docs/OTA.md` — OTA state machine, runner UX, field-test recipe.
 - `docs/TILT_CALIBRATION_PLAN.md` — tilt calibration design + TODO list.
+- `docs/SATELLITE_WORKFLOW.md` — Stage 6 operator narrative: office
+  prefetch, ROI drawing, map collection, correspondence alignment, Send.
 - `docs/AUTONOMY_CONOPS.md` — north-star concept of operations for
   autonomous scan-while-exploring (edge/obstacle detection, on-robot
   coverage, ROI flow, RTK/frontier roadmap). Design intent, not yet built.
