@@ -87,12 +87,11 @@ RobotTarget MissionController::resolveRobotTarget(QString* error) {
     return target;
 }
 
-QString MissionController::roiVerticesArgument(const RoiRect& roi,
+QString MissionController::roiVerticesArgument(const RoiPolygon& poly,
                                                const geo::GeoPose& robot) {
     const geo::GeoPoint anchor{robot.lat, robot.lon};
     QStringList values;
-    const auto corners = roi.corners();
-    for (const geo::GeoPoint& corner : corners) {
+    for (const geo::GeoPoint& corner : poly.vertices) {
         const QPointF enu = geo::enuFromGeo(anchor, corner);
         const QPointF body = geo::bodyFromEnu(enu, robot.heading_deg);
         values << QString::number(body.x(), 'f', 3)
@@ -101,22 +100,40 @@ QString MissionController::roiVerticesArgument(const RoiRect& roi,
     return QStringLiteral("[%1]").arg(values.join(QStringLiteral(",")));
 }
 
-QString MissionController::roiEdgeFlagsArgument(const RoiRect& roi) {
+QString MissionController::roiVerticesArgument(const RoiRect& roi,
+                                               const geo::GeoPose& robot) {
+    return roiVerticesArgument(RoiPolygon::fromRect(roi), robot);
+}
+
+QString MissionController::roiEdgeFlagsArgument(const RoiPolygon& poly) {
     QStringList values;
-    for (bool marked : roi.roof_edges) {
+    const int n = poly.vertices.size();
+    for (int i = 0; i < n; ++i) {
+        const bool marked =
+            i < poly.roof_edges.size() ? poly.roof_edges[i] : false;
         values << (marked ? QStringLiteral("1") : QStringLiteral("0"));
     }
     return QStringLiteral("[%1]").arg(values.join(QStringLiteral(",")));
 }
 
+QString MissionController::roiEdgeFlagsArgument(const RoiRect& roi) {
+    return roiEdgeFlagsArgument(RoiPolygon::fromRect(roi));
+}
+
 bool MissionController::startMission(const RoiRect& roi,
+                                     const geo::GeoPose& robot,
+                                     QString* error) {
+    return startMission(RoiPolygon::fromRect(roi), robot, error);
+}
+
+bool MissionController::startMission(const RoiPolygon& poly,
                                      const geo::GeoPose& robot,
                                      QString* error) {
     if (mission_active_) {
         if (error) *error = QStringLiteral("A mission is already active.");
         return false;
     }
-    if (!roi.valid || !robot.valid) {
+    if (!poly.valid() || !robot.valid) {
         if (error) *error = QStringLiteral("ROI and robot placement are both required.");
         return false;
     }
@@ -127,7 +144,7 @@ bool MissionController::startMission(const RoiRect& roi,
         return false;
     }
 
-    const QString roi_arg = roiVerticesArgument(roi, robot);
+    const QString roi_arg = roiVerticesArgument(poly, robot);
     emit logLine(QStringLiteral("[send] roi_vertices=%1 (robot_init frame)")
                      .arg(roi_arg));
 
@@ -162,7 +179,7 @@ bool MissionController::startMission(const RoiRect& roi,
         QProcess cleanup;
         QStringList args = sshBaseArgs(target_);
         args << "pkill -f '[r]os2 launch pilot_control "
-                "robot_autonomous_coverage.launch.py' >/dev/null 2>&1 || true";
+                "robot_autonomous_coverage' >/dev/null 2>&1 || true";
         cleanup.start("ssh", args);
         cleanup.waitForFinished(8000);
     }
@@ -178,26 +195,21 @@ bool MissionController::startMission(const RoiRect& roi,
     QString remote_script = QString::fromLatin1(kEnvPreamble) +
         QStringLiteral("set -f; ");
     const bool any_roof_edge =
-        std::any_of(roi.roof_edges.begin(), roi.roof_edges.end(),
+        std::any_of(poly.roof_edges.begin(), poly.roof_edges.end(),
                     [](bool marked) { return marked; });
     if (any_roof_edge) {
-        // Only send when edges are actually marked: the argument requires
-        // a robot build carrying the roi_edge_flags declaration
-        // (pilot_ws feature/ocu-satellite-roi) — unmarked plans stay
-        // compatible with older robot builds (including autonomy).
         emit logLine(QStringLiteral(
-            "[send] roof-edge flags %1 (requires robot build with "
-            "roi_edge_flags support)")
-                         .arg(roiEdgeFlagsArgument(roi)));
+            "[send] roof-edge flags %1")
+                         .arg(roiEdgeFlagsArgument(poly)));
     }
     remote_script += QStringLiteral(
                          "ros2 launch pilot_control "
-                         "robot_autonomous_coverage.launch.py "
+                         "robot_autonomous_coverage_director.launch.py "
                          "roi_vertices:=%1")
                          .arg(roi_arg);
     if (any_roof_edge) {
         remote_script += QStringLiteral(" roi_edge_flags:=%1")
-                             .arg(roiEdgeFlagsArgument(roi));
+                             .arg(roiEdgeFlagsArgument(poly));
     }
     const QString remote_cmd =
         QStringLiteral("bash -lc \"%1\"")
@@ -232,10 +244,10 @@ void MissionController::teardownMission() {
         QProcess killer;
         QStringList args = sshBaseArgs(target_);
         args << "pkill -f '[r]os2 launch pilot_control "
-                "robot_autonomous_coverage.launch.py' >/dev/null 2>&1 || true; "
+                "robot_autonomous_coverage' >/dev/null 2>&1 || true; "
                 "sleep 2; "
                 "pkill -9 -f '[r]os2 launch pilot_control "
-                "robot_autonomous_coverage.launch.py' >/dev/null 2>&1 || true";
+                "robot_autonomous_coverage' >/dev/null 2>&1 || true";
         killer.start("ssh", args);
         killer.waitForFinished(12000);
     }

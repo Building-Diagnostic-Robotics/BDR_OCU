@@ -46,15 +46,20 @@ public:
      */
     static QString roiVerticesArgument(const RoiRect& roi,
                                        const geo::GeoPose& robot);
+    static QString roiVerticesArgument(const RoiPolygon& poly,
+                                       const geo::GeoPose& robot);
 
     /** Per-edge roof flags "[0,1,0,0]" (edge i = corner i -> i+1). */
     static QString roiEdgeFlagsArgument(const RoiRect& roi);
+    static QString roiEdgeFlagsArgument(const RoiPolygon& poly);
 
     bool missionActive() const { return mission_active_; }
     RobotTarget target() const { return target_; }
 
     /** Starts laptop launch + SSH robot launch. Emits log/state signals. */
     bool startMission(const RoiRect& roi, const geo::GeoPose& robot,
+                      QString* error = nullptr);
+    bool startMission(const RoiPolygon& poly, const geo::GeoPose& robot,
                       QString* error = nullptr);
 
     /** Kills both launch trees (remote pkill + local process kill). */

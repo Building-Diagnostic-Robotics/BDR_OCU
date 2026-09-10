@@ -10,6 +10,7 @@
 
 #include "components/scan_setup_dialog.hpp"
 
+#include <QDate>
 #include <QFile>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -242,12 +243,25 @@ QWidget* ScanSetupDialog::buildPlanRow(const Job& job, QWidget* parent) {
     auto* name = new QLabel(job.name.isEmpty() ? job.id : job.name, row);
     name->setObjectName("SetupPlanName");
     text_column->addWidget(name);
-    auto* detail = new QLabel(
+    QString detail_text =
         job.address.isEmpty()
             ? (measured ? QStringLiteral("Measured plan")
                         : QStringLiteral("Satellite plan"))
-            : job.address,
-        row);
+            : job.address;
+    // Imagery provenance travels with the plan (schema 3): a plan saved last
+    // month may have been drawn on a flight from years earlier, because World
+    // Imagery serves different LODs from different captures. Surface it here
+    // so the operator sees it at the moment they pick the plan.
+    if (!measured && job.hasImageryProvenance()) {
+        const int age = int(job.imagery_captured.daysTo(QDate::currentDate()) /
+                            365.25);
+        detail_text += QStringLiteral("  ·  imagery %1")
+                           .arg(job.imagery_captured.toString(Qt::ISODate));
+        if (age >= 3) {
+            detail_text += QStringLiteral(" (%1 yr old)").arg(age);
+        }
+    }
+    auto* detail = new QLabel(detail_text, row);
     detail->setObjectName("SetupPlanDetail");
     text_column->addWidget(detail);
     layout->addLayout(text_column, 1);

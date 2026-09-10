@@ -660,9 +660,160 @@ just observes progress over SSH.
   `finalize_mission_local.py`. Always invoke via direct
   `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`.
 
+## FAST-LIVO2 migration (planned, not yet built)
+
+Goal: replace FAST-LIO2 with FAST-LIVO2 for more robust odometry
+(visual constraints in LiDAR-degenerate roof geometry) and an
+RGB-colorized PCD deliverable. Full study + ordered plan in
+`pilot_ws/src/pilot_control/docs/FASTLIVO2_CAMERA_NOTES.md`; vendor
+camera PDFs in `pilot_ws/src/pilot_control/docs/vendor/see3cam_24cug/`.
+
+Facts agents should not re-derive:
+
+- BDR owns **6× See3CAM_24CUG_CHL_TC** (global shutter AR0234CS, M12,
+  no enclosure — the ONLY variant with hardware trigger support).
+  TRIG pin 4 (active-high, 3.3 V-drivable, ≥10 µs) + STROBE pin 5
+  (open-drain actual-exposure output) on the CN6 header.
+- **Trigger mode disables free-run streaming** → one camera cannot be
+  both FPV and hardware-triggered VIO. Plan: left camera stays
+  UDC-owned MJPEG FPV untouched; a **dedicated VIO camera** (spare
+  unit, rigid LiDAR-adjacent mount) publishes UYVY `image` +
+  `camera_info` for LIVO2. No UDC tee refactor needed.
+- LIVO2 feed must be **UYVY, never MJPEG** (JPEG artifacts break the
+  direct photometric method), which requires USB 3.2 Gen 1
+  enumeration — verify `lsusb -t` shows 5000M on the robot port.
+- Lock AE/AWB/gain via UVC controls during scans; stock lens is ~128°
+  diagonal — pick a narrower (~70–90°) M12 lens BEFORE intrinsic
+  calibration.
+- Cut-over contract: remap LIVO2 outputs to `/Odometry` +
+  `/cloud_registered` in `camera_init` so the tilt-corrector chain,
+  costmaps, and nav-grid stay untouched; keep an XYZI cloud for
+  costmap/nav-grid consumers (color only for the deliverable).
+
+## Stage 6 — ROI Coverage (Measured / Satellite), branch `feature/satellite-roi-stage`
+
+Autonomous ROI coverage per `docs/AUTONOMY_CONOPS.md` Mode B. **Start New
+Scan no longer routes to Stage 4/5** — it opens `ScanSetupDialog` (saved
+plans unexecuted-first, or Measured/Satellite mode cards), then the
+metadata modal (building prefilled from the chosen plan), then
+`SatelliteScreen` (Stage 6). The Dashboard "Plan Job" card opens the same
+screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
+
+### Key files (all `satellite_*` prefixed, flat in cpp/include + cpp/src)
+
+- `satellite_screen.{hpp,cpp}` — the stage. Stage 4/5 top-bar construction
+ (SVG back button, battery/BOT/state pills, motors chip, 184px
+ window-controls reservation), 320px LEFT rail of zinc cards, per-element
+ Arimo, object-name-scoped QSS ONLY (a repolish sweep in applyTheme is
+ load-bearing: replacing an ancestor stylesheet does not reliably
+ repolish the QScrollArea subtree).
+- `satellite_map_widget.{hpp,cpp}` — one canvas, two modes: Esri imagery
+ (overzoom fallback: failed tiles remembered 60 s, parent-fetch cascade,
+ ancestor scaling — imagery 404s past native LOD) or measured CAD grid
+ (adaptive metric grid, 0.1 m snap, z23 ceiling, fixed reference-origin
+ anchor). The authored geometry is an **arbitrary polygon** (`RoiPolygon`,
+ ground meters + geo anchor): "Draw Shape" appends a vertex per click and
+ right-click closes it, vertices drag individually, each edge carries a
+ unit-aware dimension chip that is click-to-edit (typing a length slides
+ the next vertex along that edge), and tapping an edge toggles its
+ roof-edge flag (red solid = physical fall hazard). `RoiRect` survives
+ only as the four-corner special case that backs the rail's
+ along/across/heading spinboxes — those disable themselves the moment the
+ polygon has more than four vertices, because the rect mirror is stale
+ then and the per-edge chips are the live dimensions.
+- `satellite_tile_service.{hpp,cpp}` — Esri tiles + geocode + provenance,
+ plus the office prefetch: `tilesForArea`, `imageryMeetsAge`,
+ `stitchArea` (max-zoom site JPEG), `writeSiteManifest`/`readSiteManifest`,
+ `setCacheRoot` (per-job tile tree), `setMaxZoomCap`, Clarity and Wayback
+ layer URLs, `listWaybackReleases`.
+- `satellite_job_model.{hpp,cpp}` — plans as JSON under
+ AppData/satellite_jobs; **schema 4** carries `mode`
+ (satellite|measured), the `polygon` + `polygon_roof_edges` arrays,
+ `gps` (the map-collection seed fix), `imagery_cache` (what the office
+ prefetch actually cached), `alignment` (the `Similarity2D` PCD->imagery
+ fit) and `last_executed_at`. Schema <= 3 rect-only plans convert to a
+ 4-gon on load. `JobStore::assetsDir(id)` is the per-job asset folder
+ (`tiles/`, `site.jpg`, `imagery.json`).
+- `similarity_2d.{hpp,cpp}` — Umeyama 2D similarity (scale + rotation +
+ optional reflection + translation) mapping PCD/robot_init metres to
+ satellite pixels, with RMSE in both units. Reflection is tried both ways
+ and the lower-RMSE fit wins.
+- `satellite_mission_controller.{hpp,cpp}` — Send: geo->robot_init export
+ (marker pose = anchor; verified numerically), SSH launch of
+ `robot_autonomous_coverage_director.launch.py roi_vertices:='[...]'`
+ (+ `roi_edge_flags` ONLY when edges are marked — older robot builds
+ reject undeclared args), laptop_teleop launch for the heartbeat.
+- `satellite_ros_link.{hpp,cpp}` — the stage's own rclcpp node:
+ cmd_vel/autonomy_enable pubs, coverage/odom/status subs, axis-state
+ clients, `pushSessionMetadata` (coordinator SetParameters).
+- `components/scan_setup_dialog.{hpp,cpp}` — the mode/plan selector modal.
+
+### Offline imagery (office prefetch)
+
+The field has no internet, so the whole site pyramid is downloaded in the
+office and stored **per job** under `JobStore::assetsDir(id)`. Download Area
+saves the plan first (it needs an id), then caches `tiles/`, stitches a
+max-zoom `site.jpg`, and writes `imagery.json`; `loadJob` replays that
+manifest through `applyImageryManifest()` so the canvas paints off disk and
+`setMaxZoomCap` stops the operator zooming into blanks.
+
+Zoom selection is **the highest native zoom whose `SRC_DATE` is within N
+years** (operator-set, default 3, newest preferred). There is deliberately
+no fallback to older-but-sharper imagery: planning a roof against a
+decade-old flight is a real failure mode. `imageryMeetsAge` **fails closed**
+— unknown provenance is not treated as fresh. Wayback is an optional office
+dropdown for pinning a dated mosaic release.
+
+### Rules for agents touching Stage 6
+
+- **The metadata push is the arming gate**: Start Autonomy stays disabled
+ until `/data_collection_coordinator/set_parameters` accepts
+ building/operator/units (retried 3 s while the stack boots). Same
+ hard-block contract as Stage 5 — do not weaken it.
+- The BOT pill runs the layered link model: AppShell arms
+ `link_monitor_` + `reachability_probe_` on `missionActiveChanged(true)`
+ (probe host = the Send SSH target) and every Stage 6 ROS callback stamps
+ the monitor. New subscribers must stamp too.
+- ROI vertices/edge flags travel in RAW corner order — the robot-side
+ manager resolves flags to segments BEFORE `Polygon.buffer(0)` (which may
+ reorder rings). Marked edges get `roof_edge_clearance` (0.5 m default)
+ planning setback robot-side; physical keep-out still wins.
+- **`RoiPolygon` is the authored geometry, `RoiRect` is not.** Anything
+ that sends, saves, or renders the ROI must read `map_->polygon()` and
+ fall back to `RoiPolygon::fromRect()` only when no polygon exists. Do
+ not "simplify" the send path back to the rectangle — it silently drops
+ every vertex past the fourth.
+- `saveJob()` rebuilds the `Job` from the rail, so it must copy `gps`,
+ `imagery_cache`, `alignment`, and `align_rmse_m` forward from the stored
+ job. Those are produced by the prefetch / map-collection / alignment
+ steps, not by the plan card, and re-saving from the rail would otherwise
+ wipe them.
+- `TileService::imageryInfoAt` coalesces concurrent queries for the same
+ cell and notifies **every** waiting callback. Do not go back to dropping
+ coalesced callers: the download dialog gates its whole prefetch on that
+ callback, so a dropped one hangs the download forever.
+- Mission end is watchdog-finalized (robot's 10-min auto-finalize) — the
+ OCU deliberately does not call /dc/finalize_mission here yet. Revisit
+ before customer delivery.
+- `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
+ (`_DARK`, `_MODE=measured|scan`, `_STAGE=3|4|5`, `_TOGGLE` modifiers) —
+ the agent-side visual verification loop. See docs/DEV_BYPASSES.md.
+- Robot-side counterpart lives on pilot_ws branch
+ `feature/ocu-satellite-roi` (worktree `~/BDR_data/pilot_ws_ocu_worktree`):
+ `/coverage/status` 2 Hz JSON publisher + zenoh allowlist entry +
+ `roi_edge_flags`/`roof_edge_clearance` params + differential erosion in
+ `coverage_planner_core.py` (tests: 136 passing). Robot must be rebuilt
+ from that branch for the state pill + edge setback to be live.
+
 ## Docs worth reading
 
 - `cpp/CLAUDE.md` — authoritative architecture overview and build notes.
 - `docs/DEV_BYPASSES.md` — the re-wiring checklist (see above).
 - `docs/OTA.md` — OTA state machine, runner UX, field-test recipe.
 - `docs/TILT_CALIBRATION_PLAN.md` — tilt calibration design + TODO list.
+- `docs/AUTONOMY_CONOPS.md` — north-star concept of operations for
+  autonomous scan-while-exploring (edge/obstacle detection, on-robot
+  coverage, ROI flow, RTK/frontier roadmap). Design intent, not yet built.
+- `pilot_ws/src/pilot_control/docs/FASTLIVO2_CAMERA_NOTES.md` —
+  See3CAM_24CUG vendor-doc study + FAST-LIVO2 migration plan (see the
+  FAST-LIVO2 section above).

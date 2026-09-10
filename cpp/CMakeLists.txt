@@ -149,6 +149,7 @@ set(HEADERS
     include/satellite_mission_controller.hpp
     include/satellite_download_dialog.hpp
     include/satellite_job_model.hpp
+    include/similarity_2d.hpp
     include/components/scan_setup_dialog.hpp
     include/plot_widget.hpp
     include/obstacle_detector.hpp
@@ -264,6 +265,7 @@ set(GUI_SOURCES
     src/link_health_monitor.cpp
     src/robot_reachability_probe.cpp
     src/satellite_job_model.cpp
+    src/similarity_2d.cpp
     src/satellite_tile_service.cpp
     src/satellite_ros_link.cpp
     src/satellite_mission_controller.cpp
@@ -458,8 +460,40 @@ if(BDR_BUILD_TESTS)
             GTest::gtest
             GTest::gtest_main
         )
-        add_test(NAME obstacle_geometry_tests COMMAND obstacle_geometry_tests)
-        message(STATUS "Unit tests: enabled (obstacle_geometry_tests)")
+        add_executable(similarity_2d_tests
+            tests/similarity_2d_tests.cpp
+            src/similarity_2d.cpp
+        )
+        target_include_directories(similarity_2d_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${EIGEN3_INCLUDE_DIRS}
+        )
+        target_link_libraries(similarity_2d_tests PRIVATE
+            Eigen3::Eigen
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME similarity_2d_tests COMMAND similarity_2d_tests)
+
+        # The header is listed so AUTOMOC generates TileService's moc — it
+        # lives in include/, which AUTOMOC only scans for targets that name it.
+        add_executable(satellite_tile_policy_tests
+            tests/satellite_tile_policy_tests.cpp
+            src/satellite_tile_service.cpp
+            include/satellite_tile_service.hpp
+        )
+        target_include_directories(satellite_tile_policy_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_BINARY_DIR}/generated
+        )
+        target_link_libraries(satellite_tile_policy_tests PRIVATE
+            ${QT_GUI_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME satellite_tile_policy_tests COMMAND satellite_tile_policy_tests)
+        message(STATUS "Unit tests: enabled (obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

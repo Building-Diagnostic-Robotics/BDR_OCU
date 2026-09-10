@@ -4,6 +4,8 @@
 #include "satellite_tile_service.hpp"
 #include "units_system.hpp"
 
+#include <QBrush>
+#include <QInputDialog>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -61,6 +63,16 @@ void SatelliteMapWidget::setImageryEnabled(bool enabled) {
     imagery_enabled_ = enabled;
     zoom_ = qBound(kMinZoom, zoom_, maxZoomNow());
     update();
+}
+
+int SatelliteMapWidget::maxZoomNow() const {
+    if (!imagery_enabled_) {
+        return kMaxZoomGrid;
+    }
+    if (tiles_ && tiles_->maxZoomCap() > 0) {
+        return tiles_->maxZoomCap();
+    }
+    return kMaxZoom;
 }
 
 void SatelliteMapWidget::setView(double lat, double lon, int zoom) {
@@ -123,7 +135,65 @@ double SatelliteMapWidget::metersPerPixelNow() const {
 
 void SatelliteMapWidget::setRoi(const RoiRect& roi) {
     roi_ = roi;
+    if (roi.valid) {
+        polygon_ = RoiPolygon::fromRect(roi);
+    }
     update();
+}
+
+void SatelliteMapWidget::setPolygon(const RoiPolygon& poly) {
+    polygon_ = poly;
+    polygon_.ensureEdgeFlags();
+    if (polygon_.valid() && polygon_.vertices.size() == 4) {
+        // Keep the rectangle mirror in sync for length/width spinboxes.
+        roi_.valid = true;
+        roi_.center = polygon_.vertices[0];
+        // Approximate: use first vertex as a corner, not exact.
+    }
+    update();
+    emit roiChanged();
+}
+
+void SatelliteMapWidget::armPolygonDraw() {
+    draw_polygon_armed_ = true;
+    polygon_ = RoiPolygon{};
+    setCursor(Qt::CrossCursor);
+}
+
+void SatelliteMapWidget::clearPolygon() {
+    polygon_ = RoiPolygon{};
+    roi_.valid = false;
+    update();
+    emit roiChanged();
+}
+
+bool SatelliteMapWidget::setEdgeLength(int edge, double meters) {
+    const int n = polygon_.vertices.size();
+    if (edge < 0 || edge >= n || meters < 0.5) {
+        return false;
+    }
+    const geo::GeoPoint a = polygon_.vertices[edge];
+    const geo::GeoPoint b = polygon_.vertices[(edge + 1) % n];
+    const QPointF enu = geo::enuFromGeo(a, b);
+    const double cur = std::hypot(enu.x(), enu.y());
+    if (cur < 1e-6) {
+        return false;
+    }
+    const double s = meters / cur;
+    polygon_.vertices[(edge + 1) % n] =
+        geo::geoFromEnu(a, enu.x() * s, enu.y() * s);
+    update();
+    emit roiChanged();
+    return true;
+}
+
+QVector<QPointF> SatelliteMapWidget::polygonScreenPoints() const {
+    QVector<QPointF> out;
+    out.reserve(polygon_.vertices.size());
+    for (const geo::GeoPoint& p : polygon_.vertices) {
+        out.append(screenFromGeo(p));
+    }
+    return out;
 }
 
 void SatelliteMapWidget::addRoiAtViewCenter() {
@@ -134,6 +204,7 @@ void SatelliteMapWidget::addRoiAtViewCenter() {
     if (marker_.valid) {
         roi_.heading_deg = marker_.heading_deg;
     }
+    polygon_ = RoiPolygon::fromRect(roi_);
     update();
     emit roiChanged();
 }
@@ -261,21 +332,32 @@ SatelliteMapWidget::Drag SatelliteMapWidget::hitTest(const QPointF& pos,
             return Drag::MoveMarker;
         }
     }
-    if (roi_.valid) {
-        if (QLineF(pos, roiRotateHandleScreen()).length() <= kHitRadiusPx) {
-            return Drag::RotateRoi;
+    const bool have_poly = polygon_.valid() || roi_.valid;
+    if (have_poly) {
+        if (!polygon_.valid() && roi_.valid) {
+            if (QLineF(pos, roiRotateHandleScreen()).length() <= kHitRadiusPx) {
+                return Drag::RotateRoi;
+            }
         }
-        const QVector<QPointF> corners = roiCornerScreenPoints();
+        for (int i = 0; i < dim_boxes_.size(); ++i) {
+            if (dim_boxes_[i].contains(pos)) {
+                if (edge_index) {
+                    *edge_index = i;
+                }
+                return Drag::DimBadge;
+            }
+        }
+        const QVector<QPointF> corners = polygon_.valid()
+                                            ? polygonScreenPoints()
+                                            : roiCornerScreenPoints();
         for (int i = 0; i < corners.size(); ++i) {
             if (QLineF(pos, corners[i]).length() <= kHitRadiusPx) {
                 if (corner_index) {
                     *corner_index = i;
                 }
-                return Drag::ResizeRoiCorner;
+                return polygon_.valid() ? Drag::MoveVertex : Drag::ResizeRoiCorner;
             }
         }
-        // Edge hit (roof-edge toggle) — checked before the interior so the
-        // boundary band isn't swallowed by MoveRoi. Corners already won.
         for (int i = 0; i < corners.size(); ++i) {
             const QLineF edge(corners[i], corners[(i + 1) % corners.size()]);
             const QPointF ab = edge.p2() - edge.p1();
@@ -388,6 +470,17 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
             // Overzoom / not-yet-fetched fallback: draw the matching
             // sub-rect of the nearest cached ancestor scaled up, so the
             // map never blanks past the imagery's native LOD.
+            //
+            // Two very different cases reach here. A tile that simply hasn't
+            // arrived yet is transient — the ancestor is a loading placeholder
+            // and will be replaced in a moment. A tile the service has already
+            // 404'd is PERMANENT: this LOD has no data here, and because World
+            // Imagery is a mosaic of contributor layers the ancestor may be a
+            // different flight from a different year. Marking the second case
+            // is the point: otherwise the operator can draw an ROI spanning
+            // two epochs with nothing on screen to say so.
+            const bool permanent_substitute =
+                tiles_->isFailedRecently(zoom_, wrapped, ty);
             bool drew_fallback = false;
             for (int up = 1; up <= 7 && zoom_ - up >= kMinZoom; ++up) {
                 const int az = zoom_ - up;
@@ -405,6 +498,16 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
                     source);
                 drew_fallback = true;
                 break;
+            }
+            if (drew_fallback && permanent_substitute) {
+                // Light diagonal hatch: readable over both bright roofs and
+                // dark asphalt without obscuring what's underneath.
+                painter.save();
+                painter.setPen(Qt::NoPen);
+                QBrush hatch(QColor(255, 255, 255, 28), Qt::BDiagPattern);
+                painter.setBrush(hatch);
+                painter.drawRect(QRectF(dest, QSizeF(kTileSize, kTileSize)));
+                painter.restore();
             }
             if (!drew_fallback) {
                 painter.fillRect(QRectF(dest, QSizeF(kTileSize, kTileSize)),
@@ -562,11 +665,14 @@ void SatelliteMapWidget::paintTelemetry(QPainter& painter) {
 }
 
 void SatelliteMapWidget::paintRoi(QPainter& painter) {
-    if (!roi_.valid) {
+    const QVector<QPointF> corners = polygon_.valid()
+                                        ? polygonScreenPoints()
+                                        : roiCornerScreenPoints();
+    const int n = corners.size();
+    if (n < 3 && !roi_.valid) {
         return;
     }
-    const QVector<QPointF> corners = roiCornerScreenPoints();
-    if (corners.size() != 4) {
+    if (n < 3) {
         return;
     }
     const QPolygonF poly(corners);
@@ -580,11 +686,11 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
     painter.drawPolygon(poly);
     painter.setBrush(Qt::NoBrush);
 
-    // Per-edge stroke: interior limits in accent (dashed while editable);
-    // marked roof edges — physical fall hazards — hazard-red, solid,
-    // heavier. Edge i = corner i -> corner (i+1)%4.
-    for (int i = 0; i < 4; ++i) {
-        if (roi_.roof_edges[size_t(i)]) {
+    for (int i = 0; i < n; ++i) {
+        const bool marked =
+            i < polygon_.roof_edges.size() ? polygon_.roof_edges[i]
+            : (roi_.valid && i < 4 ? roi_.roof_edges[size_t(i)] : false);
+        if (marked) {
             painter.setPen(
                 QPen(satpal::danger(), 3.0, Qt::SolidLine, Qt::RoundCap));
         } else {
@@ -592,51 +698,57 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
                                 edit_locked_ ? Qt::SolidLine : Qt::DashLine,
                                 Qt::RoundCap));
         }
-        painter.drawLine(corners[i], corners[(i + 1) % 4]);
+        painter.drawLine(corners[i], corners[(i + 1) % n]);
     }
 
-    // Heading tick on the forward edge (midpoint corners[0]..corners[3]).
-    const QPointF fwd_mid = (corners[0] + corners[3]) / 2.0;
-    const QPointF rot_handle = roiRotateHandleScreen();
-    if (!edit_locked_) {
+    if (!edit_locked_ && roi_.valid && !polygon_.valid()) {
+        const QPointF fwd_mid = (corners[0] + corners[3]) / 2.0;
+        const QPointF rot_handle = roiRotateHandleScreen();
         painter.setPen(QPen(edge, 1.5, Qt::DotLine));
         painter.drawLine(fwd_mid, rot_handle);
         painter.setBrush(satpal::cardBg());
         painter.setPen(QPen(edge, 2.0));
         painter.drawEllipse(rot_handle, kHandleRadiusPx, kHandleRadiusPx);
+        Q_UNUSED(fwd_mid);
+    }
 
+    if (!edit_locked_) {
         painter.setBrush(satpal::cardBg());
+        painter.setPen(QPen(edge, 2.0));
         for (const QPointF& corner : corners) {
-            painter.drawRect(QRectF(corner.x() - kHandleRadiusPx + 1,
-                                    corner.y() - kHandleRadiusPx + 1,
-                                    2 * kHandleRadiusPx - 2,
-                                    2 * kHandleRadiusPx - 2));
+            painter.drawEllipse(corner, kHandleRadiusPx, kHandleRadiusPx);
         }
         painter.setBrush(Qt::NoBrush);
     }
 
-    // Dimension labels on the two edge midpoints.
     QFont dim_font = font();
     dim_font.setPointSizeF(10.0);
     dim_font.setBold(true);
     painter.setFont(dim_font);
-    const auto drawDim = [&](const QPointF& at, const QString& text) {
+    dim_boxes_.fill(QRectF(), n);
+    dim_boxes_.resize(n);
+    for (int i = 0; i < n; ++i) {
+        const geo::GeoPoint a =
+            polygon_.valid() ? polygon_.vertices[i]
+                             : roi_.corners()[i];
+        const geo::GeoPoint b =
+            polygon_.valid() ? polygon_.vertices[(i + 1) % n]
+                             : roi_.corners()[(i + 1) % 4];
+        const QPointF enu = geo::enuFromGeo(a, b);
+        const double len = std::hypot(enu.x(), enu.y());
+        const QString text = units::formatLength(len, 1);
+        const QPointF at = (corners[i] + corners[(i + 1) % n]) / 2.0;
         const QFontMetricsF fm(dim_font);
         const QRectF box(at.x() - fm.horizontalAdvance(text) / 2.0 - 6,
                          at.y() - fm.height() / 2.0 - 3,
                          fm.horizontalAdvance(text) + 12, fm.height() + 6);
+        dim_boxes_[i] = box;
         painter.setPen(Qt::NoPen);
         painter.setBrush(QColor(0, 0, 0, 170));
         painter.drawRoundedRect(box, 5, 5);
         painter.setPen(satpal::text());
         painter.drawText(box, Qt::AlignCenter, text);
-    };
-    // Length label on a side edge (corners[0]-[1]); width on forward edge.
-    // ANSI-aware per the units rules — operators toggle between missions.
-    drawDim((corners[0] + corners[1]) / 2.0,
-            units::formatLength(roi_.length_m, 1));
-    drawDim((corners[3] + corners[0]) / 2.0,
-            units::formatLength(roi_.width_m, 1));
+    }
 }
 
 void SatelliteMapWidget::paintMarker(QPainter& painter) {
@@ -735,7 +847,19 @@ void SatelliteMapWidget::paintChrome(QPainter& painter) {
 // ---- Interaction ------------------------------------------------------------
 
 void SatelliteMapWidget::mousePressEvent(QMouseEvent* event) {
+    if (event->button() == Qt::RightButton && draw_polygon_armed_) {
+        draw_polygon_armed_ = false;
+        setCursor(Qt::OpenHandCursor);
+        return;
+    }
     if (event->button() != Qt::LeftButton) {
+        return;
+    }
+    if (draw_polygon_armed_ && !edit_locked_) {
+        polygon_.vertices.append(maybeSnap(geoFromScreen(event->pos())));
+        polygon_.ensureEdgeFlags();
+        update();
+        emit roiChanged();
         return;
     }
     if (place_marker_armed_ && !edit_locked_) {
@@ -779,8 +903,14 @@ void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
         }
         case Drag::MoveRoi: {
             const QPointF enu(delta.x() * mpp, -delta.y() * mpp);
-            roi_.center =
-                maybeSnap(geo::geoFromEnu(roi_.center, enu.x(), enu.y()));
+            if (polygon_.valid()) {
+                for (geo::GeoPoint& p : polygon_.vertices) {
+                    p = geo::geoFromEnu(p, enu.x(), enu.y());
+                }
+            } else {
+                roi_.center =
+                    maybeSnap(geo::geoFromEnu(roi_.center, enu.x(), enu.y()));
+            }
             emit roiChanged();
             break;
         }
@@ -811,9 +941,15 @@ void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
             emit roiChanged();
             break;
         }
+        case Drag::MoveVertex: {
+            if (drag_corner_ >= 0 && drag_corner_ < polygon_.vertices.size()) {
+                polygon_.vertices[drag_corner_] =
+                    maybeSnap(geoFromScreen(pos));
+                emit roiChanged();
+            }
+            break;
+        }
         case Drag::ResizeRoiCorner: {
-            // Center-fixed resize: half extents follow the cursor projection
-            // onto the ROI's own axes.
             const QPointF base = screenFromGeo(roi_.center);
             const QPointF v_screen = pos - base;
             const QPointF v_enu(v_screen.x() * mpp, -v_screen.y() * mpp);
@@ -823,6 +959,7 @@ void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
             const double across = v_enu.x() * c - v_enu.y() * s;
             roi_.length_m = qBound(2.0, std::abs(along) * 2.0, 500.0);
             roi_.width_m = qBound(2.0, std::abs(across) * 2.0, 500.0);
+            polygon_ = RoiPolygon::fromRect(roi_);
             emit roiChanged();
             break;
         }
@@ -835,12 +972,60 @@ void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
 void SatelliteMapWidget::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
         if (drag_ == Drag::EdgeTogglePending && drag_edge_ >= 0 &&
-            drag_edge_ < 4 &&
             (event->pos() - drag_press_pos_).manhattanLength() <= 4) {
-            roi_.roof_edges[size_t(drag_edge_)] =
-                !roi_.roof_edges[size_t(drag_edge_)];
+            if (polygon_.valid()) {
+                polygon_.ensureEdgeFlags();
+                if (drag_edge_ < polygon_.roof_edges.size()) {
+                    polygon_.roof_edges[drag_edge_] =
+                        !polygon_.roof_edges[drag_edge_];
+                }
+            } else if (drag_edge_ < 4) {
+                roi_.roof_edges[size_t(drag_edge_)] =
+                    !roi_.roof_edges[size_t(drag_edge_)];
+            }
             update();
             emit roiChanged();
+        }
+        if (drag_ == Drag::DimBadge && drag_edge_ >= 0 &&
+            (event->pos() - drag_press_pos_).manhattanLength() <= 4) {
+            const int n = polygon_.valid() ? polygon_.vertices.size() : 4;
+            if (drag_edge_ < n) {
+                geo::GeoPoint a, b;
+                if (polygon_.valid()) {
+                    a = polygon_.vertices[drag_edge_];
+                    b = polygon_.vertices[(drag_edge_ + 1) % n];
+                } else {
+                    const auto c = roi_.corners();
+                    a = c[drag_edge_];
+                    b = c[(drag_edge_ + 1) % 4];
+                }
+                const QPointF enu = geo::enuFromGeo(a, b);
+                const double cur = std::hypot(enu.x(), enu.y());
+                bool ok = false;
+                const QString prompt =
+                    UnitsProvider::instance()->isMetric()
+                        ? QStringLiteral("Edge length (m)")
+                        : QStringLiteral("Edge length (ft)");
+                const double shown = UnitsProvider::instance()->isMetric()
+                                        ? cur
+                                        : units::metersToFeet(cur);
+                const double entered = QInputDialog::getDouble(
+                    this, QStringLiteral("Edge length"), prompt, shown, 0.5,
+                    500.0, 2, &ok);
+                if (ok) {
+                    const double meters = UnitsProvider::instance()->isMetric()
+                                             ? entered
+                                             : units::feetToMeters(entered);
+                    if (polygon_.valid()) {
+                        setEdgeLength(drag_edge_, meters);
+                    } else {
+                        polygon_ = RoiPolygon::fromRect(roi_);
+                        if (setEdgeLength(drag_edge_, meters)) {
+                            roi_.valid = false;
+                        }
+                    }
+                }
+            }
         }
         drag_ = Drag::None;
         drag_corner_ = -1;

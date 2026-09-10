@@ -47,6 +47,14 @@ public:
     /** Creates/re-centers the ROI in the current view. */
     void addRoiAtViewCenter();
 
+    RoiPolygon polygon() const { return polygon_; }
+    void setPolygon(const RoiPolygon& poly);
+    /** Next left-clicks append polygon vertices; right-click / Finish closes. */
+    void armPolygonDraw();
+    void clearPolygon();
+    /** Slide vertex i+1 along edge i to the given length (metres). */
+    bool setEdgeLength(int edge, double meters);
+
     geo::GeoPose marker() const { return marker_; }
     void setMarker(const geo::GeoPose& marker);
     /** The next left click places the robot marker. */
@@ -70,7 +78,7 @@ public:
     /** The grid canvas has no imagery-resolution ceiling — allow zooming to
         centimeter scale for small roofs. */
     static constexpr int kMaxZoomGrid = 23;
-    int maxZoomNow() const { return imagery_enabled_ ? kMaxZoom : kMaxZoomGrid; }
+    int maxZoomNow() const;
 
 signals:
     void viewChanged(double lat, double lon, int zoom);
@@ -93,7 +101,9 @@ private:
         RotateRoi,
         MoveMarker,
         RotateMarker,
-        EdgeTogglePending,  // pressed on an ROI edge; toggles on release
+        MoveVertex,
+        EdgeTogglePending,
+        DimBadge,
     };
 
     // Coordinate helpers (valid during paint/mouse handling).
@@ -105,6 +115,7 @@ private:
 
     // Overlay geometry in screen space.
     QVector<QPointF> roiCornerScreenPoints() const;
+    QVector<QPointF> polygonScreenPoints() const;
     QPointF roiRotateHandleScreen() const;
     QPointF markerScreenPos() const;
     QPointF markerArrowTipScreen() const;
@@ -132,9 +143,13 @@ private:
     int zoom_ = 5;
 
     RoiRect roi_;
+    RoiPolygon polygon_;
     geo::GeoPose marker_;
     bool edit_locked_ = false;
     bool place_marker_armed_ = false;
+    bool draw_polygon_armed_ = false;
+    int drag_dim_edge_ = -1;
+    QVector<QRectF> dim_boxes_;
 
     geo::GeoPose mission_anchor_;
     GridSnapshot grid_;

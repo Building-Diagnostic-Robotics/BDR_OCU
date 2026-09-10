@@ -9,7 +9,9 @@
 #pragma once
 
 #include "satellite_geo_math.hpp"
+#include "similarity_2d.hpp"
 
+#include <QDate>
 #include <QDateTime>
 #include <QJsonObject>
 #include <QString>
@@ -40,28 +42,42 @@ struct RoiRect {
     std::array<bool, 4> roof_edges{{false, false, false, false}};
 
     /** Four corners as geo points, CCW. */
-    QVector<geo::GeoPoint> corners() const {
-        QVector<geo::GeoPoint> out;
-        if (!valid) {
-            return out;
-        }
-        const double s = std::sin(heading_deg * geo::kDegToRad);
-        const double c = std::cos(heading_deg * geo::kDegToRad);
-        // u = along heading (ENU), v = right of heading.
-        const QPointF u(s, c);
-        const QPointF v(c, -s);
-        const double hl = length_m / 2.0;
-        const double hw = width_m / 2.0;
-        const QPointF signs[4] = {
-            QPointF(+hl, +hw), QPointF(-hl, +hw),
-            QPointF(-hl, -hw), QPointF(+hl, -hw)};
-        for (const QPointF& sgn : signs) {
-            const double e = sgn.x() * u.x() + sgn.y() * v.x();
-            const double n = sgn.x() * u.y() + sgn.y() * v.y();
-            out.append(geo::geoFromEnu(center, e, n));
-        }
-        return out;
-    }
+    QVector<geo::GeoPoint> corners() const;
+};
+
+/** Operator-drawn coverage polygon (schema 4). Edge i = vertex i -> i+1. */
+struct RoiPolygon {
+    QVector<geo::GeoPoint> vertices;
+    QVector<bool> roof_edges;
+
+    bool valid() const { return vertices.size() >= 3; }
+    void ensureEdgeFlags();
+    static RoiPolygon fromRect(const RoiRect& rect);
+};
+
+struct GpsFix {
+    bool valid = false;
+    double lat = 0.0;
+    double lon = 0.0;
+    double alt_m = 0.0;
+    bool heading_valid = false;
+    double heading_deg = 0.0;
+    QString fix_type;
+    double hacc_m = 0.0;
+    int num_sats = 0;
+    QDateTime utc;
+    QString source;
+};
+
+struct ImageryCache {
+    bool cached = false;
+    int max_zoom = 0;
+    QDate captured;
+    double res_m = 0.0;
+    QString layer;
+    QString wayback_release;
+    QDate min_date;
+    QString stitch_relpath;
 };
 
 struct Job {
@@ -80,10 +96,29 @@ struct Job {
     QDateTime updated;
     QDateTime last_executed_at;  // stamped when a mission actually launches
 
+    /**
+     * Provenance of the imagery this plan was DRAWN against (schema 3).
+     * World Imagery is a mosaic — the same roof is served from different
+     * flights at different zooms — so a plan authored months ago may have
+     * been drawn on imagery years older than its own creation date. Carrying
+     * it forward is what lets the plan picker warn about that later.
+     * Absent on schema <= 2 plans, which is not an error.
+     */
+    QDate imagery_captured;
+    double imagery_res_m = 0.0;
+    int imagery_zoom = 0;
+
+    RoiPolygon polygon;
+    GpsFix gps;
+    ImageryCache imagery_cache;
+    Similarity2D alignment;
+    double align_rmse_m = 0.0;
+
     bool isMeasured() const {
         return mode == QLatin1String(kModeMeasured);
     }
     bool executed() const { return last_executed_at.isValid(); }
+    bool hasImageryProvenance() const { return imagery_captured.isValid(); }
 
     QJsonObject toJson() const;
     static Job fromJson(const QJsonObject& obj);
@@ -95,6 +130,7 @@ public:
     JobStore();
 
     QString jobsDir() const { return jobs_dir_; }
+    QString assetsDir(const QString& job_id) const;
     QVector<Job> loadAll() const;
     bool save(const Job& job, QString* error = nullptr) const;
     bool remove(const QString& job_id) const;

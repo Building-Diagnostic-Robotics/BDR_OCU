@@ -285,6 +285,55 @@ enumerates all sites.
 
 ---
 
+## Robot-side — Temporary hardware removal (thermal + right RGB)
+
+> **Repo:** `pilot_ws/src/pilot_control` (separate from the OCU `cpp/` tree).
+> The thermal camera and the RIGHT RGB camera have been physically removed
+> from Roofus. These are **runtime** flags on `unified_data_collector`, not
+> compile-time — revert is a one-line-per-flag change in the launch file.
+
+- [ ] **Thermal disabled.** `unified_data_collector.cpp` `Config::enable_thermal`
+      (default `true`) is set `False` from
+      `launch/robot_complete.launch.py` (UDC params block). When false the node
+      skips `createCameraManager()` (Seek SDK init) and does **not** arm the
+      connect watchdog or the runtime drop-rate watchdog, so an absent Seek
+      device can no longer drive the launch to `DEAD_USB_RESET_FAILED`.
+      `thermal_connect_seen_` is forced true at startup so `/udc/health`
+      reports STOPPED/RECORDING and the OCU Start-Scan gate can arm. The
+      per-row thermal presence gate in `onOdom` is skipped; the writer emits
+      empty `thermo_f32_bin` / `thermal_color_png` CSV fields (schema
+      unchanged). All sites tagged `// BDR_REWIRE:`.
+- [ ] **Right RGB disabled.** `Config::enable_right_camera` (default `true`)
+      set `False` from the same launch block. `buildStreamingPipeline()` then
+      emits a **left-only** GStreamer pipeline (no `v4l2src_right` / `T_right` /
+      right appsink), so a missing right device can't fail the whole pipeline;
+      the right appsink retrieval + `new-sample` connect are skipped, the
+      `onOdom` right presence gate is skipped, and `onCameraSelect` refuses a
+      `right` request (stays LEFT). `right_image_jxl` CSV field is written
+      empty. Streaming remains left-only (already the default).
+
+**Revert:** set both `enable_thermal` and `enable_right_camera` back to `True`
+(or delete the two lines) in `launch/robot_complete.launch.py`, rebuild
+`pilot_control`. Enumerate sites with `rg -n 'BDR_REWIRE' pilot_ws/src/pilot_control/`.
+
+---
+
+## Stage 6 screenshot hook (`app_shell.cpp`)
+
+- [ ] `BDR_DEV_STAGE6_SHOT=<png path>` — jumps to the Stage 6 planning
+      screen on startup, renders offscreen, saves a PNG, and exits.
+      Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
+      `BDR_DEV_STAGE6_SHOT_MODE=measured|scan`. Used by the AI-agent
+      visual-verification loop during Stage 6 UI work. Env-gated only
+      (same class as `BDR_DEV_START_AT_SCAN`); harmless in release when
+      the env var is unset, but remove alongside the other screenshot
+      hooks before customer delivery.
+
+**Revert:** delete the `BDR_DEV_STAGE6_SHOT` block in
+`AppShellWindow::AppShellWindow` (tagged `BDR_REWIRE`).
+
+---
+
 ## Pre-release verification
 
 Run before tagging any release build:

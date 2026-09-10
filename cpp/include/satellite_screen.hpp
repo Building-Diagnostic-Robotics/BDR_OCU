@@ -22,7 +22,9 @@
 #pragma once
 
 #include "satellite_job_model.hpp"
+#include "satellite_tile_service.hpp"
 
+#include <QDate>
 #include <QSet>
 #include <QWidget>
 
@@ -43,7 +45,6 @@ class LinkHealthMonitor;
 class MissionController;
 class RosLink;
 class SatelliteMapWidget;
-class TileService;
 
 class SatelliteScreen : public QWidget {
     Q_OBJECT
@@ -111,6 +112,16 @@ private:
 
     void onGoToAddress();
     void onDownloadArea();
+    /** Points the tile service at a job's offline pyramid + zoom ceiling. */
+    void applyImageryManifest(const TileService::SiteManifest& manifest,
+                              const QString& assets_dir);
+    /**
+     * Refresh the source-imagery provenance label for the current view.
+     * Driven off the existing 1 Hz slow_timer_ and gated by
+     * imagery_query_pending_ — viewChanged fires on every wheel notch and
+     * drag step, so querying directly from it would be a request storm.
+     */
+    void refreshImageryInfo();
     void onSendMission();
     void onEndMission();
     void onEstop();
@@ -159,13 +170,23 @@ private:
     QWidget* geo_tools_host_ = nullptr;  // address search + download (geo-only)
     QLineEdit* address_edit_ = nullptr;
     QPushButton* add_roi_button_ = nullptr;
+    QPushButton* draw_polygon_button_ = nullptr;
     QPushButton* place_robot_button_ = nullptr;
+    QPushButton* clear_roi_button_ = nullptr;
     QDoubleSpinBox* roi_length_ = nullptr;
     QDoubleSpinBox* roi_width_ = nullptr;
     QDoubleSpinBox* roi_heading_ = nullptr;
     QDoubleSpinBox* robot_heading_ = nullptr;
     QLabel* robot_pos_label_ = nullptr;
+    QLabel* imagery_label_ = nullptr;  // source capture date / GSD (geo only)
     QPushButton* save_button_ = nullptr;
+
+    // Last resolved imagery provenance for the current view. Stamped into the
+    // Job on save so a plan carries forward what it was drawn against.
+    QDate last_imagery_captured_;
+    double last_imagery_res_m_ = 0.0;
+    int last_imagery_zoom_ = 0;
+    bool imagery_query_pending_ = false;
 
     // Mission card.
     QWidget* mission_card_ = nullptr;

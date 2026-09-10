@@ -4,6 +4,10 @@
 #include "satellite_map_widget.hpp"
 #include "satellite_tile_service.hpp"
 
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDate>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -105,6 +109,20 @@ QProgressBar::chunk { background: #00b35a; border-radius: 5px; }
     max_zoom_spin_->setValue(19);
     form->addRow(QStringLiteral("Max detail (zoom)"), max_zoom_spin_);
 
+    max_age_spin_ = new QSpinBox(this);
+    max_age_spin_->setRange(1, 15);
+    max_age_spin_->setValue(3);
+    max_age_spin_->setSuffix(QStringLiteral(" years"));
+    form->addRow(QStringLiteral("Newest imagery within"), max_age_spin_);
+
+    clarity_check_ = new QCheckBox(QStringLiteral("Prefer Esri Clarity"), this);
+    form->addRow(QStringLiteral("Layer"), clarity_check_);
+
+    wayback_combo_ = new QComboBox(this);
+    wayback_combo_->addItem(QStringLiteral("Live mosaic (date-capped)"),
+                            QString());
+    form->addRow(QStringLiteral("Wayback release"), wayback_combo_);
+
     layout->addLayout(form);
 
     estimate_label_ = new QLabel(this);
@@ -151,6 +169,12 @@ QProgressBar::chunk { background: #00b35a; border-radius: 5px; }
             refresh);
     refreshEstimate();
 
+    tiles_->listWaybackReleases([this](QVector<TileService::WaybackRelease> releases) {
+        for (const TileService::WaybackRelease& r : releases) {
+            wayback_combo_->addItem(r.label, r.id);
+        }
+    });
+
     if (!tiles_->hasApiKey()) {
         download_button_->setEnabled(false);
         find_button_->setEnabled(false);
@@ -160,36 +184,18 @@ QProgressBar::chunk { background: #00b35a; border-radius: 5px; }
     }
 }
 
+void DownloadAreaDialog::setAssetsDir(const QString& dir) {
+    assets_dir_ = dir;
+}
+
 QVector<DownloadAreaDialog::TileId> DownloadAreaDialog::tilesForArea() const {
-    const double lat = lat_spin_->value();
-    const double lon = lon_spin_->value();
-    const double radius_m = radius_spin_->value();
-
-    const double dlat = radius_m / kMetersPerDegreeLat;
-    const double cos_lat =
-        std::max(0.01, std::cos(lat * M_PI / 180.0));
-    const double dlon = radius_m / (kMetersPerDegreeLat * cos_lat);
-
+    const auto tiles = TileService::tilesForArea(
+        lat_spin_->value(), lon_spin_->value(), radius_spin_->value(),
+        kMinDownloadZoom, max_zoom_spin_->value());
     QVector<TileId> out;
-    for (int z = kMinDownloadZoom; z <= max_zoom_spin_->value(); ++z) {
-        const int n = 1 << z;
-        auto tile_x = [n](double lon_deg) {
-            return qBound(0, int(std::floor(geo::lonToNormX(lon_deg) * n)),
-                          n - 1);
-        };
-        auto tile_y = [n](double lat_deg) {
-            return qBound(0, int(std::floor(geo::latToNormY(lat_deg) * n)),
-                          n - 1);
-        };
-        const int x0 = tile_x(lon - dlon);
-        const int x1 = tile_x(lon + dlon);
-        const int y0 = tile_y(lat + dlat);  // north edge = smaller y
-        const int y1 = tile_y(lat - dlat);
-        for (int y = y0; y <= y1; ++y) {
-            for (int x = x0; x <= x1; ++x) {
-                out.append({z, x, y});
-            }
-        }
+    out.reserve(tiles.size());
+    for (const auto& t : tiles) {
+        out.append({t.z, t.x, t.y});
     }
     return out;
 }
@@ -226,6 +232,41 @@ void DownloadAreaDialog::onStartDownload() {
     if (downloading_) {
         return;
     }
+    tiles_->setLayer(clarity_check_->isChecked() ? TileService::ImageryLayer::Clarity
+                                                 : TileService::ImageryLayer::World);
+    tiles_->setWaybackRelease(wayback_combo_->currentData().toString());
+    if (!assets_dir_.isEmpty()) {
+        tiles_->setCacheRoot(assets_dir_ + QStringLiteral("/tiles"));
+    }
+
+    const double lat = lat_spin_->value();
+    const double lon = lon_spin_->value();
+    const int want_zoom = max_zoom_spin_->value();
+    const int max_age = max_age_spin_->value();
+    status_label_->setText(QStringLiteral("Checking imagery date…"));
+    tiles_->imageryInfoAt(lat, lon, want_zoom, [this, want_zoom, max_age](ImageryInfo info) {
+        last_captured_ = info.captured;
+        last_res_m_ = info.src_res_m;
+        int z = want_zoom;
+        if (!TileService::imageryMeetsAge(info, max_age, QDate::currentDate())) {
+            if (info.max_map_level >= 16) {
+                z = qMin(z, info.max_map_level);
+            }
+            status_label_->setText(
+                QStringLiteral("Requested zoom is older than %1 y — capping at z%2 (%3).")
+                    .arg(max_age)
+                    .arg(z)
+                    .arg(info.captured.isValid()
+                             ? info.captured.toString(Qt::ISODate)
+                             : QStringLiteral("unknown date")));
+            max_zoom_spin_->setValue(z);
+        }
+        tiles_->setMaxZoomCap(z);
+        beginFetchQueue();
+    });
+}
+
+void DownloadAreaDialog::beginFetchQueue() {
     queue_.clear();
     pending_.clear();
     done_ = 0;
@@ -244,7 +285,7 @@ void DownloadAreaDialog::onStartDownload() {
     if (queue_.isEmpty()) {
         status_label_->setText(
             QStringLiteral("All %1 tiles already cached.").arg(all.size()));
-        emit areaReady(lat_spin_->value(), lon_spin_->value());
+        finishDownload();
         return;
     }
 
@@ -291,10 +332,41 @@ void DownloadAreaDialog::onTileDone(int z, int x, int y, bool ok) {
 void DownloadAreaDialog::finishDownload() {
     downloading_ = false;
     download_button_->setEnabled(true);
+
+    QString stitch_note;
+    if (!assets_dir_.isEmpty() && failed_ == 0) {
+        QDir().mkpath(assets_dir_);
+        const QString stitch_path =
+            assets_dir_ + QStringLiteral("/site.jpg");
+        const bool stitched = tiles_->stitchArea(
+            lat_spin_->value(), lon_spin_->value(), radius_spin_->value(),
+            max_zoom_spin_->value(), stitch_path);
+        TileService::SiteManifest m;
+        m.lat = lat_spin_->value();
+        m.lon = lon_spin_->value();
+        m.radius_m = radius_spin_->value();
+        m.min_zoom = kMinDownloadZoom;
+        m.max_zoom = max_zoom_spin_->value();
+        m.captured = last_captured_;
+        m.res_m = last_res_m_;
+        m.layer = clarity_check_->isChecked() ? QStringLiteral("clarity")
+                                               : QStringLiteral("world");
+        m.wayback_release = wayback_combo_->currentData().toString();
+        m.min_date = QDate::currentDate().addYears(-max_age_spin_->value());
+        m.stitch_relpath = stitched ? QStringLiteral("site.jpg") : QString();
+        m.cached = true;
+        tiles_->writeSiteManifest(assets_dir_ + QStringLiteral("/imagery.json"),
+                                 m);
+        stitch_note = stitched
+                          ? QStringLiteral(" Highest-resolution site image saved.")
+                          : QStringLiteral(" (site stitch skipped — missing tiles)");
+    }
+
     if (failed_ == 0) {
         status_label_->setText(
-            QStringLiteral("Done — %1 tiles cached for offline use.")
-                .arg(done_));
+            QStringLiteral("Done — %1 tiles cached for offline use.%2")
+                .arg(qMax(done_, tilesForArea().size()))
+                .arg(stitch_note));
     } else {
         status_label_->setText(
             QStringLiteral("Finished with %1 failures (%2 cached). Check "

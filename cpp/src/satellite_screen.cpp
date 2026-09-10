@@ -284,9 +284,15 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // ---- Map <-> rail sync ----
     connect(map_, &SatelliteMapWidget::roiChanged, this, [this] {
         const RoiRect roi = map_->roi();
+        // Along/across/heading only describe a rectangle. Once the operator
+        // draws a free polygon the rect mirror is stale, so the fields go
+        // read-only rather than reporting a shape that is no longer on the
+        // canvas — the per-edge chips are the live dimensions there.
+        const bool rectangular = map_->polygon().vertices.size() <= 4;
         for (QDoubleSpinBox* spin : {roi_length_, roi_width_, roi_heading_}) {
             spin->blockSignals(true);
-            spin->setEnabled(roi.valid && !mission_->missionActive());
+            spin->setEnabled(roi.valid && rectangular &&
+                             !mission_->missionActive());
         }
         roi_length_->setValue(metersToSpin(roi.length_m));
         roi_width_->setValue(metersToSpin(roi.width_m));
@@ -311,6 +317,12 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     spin->blockSignals(false);
                 }
             });
+    // World Imagery is a mosaic: the same roof can be served from different
+    // flights at different zooms. Re-check provenance whenever the view moves,
+    // but only mark it dirty here — viewChanged fires on every wheel notch and
+    // drag step. refreshImageryInfo() runs off slow_timer_ at 1 Hz.
+    connect(map_, &SatelliteMapWidget::viewChanged, this,
+            [this](double, double, int) { imagery_query_pending_ = true; });
     connect(map_, &SatelliteMapWidget::markerChanged, this, [this] {
         const geo::GeoPose marker = map_->marker();
         robot_heading_->blockSignals(true);
@@ -389,7 +401,9 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 disarm_button_->setEnabled(active);
                 estop_button_->setEnabled(active);
                 add_roi_button_->setEnabled(!active);
+                draw_polygon_button_->setEnabled(!active);
                 place_robot_button_->setEnabled(!active);
+                clear_roi_button_->setEnabled(!active);
                 save_button_->setEnabled(!active);
                 if (!active) {
                     stopMetadataPushLoop();
@@ -450,6 +464,8 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     slow_timer_->setInterval(1000);
     connect(slow_timer_, &QTimer::timeout, this,
             &SatelliteScreen::updateBotPill);
+    connect(slow_timer_, &QTimer::timeout, this,
+            &SatelliteScreen::refreshImageryInfo);
     slow_timer_->start();
 
     setStatePill(QStringLiteral("NO MISSION"), QColor(mutedColor(true)));
@@ -578,10 +594,23 @@ void SatelliteScreen::devSeedDemoPlan() {
     roi.length_m = 24.0;
     roi.width_m = 16.0;
     roi.heading_deg = 20.0;
-    roi.roof_edges[0] = true;
-    roi.roof_edges[2] = true;
     map_->setRoi(roi);
-    emit map_->roiChanged();
+
+    // Seed a non-rectangular footprint: the rect mirror alone never exercises
+    // the vertex handles, the per-edge dimension chips, or the roof-edge
+    // colouring on an edge count other than four.
+    RoiPolygon poly;
+    const QVector<QPointF> corners_enu{{-12.0, -8.0}, {12.0, -8.0},
+                                       {12.0, 4.0},   {2.0, 4.0},
+                                       {2.0, 8.0},    {-12.0, 8.0}};
+    for (const QPointF& enu : corners_enu) {
+        poly.vertices.append(geo::geoFromEnu(roi.center, enu.x(), enu.y()));
+    }
+    poly.ensureEdgeFlags();
+    poly.roof_edges[0] = true;
+    poly.roof_edges[2] = true;
+    map_->setPolygon(poly);
+
     geo::GeoPose marker;
     const geo::GeoPoint at = geo::geoFromEnu(roi.center, -6.0, -4.0);
     marker.lat = at.lat;
@@ -610,9 +639,14 @@ void SatelliteScreen::applyModeVisibility() {
                                        : QStringLiteral("Satellite ROI Scan")));
     }
     if (geo_tools_host_) {
-        // Address search / tile download are geographic tools — meaningless
-        // on the measured (grid) canvas.
+        // Address search / tile download / imagery provenance are geographic
+        // tools — meaningless on the measured (grid) canvas.
         geo_tools_host_->setVisible(!measured);
+    }
+    if (!measured) {
+        // Entering (or re-entering) the satellite canvas: re-resolve
+        // provenance for whatever view we land on.
+        imagery_query_pending_ = true;
     }
     if (jobs_combo_row_) {
         // In the scan flow the plan was already chosen in ScanSetupDialog;
@@ -860,6 +894,14 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     connect(download, &QPushButton::clicked, this,
             &SatelliteScreen::onDownloadArea);
     geo_layout->addWidget(download);
+
+    // Source-imagery provenance. Lives inside geo_tools_host_ so
+    // applyModeVisibility() hides it on the measured canvas for free.
+    imagery_label_ = new QLabel(QStringLiteral("Imagery: —"), geo_tools_host_);
+    imagery_label_->setObjectName("SatFieldLabel");
+    imagery_label_->setWordWrap(true);
+    geo_layout->addWidget(imagery_label_);
+
     layout->addWidget(geo_tools_host_);
 
     auto* draw_row = new QWidget(card);
@@ -867,8 +909,9 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     draw_layout->setContentsMargins(0, 0, 0, 0);
     draw_layout->setSpacing(8);
     add_roi_button_ = new QPushButton(QStringLiteral("Add ROI"), draw_row);
-    place_robot_button_ = new QPushButton(QStringLiteral("Place Robot"), draw_row);
-    for (QPushButton* button : {add_roi_button_, place_robot_button_}) {
+    draw_polygon_button_ =
+        new QPushButton(QStringLiteral("Draw Shape"), draw_row);
+    for (QPushButton* button : {add_roi_button_, draw_polygon_button_}) {
         button->setObjectName("SatButton");
         button->setFixedHeight(36);
         button->setCursor(Qt::PointingHandCursor);
@@ -876,12 +919,36 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     }
     connect(add_roi_button_, &QPushButton::clicked, this,
             [this] { map_->addRoiAtViewCenter(); });
+    connect(draw_polygon_button_, &QPushButton::clicked, this, [this] {
+        map_->armPolygonDraw();
+        appendLog(QStringLiteral(
+            "[plan] click each roof corner in order; right-click to close"));
+    });
+    layout->addWidget(draw_row);
+
+    auto* draw_row2 = new QWidget(card);
+    auto* draw_layout2 = new QHBoxLayout(draw_row2);
+    draw_layout2->setContentsMargins(0, 0, 0, 0);
+    draw_layout2->setSpacing(8);
+    place_robot_button_ = new QPushButton(QStringLiteral("Place Robot"), draw_row2);
+    clear_roi_button_ = new QPushButton(QStringLiteral("Clear ROI"), draw_row2);
+    for (QPushButton* button : {place_robot_button_, clear_roi_button_}) {
+        button->setObjectName("SatButton");
+        button->setFixedHeight(36);
+        button->setCursor(Qt::PointingHandCursor);
+        draw_layout2->addWidget(button, 1);
+    }
     connect(place_robot_button_, &QPushButton::clicked, this, [this] {
         map_->armMarkerPlacement();
         appendLog(QStringLiteral(
             "[plan] click the canvas where the robot physically sits"));
     });
-    layout->addWidget(draw_row);
+    connect(clear_roi_button_, &QPushButton::clicked, this, [this] {
+        map_->setRoi(RoiRect{});
+        map_->clearPolygon();
+        emit map_->roiChanged();
+    });
+    layout->addWidget(draw_row2);
 
     const QString length_suffix =
         QStringLiteral(" ") + units::lengthUnitSuffix();
@@ -1257,6 +1324,10 @@ void SatelliteScreen::setDarkMode(bool dark_mode) {
     setStatePill(state_text_, remap(state_color_));
     setMotorsChip(motors_text_, remap(motors_color_));
     setTopBatteryState(last_batt_pct_, last_batt_stale_);
+    // The imagery label carries an inline colour too. Re-resolving is free
+    // (the provenance cache answers without a request) and repaints it
+    // against the new palette on the next slow_timer_ tick.
+    imagery_query_pending_ = true;
 }
 
 // ---- Jobs -------------------------------------------------------------------
@@ -1283,12 +1354,36 @@ void SatelliteScreen::loadJob(const Job& job) {
     job_name_->setText(job.name);
     job_address_->setText(job.address);
     map_->setRoi(job.roi);
+    if (job.polygon.valid()) {
+        map_->setPolygon(job.polygon);
+    }
     map_->setMarker(job.robot);
     emit map_->roiChanged();
     emit map_->markerChanged();
-    if (job.roi.valid) {
+
+    // Offline first: point the canvas at this job's prefetched pyramid before
+    // choosing a view, so the very first paint comes off disk.
+    if (job.imagery_cache.cached && !job.isMeasured()) {
+        applyImageryManifest(
+            TileService::readSiteManifest(job_store_.assetsDir(job.id) +
+                                          QStringLiteral("/imagery.json")),
+            job_store_.assetsDir(job.id));
+    }
+
+    const int geo_zoom = job.imagery_cache.cached && job.imagery_cache.max_zoom > 0
+                             ? job.imagery_cache.max_zoom
+                             : 19;
+    if (job.polygon.valid()) {
+        map_->setView(job.polygon.vertices.first().lat,
+                      job.polygon.vertices.first().lon,
+                      job.isMeasured() ? kMeasuredDefaultZoom : geo_zoom);
+    } else if (job.roi.valid) {
         map_->setView(job.roi.center.lat, job.roi.center.lon,
-                      job.isMeasured() ? kMeasuredDefaultZoom : 19);
+                      job.isMeasured() ? kMeasuredDefaultZoom : geo_zoom);
+    } else if (job.gps.valid && !job.isMeasured()) {
+        // No geometry yet, but the robot reported a fix during map collection
+        // — that is the best seed we have for where the site actually is.
+        map_->setView(job.gps.lat, job.gps.lon, geo_zoom);
     } else if (job.isMeasured()) {
         map_->setView(0.0, 0.0, kMeasuredDefaultZoom);
     }
@@ -1301,6 +1396,7 @@ void SatelliteScreen::newJob() {
     job_name_->clear();
     job_address_->clear();
     map_->setRoi(RoiRect{});
+    map_->clearPolygon();
     map_->setMarker(geo::GeoPose{});
     emit map_->roiChanged();
     emit map_->markerChanged();
@@ -1318,8 +1414,16 @@ void SatelliteScreen::saveJob() {
                                        ? Job::kModeMeasured
                                        : Job::kModeSatellite);
     job.roi = map_->roi();
+    job.polygon = map_->polygon();
     job.robot = map_->marker();
     job.updated = QDateTime::currentDateTime();
+    // Stamp what this plan was actually drawn against. Only meaningful on the
+    // satellite canvas — a measured plan came off a tape, not off imagery.
+    if (plan_mode_ == PlanMode::Satellite) {
+        job.imagery_captured = last_imagery_captured_;
+        job.imagery_res_m = last_imagery_res_m_;
+        job.imagery_zoom = last_imagery_zoom_;
+    }
     if (current_job_id_.isEmpty()) {
         job.id = JobStore::slugify(job.name) + QStringLiteral("_") +
                  QUuid::createUuid().toString(QUuid::Id128).left(6);
@@ -1330,6 +1434,13 @@ void SatelliteScreen::saveJob() {
             if (existing.id == job.id) {
                 job.created = existing.created;
                 job.last_executed_at = existing.last_executed_at;
+                // Fields the plan card does not own. They are produced by the
+                // prefetch / map-collection / alignment steps, so re-saving
+                // from the rail must not wipe them.
+                job.gps = existing.gps;
+                job.imagery_cache = existing.imagery_cache;
+                job.alignment = existing.alignment;
+                job.align_rmse_m = existing.align_rmse_m;
                 break;
             }
         }
@@ -1373,12 +1484,145 @@ void SatelliteScreen::onGoToAddress() {
                     });
 }
 
+void SatelliteScreen::refreshImageryInfo() {
+    if (!imagery_label_ || !imagery_query_pending_) {
+        return;
+    }
+    if (plan_mode_ == PlanMode::Measured) {
+        // Measured canvas has no imagery under it at all.
+        imagery_query_pending_ = false;
+        return;
+    }
+    imagery_query_pending_ = false;
+
+    const int zoom = map_->zoom();
+    tiles_->imageryInfoAt(
+        map_->centerLat(), map_->centerLon(), zoom,
+        [this, zoom](ImageryInfo info) {
+            if (!imagery_label_) {
+                return;
+            }
+            // Always set an explicit colour rather than clearing the
+            // stylesheet: an emptied inline sheet does not reliably repolish
+            // back to the card's #SatFieldLabel rule (same trap applyTheme's
+            // repolish sweep exists for).
+            const QString normal_color =
+                QStringLiteral("color: %1;").arg(mutedColor(dark_mode_));
+            if (!info.valid) {
+                imagery_label_->setText(
+                    QStringLiteral("Imagery: capture date unavailable"));
+                imagery_label_->setStyleSheet(normal_color);
+                return;
+            }
+
+            const bool changed = info.captured != last_imagery_captured_;
+            last_imagery_captured_ = info.captured;
+            last_imagery_res_m_ = info.src_res_m;
+            last_imagery_zoom_ = zoom;
+
+            const int age = info.ageYears();
+            // Three years is roughly the window in which a commercial roof
+            // can be re-covered, re-penetrated, or have its HVAC swapped —
+            // past that the operator should not trust what they are drawing
+            // around. Advisory only: imagery is a drawing surface, not an
+            // accuracy input (the ROI exports in the robot's body frame).
+            const bool stale = age >= 3;
+
+            QString detail = info.captured.toString(Qt::ISODate);
+            if (info.src_res_m > 0.0) {
+                detail += QStringLiteral(" · %1 cm")
+                              .arg(info.src_res_m * 100.0, 0, 'f', 0);
+            }
+            if (age >= 0) {
+                detail += QStringLiteral(" · %1 yr old").arg(age);
+            }
+            imagery_label_->setText(QStringLiteral("Imagery: %1").arg(detail));
+            imagery_label_->setStyleSheet(
+                stale ? QStringLiteral("color: %1;").arg(QLatin1String(kAmber))
+                      : normal_color);
+
+            if (changed) {
+                // Log it: the whole point is that this changes silently as
+                // the operator zooms, because different LODs are served from
+                // different flights.
+                appendLog(QStringLiteral("[imagery] z%1 · %2%3%4")
+                              .arg(zoom)
+                              .arg(detail,
+                                   info.source.isEmpty()
+                                       ? QString()
+                                       : QStringLiteral(" · %1").arg(info.source),
+                                   stale ? QStringLiteral("  ** STALE **")
+                                         : QString()));
+            }
+        });
+}
+
 void SatelliteScreen::onDownloadArea() {
+    // The prefetch is per-job: tiles, the stitched site image, and the
+    // imagery manifest all live under the job's assets folder so the whole
+    // site travels with the plan and uploads with the mission. That needs an
+    // id, so an unsaved plan is saved first.
+    if (current_job_id_.isEmpty()) {
+        saveJob();
+    }
+    if (current_job_id_.isEmpty()) {
+        appendLog(QStringLiteral(
+            "[geo] name and save the plan before downloading — cached "
+            "imagery is stored per job"));
+        return;
+    }
+    const QString assets = job_store_.assetsDir(current_job_id_);
+    const QString shared_cache = tiles_->cacheRoot();
+
     DownloadAreaDialog dialog(tiles_, map_->centerLat(), map_->centerLon(),
                               this);
+    dialog.setAssetsDir(assets);
     connect(&dialog, &DownloadAreaDialog::areaReady, this,
             [this](double lat, double lon) { map_->setView(lat, lon, 18); });
     dialog.exec();
+
+    // Adopt whatever the dialog actually cached, then hand the canvas back to
+    // the job's tile tree so the operator sees the offline pyramid, not the
+    // shared scratch cache.
+    const TileService::SiteManifest manifest = TileService::readSiteManifest(
+        assets + QStringLiteral("/imagery.json"));
+    if (manifest.cached) {
+        applyImageryManifest(manifest, assets);
+        for (Job& job : jobs_) {
+            if (job.id != current_job_id_) {
+                continue;
+            }
+            job.imagery_cache.cached = true;
+            job.imagery_cache.max_zoom = manifest.max_zoom;
+            job.imagery_cache.captured = manifest.captured;
+            job.imagery_cache.res_m = manifest.res_m;
+            job.imagery_cache.layer = manifest.layer;
+            job.imagery_cache.wayback_release = manifest.wayback_release;
+            job.imagery_cache.min_date = manifest.min_date;
+            job.imagery_cache.stitch_relpath = manifest.stitch_relpath;
+            job_store_.save(job);
+            break;
+        }
+        appendLog(QStringLiteral("[geo] offline imagery ready (z%1, %2)")
+                      .arg(manifest.max_zoom)
+                      .arg(manifest.captured.isValid()
+                               ? manifest.captured.toString(Qt::ISODate)
+                               : QStringLiteral("date unknown")));
+    } else {
+        tiles_->setCacheRoot(shared_cache);
+    }
+}
+
+void SatelliteScreen::applyImageryManifest(
+    const TileService::SiteManifest& manifest, const QString& assets_dir) {
+    tiles_->setCacheRoot(assets_dir + QStringLiteral("/tiles"));
+    tiles_->setLayer(manifest.layer == QLatin1String("clarity")
+                         ? TileService::ImageryLayer::Clarity
+                         : TileService::ImageryLayer::World);
+    tiles_->setWaybackRelease(manifest.wayback_release);
+    // Past the prefetched ceiling there is nothing on disk and no internet on
+    // the roof, so the canvas must not let the operator zoom into blanks.
+    tiles_->setMaxZoomCap(manifest.max_zoom);
 }
 
 // ---- Mission ----------------------------------------------------------------
@@ -1434,15 +1678,19 @@ bool SatelliteScreen::confirmDialog(const QString& title, const QString& body,
 }
 
 void SatelliteScreen::onSendMission() {
-    const RoiRect roi = map_->roi();
+    // The polygon is the authored geometry; the rectangle is only its
+    // four-corner special case kept for the rail's length/width spinboxes.
+    const RoiPolygon poly = map_->polygon().valid()
+                                ? map_->polygon()
+                                : RoiPolygon::fromRect(map_->roi());
     const geo::GeoPose marker = map_->marker();
-    if (!roi.valid || !marker.valid) {
+    if (!poly.valid() || !marker.valid) {
         appendLog(QStringLiteral(
             "[send] draw the ROI and place the robot marker first"));
         return;
     }
     const QString roi_arg =
-        MissionController::roiVerticesArgument(roi, marker);
+        MissionController::roiVerticesArgument(poly, marker);
     if (!confirmDialog(
             QStringLiteral("Send Mission to Robot"),
             QStringLiteral(
@@ -1457,7 +1705,7 @@ void SatelliteScreen::onSendMission() {
         return;
     }
     QString error;
-    if (!mission_->startMission(roi, marker, &error)) {
+    if (!mission_->startMission(poly, marker, &error)) {
         appendLog(QStringLiteral("[send] FAILED: %1").arg(error));
         return;
     }
