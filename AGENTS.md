@@ -861,12 +861,19 @@ dropdown for pinning a dated mosaic release.
  Web Mercator extent a fit lands in pixels that mean nothing geographically
  and Confirm cannot place the robot. `loadSiteImage()` refuses manifests
  that lack it rather than silently producing a bad anchor.
-- Robot-side counterpart lives on pilot_ws branch
- `feature/ocu-satellite-roi` (worktree `~/BDR_data/pilot_ws_ocu_worktree`):
- `/coverage/status` 2 Hz JSON publisher + zenoh allowlist entry +
- `roi_edge_flags`/`roof_edge_clearance` params + differential erosion in
- `coverage_planner_core.py` (tests: 136 passing). Robot must be rebuilt
- from that branch for the state pill + edge setback to be live.
+- **Robot-side counterpart is pilot_ws branch `cliff-on-autonomy`**
+ (worktree `~/BDR_data/pilot_ws`), commit `1c5676e`: GPS-stamped
+ `map_collection_node` + `roi_edge_flags`/`roof_edge_clearance` on
+ `robot_autonomous_coverage_director.launch.py` + differential erosion in
+ `coverage_planner_core.py` (tests: 54 passing). Robot must be rebuilt from
+ that branch for the state pill + edge setback to be live.
+ Do **not** go back to `feature/ocu-satellite-roi` despite its name: that
+ branch only carries the older `robot_autonomous_coverage.launch.py` +
+ `coverage_horizon_manager.py` stack, and the OCU launches the *director*
+ stack (`satellite_mission_controller.cpp`), which exists only on
+ `cliff-on-autonomy`. `feature/ocu-satellite-roi` has its own independent
+ `roof_edge_clearance` implementation in `coverage_horizon_manager.py` —
+ that one is the dead horizon-manager path, kept only for history.
 
 ## Docs worth reading
 
