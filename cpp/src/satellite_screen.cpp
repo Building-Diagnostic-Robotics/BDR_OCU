@@ -70,6 +70,49 @@ constexpr int kTopStatusWindowControlsReservedWidth = 184;
 constexpr int kLeftRailWidth = 320;
 constexpr int kSendButtonHeight = 44;
 constexpr int kEstopButtonHeight = 44;
+constexpr int kStepHeaderHeight = 55;
+constexpr int kStepBadgeSize = 20;
+constexpr int kStepChipHeight = 34;
+constexpr int kFooterBarHeight = 65;
+constexpr int kFooterButtonHeight = 40;
+constexpr int kUnitsChipWidth = 46;
+
+/**
+ * Per-step operator-facing strings. `arrive` is what the footer promises
+ * when this step is the *destination*, so the button always names where it
+ * is taking you rather than what you just finished. The destination is
+ * resolved against availability, which is why these can't be baked into a
+ * single per-step "next" label: the office trim skips Alignment, so step 1's
+ * footer reads "Define ROI" there and "Capture Point Cloud" in the field.
+ */
+struct StepSpec {
+    const char* title;
+    const char* detail;
+    const char* arrive;
+};
+
+constexpr StepSpec kStepSpecs[] = {
+    {"Satellite Map", "Locate building", "Locate Building"},
+    {"3D Alignment", "Align to robot map", "Capture Point Cloud"},
+    {"ROI Definition", "Draw the scan area", "Define ROI"},
+    {"Edge Review", "Mark fall hazards", "Review Edges"},
+    {"Autonomous Scan", "Run the mission", "Autonomous Scan"},
+};
+
+/**
+ * Measured-mode overrides for the first two steps. The step *means* the same
+ * thing in both modes, but naming it "Satellite Map" on a canvas that has no
+ * imagery, or "3D Alignment" where the grid origin already IS robot_init and
+ * nothing gets aligned, describes work the operator will not be doing.
+ * Nullptr keeps the satellite wording.
+ */
+constexpr StepSpec kMeasuredStepSpecs[] = {
+    {"Site Setup", "Name the job", "Set Up Site"},
+    {"Robot Map", "Collect the point cloud", "Capture Point Cloud"},
+    {nullptr, nullptr, nullptr},
+    {nullptr, nullptr, nullptr},
+    {nullptr, nullptr, nullptr},
+};
 
 constexpr const char* kSatViewLatKey = "satellite/center_lat";
 constexpr const char* kSatViewLonKey = "satellite/center_lon";
@@ -278,6 +321,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
     root->addWidget(buildTopBar());
+    root->addWidget(buildStepHeader());
 
     auto* content = new QWidget(this);
     auto* content_layout = new QHBoxLayout(content);
@@ -287,14 +331,38 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // One canvas area, three pages: the plan map, the correspondence picker,
     // and the alignment review. The rail stays put across all three so the
     // operator never loses the mission controls mid-alignment.
-    canvas_stack_ = new QStackedWidget(content);
+    auto* canvas_column = new QWidget(content);
+    auto* canvas_column_layout = new QVBoxLayout(canvas_column);
+    canvas_column_layout->setContentsMargins(0, 0, 0, 0);
+    canvas_column_layout->setSpacing(0);
+    canvas_stack_ = new QStackedWidget(canvas_column);
     canvas_stack_->addWidget(map_);
     correspond_page_ = buildCorrespondPage();
     canvas_stack_->addWidget(correspond_page_);
     align_review_page_ = buildAlignReviewPage();
     canvas_stack_->addWidget(align_review_page_);
-    content_layout->addWidget(canvas_stack_, 1);
+    canvas_column_layout->addWidget(canvas_stack_, 1);
+    // The frame floats the footer over the canvas's bottom 65px. It goes in
+    // as a real row instead: the bar is all but opaque anyway, and the map's
+    // own scale bar and Esri attribution live in exactly that strip, so
+    // overlaying would bury the attribution we are contractually required
+    // to show.
+    canvas_column_layout->addWidget(buildFooterBar());
+    content_layout->addWidget(canvas_column, 1);
     root->addWidget(content, 1);
+
+    // ---- Step acknowledgements ----
+    connect(roi_confirm_check_, &QCheckBox::toggled, this, [this](bool on) {
+        // Snapshot the geometry that was confirmed, so a later vertex drag
+        // revokes it but marking a roof edge does not.
+        confirmed_vertices_ = on ? map_->polygon().vertices
+                                 : QVector<geo::GeoPoint>{};
+        refreshStepUi();
+    });
+    connect(edge_review_check_, &QCheckBox::toggled, this, [this](bool on) {
+        edges_reviewed_ = on;
+        refreshStepUi();
+    });
 
     map_capture_ = new MapCaptureRunner(this);
     connect(map_capture_, &MapCaptureRunner::progress, this,
@@ -324,11 +392,13 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         for (QDoubleSpinBox* spin : {roi_length_, roi_width_, roi_heading_}) {
             spin->blockSignals(false);
         }
+        refreshStepUi();
     });
     // Units toggle: re-suffix + re-display the length fields (values stay
     // SI in the model; only the presentation flips — house rule).
     connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
             [this](Units) {
+                refreshUnitsChip();
                 const RoiRect roi = map_->roi();
                 for (QDoubleSpinBox* spin : {roi_length_, roi_width_}) {
                     spin->blockSignals(true);
@@ -349,6 +419,11 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             [this](double, double, int) { imagery_query_pending_ = true; });
     connect(map_, &SatelliteMapWidget::markerChanged, this, [this] {
         const geo::GeoPose marker = map_->marker();
+        if (marker.valid) {
+            // Placing the robot is a deliberate act of aiming the canvas.
+            canvas_aimed_ = true;
+            refreshStepUi();
+        }
         robot_heading_->blockSignals(true);
         robot_heading_->setEnabled(marker.valid && !mission_->missionActive());
         robot_heading_->setValue(marker.heading_deg);
@@ -602,6 +677,7 @@ void SatelliteScreen::configureForScan(const Job& job) {
     planning_only_ = false;
     plan_mode_ = job.isMeasured() ? PlanMode::Measured : PlanMode::Satellite;
     refreshJobsCombo(job.id);  // selects + loads the plan
+    selected_step_ = computeStep();
     applyModeVisibility();
 }
 
@@ -610,6 +686,7 @@ void SatelliteScreen::configureForScan(PlanMode mode) {
     plan_mode_ = mode;
     refreshJobsCombo(QString());
     newJob();
+    selected_step_ = computeStep();
     applyModeVisibility();
     if (mode == PlanMode::Measured) {
         // The measured canvas opens centered on its reference origin at a
@@ -653,6 +730,13 @@ void SatelliteScreen::devSeedDemoPlan() {
     marker.valid = true;
     map_->setMarker(marker);
     emit map_->markerChanged();
+
+    // Satisfy step 1 as well. Without a name the whole flow is gated at the
+    // first chip, and every shot would render the same step regardless of
+    // what the mode seeded.
+    job_name_->setText(QStringLiteral("Demo Roof"));
+    canvas_aimed_ = true;
+    applyModeVisibility();
 }
 
 void SatelliteScreen::devSeedDemoAlignment(bool review) {
@@ -708,6 +792,7 @@ void SatelliteScreen::devSeedDemoAlignment(bool review) {
         correspondences_.append(Correspondence{pair.first, pair.second});
     }
     updateCorrespondenceUi();
+    setSelectedStep(Step::Alignment);
     canvas_stack_->setCurrentWidget(correspond_page_);
     if (review) {
         onAlignClicked();
@@ -719,6 +804,7 @@ void SatelliteScreen::configureForPlanning() {
     planning_only_ = true;
     plan_mode_ = PlanMode::Satellite;
     refreshJobsCombo(current_job_id_);
+    selected_step_ = computeStep();
     applyModeVisibility();
 }
 
@@ -756,6 +842,17 @@ void SatelliteScreen::applyModeVisibility() {
     // Aligning needs both a robot and real imagery, so the card is hidden on
     // the measured canvas and in the office planning trim.
     updateAlignCardUi();
+    // refreshStepUi() first: it clamps selected_step_ when a trim change has
+    // made it unavailable, and applyStepVisibility() has to act on the
+    // clamped value. Visibility then runs last, narrowing whatever the mode
+    // rules left visible down to the active step.
+    refreshStepUi();
+    applyStepVisibility();
+    if (roi_confirm_check_) {
+        roi_confirm_check_->blockSignals(true);
+        roi_confirm_check_->setChecked(roiMatchesConfirmed());
+        roi_confirm_check_->blockSignals(false);
+    }
 }
 
 void SatelliteScreen::setTopBatteryState(double pct, bool stale) {
@@ -885,9 +982,432 @@ QWidget* SatelliteScreen::buildTopBar() {
     motors_layout->addWidget(lbl_motors_text_, 0, Qt::AlignVCenter);
     status_layout->addWidget(motors_chip_);
 
+    // Units toggle. Sits with the theme toggle because both are global
+    // presentation state; before this the only chooser was the New Scan
+    // modal, so an operator already inside Stage 6 could not switch.
+    units_chip_ = new QPushButton(status_host);
+    units_chip_->setObjectName("SatUnitsChip");
+    units_chip_->setCursor(Qt::PointingHandCursor);
+    units_chip_->setFixedSize(kUnitsChipWidth, kTopStatusMotorsChipHeight);
+    connect(units_chip_, &QPushButton::clicked, this, [] {
+        auto* provider = UnitsProvider::instance();
+        provider->setUnits(provider->isMetric() ? Units::Ansi : Units::Metric);
+    });
+    status_layout->addWidget(units_chip_);
+    refreshUnitsChip();
+
     layout->addWidget(status_host, 0, Qt::AlignVCenter);
     layout->addSpacing(kTopStatusWindowControlsReservedWidth);
     return top_bar;
+}
+
+QWidget* SatelliteScreen::buildAckCard(QWidget* parent,
+                                       const QString& object_name,
+                                       const QString& icon,
+                                       const QString& title,
+                                       const QString& description,
+                                       const QString& check,
+                                       QCheckBox** out_check) {
+    auto* card = new QWidget(parent);
+    card->setObjectName("SatCard");
+    card->setProperty("satCardRole", object_name);
+    card->setAttribute(Qt::WA_StyledBackground, true);
+    auto* layout = new QVBoxLayout(card);
+    layout->setContentsMargins(16, 14, 16, 16);
+    layout->setSpacing(8);
+    layout->addWidget(makeCardHeader(icon, title, card));
+
+    auto* body = new QLabel(description, card);
+    body->setObjectName("SatFieldLabel");
+    body->setWordWrap(true);
+    layout->addWidget(body);
+
+    auto* box = new QCheckBox(check, card);
+    box->setObjectName("SatCheck");
+    layout->addWidget(box);
+    if (out_check) {
+        *out_check = box;
+    }
+    return card;
+}
+
+QWidget* SatelliteScreen::buildStepHeader() {
+    step_header_ = new QWidget(this);
+    step_header_->setObjectName("SatStepHeader");
+    step_header_->setAttribute(Qt::WA_StyledBackground, true);
+    step_header_->setFixedHeight(kStepHeaderHeight);
+    auto* layout = new QHBoxLayout(step_header_);
+    layout->setContentsMargins(24, 10, 24, 10);
+    layout->setSpacing(8);
+    layout->addStretch(1);
+
+    step_chips_.clear();
+    for (int i = 0; i < kStepCount; ++i) {
+        StepChip chip;
+        chip.button = new QPushButton(step_header_);
+        chip.button->setObjectName("SatStepChip");
+        chip.button->setFlat(true);
+        chip.button->setFixedHeight(kStepChipHeight);
+        chip.button->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+        auto* chip_layout = new QHBoxLayout(chip.button);
+        chip_layout->setContentsMargins(12, 6, 12, 6);
+        chip_layout->setSpacing(8);
+
+        chip.badge = new QLabel(QString::number(i + 1), chip.button);
+        chip.badge->setObjectName("SatStepBadge");
+        chip.badge->setFixedSize(kStepBadgeSize, kStepBadgeSize);
+        chip.badge->setAlignment(Qt::AlignCenter);
+        chip_layout->addWidget(chip.badge, 0, Qt::AlignVCenter);
+
+        chip.label = new QLabel(QString::fromLatin1(kStepSpecs[i].title),
+                                chip.button);
+        chip.label->setObjectName("SatStepLabel");
+        chip_layout->addWidget(chip.label, 0, Qt::AlignVCenter);
+
+        // Only the active chip shows its detail line, so the header stays
+        // readable at five steps wide.
+        chip.detail = new QLabel(
+            QStringLiteral("— %1").arg(
+                QString::fromLatin1(kStepSpecs[i].detail)),
+            chip.button);
+        chip.detail->setObjectName("SatStepDetail");
+        chip.detail->hide();
+        chip_layout->addWidget(chip.detail, 0, Qt::AlignVCenter);
+
+        const Step step = Step(i);
+        connect(chip.button, &QPushButton::clicked, this,
+                [this, step] { setSelectedStep(step); });
+        layout->addWidget(chip.button, 0, Qt::AlignVCenter);
+
+        if (i + 1 < kStepCount) {
+            chip.chevron = new QLabel(QStringLiteral("›"), step_header_);
+            chip.chevron->setObjectName("SatStepChevron");
+            chip.chevron->setFixedSize(16, 16);
+            chip.chevron->setAlignment(Qt::AlignCenter);
+            layout->addWidget(chip.chevron, 0, Qt::AlignVCenter);
+        }
+        step_chips_.append(chip);
+    }
+
+    layout->addStretch(1);
+    return step_header_;
+}
+
+QWidget* SatelliteScreen::buildFooterBar() {
+    footer_bar_ = new QWidget(this);
+    footer_bar_->setObjectName("SatFooterBar");
+    footer_bar_->setAttribute(Qt::WA_StyledBackground, true);
+    footer_bar_->setFixedHeight(kFooterBarHeight);
+    auto* layout = new QHBoxLayout(footer_bar_);
+    layout->setContentsMargins(24, 12, 24, 12);
+    layout->setSpacing(12);
+    layout->addStretch(1);
+
+    next_button_ = new QPushButton(footer_bar_);
+    next_button_->setObjectName("SatNextButton");
+    next_button_->setCursor(Qt::PointingHandCursor);
+    next_button_->setFixedHeight(kFooterButtonHeight);
+    connect(next_button_, &QPushButton::clicked, this, [this] {
+        setSelectedStep(nextAvailableStep(selected_step_));
+    });
+    layout->addWidget(next_button_, 0, Qt::AlignVCenter);
+    return footer_bar_;
+}
+
+// ---- Step model -------------------------------------------------------------
+
+bool SatelliteScreen::stepAvailable(Step step) const {
+    switch (step) {
+        case Step::Alignment:
+        case Step::AutonomousScan:
+            // Both need a robot on site, so neither is reachable from the
+            // office planning trim.
+            return !planning_only_;
+        case Step::SatelliteMap:
+        case Step::RoiDefinition:
+        case Step::EdgeReview:
+            break;
+    }
+    return true;
+}
+
+bool SatelliteScreen::stepComplete(Step step) const {
+    switch (step) {
+        case Step::SatelliteMap:
+            // Named job plus a deliberately aimed canvas. Cached imagery is
+            // deliberately NOT required: it would force a tile download on
+            // someone merely drafting, and hard-block a satellite plan
+            // started in the field, where there is no internet to cache
+            // from. Measured mode has no imagery to aim at at all.
+            return job_name_ && !job_name_->text().trimmed().isEmpty() &&
+                   (plan_mode_ == PlanMode::Measured || canvas_aimed_);
+        case Step::Alignment:
+            // Measured mode has no correspondence step — its grid origin IS
+            // robot_init, so a collected map is already in the canvas frame.
+            return plan_mode_ == PlanMode::Measured
+                       ? !pcd_image_.isNull()
+                       : pcd_to_sat_.valid && alignment_confirmed_;
+        case Step::RoiDefinition:
+            return map_ && map_->polygon().valid() && roiMatchesConfirmed();
+        case Step::EdgeReview:
+            return edges_reviewed_;
+        case Step::AutonomousScan:
+            // Terminal: "complete" here means the mission finalized, which
+            // tears the screen down anyway.
+            return false;
+    }
+    return false;
+}
+
+bool SatelliteScreen::roiMatchesConfirmed() const {
+    if (!map_ || confirmed_vertices_.isEmpty()) {
+        return false;
+    }
+    const QVector<geo::GeoPoint>& current = map_->polygon().vertices;
+    if (current.size() != confirmed_vertices_.size()) {
+        return false;
+    }
+    // Exact comparison is right here: these are the same doubles copied
+    // verbatim unless the operator actually moved something.
+    for (int i = 0; i < current.size(); ++i) {
+        if (current[i].lat != confirmed_vertices_[i].lat ||
+            current[i].lon != confirmed_vertices_[i].lon) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SatelliteScreen::stepReachable(Step step) const {
+    if (!stepAvailable(step)) {
+        return false;
+    }
+    for (int i = 0; i < int(step); ++i) {
+        const Step earlier = Step(i);
+        if (stepAvailable(earlier) && !stepComplete(earlier)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+SatelliteScreen::Step SatelliteScreen::computeStep() const {
+    Step last_available = Step::SatelliteMap;
+    for (int i = 0; i < kStepCount; ++i) {
+        const Step step = Step(i);
+        if (!stepAvailable(step)) {
+            continue;
+        }
+        last_available = step;
+        if (!stepComplete(step)) {
+            return step;
+        }
+    }
+    return last_available;
+}
+
+SatelliteScreen::Step SatelliteScreen::nextAvailableStep(Step step) const {
+    // Skip what is already done — measured mode can arrive at step 1 with
+    // step 2 already satisfied by a collected map, and a footer offering to
+    // "Capture Point Cloud" would be promising work that is finished.
+    // Revisiting a completed step is still possible, just via its chip.
+    for (int i = int(step) + 1; i < kStepCount; ++i) {
+        if (stepAvailable(Step(i)) && !stepComplete(Step(i))) {
+            return Step(i);
+        }
+    }
+    for (int i = int(step) + 1; i < kStepCount; ++i) {
+        if (stepAvailable(Step(i))) {
+            return Step(i);
+        }
+    }
+    return step;
+}
+
+void SatelliteScreen::setSelectedStep(Step step) {
+    if (!stepReachable(step)) {
+        return;
+    }
+    selected_step_ = step;
+    // Leaving the correspondence picker or the alignment review behind must
+    // put the canvas back on the map, or the operator lands on step 3 still
+    // looking at a side-by-side picker.
+    if (canvas_stack_ && step != Step::Alignment) {
+        canvas_stack_->setCurrentWidget(map_);
+    }
+    applyModeVisibility();
+}
+
+void SatelliteScreen::refreshStepUi() {
+    if (step_chips_.size() != kStepCount) {
+        return;
+    }
+    if (!stepAvailable(selected_step_)) {
+        // Trim changed under us (planning <-> scan).
+        selected_step_ = computeStep();
+    }
+
+    const bool measured = plan_mode_ == PlanMode::Measured;
+    const auto spec = [measured](int index) {
+        return measured && kMeasuredStepSpecs[index].title
+                   ? kMeasuredStepSpecs[index]
+                   : kStepSpecs[index];
+    };
+
+    const bool dark = dark_mode_;
+    const QString muted = mutedColor(dark);
+    const QString idle_badge_bg = dark ? QStringLiteral("#27272a")
+                                       : QStringLiteral("#E5E7EB");
+    const QString idle_fg = dark ? QStringLiteral("#52525C")
+                                 : QStringLiteral("#9CA3AF");
+    const QString active_fg = dark ? QStringLiteral("#00D492")
+                                   : QStringLiteral("#00A86D");
+
+    for (int i = 0; i < kStepCount; ++i) {
+        const Step step = Step(i);
+        const StepChip& chip = step_chips_[i];
+        const bool active = step == selected_step_;
+        const bool available = stepAvailable(step);
+        const bool complete = stepComplete(step);
+        const bool clickable = stepReachable(step);
+
+        chip.label->setText(QString::fromLatin1(spec(i).title));
+        chip.detail->setText(
+            QStringLiteral("— %1").arg(QString::fromLatin1(spec(i).detail)));
+        chip.button->setEnabled(clickable);
+        chip.button->setCursor(clickable && !active ? Qt::PointingHandCursor
+                                                    : Qt::ArrowCursor);
+        chip.button->setStyleSheet(
+            active ? QStringLiteral(
+                         "QPushButton#SatStepChip {"
+                         " background-color: rgba(0, 188, 125, 0.15);"
+                         " border: 1px solid rgba(0, 188, 125, 0.30);"
+                         " border-radius: 10px; }")
+                   : QStringLiteral(
+                         "QPushButton#SatStepChip { background-color:"
+                         " transparent; border: none; border-radius: 10px; }"));
+
+        // A finished step reads as done; an unavailable one has to look
+        // different from a merely incomplete one, or the office operator
+        // spends the day wondering why Alignment never lights up.
+        QString fg = idle_fg;
+        QString badge_bg = idle_badge_bg;
+        QString badge_border = QStringLiteral("none");
+        if (active) {
+            fg = active_fg;
+            badge_bg = QStringLiteral("rgba(0, 188, 125, 0.20)");
+            badge_border = QStringLiteral("1px solid rgba(0, 188, 125, 0.50)");
+        } else if (complete) {
+            fg = muted;
+        }
+        chip.badge->setText(!available ? QStringLiteral("–")
+                                       : (complete && !active
+                                              ? QStringLiteral("✓")
+                                              : QString::number(i + 1)));
+        chip.badge->setStyleSheet(
+            QStringLiteral("QLabel#SatStepBadge { background-color: %1;"
+                           " border: %2; border-radius: %3px;"
+                           " font-family: 'Arimo'; font-weight: 700;"
+                           " font-size: 12px; color: %4; }")
+                .arg(badge_bg, badge_border)
+                .arg(kStepBadgeSize / 2)
+                .arg(fg));
+        chip.label->setStyleSheet(
+            QStringLiteral("QLabel#SatStepLabel { background: transparent;"
+                           " font-family: 'Arimo'; font-weight: 500;"
+                           " font-size: 14px; color: %1; }")
+                .arg(fg));
+        chip.label->setToolTip(
+            available ? QString()
+                      : QStringLiteral("Requires the robot on site"));
+        chip.detail->setVisible(active);
+        chip.detail->setStyleSheet(
+            QStringLiteral("QLabel#SatStepDetail { background: transparent;"
+                           " font-family: 'Arimo'; font-weight: 400;"
+                           " font-size: 14px; color: %1; }")
+                .arg(muted));
+
+        // QPushButton derives its sizeHint from its text, not from a layout
+        // placed inside it, so a chip assembled out of child labels collapses
+        // to the width of its badge. Drive the width from the layout, and
+        // redo it on every refresh because showing or hiding the detail line
+        // changes what it needs.
+        QLayout* chip_layout = chip.button->layout();
+        chip_layout->invalidate();
+        chip.button->setFixedWidth(chip_layout->sizeHint().width());
+        if (chip.chevron) {
+            // A glyph rather than an SVG: the only chevron assets in the
+            // tree are the back button's left-pointing pair, and mirroring
+            // them costs more than it saves for a 16px separator.
+            chip.chevron->setStyleSheet(
+                QStringLiteral("QLabel#SatStepChevron { background:"
+                               " transparent; font-family: 'Arimo';"
+                               " font-size: 14px; color: %1; }")
+                    .arg(dark ? QStringLiteral("#3f3f46")
+                              : QStringLiteral("#D1D5DC")));
+        }
+    }
+
+    if (next_button_) {
+        const Step next = nextAvailableStep(selected_step_);
+        const bool has_next = next != selected_step_;
+        footer_bar_->setVisible(has_next);
+        next_button_->setVisible(has_next);
+        if (has_next) {
+            next_button_->setText(
+                QStringLiteral("Next: %1")
+                    .arg(QString::fromLatin1(spec(int(next)).arrive)));
+            next_button_->setEnabled(stepComplete(selected_step_));
+            next_button_->setToolTip(
+                stepComplete(selected_step_)
+                    ? QString()
+                    : QStringLiteral("Finish this step first"));
+        }
+    }
+}
+
+void SatelliteScreen::applyStepVisibility() {
+    // Scaffolding stage: the rail still holds today's cards, shown and
+    // hidden per step. Each card gets reshaped into the frame's flat
+    // sections in its own change, so the step machinery below is not
+    // churning at the same time as the widgets it governs.
+    const Step step = selected_step_;
+    if (plan_card_) {
+        // The plan card currently carries step 1's identity fields, step 3's
+        // drawing tools and step 4's edge hint, so it appears in all three
+        // until it is split.
+        plan_card_->setVisible(step == Step::SatelliteMap ||
+                               step == Step::RoiDefinition ||
+                               step == Step::EdgeReview);
+    }
+    if (align_card_) {
+        align_card_->setVisible(!planning_only_ && step == Step::Alignment);
+    }
+    if (roi_confirm_card_) {
+        roi_confirm_card_->setVisible(step == Step::RoiDefinition);
+    }
+    if (edge_review_card_) {
+        edge_review_card_->setVisible(step == Step::EdgeReview);
+    }
+    if (mission_card_) {
+        mission_card_->setVisible(!planning_only_ &&
+                                  step == Step::AutonomousScan);
+    }
+    if (teleop_card_) {
+        teleop_card_->setVisible(!planning_only_ &&
+                                 step == Step::AutonomousScan);
+    }
+}
+
+void SatelliteScreen::refreshUnitsChip() {
+    if (!units_chip_) {
+        return;
+    }
+    const bool metric = UnitsProvider::instance()->isMetric();
+    units_chip_->setText(metric ? QStringLiteral("M") : QStringLiteral("FT"));
+    units_chip_->setToolTip(
+        metric ? QStringLiteral("Display units: metric — click for ANSI")
+               : QStringLiteral("Display units: ANSI — click for metric"));
 }
 
 QWidget* SatelliteScreen::buildLeftRail() {
@@ -897,9 +1417,29 @@ QWidget* SatelliteScreen::buildLeftRail() {
     auto* layout = new QVBoxLayout(rail_content);
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(12);
-    layout->addWidget(buildPlanCard(rail_content));
+    plan_card_ = buildPlanCard(rail_content);
+    layout->addWidget(plan_card_);
     align_card_ = buildAlignCard(rail_content);
     layout->addWidget(align_card_);
+    roi_confirm_card_ = buildAckCard(
+        rail_content, QStringLiteral("roiConfirm"),
+        QStringLiteral(":/assets/exploration/map.svg"),
+        QStringLiteral("Confirm ROI"),
+        QStringLiteral("Check the outline against the aligned robot map and "
+                       "drag any vertex that does not match the real roof. "
+                       "Adjusting the shape clears this confirmation."),
+        QStringLiteral("ROI matches the roof"), &roi_confirm_check_);
+    layout->addWidget(roi_confirm_card_);
+    edge_review_card_ = buildAckCard(
+        rail_content, QStringLiteral("edgeReview"),
+        QStringLiteral(":/assets/missionplanner/scan_card_telemetry.svg"),
+        QStringLiteral("Edge Review"),
+        QStringLiteral("Tap every ROI edge with a fall hazard beyond it — "
+                       "red edges get a larger planning setback. A roof with "
+                       "no hazardous edges is a valid answer; what matters is "
+                       "that you have looked."),
+        QStringLiteral("Edges reviewed"), &edge_review_check_);
+    layout->addWidget(edge_review_card_);
     mission_card_ = buildMissionCard(rail_content);
     layout->addWidget(mission_card_);
     teleop_card_ = buildTeleopCard(rail_content);
@@ -1101,6 +1641,10 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     job_name_->setObjectName("SatInput");
     job_name_->setPlaceholderText(QStringLiteral("Building / job name"));
     job_name_->setFixedHeight(36);
+    // Step 1's gate reads this field, so the footer has to re-evaluate as it
+    // is typed rather than only on save.
+    connect(job_name_, &QLineEdit::textChanged, this,
+            [this](const QString&) { refreshStepUi(); });
     layout->addWidget(job_name_);
 
     job_address_ = new QLineEdit(card);
@@ -1468,6 +2012,27 @@ void SatelliteScreen::applyTheme() {
 #SatMotorsChip {
     background-color: transparent; border: 1px solid @CARD_BORDER@; border-radius: 10px;
 }
+QPushButton#SatUnitsChip {
+    background-color: transparent; border: 1px solid @CARD_BORDER@; border-radius: 10px;
+    font-family: 'Arimo'; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.5px; color: @MUTED@;
+}
+QPushButton#SatUnitsChip:hover { background-color: @BUTTON_HOVER@; color: @TEXT@; }
+#SatStepHeader {
+    background-color: @SURFACE@; border-bottom: 1px solid @SURFACE_BORDER@;
+}
+#SatFooterBar {
+    background-color: @SURFACE@; border-top: 1px solid @SURFACE_BORDER@;
+}
+QPushButton#SatNextButton {
+    background-color: #009966; border: none; border-radius: 10px;
+    font-family: 'Arimo'; font-weight: 700; font-size: 14px; color: #FFFFFF;
+    padding: 0 24px;
+}
+QPushButton#SatNextButton:hover { background-color: #00A86D; }
+QPushButton#SatNextButton:disabled {
+    background-color: @BUTTON_BG@; border: 1px solid @INPUT_BORDER@; color: @MUTED@;
+}
 #SatRailScroll { background-color: @PAGE@; border: none; border-right: 1px solid @SURFACE_BORDER@; }
 #SatRail { background-color: @PAGE@; }
 #SatCard {
@@ -1591,6 +2156,11 @@ void SatelliteScreen::setDarkMode(bool dark_mode) {
     setStatePill(state_text_, remap(state_color_));
     setMotorsChip(motors_text_, remap(motors_color_));
     setTopBatteryState(last_batt_pct_, last_batt_stale_);
+    refreshUnitsChip();
+    // Step chips carry per-element colours for the same reason the pills do,
+    // so they need re-rendering here too — applyTheme()'s sheet does not
+    // reach them.
+    refreshStepUi();
     // The imagery label carries an inline colour too. Re-resolving is free
     // (the provenance cache answers without a request) and repaints it
     // against the new palette on the next slow_timer_ tick.
@@ -1654,6 +2224,18 @@ void SatelliteScreen::loadJob(const Job& job) {
     } else if (job.isMeasured()) {
         map_->setView(0.0, 0.0, kMeasuredDefaultZoom);
     }
+    // A plan that already carries geometry or a GPS seed was aimed when it
+    // was authored; re-aiming it in the field would be busywork. The ROI
+    // confirmation deliberately does NOT carry over — an office-drawn
+    // outline is exactly what step 3 exists to check against the real roof.
+    canvas_aimed_ = job.polygon.valid() || job.roi.valid || job.gps.valid ||
+                    job.robot.valid;
+    confirmed_vertices_.clear();
+    edges_reviewed_ = false;
+    // A saved plan's stored fit was solved against a map collected on a
+    // previous outing; the robot is somewhere else now. Alignment is a field
+    // step every time.
+    alignment_confirmed_ = false;
     appendLog(QStringLiteral("[plan] loaded '%1'").arg(job.name));
 }
 
@@ -1665,6 +2247,11 @@ void SatelliteScreen::newJob() {
     map_->setRoi(RoiRect{});
     map_->clearPolygon();
     map_->setMarker(geo::GeoPose{});
+    canvas_aimed_ = false;
+    confirmed_vertices_.clear();
+    edges_reviewed_ = false;
+    alignment_confirmed_ = false;
+    selected_step_ = Step::SatelliteMap;
     emit map_->roiChanged();
     emit map_->markerChanged();
 }
@@ -1738,6 +2325,8 @@ void SatelliteScreen::onGoToAddress() {
         if (lat_ok && lon_ok && std::abs(lat) <= 85.0 &&
             std::abs(lon) <= 180.0) {
             map_->setView(lat, lon, 18);
+            canvas_aimed_ = true;
+            refreshStepUi();
             return;
         }
     }
@@ -1747,6 +2336,8 @@ void SatelliteScreen::onGoToAddress() {
                         appendLog(QStringLiteral("[geo] %1").arg(label));
                         if (ok) {
                             map_->setView(lat, lon, 18);
+                            canvas_aimed_ = true;
+                            refreshStepUi();
                         }
                     });
 }
@@ -1840,11 +2431,15 @@ void SatelliteScreen::onFindRobot() {
     const int zoom = std::max(map_->zoom(), 19);
     if (marker.valid) {
         map_->setView(marker.lat, marker.lon, zoom);
+        canvas_aimed_ = true;
+        refreshStepUi();
         appendLog(QStringLiteral("[geo] centred on the aligned robot anchor"));
         return;
     }
     if (seed.valid) {
         map_->setView(seed.lat, seed.lon, zoom);
+        canvas_aimed_ = true;
+        refreshStepUi();
         appendLog(QStringLiteral("[geo] centred on the GPS seed (%1, hacc %2)")
                       .arg(seed.fix_type.isEmpty()
                                ? QStringLiteral("fix")
@@ -2075,6 +2670,10 @@ void SatelliteScreen::showCorrespondPage() {
         return;
     }
     updateCorrespondenceUi();
+    // Picking correspondences IS step 2, so the header follows the canvas
+    // rather than leaving the operator on a picker while the chips still
+    // claim they are somewhere else.
+    setSelectedStep(Step::Alignment);
     canvas_stack_->setCurrentWidget(correspond_page_);
 }
 
@@ -2231,6 +2830,7 @@ void SatelliteScreen::onAlignClicked() {
 
 void SatelliteScreen::onReselectAlignment() {
     pcd_to_sat_ = Similarity2D{};
+    alignment_confirmed_ = false;
     updateCorrespondenceUi();
     canvas_stack_->setCurrentWidget(correspond_page_);
 }
@@ -2279,18 +2879,24 @@ void SatelliteScreen::onConfirmAlignment() {
                   .arg(origin.lon, 0, 'f', 7)
                   .arg(marker.heading_deg, 0, 'f', 1)
                   .arg(units::formatLength(align_rmse_m_, 3)));
+    alignment_confirmed_ = true;
     updateAlignCardUi();
     canvas_stack_->setCurrentWidget(map_);
 }
 
 void SatelliteScreen::updateAlignCardUi() {
-    const bool measured = plan_mode_ == PlanMode::Measured;
-    if (align_card_) {
-        // Collecting a map needs a robot, so the card is useless in the office
-        // planning trim. Measured mode keeps it — it just skips the
-        // correspondence step.
-        align_card_->setVisible(!planning_only_);
+    // Step 2's gate is pcd_image_ / pcd_to_sat_, both of which change on the
+    // same transitions this function is called for, so the footer follows
+    // from here rather than needing a call at every one of those sites.
+    if (next_button_) {
+        refreshStepUi();
     }
+    const bool measured = plan_mode_ == PlanMode::Measured;
+    // Card visibility is the step model's job now (the card belongs to step
+    // 2, which is itself unavailable in the office planning trim). Setting it
+    // here as well would let a mid-alignment refresh put the card back on a
+    // step that is not showing it.
+    applyStepVisibility();
     const bool busy = map_capture_ && map_capture_->busy();
     collect_map_button_->setEnabled(!mission_->missionActive());
     correspond_button_->setVisible(!measured);

@@ -113,7 +113,46 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    /**
+     * The five operator-facing steps, in order. Specified in
+     * `docs/SATELLITE_WORKFLOW.md`. ROI deliberately follows Alignment: the
+     * operator draws against imagery already fitted to the robot's map
+     * rather than drawing first and discovering the fit moved everything.
+     */
+    enum class Step {
+        SatelliteMap = 0,
+        Alignment = 1,
+        RoiDefinition = 2,
+        EdgeReview = 3,
+        AutonomousScan = 4,
+    };
+    static constexpr int kStepCount = 5;
+
+    /** Reachable in the current trim. The office has no robot, so the
+        robot-dependent steps are unavailable rather than merely incomplete —
+        which is what lets planning run 1 -> 3 -> 4. */
+    bool stepAvailable(Step step) const;
+    /**
+     * Whether this step's own work is done. Reads the same expressions the
+     * buttons already gate on; there is deliberately no stored duplicate of
+     * this, because a copy could drift and advertise a step as passable
+     * while the real gate still refuses.
+     */
+    bool stepComplete(Step step) const;
+    /** First available incomplete step, else the last available one. Used to
+        seed `selected_step_`, not to move it — advancement is explicit. */
+    Step computeStep() const;
+    /** Available, and every available step before it is complete. */
+    bool stepReachable(Step step) const;
+    /** Next available step after `step`, or `step` itself if there is none. */
+    Step nextAvailableStep(Step step) const;
+    void setSelectedStep(Step step);
+    /** Re-renders the step chips, the footer action, and rail visibility. */
+    void refreshStepUi();
+
     QWidget* buildTopBar();
+    QWidget* buildStepHeader();
+    QWidget* buildFooterBar();
     QWidget* buildLeftRail();
     QWidget* buildPlanCard(QWidget* parent);
     QWidget* buildAlignCard(QWidget* parent);
@@ -122,8 +161,18 @@ private:
     QWidget* buildMissionCard(QWidget* parent);
     QWidget* buildTeleopCard(QWidget* parent);
     QWidget* buildLogCard(QWidget* parent);
+    /** Card carrying a step's acknowledgement checkbox — the whole content
+        of steps 3 and 4 until their Figma frames land. */
+    QWidget* buildAckCard(QWidget* parent, const QString& object_name,
+                          const QString& icon, const QString& title,
+                          const QString& description, const QString& check,
+                          QCheckBox** out_check);
     void applyTheme();
     void applyModeVisibility();
+    /** Shows only the active step's rail cards. Called from
+        applyModeVisibility() so every existing call site keeps working. */
+    void applyStepVisibility();
+    void refreshUnitsChip();
 
     void refreshJobsCombo(const QString& select_id = QString());
     void loadJob(const Job& job);
@@ -224,8 +273,33 @@ private:
     QWidget* motors_chip_ = nullptr;
     QLabel* lbl_motors_dot_ = nullptr;
     QLabel* lbl_motors_text_ = nullptr;
+    // Units are display-only but were previously only choosable in the
+    // New Scan modal, so an operator already inside Stage 6 had no way to
+    // flip them. Lives next to the theme toggle: both are global
+    // presentation state.
+    QPushButton* units_chip_ = nullptr;
+
+    // Step header. One chip per step plus the chevron that follows it (null
+    // on the last). Chips are styled per-element rather than through QSS
+    // state selectors, matching the pill/motors-chip pattern in this file —
+    // dynamic-property selectors would need their own repolish on every
+    // state change, not just on theme change.
+    struct StepChip {
+        QPushButton* button = nullptr;
+        QLabel* badge = nullptr;
+        QLabel* label = nullptr;
+        QLabel* detail = nullptr;
+        QLabel* chevron = nullptr;
+    };
+    QWidget* step_header_ = nullptr;
+    QVector<StepChip> step_chips_;
+
+    // Footer action bar.
+    QWidget* footer_bar_ = nullptr;
+    QPushButton* next_button_ = nullptr;
 
     // Plan card.
+    QWidget* plan_card_ = nullptr;
     QComboBox* jobs_combo_ = nullptr;
     QWidget* jobs_combo_row_ = nullptr;
     QLineEdit* job_name_ = nullptr;
@@ -244,6 +318,12 @@ private:
     QPushButton* find_robot_button_ = nullptr;
     QLabel* imagery_label_ = nullptr;  // source capture date / GSD (geo only)
     QPushButton* save_button_ = nullptr;
+
+    // Step 3 / step 4 acknowledgement cards.
+    QWidget* roi_confirm_card_ = nullptr;
+    QCheckBox* roi_confirm_check_ = nullptr;
+    QWidget* edge_review_card_ = nullptr;
+    QCheckBox* edge_review_check_ = nullptr;
 
     // Align card + pages.
     struct Correspondence {
@@ -285,6 +365,15 @@ private:
     bool have_pending_sat_ = false;
     Similarity2D pcd_to_sat_;
     double align_rmse_m_ = 0.0;
+    /**
+     * The operator accepted the fit and it became the robot anchor. Distinct
+     * from `pcd_to_sat_.valid`, which only means the solve converged: a fit
+     * can converge on badly-placed picks, which is exactly what the review
+     * page asks the operator to catch. Gating step 2 on the solve would put
+     * an enabled "Next" beside "Confirm alignment" and invite skipping the
+     * check.
+     */
+    bool alignment_confirmed_ = false;
 
     // Last resolved imagery provenance for the current view. Stamped into the
     // Job on save so a plan carries forward what it was drawn against.
@@ -329,6 +418,40 @@ private:
 
     PlanMode plan_mode_ = PlanMode::Satellite;
     bool planning_only_ = false;
+
+    // Which step the rail is showing. Display state, seeded from
+    // computeStep() and moved only by the footer action or a chip click —
+    // the gates decide what is *passable*, the operator decides what is
+    // on screen. Auto-advancing the moment a gate flips would yank the rail
+    // out from under someone still working in a step.
+    Step selected_step_ = Step::SatelliteMap;
+    /**
+     * The canvas has been deliberately aimed at the building: a successful
+     * geocode, a Find Robot seed, a placed marker, or a loaded plan that
+     * already carries one of those. Panning by hand does not count — a
+     * stray drag should not satisfy a gate.
+     */
+    bool canvas_aimed_ = false;
+    /**
+     * Vertices as they stood when the operator confirmed the ROI. Needed as
+     * its own record because polygon().valid() is already true the moment a
+     * saved plan loads, so without it step 3 would arrive pre-completed and
+     * the confirm pass that motivated putting ROI after alignment could be
+     * walked straight past. Stored as geometry rather than a bool so that
+     * marking a roof edge — which also emits roiChanged — does not revoke
+     * the confirmation and bounce the operator back a step mid-review.
+     */
+    QVector<geo::GeoPoint> confirmed_vertices_;
+    bool roiMatchesConfirmed() const;
+    /**
+     * The operator has reviewed the roof edges. Deliberately NOT a count of
+     * marked edges: a roof with no fall hazards is a legitimate answer, and
+     * gating on a nonzero count would pressure the operator into marking
+     * something spurious to advance. Per-session and unpersisted — parapets
+     * and skylights are exactly what imagery gets wrong, so an office review
+     * does not stand in for looking at the real roof.
+     */
+    bool edges_reviewed_ = false;
 
     // Last-rendered pill states, kept so setDarkMode() can re-render every
     // dynamic surface against the new palette.
