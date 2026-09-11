@@ -49,9 +49,20 @@ struct RoiRect {
 struct RoiPolygon {
     QVector<geo::GeoPoint> vertices;
     QVector<bool> roof_edges;
+    /**
+     * Per-edge pinned length in metres; 0 means free. Set when the operator
+     * types a dimension, which makes that measurement authoritative: dragging
+     * an endpoint afterwards slides along the constraint instead of silently
+     * discarding the number that was typed in.
+     */
+    QVector<double> edge_locks_m;
 
     bool valid() const { return vertices.size() >= 3; }
     void ensureEdgeFlags();
+    double lockedLength(int edge) const {
+        return edge >= 0 && edge < edge_locks_m.size() ? edge_locks_m[edge]
+                                                       : 0.0;
+    }
     static RoiPolygon fromRect(const RoiRect& rect);
 };
 

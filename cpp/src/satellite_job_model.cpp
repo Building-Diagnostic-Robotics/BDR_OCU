@@ -38,6 +38,7 @@ QVector<geo::GeoPoint> RoiRect::corners() const {
 
 void RoiPolygon::ensureEdgeFlags() {
     roof_edges.resize(vertices.size());
+    edge_locks_m.resize(vertices.size());
 }
 
 RoiPolygon RoiPolygon::fromRect(const RoiRect& rect) {
@@ -47,6 +48,7 @@ RoiPolygon RoiPolygon::fromRect(const RoiRect& rect) {
     }
     poly.vertices = rect.corners();
     poly.roof_edges.resize(4);
+    poly.edge_locks_m.resize(4);
     for (int i = 0; i < 4; ++i) {
         poly.roof_edges[i] = rect.roof_edges[size_t(i)];
     }
@@ -74,9 +76,10 @@ QJsonObject Job::toJson() const {
     robot_obj["heading_deg"] = robot.heading_deg;
 
     QJsonObject obj;
-    // Schema 3 adds imagery provenance. Readers tolerate its absence, so
-    // schema 2 files load unchanged.
-    obj["schema"] = 4;
+    // Schema 5 adds per-edge pinned lengths; 4 added the polygon, alignment
+    // and imagery-cache blocks; 3 added imagery provenance. Readers tolerate
+    // every one of those being absent, so older plans load unchanged.
+    obj["schema"] = 5;
     obj["id"] = id;
     obj["name"] = name;
     obj["address"] = address;
@@ -107,6 +110,11 @@ QJsonObject Job::toJson() const {
             flags.append(marked ? 1 : 0);
         }
         obj["polygon_roof_edges"] = flags;
+        QJsonArray locks;
+        for (double meters : polygon.edge_locks_m) {
+            locks.append(meters);
+        }
+        obj["polygon_edge_locks_m"] = locks;
     }
     if (gps.valid) {
         QJsonObject g;
@@ -205,6 +213,13 @@ Job Job::fromJson(const QJsonObject& obj) {
         for (int i = 0; i < flags.size() && i < job.polygon.roof_edges.size();
              ++i) {
             job.polygon.roof_edges[i] = flags[i].toInt(0) != 0;
+        }
+        // Absent on schema <= 4 plans, which simply have no pinned edges.
+        const QJsonArray locks = obj.value("polygon_edge_locks_m").toArray();
+        job.polygon.edge_locks_m.resize(job.polygon.vertices.size());
+        for (int i = 0;
+             i < locks.size() && i < job.polygon.edge_locks_m.size(); ++i) {
+            job.polygon.edge_locks_m[i] = locks[i].toDouble(0.0);
         }
         job.polygon.ensureEdgeFlags();
     } else if (job.roi.valid) {

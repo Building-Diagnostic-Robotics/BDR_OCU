@@ -5,7 +5,9 @@
 #include "units_system.hpp"
 
 #include <QBrush>
-#include <QInputDialog>
+#include <QDoubleValidator>
+#include <QKeyEvent>
+#include <QLineEdit>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -167,23 +169,134 @@ void SatelliteMapWidget::clearPolygon() {
     emit roiChanged();
 }
 
-bool SatelliteMapWidget::setEdgeLength(int edge, double meters) {
+bool SatelliteMapWidget::setEdgeLength(int edge, double meters, bool pin) {
     const int n = polygon_.vertices.size();
     if (edge < 0 || edge >= n || meters < 0.5) {
         return false;
     }
-    const geo::GeoPoint a = polygon_.vertices[edge];
-    const geo::GeoPoint b = polygon_.vertices[(edge + 1) % n];
-    const QPointF enu = geo::enuFromGeo(a, b);
-    const double cur = std::hypot(enu.x(), enu.y());
-    if (cur < 1e-6) {
+    polygon_.ensureEdgeFlags();
+
+    // Feed the typed length to the solver as though it were already pinned,
+    // so it is honoured alongside the existing pins rather than overwriting
+    // whichever one happens to share a vertex with it. Hold this edge's near
+    // vertex, which makes the far one do the moving. Work on copies: a
+    // rejected edit must leave the polygon untouched.
+    QVector<double> locks = polygon_.edge_locks_m;
+    locks[edge] = meters;
+    QVector<geo::GeoPoint> next = polygon_.vertices;
+    if (!solveEdgeLocks(edge, locks, next)) {
         return false;
     }
-    const double s = meters / cur;
-    polygon_.vertices[(edge + 1) % n] =
-        geo::geoFromEnu(a, enu.x() * s, enu.y() * s);
+    polygon_.vertices = next;
+    if (pin) {
+        polygon_.edge_locks_m[edge] = meters;
+    }
     update();
     emit roiChanged();
+    return true;
+}
+
+void SatelliteMapWidget::clearEdgeLock(int edge) {
+    polygon_.ensureEdgeFlags();
+    if (edge >= 0 && edge < polygon_.edge_locks_m.size()) {
+        polygon_.edge_locks_m[edge] = 0.0;
+        update();
+        emit roiChanged();
+    }
+}
+
+bool SatelliteMapWidget::solveEdgeLocks(int held, const QVector<double>& locks,
+                                        QVector<geo::GeoPoint>& verts) const {
+    const int n = verts.size();
+    if (n < 3) {
+        return false;
+    }
+    bool any_pinned = false;
+    for (int e = 0; e < n && e < locks.size(); ++e) {
+        any_pinned = any_pinned || locks[e] > 0.0;
+    }
+    if (!any_pinned) {
+        return true;
+    }
+
+    // Gauss-Seidel constraint projection: each pass walks the pinned edges
+    // and corrects their endpoints along the edge direction, weighted so the
+    // held vertex never moves. Chosen over solving the constraints in closed
+    // form because it needs no case analysis per pin count — a ring with
+    // every side dimensioned is a linkage with one remaining degree of
+    // freedom, and this finds its nearest valid configuration the same way
+    // it handles a single pin. Seeding from the current (already satisfied)
+    // shape means an incremental drag is a small perturbation, which both
+    // converges in a handful of passes and keeps the polygon on its current
+    // branch rather than snapping to a mirrored solution.
+    const geo::GeoPoint anchor = verts[held >= 0 && held < n ? held : 0];
+    QVector<QPointF> p(n);
+    for (int i = 0; i < n; ++i) {
+        p[i] = geo::enuFromGeo(anchor, verts[i]);
+    }
+
+    constexpr int kMaxPasses = 200;
+    constexpr double kToleranceM = 1e-4;
+    double worst = 0.0;
+    for (int pass = 0; pass < kMaxPasses; ++pass) {
+        worst = 0.0;
+        for (int e = 0; e < n; ++e) {
+            const double want = e < locks.size() ? locks[e] : 0.0;
+            if (want <= 0.0) {
+                continue;
+            }
+            const int i = e;
+            const int j = (e + 1) % n;
+            const double wi = i == held ? 0.0 : 1.0;
+            const double wj = j == held ? 0.0 : 1.0;
+            if (wi + wj <= 0.0) {
+                continue;  // both ends held — nothing this pass can do
+            }
+            QPointF d = p[j] - p[i];
+            double len = std::hypot(d.x(), d.y());
+            if (len < 1e-9) {
+                // Coincident endpoints leave the direction undefined; pick
+                // one so the pass can still separate them.
+                d = QPointF(1.0, 0.0);
+                len = 1.0;
+            }
+            const double err = len - want;
+            worst = std::max(worst, std::abs(err));
+            const QPointF fix = d * (err / len / (wi + wj));
+            p[i] += fix * wi;
+            p[j] -= fix * wj;
+        }
+        if (worst < kToleranceM) {
+            break;
+        }
+    }
+    if (worst >= kToleranceM) {
+        // Did not settle: the pinned lengths cannot form a ring at all (one
+        // side longer than the rest combined, say). Report failure so the
+        // caller can leave the polygon alone instead of showing a shape whose
+        // dimension chips disagree with its geometry.
+        return false;
+    }
+
+    for (int i = 0; i < n; ++i) {
+        verts[i] = geo::geoFromEnu(anchor, p[i].x(), p[i].y());
+    }
+    return true;
+}
+
+bool SatelliteMapWidget::dragVertexWithLocks(int vertex,
+                                             const geo::GeoPoint& desired) {
+    const int n = polygon_.vertices.size();
+    if (n < 3 || vertex < 0 || vertex >= n) {
+        return false;
+    }
+    polygon_.ensureEdgeFlags();
+    QVector<geo::GeoPoint> next = polygon_.vertices;
+    next[vertex] = desired;
+    if (!solveEdgeLocks(vertex, polygon_.edge_locks_m, next)) {
+        return false;
+    }
+    polygon_.vertices = next;
     return true;
 }
 
@@ -775,12 +888,146 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
                          at.y() - fm.height() / 2.0 - 3,
                          fm.horizontalAdvance(text) + 12, fm.height() + 6);
         dim_boxes_[i] = box;
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0, 0, 0, 170));
+        if (i == dim_edit_edge_) {
+            continue;  // the inline editor is drawn over this chip
+        }
+        // A pinned edge gets an accent outline: the operator has to be able to
+        // see which dimensions are holding before they drag a vertex and find
+        // it sliding along an arc.
+        const bool pinned = polygon_.lockedLength(i) > 0.0;
+        painter.setPen(pinned ? QPen(satpal::accent(), 1.5) : QPen(Qt::NoPen));
+        painter.setBrush(QColor(0, 0, 0, pinned ? 200 : 170));
         painter.drawRoundedRect(box, 5, 5);
         painter.setPen(satpal::text());
         painter.drawText(box, Qt::AlignCenter, text);
     }
+}
+
+void SatelliteMapWidget::beginEdgeLengthEdit(int edge) {
+    const int n = polygon_.valid() ? polygon_.vertices.size() : 4;
+    if (edge < 0 || edge >= n || edge >= dim_boxes_.size()) {
+        return;
+    }
+    geo::GeoPoint a, b;
+    if (polygon_.valid()) {
+        a = polygon_.vertices[edge];
+        b = polygon_.vertices[(edge + 1) % n];
+    } else {
+        const auto c = roi_.corners();
+        a = c[edge];
+        b = c[(edge + 1) % 4];
+    }
+    const QPointF enu = geo::enuFromGeo(a, b);
+    const double meters = std::hypot(enu.x(), enu.y());
+    const bool metric = UnitsProvider::instance()->isMetric();
+    const double shown = metric ? meters : units::metersToFeet(meters);
+
+    if (!dim_edit_) {
+        dim_edit_ = new QLineEdit(this);
+        dim_edit_->setObjectName("SatDimEdit");
+        dim_edit_->setAlignment(Qt::AlignCenter);
+        dim_edit_->setFrame(false);
+        dim_edit_->hide();
+        dim_edit_->installEventFilter(this);
+        connect(dim_edit_, &QLineEdit::returnPressed, this,
+                [this] { commitEdgeLengthEdit(); });
+    }
+    // Same clamp the dialog enforced, expressed in whatever unit is on screen
+    // so the operator can't type a value the model would reject.
+    const double lo = metric ? 0.5 : units::metersToFeet(0.5);
+    const double hi = metric ? 500.0 : units::metersToFeet(500.0);
+    auto* validator = new QDoubleValidator(lo, hi, 2, dim_edit_);
+    validator->setNotation(QDoubleValidator::StandardNotation);
+    delete dim_edit_->validator();
+    dim_edit_->setValidator(validator);
+
+    QFont edit_font = font();
+    edit_font.setPointSizeF(10.0);
+    edit_font.setBold(true);
+    dim_edit_->setFont(edit_font);
+    dim_edit_->setStyleSheet(
+        QStringLiteral("QLineEdit#SatDimEdit { background-color: rgba(0,0,0,210);"
+                       " color: %1; border: 1px solid %2; border-radius: 5px;"
+                       " padding: 0px; }")
+            .arg(satpal::text().name(), satpal::accent().name()));
+
+    // Widen the chip rect a little: the caret and a longer typed value need
+    // more room than the formatted label did.
+    QRectF box = dim_boxes_[edge];
+    box.adjust(-10.0, -1.0, 10.0, 1.0);
+    dim_edit_->setGeometry(box.toRect());
+    dim_edit_->setText(QString::number(shown, 'f', 2));
+    dim_edit_edge_ = edge;
+    dim_edit_->show();
+    dim_edit_->setFocus(Qt::MouseFocusReason);
+    dim_edit_->selectAll();
+    update();
+}
+
+void SatelliteMapWidget::commitEdgeLengthEdit() {
+    if (!dim_edit_ || dim_edit_edge_ < 0) {
+        return;
+    }
+    const int edge = dim_edit_edge_;
+    // Clear the edge first: setEdgeLength repaints, and a stale index would
+    // leave the chip hidden behind an already-hidden editor.
+    dim_edit_edge_ = -1;
+    const QString typed = dim_edit_->text().trimmed();
+    dim_edit_->hide();
+    if (typed.isEmpty()) {
+        // Empty field releases the pin — the only way back to a free edge
+        // once a dimension has been committed.
+        clearEdgeLock(edge);
+        update();
+        return;
+    }
+    bool ok = false;
+    const double entered = typed.toDouble(&ok);
+    if (!ok) {
+        update();
+        return;
+    }
+    const bool metric = UnitsProvider::instance()->isMetric();
+    const double meters = metric ? entered : units::feetToMeters(entered);
+    if (meters < 0.5 || meters > 500.0) {
+        update();
+        return;
+    }
+    if (polygon_.valid()) {
+        setEdgeLength(edge, meters, true);
+    } else {
+        polygon_ = RoiPolygon::fromRect(roi_);
+        if (setEdgeLength(edge, meters, true)) {
+            roi_.valid = false;
+        }
+    }
+    update();
+}
+
+void SatelliteMapWidget::cancelEdgeLengthEdit() {
+    if (!dim_edit_ || dim_edit_edge_ < 0) {
+        return;
+    }
+    dim_edit_edge_ = -1;
+    dim_edit_->hide();
+    update();
+}
+
+bool SatelliteMapWidget::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == dim_edit_) {
+        if (event->type() == QEvent::KeyPress) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            if (key->key() == Qt::Key_Escape) {
+                cancelEdgeLengthEdit();
+                return true;
+            }
+        } else if (event->type() == QEvent::FocusOut) {
+            // Clicking away commits, matching the dimension chips in CAD
+            // tools. Escape is the explicit discard.
+            commitEdgeLengthEdit();
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void SatelliteMapWidget::paintMarker(QPainter& painter) {
@@ -975,9 +1222,12 @@ void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
         }
         case Drag::MoveVertex: {
             if (drag_corner_ >= 0 && drag_corner_ < polygon_.vertices.size()) {
-                polygon_.vertices[drag_corner_] =
-                    maybeSnap(geoFromScreen(pos));
-                emit roiChanged();
+                // Snap first, then constrain: a pinned length is a harder
+                // promise than the 0.1 m grid, so it must have the last word.
+                if (dragVertexWithLocks(drag_corner_,
+                                        maybeSnap(geoFromScreen(pos)))) {
+                    emit roiChanged();
+                }
             }
             break;
         }
@@ -1022,41 +1272,7 @@ void SatelliteMapWidget::mouseReleaseEvent(QMouseEvent* event) {
             (event->pos() - drag_press_pos_).manhattanLength() <= 4) {
             const int n = polygon_.valid() ? polygon_.vertices.size() : 4;
             if (drag_edge_ < n) {
-                geo::GeoPoint a, b;
-                if (polygon_.valid()) {
-                    a = polygon_.vertices[drag_edge_];
-                    b = polygon_.vertices[(drag_edge_ + 1) % n];
-                } else {
-                    const auto c = roi_.corners();
-                    a = c[drag_edge_];
-                    b = c[(drag_edge_ + 1) % 4];
-                }
-                const QPointF enu = geo::enuFromGeo(a, b);
-                const double cur = std::hypot(enu.x(), enu.y());
-                bool ok = false;
-                const QString prompt =
-                    UnitsProvider::instance()->isMetric()
-                        ? QStringLiteral("Edge length (m)")
-                        : QStringLiteral("Edge length (ft)");
-                const double shown = UnitsProvider::instance()->isMetric()
-                                        ? cur
-                                        : units::metersToFeet(cur);
-                const double entered = QInputDialog::getDouble(
-                    this, QStringLiteral("Edge length"), prompt, shown, 0.5,
-                    500.0, 2, &ok);
-                if (ok) {
-                    const double meters = UnitsProvider::instance()->isMetric()
-                                             ? entered
-                                             : units::feetToMeters(entered);
-                    if (polygon_.valid()) {
-                        setEdgeLength(drag_edge_, meters);
-                    } else {
-                        polygon_ = RoiPolygon::fromRect(roi_);
-                        if (setEdgeLength(drag_edge_, meters)) {
-                            roi_.valid = false;
-                        }
-                    }
-                }
+                beginEdgeLengthEdit(drag_edge_);
             }
         }
         drag_ = Drag::None;
@@ -1067,6 +1283,9 @@ void SatelliteMapWidget::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void SatelliteMapWidget::wheelEvent(QWheelEvent* event) {
+    // Zooming moves the chip out from under the editor. Mouse-driven pans
+    // commit via focus-out, but the wheel never takes focus away.
+    cancelEdgeLengthEdit();
     const int dz = event->angleDelta().y() > 0 ? 1 : -1;
     const int new_zoom = qBound(kMinZoom, zoom_ + dz, maxZoomNow());
     if (new_zoom == zoom_) {

@@ -18,6 +18,8 @@
 
 #include <QWidget>
 
+class QLineEdit;
+
 namespace f2c_cpp {
 
 class TileService;
@@ -53,7 +55,14 @@ public:
     void armPolygonDraw();
     void clearPolygon();
     /** Slide vertex i+1 along edge i to the given length (metres). */
-    bool setEdgeLength(int edge, double meters);
+    /**
+     * Slides the edge's far vertex so the edge measures `meters`. With
+     * `pin`, the length is also recorded as a constraint that later vertex
+     * drags must honour.
+     */
+    bool setEdgeLength(int edge, double meters, bool pin = false);
+    /** Releases a pinned edge length. */
+    void clearEdgeLock(int edge);
 
     geo::GeoPose marker() const { return marker_; }
     void setMarker(const geo::GeoPose& marker);
@@ -101,6 +110,8 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    /** Escape / focus-out handling for the inline dimension editor. */
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     enum class Drag {
@@ -130,6 +141,26 @@ private:
     QPointF roiRotateHandleScreen() const;
     QPointF markerScreenPos() const;
     QPointF markerArrowTipScreen() const;
+
+    /**
+     * Moves `vertex` to `desired` and relaxes the rest of the ring so every
+     * pinned edge keeps its pinned length. Returns false if the pins cannot
+     * be satisfied, in which case the drag is ignored.
+     */
+    bool dragVertexWithLocks(int vertex, const geo::GeoPoint& desired);
+
+    /**
+     * Relaxes `verts` until every edge with a pinned length in `locks` is at
+     * that length, holding vertex `held` exactly where it is. Returns false
+     * if the pins are geometrically unsatisfiable.
+     */
+    bool solveEdgeLocks(int held, const QVector<double>& locks,
+                        QVector<geo::GeoPoint>& verts) const;
+
+    /** Opens the inline editor over `edge`'s dimension chip. */
+    void beginEdgeLengthEdit(int edge);
+    void commitEdgeLengthEdit();
+    void cancelEdgeLengthEdit();
 
     Drag hitTest(const QPointF& pos, int* corner_index,
                  int* edge_index = nullptr) const;
@@ -161,6 +192,12 @@ private:
     bool draw_polygon_armed_ = false;
     int drag_dim_edge_ = -1;
     QVector<QRectF> dim_boxes_;
+
+    // Inline dimension editing. One reusable QLineEdit overlaid on the chip
+    // rect, rather than one per edge: only one can be active, and the vertex
+    // count changes as the operator edits the polygon.
+    QLineEdit* dim_edit_ = nullptr;
+    int dim_edit_edge_ = -1;
 
     geo::GeoPose mission_anchor_;
     GridSnapshot grid_;
