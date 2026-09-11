@@ -7,16 +7,23 @@
  * (ScanSetupDialog -> MissionMetadataDialog) or the Dashboard "Plan Job"
  * card (planning-only trim).
  *
- * No Figma frame exists for this surface. Construction follows the staged
- * screens' vocabulary: 49px top bar with the Stage 4/5 SVG back button and
- * makePlannerStatusItem-style pills (Battery / BOT / state / motors chip),
- * a 320px LEFT rail of cards, zinc palette (#18181b cards, #27272a inputs,
- * #00BC7D accent) in dark mode per MissionMetadataDialog, tokens-light
- * equivalents in light mode, Arimo per-element typography throughout.
+ * The surface has a Figma frame: 49px top bar, a 55px step header of five
+ * chips, then a 320px LEFT rail beside the canvas with a 65px footer bar
+ * carrying the gated "Next" action. Zinc palette (#18181b chrome, #27272a
+ * inputs, #00BC7D accent) in dark mode, tokens-light equivalents in light
+ * mode. The frame specifies Inter; we keep the Arimo per-element typography
+ * the other stages use rather than splitting the app across two families.
  *
- * Robot-side counterpart: `robot_autonomous_coverage.launch.py` on the
- * pilot_ws `spline_tracing` line (see feature/ocu-satellite-roi for the
- * /coverage/status publisher).
+ * The five steps and the gates they derive from are specified in
+ * `docs/SATELLITE_WORKFLOW.md`. The step model is derived, not stored: it
+ * reads the same enable-gates the buttons already use, so the header can
+ * never claim a step is reachable when its gate disagrees.
+ *
+ * Robot-side counterpart: `robot_autonomous_coverage_director.launch.py`,
+ * which exists only on the pilot_ws `cliff-on-autonomy` branch — that is
+ * also where the /coverage/status publisher and the roof-edge setback live.
+ * Despite its name, `feature/ocu-satellite-roi` carries the older
+ * horizon-manager stack and is NOT what this screen launches.
  */
 
 #pragma once

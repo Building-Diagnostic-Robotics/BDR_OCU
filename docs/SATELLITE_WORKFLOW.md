@@ -21,6 +21,63 @@ Two constraints shape everything:
   a heading needs a baseline the robot may not get. GPS is used as a seed;
   operator-picked correspondences are the accuracy step.
 
+## The step model
+
+The screen is a five-step flow. The step header names the steps, the left
+rail shows only the active step's controls, and a footer button advances to
+the next one.
+
+| # | Step | Complete when | Unavailable when |
+|---|------|---------------|------------------|
+| 1 | Satellite Map | a job is named and the canvas has been aimed at the building | — |
+| 2 | 3D Alignment | measured: a map has been collected · satellite: the fit is confirmed | planning-only trim |
+| 3 | ROI Definition | the operator confirms the ROI against the aligned map | — |
+| 4 | Edge Review | the operator acknowledges having reviewed the edges | — |
+| 5 | Autonomous Scan | the mission is finalized | planning-only trim |
+
+Each step carries two separate predicates: whether it is **available** in
+this trim, and whether its own work is **complete**. Keeping them apart is
+what lets the office trim run 1 → 3 → 4 without the robot-dependent steps
+blocking anything. The footer advances to the next available incomplete step;
+completed steps stay clickable, because re-aligning or redrawing after seeing
+the result is normal rather than exceptional.
+
+**The step is derived, never stored.** `computeStep()` reads the same
+expressions the buttons already gate on — a saved job id, `pcd_to_sat_.valid`,
+`map_->polygon().valid()` and so on. A parallel step variable could drift out
+of sync with those gates and show Send as reachable while the arming gate
+still refuses, so there isn't one.
+
+Some specifics that are easy to get wrong:
+
+- **ROI comes after alignment, not before.** The operator draws against
+  imagery already fitted to the robot's map, instead of drawing first and
+  discovering the fit moved everything. The office still drafts a polygon;
+  step 3 in the field is a confirm-and-adjust pass over that draft. It needs
+  its own acknowledgement precisely because `polygon().valid()` is already
+  true the moment a saved plan loads, so without one the step would arrive
+  pre-completed and the operator could walk past the check that motivated
+  the reordering.
+- **Edge Review gates on the acknowledgement, not on a nonzero count.** A
+  roof with no fall hazards is a legitimate answer, and gating on "at least
+  one edge marked" would pressure the operator into marking something
+  spurious to advance. The point is that the question got asked. The
+  acknowledgement is per-session and is not persisted with the plan: parapets
+  and skylights are exactly what imagery gets wrong, so an office review does
+  not stand in for looking at the real roof.
+- **Imagery is advisory, not a gate.** Requiring cached tiles to leave step 1
+  would force a tile download on someone merely drafting, and would hard-block
+  a satellite plan started in the field, where there is no internet to cache
+  from. Heading to the field uncached earns a warning instead.
+- **Measured mode reduces steps, it never skips them.** Step 1 keeps the job
+  name and drops the imagery tools; step 2 keeps Collect Map and drops the
+  correspondence picker. Step numbering means the same thing in both modes.
+
+Teleop lives only in step 5, reached by clicking the FPV view as in the
+Stage 5 scan surface. The log is a collapsible canvas overlay on every step,
+because SSH and launch failures surface during Collect Map and Send, not
+only during the scan.
+
 ## Office: plan the job
 
 1. Dashboard **Plan Job** opens `SatelliteScreen` in planning-only trim
