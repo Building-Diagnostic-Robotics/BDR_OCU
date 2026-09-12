@@ -730,8 +730,8 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     // offscreen, saves a PNG, and exits — the agent-side visual feedback
     // loop for design iteration without a robot or an operator. Optional:
     // BDR_DEV_STAGE6_SHOT_DARK=1 (dark theme), BDR_DEV_STAGE6_SHOT_MODE=
-    // measured|scan|correspond|review (default: planning-only satellite trim).
-    // See docs/DEV_BYPASSES.md.
+    // measured|measured_map|scan|correspond|review|plan|plan_confirm
+    // (default: planning-only satellite trim). See docs/DEV_BYPASSES.md.
     if (!qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
         const QString shot_path =
             qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed();
@@ -745,7 +745,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
         const int shot_stage =
             qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_STAGE").trimmed().toInt();
         QTimer::singleShot(300, this, [this, shot_dark, shot_mode,
-                                       shot_stage]() {
+                                       shot_stage, shot_path]() {
             resize(1440, 860);
             setDarkMode(shot_dark);
             if (shot_stage == 3) {
@@ -788,6 +788,25 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     stage6_->devSeedDemoPlan();
                     stage6_->devSeedDemoAlignment(
                         shot_mode == QStringLiteral("review"));
+                } else if (shot_mode == QStringLiteral("plan")) {
+                    stage6_->configureForPlanning();
+                    stage6_->devSeedDemoPlan();
+                    stage6_->devSelectMarker();
+                } else if (shot_mode == QStringLiteral("plan_confirm")) {
+                    // Renders the Save Plan dialog to <shot>_dialog.png
+                    // alongside the screen shot. Deferred until the stage
+                    // has been laid out, so the canvas thumbnail is the
+                    // real canvas and not a pre-layout stub.
+                    stage6_->configureForPlanning();
+                    stage6_->devSeedDemoPlan();
+                    QString dialog_path = shot_path;
+                    dialog_path.replace(QStringLiteral(".png"),
+                                        QStringLiteral("_dialog.png"));
+                    QTimer::singleShot(400, this, [this, dialog_path] {
+                        if (stage6_) {
+                            stage6_->devRenderPlanConfirm(dialog_path);
+                        }
+                    });
                 } else {
                     stage6_->configureForPlanning();
                 }

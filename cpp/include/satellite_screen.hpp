@@ -81,6 +81,10 @@ public:
     /** Dev screenshot hook: seeds a demo ROI (roof edges marked) + robot
         marker so canvas rendering can be verified headlessly. */
     void devSeedDemoPlan();
+    /** Dev screenshot hook: selects the marker so the rotate handle renders. */
+    void devSelectMarker();
+    /** Dev screenshot hook: renders the Save Plan confirmation to a PNG. */
+    void devRenderPlanConfirm(const QString& png_path);
     /** Dev screenshot hook: fakes a collected map + site image and opens the
         correspondence picker (or, with `review`, a solved alignment). */
     void devSeedDemoAlignment(bool review);
@@ -177,13 +181,31 @@ private:
     void refreshJobsCombo(const QString& select_id = QString());
     void loadJob(const Job& job);
     void newJob();
+    /**
+     * Save Plan. In the office trim on the satellite canvas this is the
+     * imagery step: it frames the ROI, opens SatellitePlanConfirmDialog, and
+     * the download runs as part of saving. Everywhere else (field, measured)
+     * it persists geometry only — there is no internet on the roof, and a
+     * field edit must never try to fetch.
+     */
     void saveJob();
+    /** The Job as the rail currently describes it, id allocated if new,
+        with the fields the rail does not own carried forward. */
+    Job jobFromRail() const;
+    /** Writes `job` and re-selects it. False (and a log line) on failure. */
+    bool persistJob(const Job& job);
+    /** Adopts a fresh imagery manifest into the job record and the canvas. */
+    void adoptImageryManifest(Job& job,
+                              const TileService::SiteManifest& manifest);
+    /** Canvas tool stack: zoom, fit to ROI, ruler. */
+    QWidget* buildCanvasTools(QWidget* parent);
+    /** Relabels the draw button for the armed tool / drawing state. */
+    void refreshDrawButton();
 
     void onGoToAddress();
     /** Recentres on the best known robot position: confirmed anchor, else
         the map-collection GPS seed, else the saved plan's seed. */
     void onFindRobot();
-    void onDownloadArea();
     /** Points the tile service at a job's offline pyramid + zoom ceiling. */
     void applyImageryManifest(const TileService::SiteManifest& manifest,
                               const QString& assets_dir);
@@ -304,12 +326,19 @@ private:
     QWidget* jobs_combo_row_ = nullptr;
     QLineEdit* job_name_ = nullptr;
     QLineEdit* job_address_ = nullptr;
-    QWidget* geo_tools_host_ = nullptr;  // address search + download (geo-only)
+    QWidget* geo_tools_host_ = nullptr;  // address search + provenance (geo-only)
     QLineEdit* address_edit_ = nullptr;
-    QPushButton* add_roi_button_ = nullptr;
-    QPushButton* draw_polygon_button_ = nullptr;
+    // ROI drawing follows the Stage 5 pattern: pick a shape tool, one button
+    // arms it ("Draw ROI" -> "Drawing…" -> "Redraw ROI"). The shape toggles
+    // are checkable and mutually exclusive.
+    QPushButton* tool_rect_button_ = nullptr;
+    QPushButton* tool_polygon_button_ = nullptr;
+    QPushButton* draw_button_ = nullptr;
     QPushButton* place_robot_button_ = nullptr;
     QPushButton* clear_roi_button_ = nullptr;
+    // Numeric ROI/heading mirror. Hidden in the office trim, where the
+    // canvas chips and handles are the whole editing surface.
+    QWidget* roi_numeric_host_ = nullptr;
     QDoubleSpinBox* roi_length_ = nullptr;
     QDoubleSpinBox* roi_width_ = nullptr;
     QDoubleSpinBox* roi_heading_ = nullptr;
@@ -337,6 +366,18 @@ private:
     QLabel* align_status_ = nullptr;
 
     QStackedWidget* canvas_stack_ = nullptr;
+    // The map page: the map plus the tool stack floated over its right
+    // edge. Stack switching targets this, not map_.
+    QWidget* map_page_ = nullptr;
+    QWidget* canvas_tools_ = nullptr;
+    QPushButton* measure_button_ = nullptr;
+    struct CanvasTool {
+        QPushButton* button = nullptr;
+        QString icon;  // resource path; empty for glyph-only buttons
+    };
+    QVector<CanvasTool> canvas_tool_buttons_;
+    /** Re-tints the tool icons for the current palette. */
+    void refreshCanvasToolIcons();
     QWidget* correspond_page_ = nullptr;
     QWidget* align_review_page_ = nullptr;
     PanZoomImageWidget* sat_pick_ = nullptr;

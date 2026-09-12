@@ -147,7 +147,8 @@ set(HEADERS
     include/satellite_tile_service.hpp
     include/satellite_ros_link.hpp
     include/satellite_mission_controller.hpp
-    include/satellite_download_dialog.hpp
+    include/satellite_site_prefetch.hpp
+    include/components/satellite_plan_confirm_dialog.hpp
     include/satellite_job_model.hpp
     include/similarity_2d.hpp
     include/pan_zoom_image.hpp
@@ -274,7 +275,8 @@ set(GUI_SOURCES
     src/satellite_ros_link.cpp
     src/satellite_mission_controller.cpp
     src/satellite_map_widget.cpp
-    src/satellite_download_dialog.cpp
+    src/satellite_site_prefetch.cpp
+    src/components/satellite_plan_confirm_dialog.cpp
     src/satellite_screen.cpp
     src/main.cpp
     resources.qrc
