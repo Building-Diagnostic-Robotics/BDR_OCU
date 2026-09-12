@@ -175,8 +175,9 @@ still wins; the setback is not a safety system.
    satellite image, then the same feature on the point cloud, and repeat.
    Picking alternates strictly so a pair can never half-form on one side.
    The instruction bar above the panes keeps the tally (`Satellite (n)`,
-   `Point Cloud (n)`, `n/N pairs`) and holds **Undo**, **Clear** and
-   **Align**.
+   `Point Cloud (n)`, `n/N pairs` — green once enough). The footer holds
+   **Clear pairs** beside Back and **Align (N pairs)** beside Next. Ctrl+Z
+   undoes the last pick.
 
    You need **3 pairs if the collection got a GPS fix, 5 if it did not**. The
    fix independently pins position and usually heading, which leaves the fit
@@ -185,12 +186,24 @@ still wins; the setback is not a safety system.
    points clustered in one corner solve badly regardless of count.
 
 5. **Align** solves a 2D similarity (scale, rotation, optional reflection,
-   translation) and shows the robot's origin drawn on the satellite image.
-   Check the marker sits where the robot actually stood. If it does not,
-   **Reselect**.
-6. **Confirm Alignment** commits the fit. The robot's origin becomes a
-   surveyed lat/lon anchor, and every ROI vertex exported at Send inherits
-   that accuracy.
+   translation) and commits it in the same click: an **Alignment
+   Successful / RMSE** card covers the point cloud, the robot's origin is
+   drawn on the satellite image, and Next enables. The origin becomes a
+   surveyed lat/lon anchor saved with the plan, and every ROI vertex
+   exported at Send inherits that accuracy. Check the marker sits where the
+   robot actually stood; if it does not, **Clear pairs** and pick again.
+6. Leaving the screen (top-bar Back) asks for confirmation and then clears
+   the collected map, picks and fit — a saved anchor stays with the plan,
+   but a cloud is never reused across visits. Loading a different plan
+   clears them too.
+
+### Plans created in the field
+
+A satellite plan saved on site has no cached imagery, and 3D Alignment needs
+the site image. Save Plan checks for a connection: if the laptop is online
+(a phone hotspot is enough) it runs the same download-and-save dialog as the
+office; if not, it saves the geometry and warns that the plan must be
+re-saved once with a connection before step 2 can run.
 
 ## Send
 

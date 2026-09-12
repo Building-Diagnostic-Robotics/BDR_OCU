@@ -797,8 +797,14 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  `SatellitePlanConfirmDialog`. The saved polygon is a draft the operator is
  expected to adjust on the roof.
 - **Field** (scan trim, "Start New Scan"): the five-step header and footer.
- Save Plan re-writes geometry only and carries `imagery_cache` forward —
- there is no internet on the roof, and a field edit must never fetch.
+ Save Plan on a plan that already carries `imagery_cache` re-writes
+ geometry only and carries the cache forward — a roof edit must never
+ fetch. A satellite plan **created in the field** (no cache) probes
+ `TileService::connectivityProbeUrl()` on Save (`probeImageryReachable`,
+ 3 s HEAD): online → the same `SatellitePlanConfirmDialog` + prefetch as
+ the office; offline → geometry-only save plus a `BdrMessageBox::warning`
+ that 3D Alignment needs the site cached once. Connectivity, not trim,
+ decides whether a save fetches.
 
 ### Alignment: robot map -> satellite imagery
 
@@ -806,19 +812,48 @@ GPS alone is a seed, not an answer. The accuracy step is an operator-picked
 correspondence fit, ported from the legacy `AutonomyScreen`:
 
 Step 2 (`Step::Alignment`, satellite mode) is the **full-width two-pane
-picker** per the Figma "3D Alignment — Match point cloud" frame: the rail
-(`rail_scroll_`) is hidden, `correspond_page_` fills the canvas column with
-an instruction bar (`#SatCorrBar`: prompt + Undo/Clear + `Satellite (n) /
-Point Cloud (n) / n/N pairs` legend + Align) over `sat_pick_` (tag
-"SATELLITE MAP") and `pcd_pane_stack_` (tag "3D POINT CLOUD": `pcd_empty_`
-capture CTA until `pcd_image_` exists, then `pcd_pick_`). `setSelectedStep
-(Alignment)` routes through `showCorrespondPage()`, which tolerates a
-missing site image (shows why in the pane) and a missing cloud (empty
-state) — the page must open before there is anything to pick. The footer
-carries `back_button_` ("← Back", previous available step) + Next. The
-measured variant keeps the rail's `align_card_` (grid canvas, no picker).
+picker** built 1:1 px from Figma file `I9tRcFEniAqnXD0yiMlo6W` frames
+`234:1954` (empty), `219:291` (captured, 0 pairs), `235:2246` (4 pairs)
+and `235:3146` (aligned) — the frames are 1920×1080 and every Stage 6
+constant (`kTopBarHeight = 49`, `kStepHeaderHeight = 55`,
+`kFooterBarHeight = 65`, `kCorrBarHeight = 45`) is the frame's px value
+unscaled. The rail (`rail_scroll_`) is hidden; `correspond_page_` fills
+the canvas column with a 45 px instruction bar (`#SatCorrBar`: amber info
+glyph + prompt, right side legend only: `● Satellite (n) ● Point Cloud
+(n)` + the `n/N pairs` mono chip, green via the `satisfied` dynamic
+property) over `sat_pick_` (58 %) and `pcd_pane_stack_` (42 %:
+`pcd_empty_` capture CTA until `pcd_image_` exists, then `pcd_pick_host_`
+= `pcd_pick_` with `align_success_card_` floated over it). Pane tags read
+`SATELLITE MAP — click to add correspondences` once both images exist.
+**Step-2 actions live in the shared footer**: `clear_pairs_button_` beside
+Back, `align_button_` (`Align (N pairs)`, zinc) beside Next; both only
+while a cloud exists, Align hidden once aligned. Undo has no button (the
+frame has none) — it is `QKeySequence::Undo` on the page. Icons are the
+Figma exports under `:/assets/satellite/{align_info,align,align_success,
+clear_pairs,footer_back,footer_next,scan_frame,refresh}.svg`.
+`setSelectedStep(Alignment)` routes through `showCorrespondPage()`, which
+tolerates a missing site image (shows why in the pane) and a missing cloud
+(empty state). The measured variant keeps the rail's `align_card_`.
 `setAlignStatus()` is the one writer for capture progress/errors — it feeds
 the rail label, the empty-state title/hint and both capture button labels.
+The top-bar title is `Satellite ROI Setup — <plan name>` (`refreshTitle()`,
+re-run on every name edit).
+
+**There is no review page.** Align solves AND anchors in one click
+(`onAlignClicked` → `applyAlignmentAnchor`): the robot origin is drawn on
+the satellite pane, the "Alignment Successful / RMSE" card covers the
+point cloud, Next enables. Clear pairs (or Undo) drops the fit with the
+picks. `alignment_confirmed_` now means "anchor applied", and is still
+required by `stepComplete(Alignment)` because a solve without geo bounds
+must not pass.
+
+**Alignment state is per visit.** `resetAlignmentSession()` clears
+`pcd_image_`, `pcd_bounds_m_`, `capture_gps_`, `sat_image_`,
+`site_manifest_`, picks, fit and `alignment_confirmed_`. It runs on
+`loadJob()` for a *different* id (same-id reloads after a mid-alignment
+Save keep the session), on `newJob()`, and on the top-bar Back after a
+`confirmDialog("Leave to Dashboard?")` — a collected map is never reused
+across plans or visits. A cancelled Back keeps everything.
 
 1. **Capture Point Cloud** (`satellite_map_capture.{hpp,cpp}`,
  `MapCaptureRunner`) SSHes `robot_map_collection.launch.py`: arm, 360° spin,
@@ -836,10 +871,11 @@ the rail label, the empty-state title/hint and both capture button labels.
  **3 with a GPS seed, 5 without** (`SatelliteScreen::minCorrespondences`) —
  the seed independently pins position and usually heading, so the fit only
  has to find scale.
-4. **Confirm** turns the fit into a surveyed robot anchor: robot_init (0,0)
- maps to a stitch pixel, and the manifest's `stitch_bounds` (normalized Web
- Mercator) turns that pixel into a lat/lon + heading, which becomes the ROI
- marker. Every exported ROI vertex inherits that accuracy.
+4. **Anchor** (same click, `applyAlignmentAnchor`) turns the fit into a
+ surveyed robot anchor: robot_init (0,0) maps to a stitch pixel, and the
+ manifest's `stitch_bounds` (normalized Web Mercator) turns that pixel into
+ a lat/lon + heading, which becomes the ROI marker and is saved on the job.
+ Every exported ROI vertex inherits that accuracy.
 
 The `(image, bounds_m)` pair IS the point cloud's scale bookkeeping — there
 is no metres-per-pixel member. Convert with `pcdImageToWorld` /
@@ -927,9 +963,15 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  to `<png>_dialog.png` / `_dialog_adv.png`. See docs/DEV_BYPASSES.md.
 - **Save Plan in the office must keep requiring an ROI and must keep
  running the prefetch.** The imagery is the save's product; a satellite
- plan without cached tiles is not usable on the roof. Conversely the field
- Save must never fetch — check `planning_only_ && plan_mode_ == Satellite`
- before opening the confirm dialog, never `plan_mode_` alone.
+ plan without cached tiles is not usable on the roof. In the field,
+ `saveJob()` must keep the three-way branch: cached → geometry only (never
+ fetch on the roof); uncached + online → `saveSatelliteWithImagery`;
+ uncached + offline → save + warning. Do not collapse it back to
+ "field never fetches" — that strands plans created on site — and do not
+ make the field save fetch unconditionally.
+- **`review` shot mode = the aligned state** (235:3146): success card over
+ the cloud, robot origin on the satellite pane, Next enabled. Do not
+ re-add a separate review/confirm page; the frame has none.
 - **Do not drop the imagery knobs** (radius / zoom / age / Clarity /
  Wayback). They are defaulted and behind Advanced, not removed — the
  operator asked for that explicitly.

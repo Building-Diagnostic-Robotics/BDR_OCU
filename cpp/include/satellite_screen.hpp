@@ -44,7 +44,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
-class QListWidget;
+class QNetworkAccessManager;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
@@ -165,7 +165,9 @@ private:
     QWidget* buildPlanCard(QWidget* parent);
     QWidget* buildAlignCard(QWidget* parent);
     QWidget* buildCorrespondPage();
-    QWidget* buildAlignReviewPage();
+    /** Top-bar title: trim name plus the plan name (frame: "Satellite ROI
+        Setup — <plan>"). */
+    void refreshTitle();
     QWidget* buildMissionCard(QWidget* parent);
     QWidget* buildTeleopCard(QWidget* parent);
     QWidget* buildLogCard(QWidget* parent);
@@ -203,6 +205,14 @@ private:
      * field edit must never try to fetch.
      */
     void saveJob();
+    /**
+     * The imagery save: frames the ROI, opens SatellitePlanConfirmDialog,
+     * and the site prefetch runs as part of saving. Office always; field
+     * only when probeImageryReachable() says the laptop is online.
+     */
+    void saveSatelliteWithImagery(Job job);
+    /** One-shot HEAD against TileService::connectivityProbeUrl(). */
+    void probeImageryReachable(std::function<void(bool)> done);
     /** The Job as the rail currently describes it, id allocated if new,
         with the fields the rail does not own carried forward. */
     Job jobFromRail() const;
@@ -231,6 +241,9 @@ private:
     void onSatellitePicked(QPointF image_pt);
     void onPcdPicked(QPointF image_pt);
     void onUndoCorrespondence();
+    /** "Clear pairs": drops every pick AND any fit built from them — a fit
+        whose evidence is gone is no longer something the operator can
+        stand behind. */
     void onClearCorrespondences();
     /** Writes the alignment status line to every surface that shows it
         (rail card in measured mode, the point-cloud pane's title in
@@ -238,9 +251,23 @@ private:
     void setAlignStatus(const QString& text);
     /** Dev shots: select step 2 while preserving a synthetic site image. */
     void devEnterAlignmentWithDemoSite();
+    /**
+     * Align: solves the similarity from the picks and, on success, anchors
+     * the robot marker from it in one go (frame: "Alignment Successful" +
+     * RMSE over the point cloud, robot origin drawn on the satellite pane).
+     * There is no separate review page — the check happens in place, and
+     * Clear pairs is the undo.
+     */
     void onAlignClicked();
-    void onReselectAlignment();
-    void onConfirmAlignment();
+    /**
+     * Turns a solved fit into the surveyed robot anchor: robot_init (0,0)
+     * -> stitch pixel -> lat/lon + heading -> ROI marker, persisted on the
+     * job. Every exported ROI vertex inherits the fit's accuracy.
+     */
+    void applyAlignmentAnchor();
+    /** Forgets the collected map, picks, fit and site image — session state
+        that must not leak into the next plan or the next visit. */
+    void resetAlignmentSession();
     void refreshCorrespondenceMarkers();
     void updateCorrespondenceUi();
     void updateAlignCardUi();
@@ -334,6 +361,10 @@ private:
     QWidget* footer_bar_ = nullptr;
     QPushButton* back_button_ = nullptr;
     QPushButton* next_button_ = nullptr;
+    // Step 2 only (frame): "Clear pairs" beside Back, "Align (N pairs)"
+    // beside Next. Hidden on every other step and until a cloud exists.
+    QPushButton* clear_pairs_button_ = nullptr;
+    QPushButton* align_button_ = nullptr;
     // The rail as a whole: hidden on the alignment step, whose frame is a
     // full-width two-pane picker with no side cards.
     QWidget* rail_scroll_ = nullptr;
@@ -397,31 +428,32 @@ private:
     /** Re-tints the tool icons for the current palette. */
     void refreshCanvasToolIcons();
     QWidget* correspond_page_ = nullptr;
-    QWidget* align_review_page_ = nullptr;
     PanZoomImageWidget* sat_pick_ = nullptr;
     PanZoomImageWidget* pcd_pick_ = nullptr;
-    PanZoomImageWidget* review_view_ = nullptr;
     // Instruction bar across the top of the picker: prompt on the left,
-    // per-pane pick counts + pair tally and the actions on the right.
+    // per-pane pick counts + pair tally on the right.
     QLabel* corr_instruction_ = nullptr;
-    QLabel* corr_legend_ = nullptr;
-    QLabel* review_status_ = nullptr;
-    QPushButton* corr_undo_button_ = nullptr;
-    QPushButton* corr_clear_button_ = nullptr;
-    QPushButton* align_button_ = nullptr;
+    QLabel* corr_sat_count_ = nullptr;
+    QLabel* corr_pcd_count_ = nullptr;
+    QLabel* corr_pairs_chip_ = nullptr;
     // Right pane: empty state (capture CTA) until a point cloud exists,
-    // then the pick view.
+    // then the pick view with the "Alignment Successful" card floated over
+    // it once a fit is in.
     QStackedWidget* pcd_pane_stack_ = nullptr;
     QWidget* pcd_empty_ = nullptr;
+    QWidget* pcd_pick_host_ = nullptr;
     QLabel* pcd_empty_title_ = nullptr;
     QLabel* pcd_empty_hint_ = nullptr;
     QPushButton* capture_button_ = nullptr;
+    QWidget* align_success_card_ = nullptr;
+    QLabel* align_success_rmse_ = nullptr;
 
     QTimer* motors_idle_timer_ = nullptr;
     int motors_idle_ticks_ = 0;
     bool complete_mission_in_flight_ = false;
 
     MapCaptureRunner* map_capture_ = nullptr;
+    QNetworkAccessManager* probe_nam_ = nullptr;  // lazily, for field saves
     QImage sat_image_;
     TileService::SiteManifest site_manifest_;
     QImage pcd_image_;
@@ -433,12 +465,12 @@ private:
     Similarity2D pcd_to_sat_;
     double align_rmse_m_ = 0.0;
     /**
-     * The operator accepted the fit and it became the robot anchor. Distinct
-     * from `pcd_to_sat_.valid`, which only means the solve converged: a fit
-     * can converge on badly-placed picks, which is exactly what the review
-     * page asks the operator to catch. Gating step 2 on the solve would put
-     * an enabled "Next" beside "Confirm alignment" and invite skipping the
-     * check.
+     * The fit became the robot anchor (applyAlignmentAnchor ran). Distinct
+     * from `pcd_to_sat_.valid`, which only means the solve converged: the
+     * anchor needs a site image with geographic bounds as well, and a solve
+     * that could not be geo-referenced must not pass step 2. The operator's
+     * visual check happens in place — robot origin drawn on the satellite
+     * pane — and Clear pairs is the way back.
      */
     bool alignment_confirmed_ = false;
 

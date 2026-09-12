@@ -381,6 +381,9 @@ void ScanSetupDialog::buildPlanSection(PlanSection& section,
         scroll->setFrameShape(QFrame::NoFrame);
         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scroll->setFixedHeight(kPlanListMaxVisible * (kPlanRowHeight + 8));
+        // The viewport paints the palette's Base brush (white) unless told
+        // not to; the #SetupPlanScroll rule only reaches the frame.
+        scroll->viewport()->setAutoFillBackground(false);
         section.body = scroll;
     } else {
         section.body = list_host;
@@ -632,7 +635,18 @@ void ScanSetupDialog::applyStyle() {
         #SetupSectionChevron {
             font-family: 'Arimo'; font-size: 12px; color: #9F9FA9;
         }
-        #SetupPlanScroll { background: transparent; }
+        #SetupPlanScroll, #SetupPlanScroll > QWidget > QWidget { background: transparent; }
+        #SetupPlanScroll QScrollBar:vertical {
+            background: transparent; width: 6px; margin: 0;
+        }
+        #SetupPlanScroll QScrollBar::handle:vertical {
+            background: #3F3F46; border-radius: 3px; min-height: 24px;
+        }
+        #SetupPlanScroll QScrollBar::handle:vertical:hover { background: #52525B; }
+        #SetupPlanScroll QScrollBar::add-line:vertical,
+        #SetupPlanScroll QScrollBar::sub-line:vertical { height: 0; }
+        #SetupPlanScroll QScrollBar::add-page:vertical,
+        #SetupPlanScroll QScrollBar::sub-page:vertical { background: transparent; }
         #SetupPlanName {
             font-family: 'Arimo'; font-weight: 600; font-size: 14px;
             color: #FAFAFA;

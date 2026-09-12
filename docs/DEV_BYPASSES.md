@@ -329,7 +329,9 @@ enumerates all sites.
       lands past the fetch ceiling to exercise scaled-tile overzoom).
       `correspond`/`review` call `SatelliteScreen::devSeedDemoAlignment()`,
       which fakes a collected robot map and a stitched site image so the
-      alignment pages can be shot without a robot or cached imagery;
+      picker can be shot without a robot or cached imagery (`correspond` =
+      4 pairs picked, Figma 235:2246; `review` = Align pressed, the
+      "Alignment Successful" card + robot origin, Figma 235:3146);
       `align_empty` (`devSeedDemoAlignmentEmpty()`) is step 2 before any
       capture — site on the left, the Capture Point Cloud empty state on
       the right. Both go through `devEnterAlignmentWithDemoSite()`, which

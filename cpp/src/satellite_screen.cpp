@@ -13,6 +13,7 @@
 #include "satellite_screen.hpp"
 
 #include "link_health_monitor.hpp"
+#include "components/bdr_message_box.hpp"
 #include "components/offline_finalize_dialog.hpp"
 #include "components/satellite_plan_confirm_dialog.hpp"
 #include "pan_zoom_image.hpp"
@@ -40,13 +41,16 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QShortcut>
 #include <QSlider>
 #include <QStackedWidget>
 #include <QStyle>
@@ -79,7 +83,14 @@ constexpr int kStepBadgeSize = 20;
 constexpr int kStepChipHeight = 34;
 constexpr int kFooterBarHeight = 65;
 constexpr int kFooterButtonHeight = 40;
-constexpr int kCorrBarHeight = 36;
+constexpr int kFooterGhostButtonHeight = 36;
+// Step 2 picker (Figma 235:2246 / 234:1954 / 219:291 / 235:3146), 1:1 px.
+constexpr int kCorrBarHeight = 45;
+constexpr int kCorrSatPaneStretch = 58;  // 1113.6 / 1920
+constexpr int kCorrPcdPaneStretch = 42;
+// Field Save Plan connectivity check. One HEAD; a hotspot answers well
+// inside this, and a dead link should not hold the operator for long.
+constexpr int kImageryProbeTimeoutMs = 3000;
 
 /**
  * Per-step operator-facing strings. `arrive` is what the footer promises
@@ -333,9 +344,8 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     content_layout->setSpacing(0);
     rail_scroll_ = buildLeftRail();
     content_layout->addWidget(rail_scroll_);
-    // One canvas area, three pages: the plan map, the correspondence picker,
-    // and the alignment review. The rail stays put across all three so the
-    // operator never loses the mission controls mid-alignment.
+    // One canvas area, two pages: the plan map and the step-2 correspondence
+    // picker (which hides the rail — see applyStepVisibility).
     auto* canvas_column = new QWidget(content);
     auto* canvas_column_layout = new QVBoxLayout(canvas_column);
     canvas_column_layout->setContentsMargins(0, 0, 0, 0);
@@ -356,8 +366,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     canvas_stack_->addWidget(map_page_);
     correspond_page_ = buildCorrespondPage();
     canvas_stack_->addWidget(correspond_page_);
-    align_review_page_ = buildAlignReviewPage();
-    canvas_stack_->addWidget(align_review_page_);
     canvas_column_layout->addWidget(canvas_stack_, 1);
     // The frame floats the footer over the canvas's bottom 65px. It goes in
     // as a real row instead: the bar is all but opaque anyway, and the map's
@@ -883,16 +891,30 @@ void SatelliteScreen::configureForPlanning() {
     applyModeVisibility();
 }
 
+void SatelliteScreen::refreshTitle() {
+    if (!lbl_title_) {
+        return;
+    }
+    const bool measured = plan_mode_ == PlanMode::Measured;
+    const QString base =
+        planning_only_ ? QStringLiteral("Plan Job")
+                       : (measured ? QStringLiteral("Measured ROI Setup")
+                                   : QStringLiteral("Satellite ROI Setup"));
+    const QString name = job_name_ ? job_name_->text().trimmed() : QString();
+    // Frame: "Satellite ROI Setup  — <plan>" with the plan name muted.
+    lbl_title_->setTextFormat(Qt::RichText);
+    lbl_title_->setText(
+        name.isEmpty()
+            ? base
+            : QStringLiteral("%1 <span style='font-weight:400;color:%2'>"
+                             "&nbsp;— %3</span>")
+                  .arg(base, mutedColor(dark_mode_), name.toHtmlEscaped()));
+}
+
 void SatelliteScreen::applyModeVisibility() {
     const bool measured = plan_mode_ == PlanMode::Measured;
     map_->setImageryEnabled(!measured);
-    if (lbl_title_) {
-        lbl_title_->setText(planning_only_
-                                ? QStringLiteral("Plan Job")
-                                : (measured
-                                       ? QStringLiteral("Measured ROI Scan")
-                                       : QStringLiteral("Satellite ROI Scan")));
-    }
+    refreshTitle();
     if (geo_tools_host_) {
         // Address search / tile download / imagery provenance are geographic
         // tools — meaningless on the measured (grid) canvas.
@@ -1021,6 +1043,28 @@ QWidget* SatelliteScreen::buildTopBar() {
                 "[nav] mission active — Complete Mission before leaving"));
             return;
         }
+        // Alignment state is per visit: a collected map or a fit must not
+        // survive into the next plan. The operator confirms the discard
+        // (a capture cost a robot spin) and the screen clears before the
+        // dashboard shows. A confirmed anchor is already on the job.
+        const bool have_align_session = !pcd_image_.isNull() ||
+                                        !correspondences_.isEmpty() ||
+                                        have_pending_sat_ || pcd_to_sat_.valid;
+        if (have_align_session &&
+            !confirmDialog(
+                QStringLiteral("Leave to Dashboard?"),
+                QStringLiteral(
+                    "The collected robot map and any correspondence picks "
+                    "will be cleared. A confirmed alignment stays saved "
+                    "with the plan; anything else is re-captured next "
+                    "time."),
+                QStringLiteral("Clear & Leave"))) {
+            return;
+        }
+        if (map_capture_ && map_capture_->busy()) {
+            map_capture_->cancel();
+        }
+        resetAlignmentSession();
         emit backRequested();
     });
     layout->addWidget(back, 0, Qt::AlignVCenter);
@@ -1180,12 +1224,18 @@ QWidget* SatelliteScreen::buildFooterBar() {
     layout->setContentsMargins(24, 12, 24, 12);
     layout->setSpacing(12);
 
-    // "← Back" (frame: ghost button, left edge). Steps back one available
-    // step; hidden on the first.
-    back_button_ = new QPushButton(QStringLiteral("←  Back"), footer_bar_);
+    // Frame (Figma 235:3113): left group = Back (icon 16 + label, 36 tall,
+    // 16px padding) and Clear pairs (icon 14, 12px padding); right group =
+    // Align (N pairs) (zinc, 40 tall, 20px padding) and Next (green, 24px
+    // padding, arrow after the label). Disabled = 40% opacity, not a grey
+    // restyle.
+    back_button_ = new QPushButton(QStringLiteral("Back"), footer_bar_);
     back_button_->setObjectName("SatGhostButton");
+    back_button_->setIcon(QIcon(loadTintedSvg(
+        QStringLiteral(":/assets/satellite/footer_back.svg"), 16, 16)));
+    back_button_->setIconSize(QSize(16, 16));
     back_button_->setCursor(Qt::PointingHandCursor);
-    back_button_->setFixedHeight(kFooterButtonHeight);
+    back_button_->setFixedHeight(kFooterGhostButtonHeight);
     connect(back_button_, &QPushButton::clicked, this, [this] {
         for (int i = int(selected_step_) - 1; i >= 0; --i) {
             if (stepAvailable(Step(i))) {
@@ -1195,12 +1245,45 @@ QWidget* SatelliteScreen::buildFooterBar() {
         }
     });
     layout->addWidget(back_button_, 0, Qt::AlignVCenter);
+
+    clear_pairs_button_ =
+        new QPushButton(QStringLiteral("Clear pairs"), footer_bar_);
+    clear_pairs_button_->setObjectName("SatGhostButtonMuted");
+    clear_pairs_button_->setIcon(QIcon(loadTintedSvg(
+        QStringLiteral(":/assets/satellite/clear_pairs.svg"), 14, 14)));
+    clear_pairs_button_->setIconSize(QSize(14, 14));
+    clear_pairs_button_->setCursor(Qt::PointingHandCursor);
+    clear_pairs_button_->setFixedHeight(kFooterGhostButtonHeight);
+    clear_pairs_button_->hide();
+    connect(clear_pairs_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onClearCorrespondences);
+    layout->addWidget(clear_pairs_button_, 0, Qt::AlignVCenter);
     layout->addStretch(1);
+
+    align_button_ = new QPushButton(QStringLiteral("Align (0 pairs)"), footer_bar_);
+    align_button_->setObjectName("SatAlignButton");
+    align_button_->setIcon(QIcon(loadTintedSvg(
+        QStringLiteral(":/assets/satellite/align.svg"), 16, 16)));
+    align_button_->setIconSize(QSize(16, 16));
+    align_button_->setCursor(Qt::PointingHandCursor);
+    align_button_->setFixedHeight(kFooterButtonHeight);
+    align_button_->setEnabled(false);
+    align_button_->hide();
+    connect(align_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onAlignClicked);
+    layout->addWidget(align_button_, 0, Qt::AlignVCenter);
 
     next_button_ = new QPushButton(footer_bar_);
     next_button_->setObjectName("SatNextButton");
     next_button_->setCursor(Qt::PointingHandCursor);
     next_button_->setFixedHeight(kFooterButtonHeight);
+    // Trailing arrow: QPushButton draws its icon before the text, so flip
+    // the button's layout direction — the icon lands after the label and
+    // the text itself is unaffected.
+    next_button_->setLayoutDirection(Qt::RightToLeft);
+    next_button_->setIcon(QIcon(loadTintedSvg(
+        QStringLiteral(":/assets/satellite/footer_next.svg"), 16, 16)));
+    next_button_->setIconSize(QSize(16, 16));
     connect(next_button_, &QPushButton::clicked, this, [this] {
         setSelectedStep(nextAvailableStep(selected_step_));
     });
@@ -1332,12 +1415,8 @@ void SatelliteScreen::setSelectedStep(Step step) {
         } else if (plan_mode_ == PlanMode::Satellite) {
             // Step 2 IS the two-pane picker (frame): it opens with the point
             // cloud pane in its capture empty state, so the operator never
-            // needs a rail card to get the capture started. A solved fit
-            // awaiting confirmation stays on the review page.
-            if (!(pcd_to_sat_.valid && !alignment_confirmed_ &&
-                  canvas_stack_->currentWidget() == align_review_page_)) {
-                showCorrespondPage();
-            }
+            // needs a rail card to get the capture started.
+            showCorrespondPage();
         }
     }
     applyModeVisibility();
@@ -1464,6 +1543,16 @@ void SatelliteScreen::refreshStepUi() {
         footer_bar_->setVisible(has_next || has_prev);
         back_button_->setVisible(has_prev);
         next_button_->setVisible(has_next);
+        // Clear pairs / Align belong to the satellite picker, and only once
+        // there is a cloud to pick against (frames 219:291 vs 234:1954).
+        const bool picker_actions = !planning_only_ &&
+                                    selected_step_ == Step::Alignment &&
+                                    plan_mode_ == PlanMode::Satellite &&
+                                    !pcd_image_.isNull();
+        clear_pairs_button_->setVisible(picker_actions);
+        // Aligned (235:3146): the footer drops Align; Clear pairs stays as
+        // the way back to re-pick.
+        align_button_->setVisible(picker_actions && !pcd_to_sat_.valid);
         if (has_next) {
             next_button_->setText(
                 QStringLiteral("Next: %1")
@@ -1603,9 +1692,11 @@ QWidget* SatelliteScreen::buildAlignCard(QWidget* parent) {
 }
 
 QWidget* SatelliteScreen::buildCorrespondPage() {
-    // Frame: a one-line instruction bar under the stepper, then two panes
-    // edge to edge — SATELLITE MAP left, 3D POINT CLOUD right — with the
-    // footer's Back / Next below. No side rail on this step.
+    // Figma "3D Alignment — Match point cloud" (frames 234:1954 empty,
+    // 219:291 captured, 235:2246 picked, 235:3146 aligned): a 45px
+    // instruction bar under the stepper, then two panes edge to edge —
+    // SATELLITE MAP (58%) left, 3D POINT CLOUD (42%) right. Footer actions
+    // (Clear pairs / Align) live in the shared footer bar. No side rail.
     auto* page = new QWidget;
     page->setObjectName("SatCanvasPage");
     page->setAttribute(Qt::WA_StyledBackground, true);
@@ -1613,19 +1704,19 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    // ---- Instruction bar ----
+    // ---- Instruction bar (235:2377) ----
     auto* bar = new QWidget(page);
     bar->setObjectName("SatCorrBar");
     bar->setAttribute(Qt::WA_StyledBackground, true);
     bar->setFixedHeight(kCorrBarHeight);
     auto* bar_layout = new QHBoxLayout(bar);
-    bar_layout->setContentsMargins(16, 0, 16, 0);
-    bar_layout->setSpacing(10);
+    bar_layout->setContentsMargins(24, 10, 24, 10);
+    bar_layout->setSpacing(12);
 
-    auto* info = new QLabel(QStringLiteral("i"), bar);
-    info->setObjectName("SatCorrInfo");
+    auto* info = new QLabel(bar);
+    info->setPixmap(loadTintedSvg(
+        QStringLiteral(":/assets/satellite/align_info.svg"), 16, 16));
     info->setFixedSize(16, 16);
-    info->setAlignment(Qt::AlignCenter);
     bar_layout->addWidget(info, 0, Qt::AlignVCenter);
 
     corr_instruction_ = new QLabel(bar);
@@ -1633,35 +1724,37 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
     corr_instruction_->setTextFormat(Qt::RichText);
     bar_layout->addWidget(corr_instruction_, 1, Qt::AlignVCenter);
 
-    corr_undo_button_ = new QPushButton(QStringLiteral("Undo"), bar);
-    corr_clear_button_ = new QPushButton(QStringLiteral("Clear"), bar);
-    for (QPushButton* button : {corr_undo_button_, corr_clear_button_}) {
-        button->setObjectName("SatGhostButton");
-        button->setFixedHeight(26);
-        button->setCursor(Qt::PointingHandCursor);
-        bar_layout->addWidget(button, 0, Qt::AlignVCenter);
-    }
-
-    corr_legend_ = new QLabel(bar);
-    corr_legend_->setObjectName("SatCorrLegend");
-    corr_legend_->setTextFormat(Qt::RichText);
-    bar_layout->addWidget(corr_legend_, 0, Qt::AlignVCenter);
-
-    align_button_ = new QPushButton(QStringLiteral("Align"), bar);
-    align_button_->setObjectName("SatSendButton");
-    align_button_->setFixedHeight(26);
-    align_button_->setMinimumWidth(72);
-    align_button_->setCursor(Qt::PointingHandCursor);
-    align_button_->setEnabled(false);
-    bar_layout->addWidget(align_button_, 0, Qt::AlignVCenter);
+    // Legend (235:2391): 12px dot + label per pane, then the pair chip.
+    auto makeLegendEntry = [&](const QString& dot_color, QLabel** out_label) {
+        auto* entry = new QWidget(bar);
+        auto* entry_layout = new QHBoxLayout(entry);
+        entry_layout->setContentsMargins(0, 0, 0, 0);
+        entry_layout->setSpacing(8);
+        auto* dot = new QLabel(entry);
+        dot->setFixedSize(12, 12);
+        dot->setStyleSheet(
+            QStringLiteral("background-color: %1; border-radius: 6px;")
+                .arg(dot_color));
+        entry_layout->addWidget(dot, 0, Qt::AlignVCenter);
+        *out_label = new QLabel(entry);
+        (*out_label)->setObjectName("SatCorrLegend");
+        entry_layout->addWidget(*out_label, 0, Qt::AlignVCenter);
+        return entry;
+    };
+    bar_layout->addWidget(
+        makeLegendEntry(QStringLiteral("#2b7fff"), &corr_sat_count_), 0,
+        Qt::AlignVCenter);
+    bar_layout->addSpacing(4);
+    bar_layout->addWidget(
+        makeLegendEntry(QStringLiteral("#fe9a00"), &corr_pcd_count_), 0,
+        Qt::AlignVCenter);
+    bar_layout->addSpacing(4);
+    corr_pairs_chip_ = new QLabel(bar);
+    corr_pairs_chip_->setObjectName("SatCorrPairsChip");
+    corr_pairs_chip_->setFixedHeight(24);
+    corr_pairs_chip_->setAlignment(Qt::AlignCenter);
+    bar_layout->addWidget(corr_pairs_chip_, 0, Qt::AlignVCenter);
     layout->addWidget(bar);
-
-    connect(corr_undo_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::onUndoCorrespondence);
-    connect(corr_clear_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::onClearCorrespondences);
-    connect(align_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::onAlignClicked);
 
     // ---- Two panes ----
     auto* split = new QWidget(page);
@@ -1674,36 +1767,34 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
     sat_pick_ = new PanZoomImageWidget(split);
     sat_pick_->setCornerTag(QStringLiteral("SATELLITE MAP"));
     sat_pick_->setEmptyText(QString());
-    split_layout->addWidget(sat_pick_, 1);
+    split_layout->addWidget(sat_pick_, kCorrSatPaneStretch);
 
     pcd_pane_stack_ = new QStackedWidget(split);
+
+    // Empty state (234:2209): 48px frame icon, muted title, green CTA with a
+    // 16px refresh glyph, 12px hint. Column is 235px in the frame.
     pcd_empty_ = new QWidget(pcd_pane_stack_);
-    pcd_empty_->setObjectName("SatPcdEmpty");
+    pcd_empty_->setObjectName("SatPcdPane");
     pcd_empty_->setAttribute(Qt::WA_StyledBackground, true);
     {
         auto* grid = new QGridLayout(pcd_empty_);
         grid->setContentsMargins(0, 0, 0, 0);
         grid->setSpacing(0);
-        // Corner tag mirrors the pick view's so the pane keeps its identity
-        // across the empty -> captured switch.
         auto* tag = new QLabel(QStringLiteral("3D POINT CLOUD"), pcd_empty_);
         tag->setObjectName("SatPaneTag");
         grid->addWidget(tag, 0, 0, Qt::AlignLeft | Qt::AlignTop);
 
         auto* column = new QWidget(pcd_empty_);
-        // Wide enough for the hint on one line; the button would otherwise
-        // set the column width and wrap it.
-        column->setFixedWidth(360);
+        column->setFixedWidth(300);  // hint is 247px wide at 12px
         auto* col = new QVBoxLayout(column);
-        col->setContentsMargins(24, 0, 24, 0);
+        col->setContentsMargins(0, 0, 0, 0);
         col->setSpacing(0);
         auto* icon = new QLabel(column);
         icon->setPixmap(loadTintedSvg(
-            QStringLiteral(":/assets/satellite/scan_frame.svg"), 28, 28,
-            QStringLiteral("#52525C")));
-        icon->setAlignment(Qt::AlignCenter);
+            QStringLiteral(":/assets/satellite/scan_frame.svg"), 48, 48));
+        icon->setFixedSize(48, 48);
         col->addWidget(icon, 0, Qt::AlignHCenter);
-        col->addSpacing(18);
+        col->addSpacing(16);
         pcd_empty_title_ =
             new QLabel(QStringLiteral("Point cloud not yet captured"), column);
         pcd_empty_title_->setObjectName("SatPcdEmptyTitle");
@@ -1713,16 +1804,14 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
         col->addSpacing(16);
         capture_button_ =
             new QPushButton(QStringLiteral("Capture Point Cloud"), column);
-        capture_button_->setObjectName("SatSendButton");
+        capture_button_->setObjectName("SatNextButton");
         capture_button_->setIcon(QIcon(loadTintedSvg(
-            QStringLiteral(":/assets/satellite/refresh.svg"), 16, 16,
-            QStringLiteral("#FFFFFF"))));
+            QStringLiteral(":/assets/satellite/refresh.svg"), 16, 16)));
         capture_button_->setIconSize(QSize(16, 16));
-        capture_button_->setFixedHeight(36);
-        capture_button_->setMinimumWidth(168);
+        capture_button_->setFixedHeight(kFooterButtonHeight);
         capture_button_->setCursor(Qt::PointingHandCursor);
         col->addWidget(capture_button_, 0, Qt::AlignHCenter);
-        col->addSpacing(12);
+        col->addSpacing(16);
         pcd_empty_hint_ = new QLabel(
             QStringLiteral("Robot will rotate 360° to scan surroundings"),
             column);
@@ -1736,69 +1825,66 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
     }
     pcd_pane_stack_->addWidget(pcd_empty_);
 
-    pcd_pick_ = new PanZoomImageWidget(pcd_pane_stack_);
-    pcd_pick_->setCornerTag(QStringLiteral("3D POINT CLOUD"));
-    // The point-cloud raster is sparse single-pixel hits; smoothing averages
-    // them into the transparent background and they disappear.
-    pcd_pick_->setSmoothScaling(false);
-    pcd_pane_stack_->addWidget(pcd_pick_);
-    split_layout->addWidget(pcd_pane_stack_, 1);
+    // Pick view with the success card (235:4011) floated over its centre
+    // once a fit is in. The card is a sibling in the same grid cell so it
+    // tracks the pane through resizes without manual geometry.
+    pcd_pick_host_ = new QWidget(pcd_pane_stack_);
+    {
+        auto* grid = new QGridLayout(pcd_pick_host_);
+        grid->setContentsMargins(0, 0, 0, 0);
+        grid->setSpacing(0);
+        pcd_pick_ = new PanZoomImageWidget(pcd_pick_host_);
+        pcd_pick_->setCornerTag(QStringLiteral("3D POINT CLOUD"));
+        // The point-cloud raster is sparse single-pixel hits; smoothing
+        // averages them into the transparent background and they disappear.
+        pcd_pick_->setSmoothScaling(false);
+        grid->addWidget(pcd_pick_, 0, 0);
+
+        align_success_card_ = new QWidget(pcd_pick_host_);
+        align_success_card_->setObjectName("SatAlignSuccess");
+        align_success_card_->setAttribute(Qt::WA_StyledBackground, true);
+        // Let clicks pass to the pane behind: the card is a receipt, and a
+        // pick that lands under it should still count.
+        align_success_card_->setAttribute(Qt::WA_TransparentForMouseEvents,
+                                          true);
+        auto* card = new QVBoxLayout(align_success_card_);
+        card->setContentsMargins(24, 24, 24, 24);
+        card->setSpacing(0);
+        auto* check = new QLabel(align_success_card_);
+        check->setPixmap(loadTintedSvg(
+            QStringLiteral(":/assets/satellite/align_success.svg"), 40, 40));
+        check->setFixedSize(40, 40);
+        card->addWidget(check, 0, Qt::AlignHCenter);
+        card->addSpacing(8);
+        auto* title =
+            new QLabel(QStringLiteral("Alignment Successful"), align_success_card_);
+        title->setObjectName("SatAlignSuccessTitle");
+        title->setAlignment(Qt::AlignCenter);
+        card->addWidget(title);
+        card->addSpacing(4);
+        align_success_rmse_ = new QLabel(align_success_card_);
+        align_success_rmse_->setObjectName("SatAlignSuccessRmse");
+        align_success_rmse_->setAlignment(Qt::AlignCenter);
+        card->addWidget(align_success_rmse_);
+        align_success_card_->hide();
+        grid->addWidget(align_success_card_, 0, 0, Qt::AlignCenter);
+    }
+    pcd_pane_stack_->addWidget(pcd_pick_host_);
+    split_layout->addWidget(pcd_pane_stack_, kCorrPcdPaneStretch);
     layout->addWidget(split, 1);
 
     connect(sat_pick_, &PanZoomImageWidget::pointPicked, this,
             &SatelliteScreen::onSatellitePicked);
     connect(pcd_pick_, &PanZoomImageWidget::pointPicked, this,
             &SatelliteScreen::onPcdPicked);
-    return page;
-}
 
-QWidget* SatelliteScreen::buildAlignReviewPage() {
-    auto* page = new QWidget;
-    page->setObjectName("SatCanvasPage");
-    page->setAttribute(Qt::WA_StyledBackground, true);
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
-
-    // Same instruction-bar shape as the picker: fit summary left, the two
-    // decisions right.
-    auto* bar = new QWidget(page);
-    bar->setObjectName("SatCorrBar");
-    bar->setAttribute(Qt::WA_StyledBackground, true);
-    bar->setFixedHeight(kCorrBarHeight);
-    auto* bar_layout = new QHBoxLayout(bar);
-    bar_layout->setContentsMargins(16, 0, 16, 0);
-    bar_layout->setSpacing(10);
-    auto* info = new QLabel(QStringLiteral("i"), bar);
-    info->setObjectName("SatCorrInfo");
-    info->setFixedSize(16, 16);
-    info->setAlignment(Qt::AlignCenter);
-    bar_layout->addWidget(info, 0, Qt::AlignVCenter);
-    review_status_ = new QLabel(bar);
-    review_status_->setObjectName("SatCorrText");
-    review_status_->setTextFormat(Qt::RichText);
-    bar_layout->addWidget(review_status_, 1, Qt::AlignVCenter);
-    auto* reselect = new QPushButton(QStringLiteral("Reselect"), bar);
-    reselect->setObjectName("SatGhostButton");
-    reselect->setFixedHeight(26);
-    reselect->setCursor(Qt::PointingHandCursor);
-    bar_layout->addWidget(reselect, 0, Qt::AlignVCenter);
-    auto* confirm = new QPushButton(QStringLiteral("Confirm Alignment"), bar);
-    confirm->setObjectName("SatSendButton");
-    confirm->setFixedHeight(26);
-    confirm->setMinimumWidth(140);
-    confirm->setCursor(Qt::PointingHandCursor);
-    bar_layout->addWidget(confirm, 0, Qt::AlignVCenter);
-    layout->addWidget(bar);
-
-    review_view_ = new PanZoomImageWidget(page);
-    review_view_->setCornerTag(QStringLiteral("ALIGNMENT PREVIEW"));
-    layout->addWidget(review_view_, 1);
-
-    connect(reselect, &QPushButton::clicked, this,
-            &SatelliteScreen::onReselectAlignment);
-    connect(confirm, &QPushButton::clicked, this,
-            &SatelliteScreen::onConfirmAlignment);
+    // The frame has no Undo control; Clear pairs is the visible reset. A
+    // single misclick should not cost every pick though, so Undo stays as
+    // the platform shortcut while the picker is showing.
+    auto* undo = new QShortcut(QKeySequence::Undo, page);
+    undo->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(undo, &QShortcut::activated, this,
+            &SatelliteScreen::onUndoCorrespondence);
     return page;
 }
 
@@ -1838,8 +1924,10 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     job_name_->setFixedHeight(36);
     // Step 1's gate reads this field, so the footer has to re-evaluate as it
     // is typed rather than only on save.
-    connect(job_name_, &QLineEdit::textChanged, this,
-            [this](const QString&) { refreshStepUi(); });
+    connect(job_name_, &QLineEdit::textChanged, this, [this](const QString&) {
+        refreshStepUi();
+        refreshTitle();
+    });
     layout->addWidget(job_name_);
 
     job_address_ = new QLineEdit(card);
@@ -2343,7 +2431,7 @@ QPushButton#SatNextButton {
 }
 QPushButton#SatNextButton:hover { background-color: #00A86D; }
 QPushButton#SatNextButton:disabled {
-    background-color: @BUTTON_BG@; border: 1px solid @INPUT_BORDER@; color: @MUTED@;
+    background-color: rgba(0, 153, 102, 0.40); color: rgba(255, 255, 255, 0.40);
 }
 #SatRailScroll { background-color: @PAGE@; border: none; border-right: 1px solid @SURFACE_BORDER@; }
 #SatRail { background-color: @PAGE@; }
@@ -2439,34 +2527,68 @@ QPlainTextEdit#SatLog {
     color: @MUTED@; font-family: monospace; font-size: 11px;
 }
 #SatCanvasPage { background-color: @PAGE@; }
+/* ---- Step 2 picker (Figma 235:2246 family; dark-only surfaces) ---- */
 #SatCorrBar {
-    background-color: @SURFACE@; border-bottom: 1px solid @SURFACE_BORDER@;
+    background-color: rgba(39, 39, 42, 0.80); border-bottom: 1px solid #3f3f47;
 }
-QLabel#SatCorrInfo {
-    background: transparent; border: 1px solid #fbbf24; border-radius: 8px;
-    font-family: 'Arimo'; font-weight: 700; font-size: 10px; color: #fbbf24;
+QLabel#SatCorrText { background: transparent; font-family: 'Arimo'; font-size: 14px; }
+QLabel#SatCorrLegend {
+    background: transparent; font-family: 'Arimo'; font-size: 14px; color: #9f9fa9;
 }
-QLabel#SatCorrText { background: transparent; font-family: 'Arimo'; font-size: 12px; }
-QLabel#SatCorrLegend { background: transparent; font-family: 'Arimo'; font-size: 12px; }
-QPushButton#SatGhostButton {
-    background-color: transparent; border: 1px solid @INPUT_BORDER@; border-radius: 6px;
-    font-family: 'Arimo'; font-weight: 600; font-size: 12px; color: @TEXT@;
-    padding: 0 10px;
+QLabel#SatCorrPairsChip {
+    background-color: rgba(63, 63, 71, 0.40); border-radius: 4px; padding: 0 8px;
+    font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 14px;
+    color: #9f9fa9;
 }
-QPushButton#SatGhostButton:hover { background-color: @BUTTON_HOVER@; }
-QPushButton#SatGhostButton:disabled { color: @MUTED@; border-color: @CARD_BORDER@; }
-#SatCorrSplit { background-color: @SURFACE_BORDER@; }
-#SatPcdEmpty { background-color: #0b0b0b; }
+QLabel#SatCorrPairsChip[satisfied="true"] {
+    background-color: rgba(0, 188, 125, 0.10); color: #00d492;
+}
+/* Footer ghost buttons (235:3115 / 235:3121): no border, icon + label. */
+QPushButton#SatGhostButton, QPushButton#SatGhostButtonMuted {
+    background-color: transparent; border: none; border-radius: 10px;
+    font-family: 'Arimo'; font-weight: 500; font-size: 14px; color: #9f9fa9;
+    padding: 0 16px;
+}
+QPushButton#SatGhostButtonMuted { color: #71717b; padding: 0 12px; }
+QPushButton#SatGhostButton:hover, QPushButton#SatGhostButtonMuted:hover {
+    background-color: @BUTTON_HOVER@;
+}
+QPushButton#SatGhostButton:disabled, QPushButton#SatGhostButtonMuted:disabled {
+    color: rgba(113, 113, 123, 0.40);
+}
+/* Align (235:3131): zinc primary, 40% opacity when disabled. */
+QPushButton#SatAlignButton {
+    background-color: #3f3f47; border: none; border-radius: 10px;
+    font-family: 'Arimo'; font-weight: 700; font-size: 14px; color: #FFFFFF;
+    padding: 0 20px;
+}
+QPushButton#SatAlignButton:hover { background-color: #52525c; }
+QPushButton#SatAlignButton:disabled {
+    background-color: rgba(63, 63, 71, 0.40); color: rgba(255, 255, 255, 0.40);
+}
+#SatCorrSplit { background-color: #27272a; }
+#SatPcdPane { background-color: #0b0b0b; }
 QLabel#SatPaneTag {
-    background-color: rgba(11, 11, 11, 0.90); border: 1px solid #3f3f46; border-radius: 4px;
-    font-family: 'DejaVu Sans Mono'; font-size: 8pt; letter-spacing: 0.8px; color: #d4d4d8;
-    padding: 4px 8px; margin: 8px;
+    background-color: rgba(24, 24, 27, 0.90); border: 1px solid #3f3f47; border-radius: 4px;
+    font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px;
+    color: #d4d4d8; padding: 4px 10px; margin: 8px 12px;
 }
 QLabel#SatPcdEmptyTitle {
-    background: transparent; font-family: 'Arimo'; font-size: 13px; color: #d4d4d8;
+    background: transparent; font-family: 'Arimo'; font-size: 14px; color: #71717b;
 }
 QLabel#SatPcdEmptyHint {
-    background: transparent; font-family: 'Arimo'; font-size: 11px; color: #52525C;
+    background: transparent; font-family: 'Arimo'; font-size: 12px; color: #52525c;
+}
+#SatAlignSuccess {
+    background-color: #18181b; border: 1px solid rgba(0, 188, 125, 0.50); border-radius: 14px;
+}
+QLabel#SatAlignSuccessTitle {
+    background: transparent; font-family: 'Arimo'; font-weight: 600; font-size: 16px;
+    color: #FFFFFF;
+}
+QLabel#SatAlignSuccessRmse {
+    background: transparent; font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace;
+    font-size: 14px; color: #9f9fa9;
 }
 )QSS");
     qss.replace(QStringLiteral("@PAGE@"), page_bg);
@@ -2611,6 +2733,12 @@ void SatelliteScreen::markCurrentPlanCompleted() {
 }
 
 void SatelliteScreen::loadJob(const Job& job) {
+    if (job.id != current_job_id_) {
+        // A different plan: the collected map, picks and fit belonged to the
+        // previous one. Re-selecting the same id (every save routes back
+        // through here) keeps the session — mid-alignment saves happen.
+        resetAlignmentSession();
+    }
     current_job_id_ = job.id;
     job_name_->setText(job.name);
     job_address_->setText(job.address);
@@ -2664,6 +2792,7 @@ void SatelliteScreen::loadJob(const Job& job) {
 }
 
 void SatelliteScreen::newJob() {
+    resetAlignmentSession();
     current_job_id_.clear();
     jobs_combo_->setCurrentIndex(0);
     job_name_->clear();
@@ -2764,19 +2893,73 @@ void SatelliteScreen::saveJob() {
     // forward for the non-operator saves — GPS, alignment, prefetch.)
     job.last_executed_at = QDateTime();
 
-    const bool office_satellite =
-        planning_only_ && plan_mode_ == PlanMode::Satellite;
-    if (!office_satellite) {
-        // Field or measured: geometry only. The roof has no internet, and a
-        // measured plan was never drawn against imagery.
+    if (plan_mode_ == PlanMode::Measured) {
+        // A measured plan was never drawn against imagery: geometry only.
         if (persistJob(job)) {
             appendLog(QStringLiteral("[plan] saved '%1'").arg(job.name));
         }
         return;
     }
+    if (planning_only_) {
+        // Office: the save IS the imagery step.
+        saveSatelliteWithImagery(job);
+        return;
+    }
+    if (job.imagery_cache.cached) {
+        // Field edit of a plan that already carries its site pyramid: the
+        // roof has no internet, and a geometry tweak must never fetch.
+        if (persistJob(job)) {
+            appendLog(QStringLiteral("[plan] saved '%1'").arg(job.name));
+        }
+        return;
+    }
+    // Field, satellite, nothing cached — the plan was created on site. Whether
+    // it can become field-ready is a connectivity question, not a trim one:
+    // a laptop on hotspot in the parking lot can cache the site right here.
+    save_button_->setEnabled(false);
+    save_button_->setText(QStringLiteral("Checking connection…"));
+    probeImageryReachable([this, job](bool online) {
+        save_button_->setEnabled(true);
+        save_button_->setText(QStringLiteral("Save Plan"));
+        if (online) {
+            saveSatelliteWithImagery(job);
+            return;
+        }
+        if (persistJob(job)) {
+            appendLog(QStringLiteral(
+                          "[plan] saved '%1' WITHOUT imagery — no connection; "
+                          "3D Alignment needs the site cached once")
+                          .arg(job.name));
+            BdrMessageBox::warning(
+                this, QStringLiteral("Saved without imagery"),
+                QStringLiteral(
+                    "No internet connection, so the satellite site could not "
+                    "be cached with this plan.\n\n3D Alignment needs that "
+                    "cached site image. Re-save this plan once the laptop has "
+                    "a connection (hotspot is fine) and it will download "
+                    "then."));
+        }
+    });
+}
 
-    // Office: the save IS the imagery step. Without an ROI there is nothing
-    // to size the download by.
+void SatelliteScreen::probeImageryReachable(std::function<void(bool)> done) {
+    if (!probe_nam_) {
+        probe_nam_ = new QNetworkAccessManager(this);
+    }
+    QNetworkRequest request(TileService::connectivityProbeUrl());
+    request.setTransferTimeout(kImageryProbeTimeoutMs);
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+                         QNetworkRequest::AlwaysNetwork);
+    QNetworkReply* reply = probe_nam_->head(request);
+    connect(reply, &QNetworkReply::finished, this,
+            [reply, done = std::move(done)] {
+                reply->deleteLater();
+                done(reply->error() == QNetworkReply::NoError);
+            });
+}
+
+void SatelliteScreen::saveSatelliteWithImagery(Job job) {
+    // Without an ROI there is nothing to size the download by.
     geo::GeoPoint centroid;
     double roi_radius_m = 0.0;
     if (!map_->roiExtent(&centroid, &roi_radius_m)) {
@@ -3024,8 +3207,9 @@ QString SatelliteScreen::loadSiteImage() {
         assets + QStringLiteral("/imagery.json"));
     if (site_manifest_.stitch_relpath.isEmpty()) {
         return QStringLiteral(
-            "No stitched site image — save this plan in the office with "
-            "a connection first.");
+            "No cached site image for this plan.\nGo back to Satellite Map "
+            "and Save Plan while the laptop has a connection — the site "
+            "downloads as part of the save.");
     }
     if (!sat_image_.load(assets + QLatin1Char('/') +
                          site_manifest_.stitch_relpath)) {
@@ -3193,6 +3377,12 @@ void SatelliteScreen::onPcdPicked(QPointF image_pt) {
 }
 
 void SatelliteScreen::onUndoCorrespondence() {
+    if (pcd_to_sat_.valid) {
+        // Undoing into a solved fit means the fit's evidence is changing —
+        // it goes with the pick, same as Clear.
+        pcd_to_sat_ = Similarity2D{};
+        alignment_confirmed_ = false;
+    }
     if (have_pending_sat_) {
         have_pending_sat_ = false;
     } else if (!correspondences_.isEmpty()) {
@@ -3204,7 +3394,34 @@ void SatelliteScreen::onUndoCorrespondence() {
 void SatelliteScreen::onClearCorrespondences() {
     correspondences_.clear();
     have_pending_sat_ = false;
+    pcd_to_sat_ = Similarity2D{};
+    align_rmse_m_ = 0.0;
+    alignment_confirmed_ = false;
     updateCorrespondenceUi();
+}
+
+void SatelliteScreen::resetAlignmentSession() {
+    if (map_capture_ && map_capture_->busy()) {
+        map_capture_->cancel();
+    }
+    pcd_image_ = QImage();
+    pcd_bounds_m_ = QRectF();
+    capture_gps_ = GpsFix{};
+    sat_image_ = QImage();
+    site_manifest_ = TileService::SiteManifest{};
+    correspondences_.clear();
+    have_pending_sat_ = false;
+    pcd_to_sat_ = Similarity2D{};
+    align_rmse_m_ = 0.0;
+    alignment_confirmed_ = false;
+    if (sat_pick_) {
+        sat_pick_->clearOverlays();
+        sat_pick_->setImage(QImage());
+        pcd_pick_->clearOverlays();
+        pcd_pick_->setImage(QImage());
+        updateCorrespondenceUi();
+    }
+    setAlignStatus(QString());
 }
 
 void SatelliteScreen::refreshCorrespondenceMarkers() {
@@ -3220,26 +3437,44 @@ void SatelliteScreen::refreshCorrespondenceMarkers() {
     sat_pick_->setMarkers(sat_points, numbers);
     pcd_pick_->setMarkers(pcd_points, numbers);
     sat_pick_->setPendingMarker(pending_sat_px_, have_pending_sat_);
+    // A solved fit draws the robot's origin on the satellite pane — the
+    // in-place check that the frame replaces the old review page with.
+    if (pcd_to_sat_.valid) {
+        const QPointF origin_px = pcd_to_sat_.apply(QPointF(0.0, 0.0));
+        const QPointF dir = pcd_to_sat_.apply(QPointF(1.0, 0.0)) - origin_px;
+        sat_pick_->setRobotPose(origin_px, std::atan2(dir.y(), dir.x()), true);
+    } else {
+        sat_pick_->setRobotPose(QPointF(), 0.0, false);
+    }
 }
 
 void SatelliteScreen::updateCorrespondenceUi() {
     const bool have_pcd = !pcd_image_.isNull();
     const bool can_pick = have_pcd && !sat_image_.isNull();
+    const bool aligned = pcd_to_sat_.valid;
     sat_pick_->setImage(sat_image_);
     pcd_pick_->setImage(pcd_image_);
-    pcd_pane_stack_->setCurrentWidget(have_pcd ? static_cast<QWidget*>(pcd_pick_)
-                                               : pcd_empty_);
+    pcd_pane_stack_->setCurrentWidget(have_pcd ? pcd_pick_host_ : pcd_empty_);
 
     // Strict alternation: satellite first, then the matching map point. The
     // inactive pane is dimmed and refuses clicks so a pair can never be
     // half-formed on the wrong side. Before a point cloud exists neither
     // pane picks — the satellite pane is just the site for orientation.
+    // Once aligned both panes stay pickable: an extra pair re-solves.
     sat_pick_->setPickEnabled(can_pick && !have_pending_sat_);
     pcd_pick_->setPickEnabled(can_pick && have_pending_sat_);
-    sat_pick_->setDimmed(can_pick && have_pending_sat_);
-    pcd_pick_->setDimmed(can_pick && !have_pending_sat_);
+    sat_pick_->setDimmed(can_pick && have_pending_sat_ && !aligned);
+    pcd_pick_->setDimmed(can_pick && !have_pending_sat_ && !aligned);
+    sat_pick_->setCornerTag(can_pick ? QStringLiteral(
+                                           "SATELLITE MAP — click to add "
+                                           "correspondences")
+                                     : QStringLiteral("SATELLITE MAP"));
+    pcd_pick_->setCornerTag(can_pick ? QStringLiteral(
+                                           "3D POINT CLOUD — click to add "
+                                           "correspondences")
+                                     : QStringLiteral("3D POINT CLOUD"));
     const int next = correspondences_.size() + 1;
-    if (can_pick) {
+    if (can_pick && !aligned) {
         sat_pick_->setStatusText(
             have_pending_sat_
                 ? QStringLiteral("Satellite point %1 picked").arg(next)
@@ -3257,12 +3492,10 @@ void SatelliteScreen::updateCorrespondenceUi() {
     const int required = minCorrespondences();
     const int pairs = correspondences_.size();
     const int sat_count = pairs + (have_pending_sat_ ? 1 : 0);
-    corr_undo_button_->setEnabled(have_pending_sat_ || pairs > 0);
-    corr_clear_button_->setEnabled(pairs > 0);
-    align_button_->setEnabled(can_pick && pairs >= required);
+    const QString muted = QStringLiteral("#71717b");
+    const QString text = QStringLiteral("#e4e4e7");
 
-    const QString muted = mutedColor(dark_mode_);
-    const QString text = textColor(dark_mode_);
+    // Instruction (235:2385): prompt in light grey, requirement muted.
     corr_instruction_->setText(
         have_pcd
             ? QStringLiteral(
@@ -3271,31 +3504,49 @@ void SatelliteScreen::updateCorrespondenceUi() {
                   "<span style='color:%2'>(min %3 pairs required%4)</span>")
                   .arg(text, muted)
                   .arg(required)
-                  .arg(capture_gps_.valid
-                           ? QString()
-                           : QStringLiteral(" — no GPS seed"))
+                  .arg(capture_gps_.valid ? QString()
+                                          : QStringLiteral(" — no GPS seed"))
             : QStringLiteral(
                   "<span style='color:%1'>Capture a point cloud from the "
-                  "robot</span> <span style='color:%2'>— then click "
-                  "matching features on both views to align it</span>")
+                  "robot</span> <span style='color:%2'>— then click matching "
+                  "features on both views to align it</span>")
                   .arg(text, muted));
-    // Legend: per-pane pick counts in the marker palette's first two hues,
-    // then the pair tally against the requirement.
-    corr_legend_->setText(
-        QStringLiteral(
-            "<span style='color:#38bdf8'>●</span> "
-            "<span style='color:%1'>Satellite (%2)</span>"
-            "&nbsp;&nbsp;&nbsp;"
-            "<span style='color:#fbbf24'>●</span> "
-            "<span style='color:%1'>Point Cloud (%3)</span>"
-            "&nbsp;&nbsp;&nbsp;"
-            "<span style='color:%4;font-family:monospace'>%5/%6 pairs</span>")
-            .arg(text)
-            .arg(sat_count)
-            .arg(pairs)
-            .arg(pairs >= required ? QStringLiteral("#00D492") : muted)
-            .arg(pairs)
-            .arg(required));
+    corr_sat_count_->setText(QStringLiteral("Satellite (%1)").arg(sat_count));
+    corr_pcd_count_->setText(QStringLiteral("Point Cloud (%1)").arg(pairs));
+    // Pair chip (235:2402): mono "n/N pairs", green tint once satisfied.
+    corr_pairs_chip_->setText(
+        QStringLiteral("%1/%2 pairs").arg(pairs).arg(required));
+    corr_pairs_chip_->setProperty("satisfied", pairs >= required);
+    corr_pairs_chip_->style()->unpolish(corr_pairs_chip_);
+    corr_pairs_chip_->style()->polish(corr_pairs_chip_);
+
+    // Footer actions (shared bar): Align (N pairs), Clear pairs.
+    if (align_button_) {
+        align_button_->setText(QStringLiteral("Align (%1 pair%2)")
+                                   .arg(pairs)
+                                   .arg(pairs == 1 ? QString()
+                                                   : QStringLiteral("s")));
+        align_button_->setEnabled(can_pick && pairs >= required && !aligned);
+        align_button_->setToolTip(
+            aligned ? QStringLiteral("Aligned — add or clear pairs to re-solve")
+            : pairs >= required
+                ? QString()
+                : QStringLiteral("Pick at least %1 pairs").arg(required));
+        clear_pairs_button_->setEnabled(pairs > 0 || have_pending_sat_);
+    }
+
+    // Success card (235:4011) over the point cloud.
+    if (align_success_card_) {
+        align_success_card_->setVisible(aligned);
+        if (aligned) {
+            align_success_rmse_->setText(
+                QStringLiteral("RMSE: %1")
+                    .arg(units::formatLength(align_rmse_m_, 3)));
+        }
+    }
+    // The step gate and the footer's Align visibility both read pcd_image_ /
+    // pcd_to_sat_, which only change on the transitions that end up here.
+    refreshStepUi();
 }
 
 void SatelliteScreen::setAlignStatus(const QString& status) {
@@ -3355,44 +3606,22 @@ void SatelliteScreen::onAlignClicked() {
     }
     pcd_to_sat_ = fit->transform;
     align_rmse_m_ = fit->rmse_m;
-
-    const QPointF origin_px = pcd_to_sat_.apply(QPointF(0.0, 0.0));
-    const QPointF x_axis_px = pcd_to_sat_.apply(QPointF(1.0, 0.0));
-    const QPointF dir = x_axis_px - origin_px;
-    review_view_->setImage(sat_image_);
-    review_view_->setRobotPose(origin_px, std::atan2(dir.y(), dir.x()), true);
-    review_view_->fitToView();
-
-    review_status_->setText(
-        QStringLiteral(
-            "<span style='color:%1'>Check the robot marker sits where the "
-            "robot actually stood</span> <span style='color:%2'>— fit from "
-            "%3 pairs (%4), RMSE %5, %6 px/m</span>")
-            .arg(textColor(dark_mode_), mutedColor(dark_mode_))
-            .arg(correspondences_.size())
-            .arg(pcd_to_sat_.reflected
-                     ? QStringLiteral("scale, rotation, reflection")
-                     : QStringLiteral("scale, rotation"))
-            .arg(units::formatLength(align_rmse_m_, 3))
-            .arg(pcd_to_sat_.scalePxPerM(), 0, 'f', 2));
-    canvas_stack_->setCurrentWidget(align_review_page_);
-}
-
-void SatelliteScreen::onReselectAlignment() {
-    pcd_to_sat_ = Similarity2D{};
-    alignment_confirmed_ = false;
+    appendLog(QStringLiteral("[align] fit from %1 pairs (%2), RMSE %3, "
+                             "%4 px/m")
+                  .arg(correspondences_.size())
+                  .arg(pcd_to_sat_.reflected
+                           ? QStringLiteral("scale, rotation, reflection")
+                           : QStringLiteral("scale, rotation"))
+                  .arg(units::formatLength(align_rmse_m_, 3))
+                  .arg(pcd_to_sat_.scalePxPerM(), 0, 'f', 2));
+    applyAlignmentAnchor();
     updateCorrespondenceUi();
-    canvas_stack_->setCurrentWidget(correspond_page_);
 }
 
-void SatelliteScreen::onConfirmAlignment() {
+void SatelliteScreen::applyAlignmentAnchor() {
     if (!pcd_to_sat_.valid || sat_image_.isNull()) {
         return;
     }
-    // The fit's product is a surveyed robot anchor. robot_init (0,0) maps to
-    // a stitch pixel, and the manifest's Web Mercator bounds turn that pixel
-    // into a lat/lon — so the operator no longer eyeballs "Place Robot", and
-    // every ROI vertex exported at Send inherits the fit's accuracy.
     const QPointF origin_px = pcd_to_sat_.apply(QPointF(0.0, 0.0));
     const QPointF x_axis_px = pcd_to_sat_.apply(QPointF(1.0, 0.0));
     const geo::GeoPoint origin = TileService::geoFromStitchPixel(
@@ -3423,15 +3652,13 @@ void SatelliteScreen::onConfirmAlignment() {
         }
     }
     appendLog(QStringLiteral(
-                  "[align] confirmed — robot anchored at %1, %2 heading %3° "
-                  "(RMSE %4)")
+                  "[align] robot anchored at %1, %2 heading %3° (RMSE %4)")
                   .arg(origin.lat, 0, 'f', 7)
                   .arg(origin.lon, 0, 'f', 7)
                   .arg(marker.heading_deg, 0, 'f', 1)
                   .arg(units::formatLength(align_rmse_m_, 3)));
     alignment_confirmed_ = true;
     updateAlignCardUi();
-    canvas_stack_->setCurrentWidget(map_page_);
 }
 
 void SatelliteScreen::updateAlignCardUi() {

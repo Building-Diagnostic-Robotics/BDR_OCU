@@ -20,8 +20,15 @@
     <file alias="scansetup/measured.svg">../App resource/icons/scan_measured.svg</file>
     <file alias="scansetup/satellite.svg">../App resource/icons/scan_satellite.svg</file>
     <file alias="scansetup/delete.svg">../App resource/icons/scan_plan_delete.svg</file>
+    <!-- Stage 6 step 2 picker — exported from Figma I9tRcFEniAqnXD0yiMlo6W (235:2246 family). -->
     <file alias="satellite/scan_frame.svg">../App resource/icons/satellite_scan_frame.svg</file>
     <file alias="satellite/refresh.svg">../App resource/icons/satellite_refresh.svg</file>
+    <file alias="satellite/align_info.svg">../App resource/icons/satellite_align_info.svg</file>
+    <file alias="satellite/align.svg">../App resource/icons/satellite_align.svg</file>
+    <file alias="satellite/align_success.svg">../App resource/icons/satellite_align_success.svg</file>
+    <file alias="satellite/clear_pairs.svg">../App resource/icons/satellite_clear_pairs.svg</file>
+    <file alias="satellite/footer_back.svg">../App resource/icons/satellite_footer_back.svg</file>
+    <file alias="satellite/footer_next.svg">../App resource/icons/satellite_footer_next.svg</file>
 
     <!-- Exploration frame assets (Figma node 58:2) -->
     <file alias="exploration/fpv_feed.svg">../App resource/icons/exploration_fpv_feed.svg</file>

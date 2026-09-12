@@ -171,7 +171,8 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
     } else if (!empty_text_.isEmpty()) {
         painter.setPen(QColor(0x5d, 0x65, 0x6c));
         painter.setFont(QFont(QStringLiteral("Arimo"), 11));
-        painter.drawText(rect(), Qt::AlignCenter, empty_text_);
+        painter.drawText(rect().adjusted(48, 0, -48, 0),
+                         Qt::AlignCenter | Qt::TextWordWrap, empty_text_);
     }
 
     auto drawMarker = [&](const QPointF& img_pt, int number, bool pending) {
@@ -224,16 +225,16 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
     }
 
     if (!corner_tag_.isEmpty()) {
-        // Frame spec: mono uppercase tag, dark chip with a hairline border,
-        // 8 px in from the top-left corner.
-        QFont tag_font(QStringLiteral("DejaVu Sans Mono"), 8);
-        tag_font.setLetterSpacing(QFont::AbsoluteSpacing, 0.8);
+        // Figma 235:2407: 12px mono, 10/4 padding, rgba(24,24,27,.9) chip
+        // with a #3f3f47 hairline, 12 px in and 8 px down from the corner.
+        QFont tag_font(QStringLiteral("Liberation Mono"));
+        tag_font.setPixelSize(12);
         painter.setFont(tag_font);
         const QFontMetrics fm(tag_font);
-        const QRectF chip(8, 8, fm.horizontalAdvance(corner_tag_) + 16,
+        const QRectF chip(12, 8, fm.horizontalAdvance(corner_tag_) + 20,
                           fm.height() + 8);
-        painter.setPen(QPen(QColor(0x3f, 0x3f, 0x46), 1));
-        painter.setBrush(QColor(0x0b, 0x0b, 0x0b, 230));
+        painter.setPen(QPen(QColor(0x3f, 0x3f, 0x47), 1));
+        painter.setBrush(QColor(0x18, 0x18, 0x1b, 230));
         painter.drawRoundedRect(chip, 4, 4);
         painter.setPen(QColor(0xd4, 0xd4, 0xd8));
         painter.drawText(chip, Qt::AlignCenter, corner_tag_);
