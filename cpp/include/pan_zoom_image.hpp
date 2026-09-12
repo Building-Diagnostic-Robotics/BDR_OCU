@@ -38,7 +38,13 @@ public:
     void setDimmed(bool dimmed);
     /** Off for the point-cloud raster: smoothing blurs sparse hits away. */
     void setSmoothScaling(bool enabled);
+    /** Turn prompt, drawn as a pill along the bottom edge. */
     void setStatusText(const QString& text);
+    /** Pane identity ("SATELLITE MAP"), a small mono tag in the top-left
+        corner per the Stage 6 alignment frame. */
+    void setCornerTag(const QString& tag);
+    /** Shown centred when no image is loaded. */
+    void setEmptyText(const QString& text);
     void setMarkers(const QVector<QPointF>& image_points,
                     const QVector<int>& numbers);
     void setPendingMarker(const QPointF& image_pt, bool visible);
@@ -79,6 +85,8 @@ private:
     bool dimmed_ = false;
     bool smooth_scaling_ = true;
     QString status_text_;
+    QString corner_tag_;
+    QString empty_text_ = QStringLiteral("No image loaded");
     QVector<QPointF> markers_;
     QVector<int> marker_numbers_;
     QPointF pending_marker_;

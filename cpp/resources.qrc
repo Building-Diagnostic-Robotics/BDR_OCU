@@ -20,6 +20,8 @@
     <file alias="scansetup/measured.svg">../App resource/icons/scan_measured.svg</file>
     <file alias="scansetup/satellite.svg">../App resource/icons/scan_satellite.svg</file>
     <file alias="scansetup/delete.svg">../App resource/icons/scan_plan_delete.svg</file>
+    <file alias="satellite/scan_frame.svg">../App resource/icons/satellite_scan_frame.svg</file>
+    <file alias="satellite/refresh.svg">../App resource/icons/satellite_refresh.svg</file>
 
     <!-- Exploration frame assets (Figma node 58:2) -->
     <file alias="exploration/fpv_feed.svg">../App resource/icons/exploration_fpv_feed.svg</file>

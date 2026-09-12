@@ -814,6 +814,11 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     stage6_->configureForScan(
                         SatelliteScreen::PlanMode::Satellite);
                     stage6_->devSeedDemoPlan();
+                } else if (shot_mode == QStringLiteral("align_empty")) {
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
+                    stage6_->devSeedDemoPlan();
+                    stage6_->devSeedDemoAlignmentEmpty();
                 } else if (shot_mode == QStringLiteral("correspond") ||
                            shot_mode == QStringLiteral("review")) {
                     stage6_->configureForScan(

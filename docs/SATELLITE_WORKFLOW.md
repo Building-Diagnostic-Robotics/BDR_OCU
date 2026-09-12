@@ -161,15 +161,22 @@ still wins; the setback is not a safety system.
 
 1. Start New Scan, pick the saved plan, fill in the metadata modal.
 2. **Find Robot** recentres the canvas on the best position known so far.
-3. **Collect Map from Robot** arms the motors, spins 360° in place, then
-   drives a short forward/back leg. That produces three things: a point
-   cloud, a final pose, and a GPS fix with a heading (when the baseline was
-   long enough to resolve one). The OCU pulls the cloud and pose back, re-
-   origins the cloud on the final pose, and renders it top-down.
-4. **Pick Correspondences** puts the site image and the point-cloud raster
-   side by side. Click a feature on the satellite image, then the same
-   feature on the map, and repeat. Picking alternates strictly so a pair can
-   never half-form on one side.
+3. Step 2, **3D Alignment**, is a full-width two-pane picker with no side
+   rail: **SATELLITE MAP** (the cached site image) on the left, **3D POINT
+   CLOUD** on the right. Until a cloud exists the right pane is an empty
+   state with one button, **Capture Point Cloud**. It arms the motors, spins
+   360° in place, then drives a short forward/back leg. That produces three
+   things: a point cloud, a final pose, and a GPS fix with a heading (when
+   the baseline was long enough to resolve one). The OCU pulls the cloud and
+   pose back, re-origins the cloud on the final pose, and renders it top-
+   down into the right pane. Capture progress replaces the pane title and
+   the button becomes **Cancel Capture** while it runs.
+4. Pick correspondences straight in the two panes. Click a feature on the
+   satellite image, then the same feature on the point cloud, and repeat.
+   Picking alternates strictly so a pair can never half-form on one side.
+   The instruction bar above the panes keeps the tally (`Satellite (n)`,
+   `Point Cloud (n)`, `n/N pairs`) and holds **Undo**, **Clear** and
+   **Align**.
 
    You need **3 pairs if the collection got a GPS fix, 5 if it did not**. The
    fix independently pins position and usually heading, which leaves the fit
@@ -180,8 +187,8 @@ still wins; the setback is not a safety system.
 5. **Align** solves a 2D similarity (scale, rotation, optional reflection,
    translation) and shows the robot's origin drawn on the satellite image.
    Check the marker sits where the robot actually stood. If it does not,
-   **Reselect correspondences**.
-6. **Confirm alignment** commits the fit. The robot's origin becomes a
+   **Reselect**.
+6. **Confirm Alignment** commits the fit. The robot's origin becomes a
    surveyed lat/lon anchor, and every ROI vertex exported at Send inherits
    that accuracy.
 

@@ -90,6 +90,8 @@ public:
     /** Dev screenshot hook: fakes a collected map + site image and opens the
         correspondence picker (or, with `review`, a solved alignment). */
     void devSeedDemoAlignment(bool review);
+    /** Dev shot only: step 2 before any capture (site + capture CTA). */
+    void devSeedDemoAlignmentEmpty();
 
     /** Mirrors the Dashboard MQTT battery sample onto the top-bar pill
         (same contract as ExplorationScreen/PlannerScreen). */
@@ -229,8 +231,13 @@ private:
     void onSatellitePicked(QPointF image_pt);
     void onPcdPicked(QPointF image_pt);
     void onUndoCorrespondence();
-    void onDeleteSelectedCorrespondence();
     void onClearCorrespondences();
+    /** Writes the alignment status line to every surface that shows it
+        (rail card in measured mode, the point-cloud pane's title in
+        satellite mode) and mirrors the capture button labels. */
+    void setAlignStatus(const QString& text);
+    /** Dev shots: select step 2 while preserving a synthetic site image. */
+    void devEnterAlignmentWithDemoSite();
     void onAlignClicked();
     void onReselectAlignment();
     void onConfirmAlignment();
@@ -325,7 +332,11 @@ private:
 
     // Footer action bar.
     QWidget* footer_bar_ = nullptr;
+    QPushButton* back_button_ = nullptr;
     QPushButton* next_button_ = nullptr;
+    // The rail as a whole: hidden on the alignment step, whose frame is a
+    // full-width two-pane picker with no side cards.
+    QWidget* rail_scroll_ = nullptr;
 
     // Plan card.
     QWidget* plan_card_ = nullptr;
@@ -390,13 +401,21 @@ private:
     PanZoomImageWidget* sat_pick_ = nullptr;
     PanZoomImageWidget* pcd_pick_ = nullptr;
     PanZoomImageWidget* review_view_ = nullptr;
-    QListWidget* corr_list_ = nullptr;
-    QLabel* corr_status_ = nullptr;
+    // Instruction bar across the top of the picker: prompt on the left,
+    // per-pane pick counts + pair tally and the actions on the right.
+    QLabel* corr_instruction_ = nullptr;
+    QLabel* corr_legend_ = nullptr;
     QLabel* review_status_ = nullptr;
     QPushButton* corr_undo_button_ = nullptr;
-    QPushButton* corr_delete_button_ = nullptr;
     QPushButton* corr_clear_button_ = nullptr;
     QPushButton* align_button_ = nullptr;
+    // Right pane: empty state (capture CTA) until a point cloud exists,
+    // then the pick view.
+    QStackedWidget* pcd_pane_stack_ = nullptr;
+    QWidget* pcd_empty_ = nullptr;
+    QLabel* pcd_empty_title_ = nullptr;
+    QLabel* pcd_empty_hint_ = nullptr;
+    QPushButton* capture_button_ = nullptr;
 
     QTimer* motors_idle_timer_ = nullptr;
     int motors_idle_ticks_ = 0;

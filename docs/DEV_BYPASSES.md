@@ -323,13 +323,18 @@ enumerates all sites.
 - [ ] `BDR_DEV_STAGE6_SHOT=<png path>` — jumps to the Stage 6 planning
       screen on startup, renders offscreen, saves a PNG, and exits.
       Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
-      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|correspond|review|plan|plan_confirm|scan_setup`,
+      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|align_empty|correspond|review|plan|plan_confirm|scan_setup`,
       `BDR_DEV_STAGE6_SHOT_STAGE=3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`,
       `BDR_DEV_STAGE6_SHOT_FIT=1` (`plan` only: `fitToRoi()` after seeding,
       lands past the fetch ceiling to exercise scaled-tile overzoom).
       `correspond`/`review` call `SatelliteScreen::devSeedDemoAlignment()`,
       which fakes a collected robot map and a stitched site image so the
-      alignment pages can be shot without a robot or cached imagery.
+      alignment pages can be shot without a robot or cached imagery;
+      `align_empty` (`devSeedDemoAlignmentEmpty()`) is step 2 before any
+      capture — site on the left, the Capture Point Cloud empty state on
+      the right. Both go through `devEnterAlignmentWithDemoSite()`, which
+      keeps the synthetic site image across `showCorrespondPage()`'s
+      `loadSiteImage()` failure (there is no saved job in a shot).
       `plan` is the office trim with the demo plan seeded and the robot
       marker selected (rotate handle visible); `plan_confirm` additionally
       renders the Save Plan confirmation to `<png>_dialog.png` and, with
@@ -349,6 +354,7 @@ enumerates all sites.
 `AppShellWindow::AppShellWindow` (tagged `BDR_REWIRE`), plus
 `SatelliteScreen::devSeedDemoPlan()`, `devSelectMarker()`,
 `devRenderPlanConfirm()`, `devFitRoi()`, `devSeedDemoAlignment()`,
+`devSeedDemoAlignmentEmpty()`, `devEnterAlignmentWithDemoSite()`,
 `SatellitePlanConfirmDialog::devSetAdvancedOpen()`, and
 `ScanSetupDialog::devSetCompletedOpen()`.
 

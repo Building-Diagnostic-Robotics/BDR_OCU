@@ -805,7 +805,22 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
 GPS alone is a seed, not an answer. The accuracy step is an operator-picked
 correspondence fit, ported from the legacy `AutonomyScreen`:
 
-1. **Collect Map from Robot** (`satellite_map_capture.{hpp,cpp}`,
+Step 2 (`Step::Alignment`, satellite mode) is the **full-width two-pane
+picker** per the Figma "3D Alignment — Match point cloud" frame: the rail
+(`rail_scroll_`) is hidden, `correspond_page_` fills the canvas column with
+an instruction bar (`#SatCorrBar`: prompt + Undo/Clear + `Satellite (n) /
+Point Cloud (n) / n/N pairs` legend + Align) over `sat_pick_` (tag
+"SATELLITE MAP") and `pcd_pane_stack_` (tag "3D POINT CLOUD": `pcd_empty_`
+capture CTA until `pcd_image_` exists, then `pcd_pick_`). `setSelectedStep
+(Alignment)` routes through `showCorrespondPage()`, which tolerates a
+missing site image (shows why in the pane) and a missing cloud (empty
+state) — the page must open before there is anything to pick. The footer
+carries `back_button_` ("← Back", previous available step) + Next. The
+measured variant keeps the rail's `align_card_` (grid canvas, no picker).
+`setAlignStatus()` is the one writer for capture progress/errors — it feeds
+the rail label, the empty-state title/hint and both capture button labels.
+
+1. **Capture Point Cloud** (`satellite_map_capture.{hpp,cpp}`,
  `MapCaptureRunner`) SSHes `robot_map_collection.launch.py`: arm, 360° spin,
  forward/back GPS baseline, save map + `*_final_pose.yaml`. The remote script
  backgrounds the launch and polls for a manifest newer than the one on disk,
@@ -813,9 +828,10 @@ correspondence fit, ported from the legacy `AutonomyScreen`:
  because Fast-LIO, Livox and the ODrive nodes ignore the shutdown request.
  The PCD and pose come back over `scp`, the cloud is re-origined on the
  robot's final pose, and `renderTopDownAlphaDensity` rasterises it.
-2. **Pick Correspondences** shows the stitched `site.jpg` and the top-down
- raster side by side in two `PanZoomImageWidget`s, strictly alternating
+2. **Pick correspondences** in the two `PanZoomImageWidget`s (stitched
+ `site.jpg` left, top-down raster right), strictly alternating
  satellite-then-map so a pair can never half-form on the wrong side.
+ Neither pane picks until both images exist.
 3. **Align** runs `estimateSimilarity2D(pcd_m, sat_px)`. Minimum pairs is
  **3 with a GPS seed, 5 without** (`SatelliteScreen::minCorrespondences`) —
  the seed independently pins position and usually heading, so the fit only
@@ -905,7 +921,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  controller_status, not by the axis-state RPC's ack. The request being
  accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
- (`_DARK`, `_MODE=measured|measured_map|scan|correspond|review|plan|
+ (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|plan|
  plan_confirm`, `_STAGE=3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog
  to `<png>_dialog.png` / `_dialog_adv.png`. See docs/DEV_BYPASSES.md.

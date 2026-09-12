@@ -69,6 +69,16 @@ void PanZoomImageWidget::setStatusText(const QString& text) {
     update();
 }
 
+void PanZoomImageWidget::setCornerTag(const QString& tag) {
+    corner_tag_ = tag;
+    update();
+}
+
+void PanZoomImageWidget::setEmptyText(const QString& text) {
+    empty_text_ = text;
+    update();
+}
+
 void PanZoomImageWidget::setMarkers(const QVector<QPointF>& image_points,
                                     const QVector<int>& numbers) {
     markers_ = image_points;
@@ -158,10 +168,10 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
             offset_,
             QSizeF(image_.width() * scale_, image_.height() * scale_));
         painter.drawImage(dest, image_);
-    } else {
+    } else if (!empty_text_.isEmpty()) {
         painter.setPen(QColor(0x5d, 0x65, 0x6c));
-        painter.drawText(rect(), Qt::AlignCenter,
-                         QStringLiteral("No image loaded"));
+        painter.setFont(QFont(QStringLiteral("Arimo"), 11));
+        painter.drawText(rect(), Qt::AlignCenter, empty_text_);
     }
 
     auto drawMarker = [&](const QPointF& img_pt, int number, bool pending) {
@@ -213,12 +223,35 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
         painter.fillRect(rect(), QColor(0, 0, 0, 140));
     }
 
+    if (!corner_tag_.isEmpty()) {
+        // Frame spec: mono uppercase tag, dark chip with a hairline border,
+        // 8 px in from the top-left corner.
+        QFont tag_font(QStringLiteral("DejaVu Sans Mono"), 8);
+        tag_font.setLetterSpacing(QFont::AbsoluteSpacing, 0.8);
+        painter.setFont(tag_font);
+        const QFontMetrics fm(tag_font);
+        const QRectF chip(8, 8, fm.horizontalAdvance(corner_tag_) + 16,
+                          fm.height() + 8);
+        painter.setPen(QPen(QColor(0x3f, 0x3f, 0x46), 1));
+        painter.setBrush(QColor(0x0b, 0x0b, 0x0b, 230));
+        painter.drawRoundedRect(chip, 4, 4);
+        painter.setPen(QColor(0xd4, 0xd4, 0xd8));
+        painter.drawText(chip, Qt::AlignCenter, corner_tag_);
+    }
+
     if (!status_text_.isEmpty()) {
+        // Turn prompt as a bottom-centre pill, clear of the corner tag and
+        // of whatever the operator is about to click near the top.
+        QFont status_font(QStringLiteral("Arimo"), 10, QFont::DemiBold);
+        painter.setFont(status_font);
+        const QFontMetrics fm(status_font);
+        const double w = fm.horizontalAdvance(status_text_) + 28;
+        const QRectF pill((width() - w) / 2.0, height() - 40, w, 28);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 190));
+        painter.drawRoundedRect(pill, 14, 14);
         painter.setPen(satpal::text());
-        painter.setFont(QFont(QStringLiteral("Arimo"), 11, QFont::DemiBold));
-        const QRectF banner(12, 12, width() - 24, 28);
-        painter.fillRect(banner, QColor(0, 0, 0, 180));
-        painter.drawText(banner, Qt::AlignCenter, status_text_);
+        painter.drawText(pill, Qt::AlignCenter, status_text_);
     }
 }
 
