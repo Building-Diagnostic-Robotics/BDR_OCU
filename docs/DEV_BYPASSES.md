@@ -324,7 +324,9 @@ enumerates all sites.
       screen on startup, renders offscreen, saves a PNG, and exits.
       Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
       `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|correspond|review|plan|plan_confirm`,
-      `BDR_DEV_STAGE6_SHOT_STAGE=3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`.
+      `BDR_DEV_STAGE6_SHOT_STAGE=3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`,
+      `BDR_DEV_STAGE6_SHOT_FIT=1` (`plan` only: `fitToRoi()` after seeding,
+      lands past the fetch ceiling to exercise scaled-tile overzoom).
       `correspond`/`review` call `SatelliteScreen::devSeedDemoAlignment()`,
       which fakes a collected robot map and a stitched site image so the
       alignment pages can be shot without a robot or cached imagery.
