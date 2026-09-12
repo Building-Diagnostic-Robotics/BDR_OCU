@@ -34,6 +34,15 @@ public:
     double centerLat() const;
     double centerLon() const;
     int zoom() const { return zoom_; }
+    /** One level about the view centre (the wheel zooms about the cursor). */
+    void zoomIn();
+    void zoomOut();
+    /**
+     * Frames the ROI (polygon, else rectangle) at the largest zoom that
+     * fits it inside the viewport with `margin_px` to spare. Returns false
+     * and leaves the view alone when there is no ROI.
+     */
+    bool fitToRoi(int margin_px = 56);
 
     /**
      * Measured (grid) mode: disables tile fetching/painting and the Esri
@@ -53,8 +62,42 @@ public:
     void setPolygon(const RoiPolygon& poly);
     /** Next left-clicks append polygon vertices; right-click / Finish closes. */
     void armPolygonDraw();
+    /**
+     * Next press-drag-release draws a north-up rectangle whose diagonal is
+     * the drag. Produces the same four-vertex RoiPolygon the polygon tool
+     * would, so everything downstream (chips, pins, roof edges, Send) is
+     * indifferent to which tool drew it.
+     */
+    void armRectangleDraw();
+    /** Drops any armed draw / placement / ruler without touching the plan. */
+    void cancelInteraction();
+    bool isDrawing() const { return draw_polygon_armed_ || draw_rect_armed_; }
+    bool isPlacingMarker() const { return place_marker_armed_; }
     void clearPolygon();
-    /** Slide vertex i+1 along edge i to the given length (metres). */
+    /**
+     * Ground-space summary of the ROI: its centroid and the radius of the
+     * smallest centroid-centred circle that contains every vertex. This is
+     * what sizes the imagery prefetch. False when there is no ROI.
+     */
+    bool roiExtent(geo::GeoPoint* centroid, double* radius_m) const;
+
+    /**
+     * Two-click ruler. First click anchors, the line follows the cursor,
+     * second click fixes it, a third starts over. Right-click or Escape
+     * clears. Purely visual — nothing in the plan changes.
+     */
+    void startMeasure();
+    void clearMeasure();
+    bool isMeasuring() const { return measure_state_ != Measure::Off; }
+
+    /**
+     * Selection gates the rotate handle: an unselected marker only ever
+     * translates, so a careless drag near the arrow cannot spin the robot's
+     * heading. Click the marker to select, click anywhere else to clear.
+     */
+    bool markerSelected() const { return marker_selected_; }
+    void setMarkerSelected(bool selected);
+
     /**
      * Slides the edge's far vertex so the edge measures `meters`. With
      * `pin`, the length is also recorded as a constraint that later vertex
@@ -103,6 +146,10 @@ signals:
     void viewChanged(double lat, double lon, int zoom);
     void roiChanged();
     void markerChanged();
+    /** An armed draw / placement / ruler started or ended. Lets the rail
+        relabel its tool buttons ("Drawing…") without polling. */
+    void interactionChanged();
+    void markerSelectionChanged(bool selected);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -110,6 +157,8 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void leaveEvent(QEvent* event) override;
     /** Escape / focus-out handling for the inline dimension editor. */
     bool eventFilter(QObject* watched, QEvent* event) override;
 
@@ -125,7 +174,18 @@ private:
         MoveVertex,
         EdgeTogglePending,
         DimBadge,
+        DrawRect,
     };
+
+    enum class Measure { Off, WantFirst, WantSecond, Fixed };
+
+    /** Zoom about the view centre, clamped to the current ceiling. */
+    void zoomBy(int delta);
+    /** Turns a diagonal into the north-up four-gon it spans. */
+    void applyRectangleFromDiagonal(const geo::GeoPoint& a,
+                                    const geo::GeoPoint& b);
+    /** In-progress polygon / rectangle / ruler, drawn above the plan. */
+    void paintInteraction(QPainter& painter);
 
     // Coordinate helpers (valid during paint/mouse handling).
     QPointF screenFromNorm(double nx, double ny) const;
@@ -190,6 +250,14 @@ private:
     bool edit_locked_ = false;
     bool place_marker_armed_ = false;
     bool draw_polygon_armed_ = false;
+    bool draw_rect_armed_ = false;
+    bool marker_selected_ = false;
+    geo::GeoPoint rect_anchor_;      // first corner of an in-progress rectangle
+    QPointF hover_pos_;              // last cursor position, for previews
+    bool hover_valid_ = false;
+    Measure measure_state_ = Measure::Off;
+    geo::GeoPoint measure_a_;
+    geo::GeoPoint measure_b_;
     int drag_dim_edge_ = -1;
     QVector<QRectF> dim_boxes_;
 
