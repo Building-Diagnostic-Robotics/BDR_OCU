@@ -136,11 +136,22 @@ public:
     void clearMapRaster();
 
     static constexpr int kMinZoom = 3;
+    /** Highest level tiles are ever requested at (Esri's native ceiling). */
     static constexpr int kMaxZoom = 20;
     /** The grid canvas has no imagery-resolution ceiling — allow zooming to
         centimeter scale for small roofs. */
     static constexpr int kMaxZoomGrid = 23;
+    /**
+     * Levels the imagery canvas may zoom PAST the fetch ceiling, painting
+     * the deepest available tiles scaled up. A 16 m roof at z19 is ~70 px
+     * wide, too small to place a vertex on; three extra levels make it
+     * ~550 px. The imagery goes soft, the handles and chips do not.
+     */
+    static constexpr int kOverzoomLevels = 3;
+    /** View ceiling: what the wheel, zoomIn and fitToRoi clamp to. */
     int maxZoomNow() const;
+    /** Fetch ceiling: the cached / native limit tiles are requested at. */
+    int fetchZoomCeiling() const;
 
 signals:
     void viewChanged(double lat, double lon, int zoom);
@@ -149,6 +160,9 @@ signals:
     /** An armed draw / placement / ruler started or ended. Lets the rail
         relabel its tool buttons ("Drawing…") without polling. */
     void interactionChanged();
+    /** A Draw ROI gesture produced a valid shape (rectangle released or
+        polygon closed). Emitted after roiChanged(); the screen frames it. */
+    void drawFinished();
     void markerSelectionChanged(bool selected);
 
 protected:

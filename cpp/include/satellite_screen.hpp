@@ -83,6 +83,8 @@ public:
     void devSeedDemoPlan();
     /** Dev screenshot hook: selects the marker so the rotate handle renders. */
     void devSelectMarker();
+    /** Dev shot only: frame the ROI as a finished draw would. */
+    void devFitRoi();
     /** Dev screenshot hook: renders the Save Plan confirmation to a PNG. */
     void devRenderPlanConfirm(const QString& png_path);
     /** Dev screenshot hook: fakes a collected map + site image and opens the

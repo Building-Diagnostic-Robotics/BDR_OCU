@@ -67,14 +67,18 @@ void SatelliteMapWidget::setImageryEnabled(bool enabled) {
     update();
 }
 
+int SatelliteMapWidget::fetchZoomCeiling() const {
+    if (tiles_ && tiles_->maxZoomCap() > 0) {
+        return std::min(tiles_->maxZoomCap(), kMaxZoom);
+    }
+    return kMaxZoom;
+}
+
 int SatelliteMapWidget::maxZoomNow() const {
     if (!imagery_enabled_) {
         return kMaxZoomGrid;
     }
-    if (tiles_ && tiles_->maxZoomCap() > 0) {
-        return tiles_->maxZoomCap();
-    }
-    return kMaxZoom;
+    return std::min(fetchZoomCeiling() + kOverzoomLevels, kMaxZoomGrid);
 }
 
 void SatelliteMapWidget::setView(double lat, double lon, int zoom) {
@@ -829,15 +833,21 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
         paintGrid(painter);
         return;
     }
-    const int n = 1 << zoom_;
-    const double world_px = double(kTileSize) * n;
+    // Past the fetch ceiling the view keeps zooming but the tile level does
+    // not: tiles at `tile_z` are painted `tile_px` wide instead of 256, and
+    // nothing is requested at levels that have no data. Below the ceiling
+    // tile_z == zoom_ and tile_px == kTileSize, so this is the plain path.
+    const int tile_z = std::min(zoom_, fetchZoomCeiling());
+    const double tile_px = double(kTileSize) * (1 << (zoom_ - tile_z));
+    const int n = 1 << tile_z;
+    const double world_px = tile_px * n;
     const double left = center_nx_ * world_px - width() / 2.0;
     const double top = center_ny_ * world_px - height() / 2.0;
 
-    const int tx0 = int(std::floor(left / kTileSize));
-    const int ty0 = int(std::floor(top / kTileSize));
-    const int tx1 = int(std::floor((left + width()) / kTileSize));
-    const int ty1 = int(std::floor((top + height()) / kTileSize));
+    const int tx0 = int(std::floor(left / tile_px));
+    const int ty0 = int(std::floor(top / tile_px));
+    const int tx1 = int(std::floor((left + width()) / tile_px));
+    const int ty1 = int(std::floor((top + height()) / tile_px));
 
     painter.setRenderHint(QPainter::Antialiasing, false);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
@@ -847,11 +857,11 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
         }
         for (int tx = tx0; tx <= tx1; ++tx) {
             const int wrapped = ((tx % n) + n) % n;
-            const QPointF dest(tx * double(kTileSize) - left,
-                               ty * double(kTileSize) - top);
-            const QPixmap tile = tiles_->cachedTile(zoom_, wrapped, ty);
+            const QPointF dest(tx * tile_px - left, ty * tile_px - top);
+            const QRectF dest_rect(dest, QSizeF(tile_px, tile_px));
+            const QPixmap tile = tiles_->cachedTile(tile_z, wrapped, ty);
             if (!tile.isNull()) {
-                painter.drawPixmap(dest, tile);
+                painter.drawPixmap(dest_rect, tile, tile.rect());
                 continue;
             }
             // Overzoom / not-yet-fetched fallback: draw the matching
@@ -867,10 +877,10 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
             // is the point: otherwise the operator can draw an ROI spanning
             // two epochs with nothing on screen to say so.
             const bool permanent_substitute =
-                tiles_->isFailedRecently(zoom_, wrapped, ty);
+                tiles_->isFailedRecently(tile_z, wrapped, ty);
             bool drew_fallback = false;
-            for (int up = 1; up <= 7 && zoom_ - up >= kMinZoom; ++up) {
-                const int az = zoom_ - up;
+            for (int up = 1; up <= 7 && tile_z - up >= kMinZoom; ++up) {
+                const int az = tile_z - up;
                 const int ax = wrapped >> up;
                 const int ay = ty >> up;
                 const QPixmap ancestor = tiles_->cachedTile(az, ax, ay);
@@ -880,9 +890,7 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
                 const int sub = kTileSize >> up;
                 const QRectF source((wrapped - (ax << up)) * sub,
                                     (ty - (ay << up)) * sub, sub, sub);
-                painter.drawPixmap(
-                    QRectF(dest, QSizeF(kTileSize, kTileSize)), ancestor,
-                    source);
+                painter.drawPixmap(dest_rect, ancestor, source);
                 drew_fallback = true;
                 break;
             }
@@ -893,17 +901,15 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
                 painter.setPen(Qt::NoPen);
                 QBrush hatch(QColor(255, 255, 255, 28), Qt::BDiagPattern);
                 painter.setBrush(hatch);
-                painter.drawRect(QRectF(dest, QSizeF(kTileSize, kTileSize)));
+                painter.drawRect(dest_rect);
                 painter.restore();
             }
             if (!drew_fallback) {
-                painter.fillRect(QRectF(dest, QSizeF(kTileSize, kTileSize)),
-                                 QColor(0x14, 0x17, 0x1b));
+                painter.fillRect(dest_rect, QColor(0x14, 0x17, 0x1b));
                 painter.setPen(QColor(0x22, 0x27, 0x2d));
-                painter.drawRect(
-                    QRectF(dest, QSizeF(kTileSize - 1, kTileSize - 1)));
+                painter.drawRect(dest_rect.adjusted(0, 0, -1, -1));
             }
-            tiles_->fetch(zoom_, wrapped, ty);
+            tiles_->fetch(tile_z, wrapped, ty);
         }
     }
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -1423,6 +1429,7 @@ void SatelliteMapWidget::mousePressEvent(QMouseEvent* event) {
                 setCursor(Qt::OpenHandCursor);
                 update();
                 emit interactionChanged();
+                emit drawFinished();
             } else {
                 cancelInteraction();
             }
@@ -1617,6 +1624,9 @@ void SatelliteMapWidget::mouseReleaseEvent(QMouseEvent* event) {
             update();
             emit roiChanged();
             emit interactionChanged();
+            if (roi_.valid) {
+                emit drawFinished();
+            }
             return;
         }
         if (drag_ == Drag::MoveMarker && stationary) {

@@ -353,17 +353,28 @@ bool MapCaptureRunner::start(const QString& host, const QString& ssh_user,
     // already on disk, prints it, then SIGINTs the tree itself.
     const QString manifest =
         QStringLiteral("/R_DATA/raw_maps/map_collection_latest.yaml");
+    // Same env preamble as the Stage 4/5 launch and Stage 6 Send scripts.
+    // `set -e`, never `set -u`: the ROS/colcon setup scripts read variables
+    // that are normally unset (AMENT_TRACE_SETUP_FILES, COLCON_TRACE, ...),
+    // so `set -u` aborts on the first `source` and nothing below it runs.
+    // `.bashrc` first so the robot's own env (RMW, Zenoh config) matches
+    // what every other launch gets.
+    //
+    // No `%%` anywhere: this literal goes through QString::arg, which does
+    // NOT collapse `%%`, so `%%Y` would reach the robot verbatim and stat
+    // would print the string "%Y" instead of the mtime.
     const QString script = QStringLiteral(
-        "set -u; "
+        "set -e; "
+        "if [ -f \"$HOME/.bashrc\" ]; then . \"$HOME/.bashrc\"; fi; "
         "if [ -f /opt/ros/humble/setup.bash ]; then . /opt/ros/humble/setup.bash; fi; "
         "if [ -f \"$HOME/pilot_ws/install/setup.bash\" ]; then . \"$HOME/pilot_ws/install/setup.bash\"; fi; "
         "M=%1; "
-        "OLD=$(stat -c %%Y \"$M\" 2>/dev/null || echo 0); "
+        "OLD=$(stat -c %Y \"$M\" 2>/dev/null || echo 0); "
         "ros2 launch pilot_control robot_map_collection.launch.py "
         "> /tmp/ocu_map_collection.log 2>&1 & LP=$!; "
         "for i in $(seq 1 120); do "
         "  sleep 2; "
-        "  NEW=$(stat -c %%Y \"$M\" 2>/dev/null || echo 0); "
+        "  NEW=$(stat -c %Y \"$M\" 2>/dev/null || echo 0); "
         "  if [ \"$NEW\" -gt \"$OLD\" ] && grep -qE '^status: (done|failed)' \"$M\"; then "
         "    echo %2; cat \"$M\"; echo %3; break; "
         "  fi; "

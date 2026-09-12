@@ -792,6 +792,17 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     stage6_->configureForPlanning();
                     stage6_->devSeedDemoPlan();
                     stage6_->devSelectMarker();
+                    // BDR_DEV_STAGE6_SHOT_FIT=1: frame the demo ROI the way
+                    // a finished draw does, exercising the overzoom path
+                    // (tiles painted scaled past the fetch ceiling).
+                    if (qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_FIT")
+                            .trimmed() == QStringLiteral("1")) {
+                        QTimer::singleShot(400, this, [this] {
+                            if (stage6_) {
+                                stage6_->devFitRoi();
+                            }
+                        });
+                    }
                 } else if (shot_mode == QStringLiteral("plan_confirm")) {
                     // Renders the Save Plan dialog to <shot>_dialog.png
                     // alongside the screen shot. Deferred until the stage

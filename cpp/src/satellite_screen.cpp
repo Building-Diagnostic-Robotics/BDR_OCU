@@ -714,6 +714,8 @@ void SatelliteScreen::configureForScan(PlanMode mode) {
 
 void SatelliteScreen::devSelectMarker() { map_->setMarkerSelected(true); }
 
+void SatelliteScreen::devFitRoi() { map_->fitToRoi(); }
+
 void SatelliteScreen::devRenderPlanConfirm(const QString& png_path) {
     geo::GeoPoint centroid;
     double roi_radius_m = 0.0;
@@ -1965,6 +1967,11 @@ QWidget* SatelliteScreen::buildCanvasTools(QWidget* parent) {
     connect(map_, &SatelliteMapWidget::interactionChanged, this, [this] {
         measure_button_->setChecked(map_->isMeasuring());
     });
+    // A roof drawn at site-overview zoom is a few dozen pixels wide — too
+    // small to grab a vertex or read an edge chip. Frame it as soon as the
+    // gesture completes; the operator can wheel back out if they want.
+    connect(map_, &SatelliteMapWidget::drawFinished, this,
+            [this] { map_->fitToRoi(); });
 
     refreshCanvasToolIcons();
     return host;
@@ -2665,7 +2672,10 @@ void SatelliteScreen::refreshImageryInfo() {
     }
     imagery_query_pending_ = false;
 
-    const int zoom = map_->zoom();
+    // Provenance describes the tiles actually on screen. Past the fetch
+    // ceiling those are the ceiling level scaled up, and Esri has no
+    // metadata cell at the (view) zoom anyway.
+    const int zoom = std::min(map_->zoom(), map_->fetchZoomCeiling());
     tiles_->imageryInfoAt(
         map_->centerLat(), map_->centerLon(), zoom,
         [this, zoom](ImageryInfo info) {
