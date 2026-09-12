@@ -499,7 +499,27 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME satellite_tile_policy_tests COMMAND satellite_tile_policy_tests)
-        message(STATUS "Unit tests: enabled (obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests)")
+
+        # Plan lifecycle on disk (remove + completed-plan pruning). Links
+        # similarity_2d because Job embeds a Similarity2D (Eigen, header-only
+        # from the test's point of view).
+        add_executable(satellite_job_store_tests
+            tests/satellite_job_store_tests.cpp
+            src/satellite_job_model.cpp
+            src/similarity_2d.cpp
+        )
+        target_include_directories(satellite_job_store_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${EIGEN3_INCLUDE_DIRS}
+        )
+        target_link_libraries(satellite_job_store_tests PRIVATE
+            Eigen3::Eigen
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME satellite_job_store_tests COMMAND satellite_job_store_tests)
+        message(STATUS "Unit tests: enabled (obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

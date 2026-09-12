@@ -754,7 +754,15 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  prefetch actually cached), `alignment` (the `Similarity2D` PCD->imagery
  fit) and `last_executed_at`. Schema <= 3 rect-only plans convert to a
  4-gon on load. `JobStore::assetsDir(id)` is the per-job asset folder
- (`tiles/`, `site.jpg`, `imagery.json`).
+ (`tiles/`, `site.jpg`, `imagery.json`). **Plan lifecycle**:
+ `last_executed_at` is stamped ONLY on a successful finalize
+ (`SatelliteScreen::markCurrentPlanCompleted`, from both the RPC and
+ SSH Complete Mission paths), never at Send; valid => COMPLETED.
+ `JobStore::remove(id)` deletes the JSON **and** the assets folder.
+ `JobStore::pruneCompleted()` keeps the `kCompletedPlansKept = 5` most
+ recently completed plans and runs after every stamp; PLANNED plans are
+ never pruned. An operator Save Plan clears the stamp (back to PLANNED).
+ Tests: `tests/satellite_job_store_tests.cpp`.
 - `similarity_2d.{hpp,cpp}` — Umeyama 2D similarity (scale + rotation +
  optional reflection + translation) mapping PCD/robot_init metres to
  satellite pixels, with RMSE in both units. Reflection is tried both ways
@@ -773,6 +781,11 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  every 5 s while the modal is open, two consecutive successes to enable,
  one failure to disable (same debounce shape as `UploadDialog`'s cloud
  probe). Satellite planning needs internet, so it happens in the office.
+ Plans are split into **SAVED PLANS** (PLANNED, open) and a collapsed
+ **COMPLETED (N)** disclosure (newest scan first, `LAST RUN` chip; rows
+ still open the plan). Every row has a trash button — the only manual
+ delete path (confirm → `JobStore::remove` → row dropped in place,
+ dialog stays open, `planDeleted(id)` emitted).
 
 ### Two trims
 
@@ -904,6 +917,13 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 - **Do not drop the imagery knobs** (radius / zoom / age / Clarity /
  Wayback). They are defaulted and behind Advanced, not removed — the
  operator asked for that explicitly.
+- **Do not stamp `last_executed_at` at Send** or on a failed / cancelled /
+ watchdog-deferred finalize. COMPLETED means data is on disk; an aborted
+ mission must leave the plan PLANNED so it can be re-run. Only
+ `markCurrentPlanCompleted()` writes the stamp, and only from the two
+ finalize-success branches. Do not raise the auto-prune above
+ `kCompletedPlansKept = 5` without operator signoff, and never let
+ `pruneCompleted()` touch a PLANNED plan.
 - **Do not re-enable the rotate handle on an unselected marker.** The
  selection gate exists so a drag near the arrow cannot spin the heading;
  `hitTest` returns `RotateMarker` only while `marker_selected_`.

@@ -181,6 +181,17 @@ private:
     void refreshUnitsChip();
 
     void refreshJobsCombo(const QString& select_id = QString());
+    /** Re-reads the store and rebuilds the combo items WITHOUT loading a
+        plan into the canvas. Selection is preserved by id. */
+    void populateJobsCombo(const QString& select_id);
+    /**
+     * Mission finalized with data on disk: stamp the current plan
+     * `last_executed_at` (moves it to COMPLETED in Scan Setup) and prune
+     * completed plans beyond JobStore::kCompletedPlansKept. Called from
+     * both Complete Mission paths only on a successful finalize — a failed
+     * or watchdog-deferred finalize leaves the plan PLANNED for a re-run.
+     */
+    void markCurrentPlanCompleted();
     void loadJob(const Job& job);
     void newJob();
     /**

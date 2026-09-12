@@ -217,6 +217,28 @@ legitimate choice — the robot auto-finalizes after 10 minutes idle.
 Merely reconnecting does not pop that dialog. A few seconds of Zenoh
 rediscovery is not a reason to make the operator choose a recovery path.
 
+### What happens to the plan
+
+A plan is **PLANNED** until a mission on it finalizes with data on disk.
+Launching does not count — an aborted or cancelled mission leaves the plan
+where it was. When `/dc/finalize_mission` returns ok (or the SSH fallback
+exits 0) the plan is stamped `last_executed_at` and becomes **COMPLETED**:
+
+- Scan Setup lists it under a collapsed **COMPLETED (N)** disclosure below
+  SAVED PLANS, newest scan first, with a `LAST RUN <date>` chip. Tapping it
+  opens the plan again — the cached imagery is still there.
+- The office rail's Saved plan combo lists completed plans after a
+  separator.
+- Only the **5 most recent** completed plans are kept
+  (`JobStore::kCompletedPlansKept`). Older ones are removed — JSON and the
+  cached imagery — the moment a newer plan completes. PLANNED plans are
+  never pruned.
+- Pressing **Save Plan** on a completed plan returns it to PLANNED. A save
+  is a statement that this roof is to be scanned again.
+
+Every row in Scan Setup has a trash button. It is the only manual delete
+path; it confirms first, then removes the plan and its imagery cache.
+
 ## Measured mode
 
 Same screen, same polygon tooling, no imagery. The canvas is an adaptive

@@ -10,9 +10,11 @@
 
 #include "components/scan_setup_dialog.hpp"
 
+#include "components/bdr_message_box.hpp"
 #include "satellite_tile_service.hpp"
 
 #include <QDate>
+#include <QEvent>
 #include <QFile>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -42,6 +44,7 @@ constexpr const char* kAccentGreen = "#00BC7D";
 constexpr const char* kAccentBlue = "#2B7FFF";
 constexpr const char* kMuted = "#9F9FA9";
 constexpr const char* kMutedBorder = "#3f3f47";
+constexpr const char* kDanger = "#EF4444";
 
 /** Same stroke-retint approach as dashboard_screen.cpp's loadSvgPixmap. */
 QPixmap tintedSvg(const QString& resource_path, int w, int h,
@@ -100,6 +103,18 @@ ScanSetupDialog::~ScanSetupDialog() {
         probe_inflight_->deleteLater();
         probe_inflight_ = nullptr;
     }
+}
+
+bool ScanSetupDialog::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::Enter || event->type() == QEvent::Leave) {
+        if (auto* button = qobject_cast<QPushButton*>(watched);
+            button && button->objectName() == QLatin1String("SetupPlanDelete")) {
+            const char* key =
+                event->type() == QEvent::Enter ? "iconHot" : "iconRest";
+            button->setIcon(QIcon(button->property(key).value<QPixmap>()));
+        }
+    }
+    return QDialog::eventFilter(watched, event);
 }
 
 // ---- Imagery reachability gate ---------------------------------------------
@@ -211,60 +226,51 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
     header_row->addWidget(close_button, 0, Qt::AlignTop);
     root->addLayout(header_row);
 
-    // ---- Saved plans (unexecuted first, then most recently updated) ----
-    QVector<Job> sorted = jobs;
-    std::sort(sorted.begin(), sorted.end(), [](const Job& a, const Job& b) {
-        if (a.executed() != b.executed()) {
-            return !a.executed();
-        }
+    // ---- Saved plans: PLANNED (open) then COMPLETED (collapsed) ----
+    // A plan is COMPLETED once its mission finalized with data on disk
+    // (SatelliteScreen::markCurrentPlanCompleted). It stays openable — the
+    // same roof scanned again — but is tucked away so the list the operator
+    // scans on the roof is the work still to do.
+    QVector<Job> planned;
+    QVector<Job> completed;
+    for (const Job& job : jobs) {
+        (job.executed() ? completed : planned).append(job);
+    }
+    std::sort(planned.begin(), planned.end(), [](const Job& a, const Job& b) {
         return a.updated > b.updated;
     });
+    std::sort(completed.begin(), completed.end(),
+              [](const Job& a, const Job& b) {
+                  return a.last_executed_at > b.last_executed_at;
+              });
 
-    if (!sorted.isEmpty()) {
-        auto* plans_label = new QLabel(QStringLiteral("SAVED PLANS"), this);
-        plans_label->setObjectName("SetupSectionLabel");
-        root->addWidget(plans_label);
+    planned_.completed = false;
+    completed_.completed = true;
+    buildPlanSection(planned_, QStringLiteral("SAVED PLANS"), planned, false,
+                     root);
+    buildPlanSection(completed_, QStringLiteral("COMPLETED"), completed, true,
+                     root);
 
-        auto* list_host = new QWidget(this);
-        auto* list_layout = new QVBoxLayout(list_host);
-        list_layout->setContentsMargins(0, 0, 0, 0);
-        list_layout->setSpacing(8);
-        for (const Job& job : sorted) {
-            list_layout->addWidget(buildPlanRow(job, list_host));
-        }
-        list_layout->addStretch(1);
-
-        if (sorted.size() > kPlanListMaxVisible) {
-            auto* scroll = new QScrollArea(this);
-            scroll->setObjectName("SetupPlanScroll");
-            scroll->setWidget(list_host);
-            scroll->setWidgetResizable(true);
-            scroll->setFrameShape(QFrame::NoFrame);
-            scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            scroll->setFixedHeight(kPlanListMaxVisible * (kPlanRowHeight + 8));
-            root->addWidget(scroll);
-        } else {
-            root->addWidget(list_host);
-        }
-
-        // "or" divider — two hairlines around muted text.
-        auto* divider_row = new QHBoxLayout();
-        divider_row->setSpacing(12);
-        auto make_line = [this]() {
-            auto* line = new QFrame(this);
-            line->setObjectName("SetupDividerLine");
-            line->setFrameShape(QFrame::HLine);
-            line->setFixedHeight(1);
-            return line;
-        };
-        divider_row->addWidget(make_line(), 1);
-        auto* divider_label =
-            new QLabel(QStringLiteral("or start from scratch"), this);
-        divider_label->setObjectName("SetupDividerLabel");
-        divider_row->addWidget(divider_label, 0);
-        divider_row->addWidget(make_line(), 1);
-        root->addLayout(divider_row);
-    }
+    // "or" divider — two hairlines around muted text.
+    divider_ = new QWidget(this);
+    auto* divider_row = new QHBoxLayout(divider_);
+    divider_row->setContentsMargins(0, 0, 0, 0);
+    divider_row->setSpacing(12);
+    auto make_line = [this]() {
+        auto* line = new QFrame(divider_);
+        line->setObjectName("SetupDividerLine");
+        line->setFrameShape(QFrame::HLine);
+        line->setFixedHeight(1);
+        return line;
+    };
+    divider_row->addWidget(make_line(), 1);
+    auto* divider_label =
+        new QLabel(QStringLiteral("or start from scratch"), divider_);
+    divider_label->setObjectName("SetupDividerLabel");
+    divider_row->addWidget(divider_label, 0);
+    divider_row->addWidget(make_line(), 1);
+    root->addWidget(divider_);
+    refreshSectionChrome();
 
     // ---- Mode cards ----
     auto* cards_row = new QHBoxLayout();
@@ -312,6 +318,122 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
     footer_row->addWidget(cancel);
     root->addLayout(footer_row);
+}
+
+void ScanSetupDialog::buildPlanSection(PlanSection& section,
+                                       const QString& title,
+                                       const QVector<Job>& jobs,
+                                       bool collapsible, QVBoxLayout* root) {
+    section.host = new QWidget(this);
+    auto* host_layout = new QVBoxLayout(section.host);
+    host_layout->setContentsMargins(0, 0, 0, 0);
+    host_layout->setSpacing(8);
+
+    if (collapsible) {
+        // Disclosure header: the whole row is the toggle, chevron at the
+        // right. Same shape as the Save Plan dialog's Advanced row.
+        section.toggle = new QPushButton(section.host);
+        section.toggle->setObjectName("SetupSectionToggle");
+        section.toggle->setCheckable(true);
+        section.toggle->setChecked(false);
+        section.toggle->setCursor(Qt::PointingHandCursor);
+        section.toggle->setFlat(true);
+        section.toggle->setFixedHeight(24);
+        auto* toggle_layout = new QHBoxLayout(section.toggle);
+        toggle_layout->setContentsMargins(0, 0, 0, 0);
+        toggle_layout->setSpacing(8);
+        section.header = new QLabel(title, section.toggle);
+        section.header->setObjectName("SetupSectionLabel");
+        toggle_layout->addWidget(section.header, 0, Qt::AlignVCenter);
+        auto* chevron = new QLabel(QStringLiteral("▸"), section.toggle);
+        chevron->setObjectName("SetupSectionChevron");
+        toggle_layout->addWidget(chevron, 0, Qt::AlignVCenter);
+        toggle_layout->addStretch(1);
+        host_layout->addWidget(section.toggle);
+        connect(section.toggle, &QPushButton::toggled, this,
+                [this, &section, chevron](bool open) {
+                    chevron->setText(open ? QStringLiteral("▾")
+                                          : QStringLiteral("▸"));
+                    section.body->setVisible(open);
+                    adjustSize();
+                });
+    } else {
+        section.header = new QLabel(title, section.host);
+        section.header->setObjectName("SetupSectionLabel");
+        host_layout->addWidget(section.header);
+    }
+
+    auto* list_host = new QWidget(section.host);
+    section.rows = new QVBoxLayout(list_host);
+    section.rows->setContentsMargins(0, 0, 0, 0);
+    section.rows->setSpacing(8);
+    for (const Job& job : jobs) {
+        section.rows->addWidget(buildPlanRow(job, list_host));
+    }
+    section.rows->addStretch(1);
+    section.count = jobs.size();
+
+    if (jobs.size() > kPlanListMaxVisible) {
+        auto* scroll = new QScrollArea(section.host);
+        scroll->setObjectName("SetupPlanScroll");
+        scroll->setWidget(list_host);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setFixedHeight(kPlanListMaxVisible * (kPlanRowHeight + 8));
+        section.body = scroll;
+    } else {
+        section.body = list_host;
+    }
+    host_layout->addWidget(section.body);
+    if (collapsible) {
+        section.body->setVisible(false);
+    }
+    root->addWidget(section.host);
+}
+
+void ScanSetupDialog::devSetCompletedOpen(bool open) {
+    if (completed_.toggle) {
+        completed_.toggle->setChecked(open);
+    }
+}
+
+void ScanSetupDialog::refreshSectionChrome() {
+    planned_.host->setVisible(planned_.count > 0);
+    completed_.host->setVisible(completed_.count > 0);
+    completed_.header->setText(
+        QStringLiteral("COMPLETED (%1)").arg(completed_.count));
+    divider_->setVisible(planned_.count > 0 || completed_.count > 0);
+    adjustSize();
+}
+
+void ScanSetupDialog::onDeletePlanClicked(const Job& job, QWidget* row) {
+    const QString name = job.name.isEmpty() ? job.id : job.name;
+    const QString detail =
+        job.isMeasured()
+            ? QStringLiteral("The plan is removed from this laptop.")
+            : QStringLiteral("The plan and its cached site imagery are "
+                             "removed from this laptop. Re-planning this "
+                             "roof needs an internet connection.");
+    const int picked = BdrMessageBox::custom(
+        this, QStringLiteral("Delete plan"),
+        QStringLiteral("Delete \u201c%1\u201d?").arg(name),
+        {QStringLiteral("Cancel"), QStringLiteral("Delete")}, 0, detail);
+    if (picked != 1) {
+        return;
+    }
+    if (!JobStore().remove(job.id)) {
+        BdrMessageBox::warning(
+            this, QStringLiteral("Delete plan"),
+            QStringLiteral("Could not delete \u201c%1\u201d.").arg(name));
+        return;
+    }
+    PlanSection& section = job.executed() ? completed_ : planned_;
+    section.rows->removeWidget(row);
+    row->deleteLater();
+    section.count = std::max(section.count - 1, 0);
+    refreshSectionChrome();
+    emit planDeleted(job.id);
 }
 
 QWidget* ScanSetupDialog::buildPlanRow(const Job& job, QWidget* parent) {
@@ -380,6 +502,28 @@ QWidget* ScanSetupDialog::buildPlanRow(const Job& job, QWidget* parent) {
     status->setObjectName(job.executed() ? "SetupPlanStatusRun"
                                          : "SetupPlanStatusPlanned");
     layout->addWidget(status, 0, Qt::AlignVCenter);
+
+    // Trash: a child button swallows its own press, so clicking it never
+    // reaches the row's "open this plan" handler.
+    auto* trash = new QPushButton(row);
+    trash->setObjectName("SetupPlanDelete");
+    trash->setFixedSize(32, 32);
+    trash->setCursor(Qt::PointingHandCursor);
+    trash->setFlat(true);
+    trash->setToolTip(QStringLiteral("Delete plan"));
+    trash->setIconSize(QSize(18, 18));
+    const QString trash_svg = QStringLiteral(":/assets/scansetup/delete.svg");
+    trash->setIcon(QIcon(tintedSvg(trash_svg, 18, 18, QLatin1String(kMuted))));
+    // Qt styles pick QIcon::Active on focus, not hover, so the red tint is
+    // swapped in explicitly on enter/leave.
+    trash->setProperty("iconRest", tintedSvg(trash_svg, 18, 18,
+                                             QLatin1String(kMuted)));
+    trash->setProperty("iconHot", tintedSvg(trash_svg, 18, 18,
+                                            QLatin1String(kDanger)));
+    trash->installEventFilter(this);
+    layout->addWidget(trash, 0, Qt::AlignVCenter);
+    connect(trash, &QPushButton::clicked, this,
+            [this, job, row] { onDeletePlanClicked(job, row); });
 
     connect(row, &QPushButton::clicked, this, [this, job] {
         choice_ = Choice::ExistingPlan;
@@ -476,6 +620,18 @@ void ScanSetupDialog::applyStyle() {
         }
         #SetupPlanRow:hover { border-color: #00BC7D; }
         #SetupPlanRow:focus { outline: none; }
+        #SetupPlanDelete {
+            background: transparent; border: none; border-radius: 6px;
+        }
+        #SetupPlanDelete:hover { background-color: rgba(239, 68, 68, 0.12); }
+        #SetupPlanDelete:focus { outline: none; }
+        #SetupSectionToggle {
+            background: transparent; border: none; text-align: left;
+        }
+        #SetupSectionToggle:focus { outline: none; }
+        #SetupSectionChevron {
+            font-family: 'Arimo'; font-size: 12px; color: #9F9FA9;
+        }
         #SetupPlanScroll { background: transparent; }
         #SetupPlanName {
             font-family: 'Arimo'; font-weight: 600; font-size: 14px;

@@ -748,6 +748,39 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                                        shot_stage, shot_path]() {
             resize(1440, 860);
             setDarkMode(shot_dark);
+            if (shot_mode == QStringLiteral("scan_setup")) {
+                // Scan Setup modal with in-memory demo plans (2 PLANNED,
+                // 3 COMPLETED) — never touches the on-disk JobStore.
+                // <shot>_open.png has the COMPLETED disclosure expanded.
+                QVector<Job> demo;
+                for (int i = 0; i < 5; ++i) {
+                    Job job;
+                    job.id = QStringLiteral("demo_%1").arg(i);
+                    job.name = QStringLiteral("Demo Roof %1").arg(i + 1);
+                    job.address = QStringLiteral("%1 Main St").arg(100 + i);
+                    job.mode = QString::fromLatin1(
+                        i % 2 ? Job::kModeMeasured : Job::kModeSatellite);
+                    job.updated = QDateTime::currentDateTime().addDays(-i);
+                    if (i >= 2) {
+                        job.last_executed_at =
+                            QDateTime::currentDateTime().addDays(-(i * 3));
+                    }
+                    demo.append(job);
+                }
+                auto* dialog = new ScanSetupDialog(demo, this);
+                dialog->show();
+                QCoreApplication::processEvents();
+                dialog->grab().save(shot_path);
+                dialog->devSetCompletedOpen(true);
+                QCoreApplication::processEvents();
+                QString open_path = shot_path;
+                open_path.replace(QStringLiteral(".png"),
+                                  QStringLiteral("_open.png"));
+                dialog->grab().save(open_path);
+                dialog->deleteLater();
+                QApplication::quit();
+                return;
+            }
             if (shot_stage == 3) {
                 if (robot_id_.isEmpty()) {
                     robot_id_ = QStringLiteral("DevScreenshotBot");

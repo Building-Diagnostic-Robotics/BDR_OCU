@@ -15,6 +15,7 @@
 #include <QDateTime>
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <array>
@@ -105,7 +106,10 @@ struct Job {
     geo::GeoPose robot;  // planned robot placement (the anchor at Send)
     QDateTime created;
     QDateTime updated;
-    QDateTime last_executed_at;  // stamped when a mission actually launches
+    /** Stamped when a mission on this plan FINALIZED with data on disk (not
+        at launch). Valid => the plan is COMPLETED; cleared by an operator
+        Save Plan so the plan can be scanned again. */
+    QDateTime last_executed_at;
 
     /**
      * Provenance of the imagery this plan was DRAWN against (schema 3).
@@ -138,13 +142,29 @@ struct Job {
 /** Loads/saves jobs as individual JSON files in the app data directory. */
 class JobStore {
 public:
+    /** AppData/satellite_jobs — the production store. */
     JobStore();
+    /** A store rooted at an explicit directory (tests, tooling). */
+    explicit JobStore(const QString& jobs_dir);
 
     QString jobsDir() const { return jobs_dir_; }
     QString assetsDir(const QString& job_id) const;
     QVector<Job> loadAll() const;
     bool save(const Job& job, QString* error = nullptr) const;
+    /** Deletes the plan JSON AND its assets folder (cached imagery, stitch,
+        manifest). A plan without its pyramid is not usable on the roof, and
+        an assets folder without its plan is an orphan nothing can open. */
     bool remove(const QString& job_id) const;
+
+    /**
+     * Completed plans kept on disk. Older completed plans are removed by
+     * pruneCompleted() once a newer one lands; PLANNED plans are never
+     * pruned — the operator has not scanned them yet.
+     */
+    static constexpr int kCompletedPlansKept = 5;
+    /** Removes completed plans beyond the `keep` most recently executed.
+        Returns the ids that were removed. */
+    QStringList pruneCompleted(int keep = kCompletedPlansKept) const;
 
     static QString slugify(const QString& name);
 

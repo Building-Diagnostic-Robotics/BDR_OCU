@@ -323,7 +323,7 @@ enumerates all sites.
 - [ ] `BDR_DEV_STAGE6_SHOT=<png path>` — jumps to the Stage 6 planning
       screen on startup, renders offscreen, saves a PNG, and exits.
       Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
-      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|correspond|review|plan|plan_confirm`,
+      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|correspond|review|plan|plan_confirm|scan_setup`,
       `BDR_DEV_STAGE6_SHOT_STAGE=3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`,
       `BDR_DEV_STAGE6_SHOT_FIT=1` (`plan` only: `fitToRoi()` after seeding,
       lands past the fetch ceiling to exercise scaled-tile overzoom).
@@ -334,7 +334,11 @@ enumerates all sites.
       marker selected (rotate handle visible); `plan_confirm` additionally
       renders the Save Plan confirmation to `<png>_dialog.png` and, with
       the Advanced disclosure open, `<png>_dialog_adv.png`
-      (`SatelliteScreen::devRenderPlanConfirm`).
+      (`SatelliteScreen::devRenderPlanConfirm`). `scan_setup` renders the
+      Start New Scan modal with in-memory demo plans (2 PLANNED, 3
+      COMPLETED; the on-disk JobStore is untouched) to `<png>` and, with
+      the COMPLETED disclosure expanded, `<png>_open.png`
+      (`ScanSetupDialog::devSetCompletedOpen`).
       Used by the AI-agent
       visual-verification loop during Stage 6 UI work. Env-gated only
       (same class as `BDR_DEV_START_AT_SCAN`); harmless in release when
@@ -344,8 +348,9 @@ enumerates all sites.
 **Revert:** delete the `BDR_DEV_STAGE6_SHOT` block in
 `AppShellWindow::AppShellWindow` (tagged `BDR_REWIRE`), plus
 `SatelliteScreen::devSeedDemoPlan()`, `devSelectMarker()`,
-`devRenderPlanConfirm()`, `devSeedDemoAlignment()`, and
-`SatellitePlanConfirmDialog::devSetAdvancedOpen()`.
+`devRenderPlanConfirm()`, `devFitRoi()`, `devSeedDemoAlignment()`,
+`SatellitePlanConfirmDialog::devSetAdvancedOpen()`, and
+`ScanSetupDialog::devSetCompletedOpen()`.
 
 ---
 

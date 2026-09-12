@@ -2374,21 +2374,90 @@ void SatelliteScreen::setDarkMode(bool dark_mode) {
 
 // ---- Jobs -------------------------------------------------------------------
 
-void SatelliteScreen::refreshJobsCombo(const QString& select_id) {
+void SatelliteScreen::populateJobsCombo(const QString& select_id) {
     jobs_ = job_store_.loadAll();
     jobs_combo_->clear();
     jobs_combo_->addItem(QStringLiteral("— unsaved plan —"), QString());
+    // PLANNED first, then a separator, then COMPLETED (newest scan first) —
+    // the same split Scan Setup shows. loadAll() is updated-desc already.
     int select_index = 0;
-    for (const Job& job : jobs_) {
+    auto add = [&](const Job& job) {
         jobs_combo_->addItem(job.name.isEmpty() ? job.id : job.name, job.id);
         if (!select_id.isEmpty() && job.id == select_id) {
             select_index = jobs_combo_->count() - 1;
         }
+    };
+    for (const Job& job : jobs_) {
+        if (!job.executed()) {
+            add(job);
+        }
+    }
+    QVector<const Job*> completed;
+    for (const Job& job : jobs_) {
+        if (job.executed()) {
+            completed.append(&job);
+        }
+    }
+    if (!completed.isEmpty()) {
+        std::sort(completed.begin(), completed.end(),
+                  [](const Job* a, const Job* b) {
+                      return a->last_executed_at > b->last_executed_at;
+                  });
+        jobs_combo_->insertSeparator(jobs_combo_->count());
+        for (const Job* job : completed) {
+            add(*job);
+        }
     }
     jobs_combo_->setCurrentIndex(select_index);
-    if (select_index > 0) {
-        loadJob(jobs_[select_index - 1]);
+}
+
+void SatelliteScreen::refreshJobsCombo(const QString& select_id) {
+    populateJobsCombo(select_id);
+    const QString id = jobs_combo_->currentData().toString();
+    if (id.isEmpty()) {
+        return;
     }
+    for (const Job& job : jobs_) {
+        if (job.id == id) {
+            loadJob(job);
+            return;
+        }
+    }
+}
+
+void SatelliteScreen::markCurrentPlanCompleted() {
+    if (current_job_id_.isEmpty()) {
+        return;  // unsaved plan — nothing on disk to archive
+    }
+    const QString id = current_job_id_;
+    bool stamped = false;
+    for (Job& job : jobs_) {
+        if (job.id == id) {
+            job.last_executed_at = QDateTime::currentDateTime();
+            QString error;
+            stamped = job_store_.save(job, &error);
+            appendLog(stamped
+                          ? QStringLiteral("[plan] '%1' marked completed")
+                                .arg(job.name)
+                          : QStringLiteral("[plan] could not mark '%1' "
+                                           "completed: %2")
+                                .arg(job.name, error));
+            break;
+        }
+    }
+    if (!stamped) {
+        return;
+    }
+    const QStringList pruned =
+        job_store_.pruneCompleted(JobStore::kCompletedPlansKept);
+    if (!pruned.isEmpty()) {
+        appendLog(QStringLiteral("[plan] pruned %1 older completed plan(s): %2")
+                      .arg(pruned.size())
+                      .arg(pruned.join(QStringLiteral(", "))));
+    }
+    // Rebuild the office combo (hidden in the field) without reloading the
+    // canvas — teardown owns the screen state from here.
+    populateJobsCombo(id);
 }
 
 void SatelliteScreen::loadJob(const Job& job) {
@@ -2540,6 +2609,10 @@ void SatelliteScreen::saveJob() {
     }
     map_->cancelInteraction();
     Job job = jobFromRail();
+    // An operator Save is a statement of intent to scan this plan again:
+    // a COMPLETED plan returns to PLANNED. (jobFromRail carries the stamp
+    // forward for the non-operator saves — GPS, alignment, prefetch.)
+    job.last_executed_at = QDateTime();
 
     const bool office_satellite =
         planning_only_ && plan_mode_ == PlanMode::Satellite;
@@ -3297,18 +3370,9 @@ void SatelliteScreen::onSendMission() {
     startMetadataPushLoop();
     manager_occupancy_seen_ = false;
     manager_watch_timer_->start();
-
-    // Stamp the plan as executed — drives the "LAST RUN" chip in the
-    // Scan Setup list.
-    if (!current_job_id_.isEmpty()) {
-        for (Job& job : jobs_) {
-            if (job.id == current_job_id_) {
-                job.last_executed_at = QDateTime::currentDateTime();
-                job_store_.save(job);
-                break;
-            }
-        }
-    }
+    // The plan is NOT stamped here. Launching is not collecting: the plan
+    // moves to COMPLETED only when finalize succeeds
+    // (markCurrentPlanCompleted), so an aborted mission leaves it PLANNED.
 }
 
 bool SatelliteScreen::isRobotLinkUnreachable() const {
@@ -3406,6 +3470,11 @@ void SatelliteScreen::executeCompleteMissionNormalPath() {
                                "[mission] finalize failed (%1) — the robot's "
                                "idle watchdog will finalize instead")
                                .arg(detail));
+            if (ok) {
+                // The coordinator closed and tagged the mission folder —
+                // that is the OCU's "data collected" signal.
+                markCurrentPlanCompleted();
+            }
             mission_->teardownMission();
             complete_mission_in_flight_ = false;
         });
@@ -3442,6 +3511,12 @@ void SatelliteScreen::executeCompleteMissionSshFallback() {
                           .arg(proc.exitCode())
                           .arg(QString::fromUtf8(
                                    proc.readAllStandardOutput().trimmed())));
+            if (proc.exitStatus() == QProcess::NormalExit &&
+                proc.exitCode() == 0) {
+                // rc=0 means finalize_mission_local.py wrote
+                // mission_finalized_at — the same guarantee as the RPC.
+                markCurrentPlanCompleted();
+            }
         }
     } else {
         appendLog(

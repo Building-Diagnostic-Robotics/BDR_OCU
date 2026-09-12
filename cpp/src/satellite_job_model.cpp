@@ -279,6 +279,10 @@ JobStore::JobStore() {
     QDir().mkpath(jobs_dir_);
 }
 
+JobStore::JobStore(const QString& jobs_dir) : jobs_dir_(jobs_dir) {
+    QDir().mkpath(jobs_dir_);
+}
+
 QString JobStore::assetsDir(const QString& job_id) const {
     return jobs_dir_ + QLatin1Char('/') + job_id;
 }
@@ -335,8 +339,38 @@ bool JobStore::save(const Job& job, QString* error) const {
 }
 
 bool JobStore::remove(const QString& job_id) const {
-    return QFile::remove(jobs_dir_ + QLatin1Char('/') + job_id +
-                         QStringLiteral(".json"));
+    if (job_id.isEmpty()) {
+        return false;
+    }
+    // JSON first: once the plan file is gone nothing references the assets,
+    // so a crash between the two leaves an orphan folder rather than a plan
+    // whose imagery has vanished under it.
+    const bool removed = QFile::remove(jobs_dir_ + QLatin1Char('/') + job_id +
+                                       QStringLiteral(".json"));
+    QDir assets(assetsDir(job_id));
+    if (assets.exists()) {
+        assets.removeRecursively();
+    }
+    return removed;
+}
+
+QStringList JobStore::pruneCompleted(int keep) const {
+    QVector<Job> completed;
+    for (const Job& job : loadAll()) {
+        if (job.executed()) {
+            completed.append(job);
+        }
+    }
+    std::sort(completed.begin(), completed.end(), [](const Job& a, const Job& b) {
+        return a.last_executed_at > b.last_executed_at;
+    });
+    QStringList removed;
+    for (int i = std::max(keep, 0); i < completed.size(); ++i) {
+        if (remove(completed[i].id)) {
+            removed.append(completed[i].id);
+        }
+    }
+    return removed;
 }
 
 }  // namespace f2c_cpp
