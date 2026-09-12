@@ -323,11 +323,16 @@ enumerates all sites.
 - [ ] `BDR_DEV_STAGE6_SHOT=<png path>` — jumps to the Stage 6 planning
       screen on startup, renders offscreen, saves a PNG, and exits.
       Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
-      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|correspond|review`,
+      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|correspond|review|plan|plan_confirm`,
       `BDR_DEV_STAGE6_SHOT_STAGE=3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`.
       `correspond`/`review` call `SatelliteScreen::devSeedDemoAlignment()`,
       which fakes a collected robot map and a stitched site image so the
       alignment pages can be shot without a robot or cached imagery.
+      `plan` is the office trim with the demo plan seeded and the robot
+      marker selected (rotate handle visible); `plan_confirm` additionally
+      renders the Save Plan confirmation to `<png>_dialog.png` and, with
+      the Advanced disclosure open, `<png>_dialog_adv.png`
+      (`SatelliteScreen::devRenderPlanConfirm`).
       Used by the AI-agent
       visual-verification loop during Stage 6 UI work. Env-gated only
       (same class as `BDR_DEV_START_AT_SCAN`); harmless in release when
@@ -336,8 +341,9 @@ enumerates all sites.
 
 **Revert:** delete the `BDR_DEV_STAGE6_SHOT` block in
 `AppShellWindow::AppShellWindow` (tagged `BDR_REWIRE`), plus
-`SatelliteScreen::devSeedDemoPlan()` and
-`SatelliteScreen::devSeedDemoAlignment()`.
+`SatelliteScreen::devSeedDemoPlan()`, `devSelectMarker()`,
+`devRenderPlanConfirm()`, `devSeedDemoAlignment()`, and
+`SatellitePlanConfirmDialog::devSetAdvancedOpen()`.
 
 ---
 

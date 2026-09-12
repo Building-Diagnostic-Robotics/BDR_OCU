@@ -21,11 +21,30 @@ Two constraints shape everything:
   a heading needs a baseline the robot may not get. GPS is used as a seed;
   operator-picked correspondences are the accuracy step.
 
-## The step model
+## Two trims, one screen
 
-The screen is a five-step flow. The step header names the steps, the left
-rail shows only the active step's controls, and a footer button advances to
-the next one.
+The screen has two very different jobs and dresses differently for each:
+
+- **Office (planning-only trim).** Reached from Dashboard **Plan Job**.
+  There is internet, there is no robot. One task: draw the roof, place the
+  robot, save. No step header, no footer, no Find Robot, no Collect Map. Save
+  Plan is the imagery step — see below.
+- **Field (scan trim).** Reached from **Start New Scan**. There is a robot,
+  there is no internet. The five-step flow below runs here. Saving in the
+  field re-writes geometry only; it never tries to fetch.
+
+Satellite planning starts in the office by construction: the **New Satellite
+Plan** card in `ScanSetupDialog` is disabled until an imagery-reachability
+probe (`TileService::connectivityProbeUrl`, every 5 s while the modal is
+open, two consecutive answers to enable, one failure to disable) says tiles
+can actually be fetched. On a roof it stays grey with "Needs an internet
+connection". The Measured card is never gated: a tape works anywhere.
+
+## The step model (field)
+
+In the scan trim the screen is a five-step flow. The step header names the
+steps, the left rail shows only the active step's controls, and a footer
+button advances to the next one.
 
 | # | Step | Complete when | Unavailable when |
 |---|------|---------------|------------------|
@@ -37,10 +56,11 @@ the next one.
 
 Each step carries two separate predicates: whether it is **available** in
 this trim, and whether its own work is **complete**. Keeping them apart is
-what lets the office trim run 1 → 3 → 4 without the robot-dependent steps
-blocking anything. The footer advances to the next available incomplete step;
-completed steps stay clickable, because re-aligning or redrawing after seeing
-the result is normal rather than exceptional.
+what lets the same gating code run in the office (where steps 2 and 5 do not
+exist) without the robot-dependent steps blocking anything. The footer
+advances to the next available incomplete step; completed steps stay
+clickable, because re-aligning or redrawing after seeing the result is normal
+rather than exceptional.
 
 **The step is derived, never stored.** `computeStep()` reads the same
 expressions the buttons already gate on — a saved job id, `pcd_to_sat_.valid`,
@@ -65,10 +85,11 @@ Some specifics that are easy to get wrong:
   acknowledgement is per-session and is not persisted with the plan: parapets
   and skylights are exactly what imagery gets wrong, so an office review does
   not stand in for looking at the real roof.
-- **Imagery is advisory, not a gate.** Requiring cached tiles to leave step 1
-  would force a tile download on someone merely drafting, and would hard-block
-  a satellite plan started in the field, where there is no internet to cache
-  from. Heading to the field uncached earns a warning instead.
+- **Imagery is advisory in the field, not a gate.** The office save already
+  cached it; if the operator chose "Save without imagery" the plan loads with
+  `imagery_cache.cached = false` and the canvas shows whatever the shared
+  cache has. Requiring tiles here would hard-block a plan on a roof with no
+  way to fetch them.
 - **Measured mode reduces steps, it never skips them.** Step 1 keeps the job
   name and drops the imagery tools; step 2 keeps Collect Map and drops the
   correspondence picker. Step numbering means the same thing in both modes.
@@ -80,26 +101,56 @@ only during the scan.
 
 ## Office: plan the job
 
-1. Dashboard **Plan Job** opens `SatelliteScreen` in planning-only trim
-   (mission and teleop cards hidden, Send unavailable).
-2. Type a building name and address, hit **Go** to geocode, and pan to the
-   roof.
-3. **Download Area…** caches the tile pyramid for a radius around the view,
-   stitches a max-zoom `site.jpg`, and writes `imagery.json`. All three live
-   under the job's assets folder, so the imagery is part of the plan rather
-   than part of the laptop.
+The goal is the fewest operator steps that still produce a field-ready plan.
+The ROI drawn here is a draft — the operator will very likely adjust it on
+the roof — so the save's real product is the cached imagery, not the polygon.
+
+1. Dashboard **Plan Job** opens `SatelliteScreen` in planning-only trim:
+   mission and teleop cards hidden, no step header or footer, no Find Robot.
+2. Type a building name (and optionally an address), hit **Go** to geocode,
+   and pan to the roof.
+3. Pick **Rectangle** or **Polygon**, press **Draw ROI**. Rectangle is a
+   press-drag-release across the roof; Polygon takes a click per corner and
+   closes on right-click (this is the Stage 5 drawing model). Either way the
+   result is a `RoiPolygon`. Drag a vertex to move it; click an edge's
+   dimension chip to type an exact length; tap an edge to mark it as a **roof
+   edge** (it turns solid red). **Redraw ROI** starts over; **Clear** removes
+   it.
+4. **Place Robot**, then click where the robot will sit. The marker is
+   selected on placement: a click on it toggles a rotate handle at the arrow
+   tip, a drag on its body translates it, a click anywhere else deselects.
+   Unselected, the arrow is heading information only — it cannot be spun by
+   a careless drag.
+5. **Save Plan** opens the **Confirm Plan** dialog: canvas thumbnail framed
+   on the ROI, every edge length (pinned / roof-edge flags shown), the robot
+   pose, and the imagery about to be cached. **Download & Save** runs the
+   prefetch in place and saves the plan when it completes.
+
+   Every download parameter is derived, not typed: centre = ROI centroid,
+   radius = ROI radius + 60 m (floor 150 m), max zoom 19, World Imagery,
+   live mosaic, imagery no older than 3 years. The knobs still exist — cache
+   radius, max zoom, age window, Esri Clarity, Wayback release — behind a
+   collapsed **Advanced imagery options** disclosure. They are defaulted, not
+   removed.
 
    Zoom selection picks **the highest native zoom whose source imagery is
-   within the configured age** (default 3 years). It never falls back to
-   older-but-sharper tiles: planning a roof against a decade-old flight is a
-   real failure mode, and unknown provenance is treated as too old rather
-   than fresh.
+   within the age window**. It never falls back to older-but-sharper tiles:
+   planning a roof against a decade-old flight is a real failure mode, and
+   unknown provenance is treated as too old rather than fresh.
 
-4. **Add ROI** drops a rectangle, or **Draw Shape** takes a click per roof
-   corner and closes on right-click. Drag a vertex to move it; click an edge's
-   dimension chip to type an exact length; tap an edge to mark it as a **roof
-   edge** (it turns solid red).
-5. **Save Plan.**
+   The prefetch caches the tile pyramid, stitches a max-zoom `site.jpg`, and
+   writes `imagery.json` under the job's assets folder, so the imagery is
+   part of the plan rather than part of the laptop. On failure the dialog
+   offers **Retry Download** (tiles already cached are kept) or **Save
+   without imagery**, which saves the plan with `imagery_cache.cached =
+   false` — visible, and not field-ready until re-saved with a connection.
+   **Cancel** saves nothing; a never-saved plan's half-filled assets folder is
+   removed.
+
+The canvas carries a tool stack ported from the Stage 5 plot: **Zoom in**,
+**Zoom out**, **Fit to ROI**, and a two-click **Measure** ruler (Esc or
+right-click clears). Save Plan fits the view to the ROI before taking the
+thumbnail.
 
 Roof edges are the ones with a fall hazard on the far side. The robot applies
 `roof_edge_clearance` (0.5 m default) as a planning setback on those edges
@@ -197,7 +248,8 @@ is recorded with the plan for reference and for **Find Robot**.
 
 ## Known gaps
 
-- Wayback release pinning is exposed but only useful in the office, where
-  there is bandwidth to compare releases.
+- Wayback release pinning lives in the Confirm Plan dialog's Advanced
+  section — office-only by construction, which is where there is bandwidth to
+  compare releases.
 - The robot must be running the `cliff-on-autonomy` build for the roof-edge
   setback and the `/coverage/status` state pill to be live.

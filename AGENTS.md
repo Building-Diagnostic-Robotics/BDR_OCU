@@ -716,11 +716,32 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  right-click closes it, vertices drag individually, each edge carries a
  unit-aware dimension chip that is click-to-edit (typing a length slides
  the next vertex along that edge), and tapping an edge toggles its
- roof-edge flag (red solid = physical fall hazard). `RoiRect` survives
- only as the four-corner special case that backs the rail's
- along/across/heading spinboxes — those disable themselves the moment the
- polygon has more than four vertices, because the rect mirror is stale
- then and the per-edge chips are the live dimensions.
+ roof-edge flag (red solid = physical fall hazard). Drawing follows the
+ Stage 5 model: a Rectangle | Polygon toggle and one Draw ROI button
+ (`armRectangleDraw` is press-drag-release, `armPolygonDraw` is
+ click-per-corner); both produce a `RoiPolygon`. The robot marker only
+ shows its rotate handle while **selected** (click toggles, click elsewhere
+ clears); an unselected marker can only translate. View tools ported from
+ the Stage 5 `PlotWidget` — `zoomIn/zoomOut`, `fitToRoi`, two-click
+ `startMeasure` ruler — sit in a tool stack over the canvas's right edge
+ (`SatelliteScreen::buildCanvasTools`). `RoiRect` survives only as the
+ four-corner special case that backs the rail's along/across/heading
+ spinboxes (field trim only; hidden in the office) — those disable
+ themselves the moment the polygon has more than four vertices, because
+ the rect mirror is stale then and the per-edge chips are the live
+ dimensions.
+- `satellite_site_prefetch.{hpp,cpp}` — `SitePrefetcher`, the office
+ imagery download engine (age probe → fetch queue → stitch → manifest),
+ split from any dialog so it can be reused. `PrefetchRequest::forSite`
+ derives every parameter from the ROI (centroid, radius + 60 m margin,
+ 150 m floor, z19, 3 y).
+- `components/satellite_plan_confirm_dialog.{hpp,cpp}` — the office
+ **Save Plan** confirmation: ROI thumbnail, per-edge lengths, robot pose,
+ tile estimate, **Download & Save** running the prefetch in place, and the
+ imagery knobs (radius / zoom / age / Clarity / Wayback) behind a collapsed
+ Advanced disclosure. Outcomes: `SavedWithImagery`, `SavedWithoutImagery`
+ (explicit operator choice after a failure or with no API key),
+ `Cancelled`. The old standalone `DownloadAreaDialog` is gone.
 - `satellite_tile_service.{hpp,cpp}` — Esri tiles + geocode + provenance,
  plus the office prefetch: `tilesForArea`, `imageryMeetsAge`,
  `stitchArea` (max-zoom site JPEG), `writeSiteManifest`/`readSiteManifest`,
@@ -747,6 +768,24 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  cmd_vel/autonomy_enable pubs, coverage/odom/status subs, axis-state
  clients, `pushSessionMetadata` (coordinator SetParameters).
 - `components/scan_setup_dialog.{hpp,cpp}` — the mode/plan selector modal.
+ The **New Satellite Plan** card is gated on imagery reachability: a
+ `QNetworkAccessManager` HEAD against `TileService::connectivityProbeUrl()`
+ every 5 s while the modal is open, two consecutive successes to enable,
+ one failure to disable (same debounce shape as `UploadDialog`'s cloud
+ probe). Satellite planning needs internet, so it happens in the office.
+
+### Two trims
+
+- **Office** (`planning_only_`, Dashboard "Plan Job"): no step header, no
+ footer, no Find Robot, no numeric ROI spinboxes, no Collect Map. Plan card
+ = name / address / Go / Rectangle|Polygon / Draw ROI / Clear / Place Robot
+ / Save Plan. **Save Plan on the satellite canvas IS the imagery step** —
+ it requires an ROI (it sizes the download), fits the view, and opens
+ `SatellitePlanConfirmDialog`. The saved polygon is a draft the operator is
+ expected to adjust on the roof.
+- **Field** (scan trim, "Start New Scan"): the five-step header and footer.
+ Save Plan re-writes geometry only and carries `imagery_cache` forward —
+ there is no internet on the roof, and a field edit must never fetch.
 
 ### Alignment: robot map -> satellite imagery
 
@@ -780,18 +819,21 @@ is no metres-per-pixel member. Convert with `pcdImageToWorld` /
 ### Offline imagery (office prefetch)
 
 The field has no internet, so the whole site pyramid is downloaded in the
-office and stored **per job** under `JobStore::assetsDir(id)`. Download Area
-saves the plan first (it needs an id), then caches `tiles/`, stitches a
-max-zoom `site.jpg`, and writes `imagery.json`; `loadJob` replays that
-manifest through `applyImageryManifest()` so the canvas paints off disk and
-`setMaxZoomCap` stops the operator zooming into blanks.
+office and stored **per job** under `JobStore::assetsDir(id)`. The office
+Save Plan allocates the job id, then `SitePrefetcher` caches `tiles/`,
+stitches a max-zoom `site.jpg`, and writes `imagery.json`; the job is
+persisted only after the dialog resolves (`adoptImageryManifest` copies the
+manifest into `imagery_cache`). `loadJob` replays that manifest through
+`applyImageryManifest()` so the canvas paints off disk and `setMaxZoomCap`
+stops the operator zooming into blanks. Cancelling a never-saved plan's
+download removes the orphan assets folder.
 
 Zoom selection is **the highest native zoom whose `SRC_DATE` is within N
-years** (operator-set, default 3, newest preferred). There is deliberately
-no fallback to older-but-sharper imagery: planning a roof against a
-decade-old flight is a real failure mode. `imageryMeetsAge` **fails closed**
-— unknown provenance is not treated as fresh. Wayback is an optional office
-dropdown for pinning a dated mosaic release.
+years** (default 3, newest preferred; editable under Advanced). There is
+deliberately no fallback to older-but-sharper imagery: planning a roof
+against a decade-old flight is a real failure mode. `imageryMeetsAge`
+**fails closed** — unknown provenance is not treated as fresh. Wayback is
+an optional Advanced dropdown for pinning a dated mosaic release.
 
 ### Rules for agents touching Stage 6
 
@@ -850,9 +892,24 @@ dropdown for pinning a dated mosaic release.
  controller_status, not by the axis-state RPC's ack. The request being
  accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
- (`_DARK`, `_MODE=measured|scan|correspond|review`, `_STAGE=3|4|5`,
- `_TOGGLE` modifiers) — the agent-side visual verification loop. See
- docs/DEV_BYPASSES.md.
+ (`_DARK`, `_MODE=measured|measured_map|scan|correspond|review|plan|
+ plan_confirm`, `_STAGE=3|4|5`, `_TOGGLE` modifiers) — the agent-side
+ visual verification loop. `plan_confirm` also writes the Save Plan dialog
+ to `<png>_dialog.png` / `_dialog_adv.png`. See docs/DEV_BYPASSES.md.
+- **Save Plan in the office must keep requiring an ROI and must keep
+ running the prefetch.** The imagery is the save's product; a satellite
+ plan without cached tiles is not usable on the roof. Conversely the field
+ Save must never fetch — check `planning_only_ && plan_mode_ == Satellite`
+ before opening the confirm dialog, never `plan_mode_` alone.
+- **Do not drop the imagery knobs** (radius / zoom / age / Clarity /
+ Wayback). They are defaulted and behind Advanced, not removed — the
+ operator asked for that explicitly.
+- **Do not re-enable the rotate handle on an unselected marker.** The
+ selection gate exists so a drag near the arrow cannot spin the heading;
+ `hitTest` returns `RotateMarker` only while `marker_selected_`.
+- The `ScanSetupDialog` satellite gate reads `imagery_reachable_` in the
+ click handler as well as disabling the card. Keep both: a queued click
+ can land after a probe flips the state.
 - `PanZoomImageWidget` re-fits on resize until the operator pans or zooms
  (`user_adjusted_`). Do not go back to a one-shot fit: `setImage()` runs
  before layout has sized the pane, so the image ends up tiny in a corner
