@@ -178,7 +178,6 @@ private:
     /** Shows only the active step's rail cards. Called from
         applyModeVisibility() so every existing call site keeps working. */
     void applyStepVisibility();
-    void refreshUnitsChip();
 
     void refreshJobsCombo(const QString& select_id = QString());
     /** Re-reads the store and rebuilds the combo items WITHOUT loading a
@@ -308,11 +307,6 @@ private:
     QWidget* motors_chip_ = nullptr;
     QLabel* lbl_motors_dot_ = nullptr;
     QLabel* lbl_motors_text_ = nullptr;
-    // Units are display-only but were previously only choosable in the
-    // New Scan modal, so an operator already inside Stage 6 had no way to
-    // flip them. Lives next to the theme toggle: both are global
-    // presentation state.
-    QPushButton* units_chip_ = nullptr;
 
     // Step header. One chip per step plus the chevron that follows it (null
     // on the last). Chips are styled per-element rather than through QSS

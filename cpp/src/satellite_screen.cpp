@@ -79,7 +79,6 @@ constexpr int kStepBadgeSize = 20;
 constexpr int kStepChipHeight = 34;
 constexpr int kFooterBarHeight = 65;
 constexpr int kFooterButtonHeight = 40;
-constexpr int kUnitsChipWidth = 46;
 
 /**
  * Per-step operator-facing strings. `arrive` is what the footer promises
@@ -414,7 +413,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // SI in the model; only the presentation flips — house rule).
     connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
             [this](Units) {
-                refreshUnitsChip();
                 const RoiRect roi = map_->roi();
                 for (QDoubleSpinBox* spin : {roi_length_, roi_width_}) {
                     spin->blockSignals(true);
@@ -1042,20 +1040,8 @@ QWidget* SatelliteScreen::buildTopBar() {
             .arg(mutedColor(true)));
     motors_layout->addWidget(lbl_motors_text_, 0, Qt::AlignVCenter);
     status_layout->addWidget(motors_chip_);
-
-    // Units toggle. Sits with the theme toggle because both are global
-    // presentation state; before this the only chooser was the New Scan
-    // modal, so an operator already inside Stage 6 could not switch.
-    units_chip_ = new QPushButton(status_host);
-    units_chip_->setObjectName("SatUnitsChip");
-    units_chip_->setCursor(Qt::PointingHandCursor);
-    units_chip_->setFixedSize(kUnitsChipWidth, kTopStatusMotorsChipHeight);
-    connect(units_chip_, &QPushButton::clicked, this, [] {
-        auto* provider = UnitsProvider::instance();
-        provider->setUnits(provider->isMetric() ? Units::Ansi : Units::Metric);
-    });
-    status_layout->addWidget(units_chip_);
-    refreshUnitsChip();
+    // Units are chosen once per mission in the New Scan Information modal
+    // (persisted to QSettings); there is deliberately no toggle here.
 
     layout->addWidget(status_host, 0, Qt::AlignVCenter);
     layout->addSpacing(kTopStatusWindowControlsReservedWidth);
@@ -1458,17 +1444,6 @@ void SatelliteScreen::applyStepVisibility() {
         teleop_card_->setVisible(!planning_only_ &&
                                  step == Step::AutonomousScan);
     }
-}
-
-void SatelliteScreen::refreshUnitsChip() {
-    if (!units_chip_) {
-        return;
-    }
-    const bool metric = UnitsProvider::instance()->isMetric();
-    units_chip_->setText(metric ? QStringLiteral("M") : QStringLiteral("FT"));
-    units_chip_->setToolTip(
-        metric ? QStringLiteral("Display units: metric — click for ANSI")
-               : QStringLiteral("Display units: ANSI — click for metric"));
 }
 
 QWidget* SatelliteScreen::buildLeftRail() {
@@ -2196,12 +2171,6 @@ void SatelliteScreen::applyTheme() {
 #SatMotorsChip {
     background-color: transparent; border: 1px solid @CARD_BORDER@; border-radius: 10px;
 }
-QPushButton#SatUnitsChip {
-    background-color: transparent; border: 1px solid @CARD_BORDER@; border-radius: 10px;
-    font-family: 'Arimo'; font-size: 10px; font-weight: 700;
-    letter-spacing: 0.5px; color: @MUTED@;
-}
-QPushButton#SatUnitsChip:hover { background-color: @BUTTON_HOVER@; color: @TEXT@; }
 #SatStepHeader {
     background-color: @SURFACE@; border-bottom: 1px solid @SURFACE_BORDER@;
 }
@@ -2360,7 +2329,6 @@ void SatelliteScreen::setDarkMode(bool dark_mode) {
     setStatePill(state_text_, remap(state_color_));
     setMotorsChip(motors_text_, remap(motors_color_));
     setTopBatteryState(last_batt_pct_, last_batt_stale_);
-    refreshUnitsChip();
     refreshCanvasToolIcons();
     // Step chips carry per-element colours for the same reason the pills do,
     // so they need re-rendering here too — applyTheme()'s sheet does not
