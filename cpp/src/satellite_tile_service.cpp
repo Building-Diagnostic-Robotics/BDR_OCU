@@ -393,6 +393,13 @@ int TileService::diskTileCount() const {
     return count;
 }
 
+QUrl TileService::connectivityProbeUrl() {
+    // The public metadata MapServer: no token, a few hundred bytes of JSON,
+    // and the same host family the provenance queries already depend on.
+    return QUrl(QString::fromLatin1(kImageryMetadataMapServer) +
+                QStringLiteral("?f=json"));
+}
+
 QString TileService::tileUrl(int z, int x, int y) const {
     if (!wayback_release_.isEmpty()) {
         return QStringLiteral("%1/%2/%3/%4/%5")

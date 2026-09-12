@@ -13,6 +13,12 @@
  * dark-only regardless of the global theme toggle) and the Dashboard
  * makeActionButton card language (2px brand border, tinted 40px SVG,
  * Arimo 700 18 title / 400 14 description).
+ *
+ * The Satellite card is gated on imagery reachability. A satellite plan is
+ * only worth starting where tiles can be fetched (the office), so the card
+ * stays disabled until a periodic probe of `TileService::connectivityProbeUrl`
+ * has answered twice in a row — the same debounce shape UploadDialog uses
+ * for the cloud API. One failure disables it again.
  */
 
 #pragma once
@@ -24,7 +30,10 @@
 #include <QVector>
 
 class QLabel;
+class QNetworkAccessManager;
+class QNetworkReply;
 class QPushButton;
+class QTimer;
 
 namespace f2c_cpp {
 
@@ -41,10 +50,15 @@ public:
 
     explicit ScanSetupDialog(const QVector<Job>& jobs,
                              QWidget* parent = nullptr);
+    ~ScanSetupDialog() override;
 
     Choice choice() const { return choice_; }
     /** Valid only when choice() == ExistingPlan. */
     Job selectedJob() const { return selected_job_; }
+
+    static constexpr int kProbeIntervalMs = 5000;
+    static constexpr int kProbeTimeoutMs = 4000;
+    static constexpr int kProbeSuccessesToEnable = 2;
 
 private:
     void buildUi(const QVector<Job>& jobs);
@@ -56,8 +70,24 @@ private:
                                const QString& description);
     void applyStyle();
 
+    void startImageryProbe();
+    void onProbeTick();
+    void onProbeFinished(QNetworkReply* reply);
+    void applyImageryReachable(bool reachable);
+
     Choice choice_ = Choice::Cancelled;
     Job selected_job_;
+
+    QPushButton* satellite_card_ = nullptr;
+    QLabel* satellite_title_ = nullptr;
+    QLabel* satellite_description_ = nullptr;
+    QString satellite_description_text_;
+    QNetworkAccessManager* probe_nam_ = nullptr;
+    QTimer* probe_timer_ = nullptr;
+    QNetworkReply* probe_inflight_ = nullptr;
+    int probe_successes_ = 0;
+    bool probe_answered_ = false;
+    bool imagery_reachable_ = false;
 };
 
 }  // namespace f2c_cpp

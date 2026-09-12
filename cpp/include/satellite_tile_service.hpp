@@ -28,6 +28,7 @@
 #include <QRectF>
 #include <QSet>
 #include <QString>
+#include <QUrl>
 #include <QVector>
 
 #include <functional>
@@ -188,6 +189,13 @@ public:
     void listWaybackReleases(std::function<void(QVector<WaybackRelease>)> cb);
 
     static QString tileKey(int z, int x, int y);
+
+    /**
+     * A small, token-free Esri endpoint whose reachability stands in for
+     * "imagery can be fetched right now". Used to gate the New Satellite
+     * Plan entry point: a satellite plan without imagery is not a plan.
+     */
+    static QUrl connectivityProbeUrl();
 
     /**
      * World_Imagery carries scale-banded metadata footprint sublayers, one per
