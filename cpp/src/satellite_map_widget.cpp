@@ -1436,14 +1436,6 @@ void SatelliteMapWidget::paintChrome(QPainter& painter) {
         }
     }
     const double bar_px = chosen * unit_m / mpp;
-    const QPointF base(14, height() - 18);
-    painter.setPen(QPen(satpal::text(), 2));
-    painter.drawLine(base, base + QPointF(bar_px, 0));
-    painter.drawLine(base + QPointF(0, -4), base + QPointF(0, 4));
-    painter.drawLine(base + QPointF(bar_px, -4), base + QPointF(bar_px, 4));
-    QFont small = font();
-    small.setPointSizeF(9.0);
-    painter.setFont(small);
     QString label;
     if (metric) {
         label = chosen >= 1000.0
@@ -1452,7 +1444,27 @@ void SatelliteMapWidget::paintChrome(QPainter& painter) {
     } else {
         label = QStringLiteral("%1 ft").arg(chosen);
     }
-    painter.drawText(QRectF(base.x(), base.y() - 20, bar_px, 14),
+    QFont small = font();
+    small.setPixelSize(12);
+    painter.setFont(small);
+    const QFontMetricsF label_fm(small);
+    // Chip per Figma 238:4489: bar on top, label under it, on the same
+    // near-black rounded panel the pane tags use — bare white strokes
+    // vanish over bright roofs.
+    const double inner_w = std::max(bar_px, label_fm.horizontalAdvance(label));
+    const QRectF chip(12, height() - 12 - 46, inner_w + 24, 46);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(0x3f, 0x3f, 0x47), 1));
+    painter.setBrush(QColor(24, 24, 27, 230));
+    painter.drawRoundedRect(chip, 8, 8);
+    const QPointF base(chip.left() + 12 + (inner_w - bar_px) / 2.0,
+                       chip.top() + 14);
+    painter.setPen(QPen(QColor(0xe4, 0xe4, 0xe7), 2));
+    painter.drawLine(base, base + QPointF(bar_px, 0));
+    painter.drawLine(base + QPointF(0, -5), base + QPointF(0, 5));
+    painter.drawLine(base + QPointF(bar_px, -5), base + QPointF(bar_px, 5));
+    painter.setPen(QColor(0xe4, 0xe4, 0xe7));
+    painter.drawText(QRectF(chip.left(), chip.top() + 22, chip.width(), 18),
                      Qt::AlignCenter, label);
 
     // Attribution (ToS requirement, bottom-right; imagery surfaces only).

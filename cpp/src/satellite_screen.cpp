@@ -399,7 +399,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     auto* chip_wrap = new QWidget(map_page_);
     chip_wrap->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     auto* chip_wrap_layout = new QVBoxLayout(chip_wrap);
-    chip_wrap_layout->setContentsMargins(12, 0, 0, 40);
+    chip_wrap_layout->setContentsMargins(12, 0, 0, 66);  // clears the scale chip
     chip_wrap_layout->addWidget(layer_chip_);
     map_page_layout->addWidget(chip_wrap, 0, 0,
                                Qt::AlignLeft | Qt::AlignBottom);
