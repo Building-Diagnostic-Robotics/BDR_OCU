@@ -807,11 +807,26 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  decides whether a save fetches.
  **The field satellite rail is per step** (`applyStepVisibility`,
  `frame_rail = !planning_only_ && Satellite`; rail is 288 px =
- `kLeftRailWidth`, frame 222:1155): step 1 shows `plan_card_` trimmed to
- **Locate Building** (address / Go, Find Robot, imagery line — every
- widget in `plan_card_authoring_` hidden; name comes from the chosen plan
+ `kLeftRailWidth`, frames 238:4289 / 222:1155): **step 1 has no rail**
+ (`rail_scroll_` hidden like the picker) — a 420 px floating search pill
+ (`buildSearchBar`, `#SatSearchBar`) sits 40 px under the step header
+ over the full-width canvas, and the imagery provenance rides the
+ bottom-left `layer_chip_` ("Satellite • <date> · <gsd> · <age>"). The
+ plan card is never shown in this trim; name comes from the chosen plan
  + metadata modal and `loadJob()` still fills the hidden `job_name_` so
- the step-1 gate holds). Step 3 shows `roi_card_` (`buildRoiCard`, Figma
+ the step-1 gate holds. Find Robot is not on step 1 (address only, per
+ operator). **Type-ahead** is Esri World Geocoder `suggest`
+ (`TileService::suggest`, free of geocode credits): 300 ms debounce,
+ ≥ 3 chars, `maxSuggestions=6`, `countryCode=USA`, `category=Address,
+ Point Address,Street Address,POI`, `location=` map centre bias,
+ collections dropped, newer call aborts the older, `suggest_seq_` drops
+ stale replies. A pick resolves via `geocode(text, GeocodeBias{magic_key})`
+ so the landing is the tapped record; `forStorage=false`, `outSR=4326`,
+ `LongLabel` in the log. Rooftop-grade (`PointAddress`/`Subaddress`)
+ lands at z19, interpolated `StreetAddress` at z18 with the existing
+ "INTERPOLATED" warning. Popup is a `QListWidget` (`#SatSearchPopup`,
+ NoFocus so the edit keeps the caret); ↑/↓/Esc handled in
+ `eventFilter`, FocusOut closes it. Step 3 shows `roi_card_` (`buildRoiCard`, Figma
  222:1284): title/blurb, Vertices/Status/Area stats box, **Edge
  Dimensions** rows whose value buttons call
  `SatelliteMapWidget::beginEdgeLengthEdit(i)` (row hover →

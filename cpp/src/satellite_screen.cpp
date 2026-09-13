@@ -23,6 +23,7 @@
 #include "satellite_palette.hpp"
 #include "satellite_ros_link.hpp"
 #include "satellite_tile_service.hpp"
+#include <QListWidget>
 #include "settings_constants.hpp"
 #include "units_system.hpp"
 
@@ -76,6 +77,8 @@ constexpr int kTopStatusMotorsChipHeight = 20;
 // top-right corner — same reservation Stage 4/5 make.
 constexpr int kTopStatusWindowControlsReservedWidth = 184;
 constexpr int kLeftRailWidth = 288;
+constexpr int kSearchBarWidth = 420;   // 238:4509
+constexpr int kSearchRowHeight = 40;
 constexpr int kSendButtonHeight = 44;
 constexpr int kEstopButtonHeight = 44;
 constexpr int kStepHeaderHeight = 55;
@@ -368,6 +371,37 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     canvas_tag_->setObjectName("SatPaneTag");
     canvas_tag_->hide();
     map_page_layout->addWidget(canvas_tag_, 0, 0, Qt::AlignLeft | Qt::AlignTop);
+    // Step-1 floating search (238:4509) + layer/provenance chip (238:4531).
+    search_host_ = buildSearchBar(map_page_);
+    search_host_->hide();
+    map_page_layout->addWidget(search_host_, 0, 0,
+                               Qt::AlignHCenter | Qt::AlignTop);
+    layer_chip_ = new QWidget(map_page_);
+    layer_chip_->setObjectName("SatLayerChip");
+    layer_chip_->setAttribute(Qt::WA_StyledBackground, true);
+    {
+        auto* chip_layout = new QHBoxLayout(layer_chip_);
+        chip_layout->setContentsMargins(12, 6, 12, 6);
+        chip_layout->setSpacing(8);
+        auto* icon = new QLabel(layer_chip_);
+        icon->setFixedSize(14, 14);
+        icon->setPixmap(loadTintedSvg(QStringLiteral(":/assets/satellite/layers.svg"),
+                                      14, 14, QStringLiteral("#9f9fa9")));
+        chip_layout->addWidget(icon);
+        layer_chip_text_ = new QLabel(QStringLiteral("Satellite"), layer_chip_);
+        layer_chip_text_->setObjectName("SatLayerChipText");
+        chip_layout->addWidget(layer_chip_text_);
+    }
+    layer_chip_->hide();
+    // Sits above the scale bar / attribution strip (bottom 30 px of the map).
+    // Plain QWidgets ignore QSS margin, so the offset is a wrapper layout.
+    auto* chip_wrap = new QWidget(map_page_);
+    chip_wrap->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    auto* chip_wrap_layout = new QVBoxLayout(chip_wrap);
+    chip_wrap_layout->setContentsMargins(12, 0, 0, 40);
+    chip_wrap_layout->addWidget(layer_chip_);
+    map_page_layout->addWidget(chip_wrap, 0, 0,
+                               Qt::AlignLeft | Qt::AlignBottom);
     canvas_stack_->addWidget(map_page_);
     correspond_page_ = buildCorrespondPage();
     canvas_stack_->addWidget(correspond_page_);
@@ -1601,28 +1635,28 @@ void SatelliteScreen::applyStepVisibility() {
     // churning at the same time as the widgets it governs.
     const Step step = selected_step_;
     // Field satellite trim follows the Figma frames step by step: step 1 is
-    // locate-only (the name came from the chosen plan + metadata modal), step
-    // 3 is the ROI Definition rail (222:1284), step 4 the edge review card.
-    // The office and the measured canvas keep the single authoring card.
+    // a full-width canvas with the floating address search (238:4289; the
+    // name came from the chosen plan + metadata modal), step 3 the ROI
+    // Definition rail (222:1284), step 4 the edge review card. The office
+    // and the measured canvas keep the single authoring card.
     const bool frame_rail =
         !planning_only_ && plan_mode_ == PlanMode::Satellite;
+    const bool locate_step = frame_rail && step == Step::SatelliteMap;
     if (plan_card_) {
-        plan_card_->setVisible(frame_rail
-                                   ? step == Step::SatelliteMap
-                                   : (step == Step::SatelliteMap ||
-                                      step == Step::RoiDefinition ||
-                                      step == Step::EdgeReview));
-        for (QWidget* w : plan_card_authoring_) {
-            w->setVisible(!frame_rail);
+        plan_card_->setVisible(!frame_rail && (step == Step::SatelliteMap ||
+                                               step == Step::RoiDefinition ||
+                                               step == Step::EdgeReview));
+    }
+    if (search_host_) {
+        search_host_->setVisible(locate_step);
+        if (locate_step) {
+            search_edit_->setFocus(Qt::OtherFocusReason);
+        } else {
+            hideSuggestions();
         }
-        if (roi_numeric_host_ && !frame_rail) {
-            roi_numeric_host_->setVisible(!planning_only_);
-        }
-        if (plan_card_title_) {
-            plan_card_title_->setText(frame_rail
-                                          ? QStringLiteral("Locate Building")
-                                          : QStringLiteral("Plan"));
-        }
+    }
+    if (layer_chip_) {
+        layer_chip_->setVisible(locate_step);
     }
     if (roi_card_) {
         const bool roi_step = frame_rail && step == Step::RoiDefinition;
@@ -1639,7 +1673,7 @@ void SatelliteScreen::applyStepVisibility() {
     const bool picker_step = !planning_only_ && step == Step::Alignment &&
                              plan_mode_ == PlanMode::Satellite;
     if (rail_scroll_) {
-        rail_scroll_->setVisible(!picker_step);
+        rail_scroll_->setVisible(!picker_step && !locate_step);
     }
     if (align_card_) {
         align_card_->setVisible(!planning_only_ && step == Step::Alignment &&
@@ -1957,10 +1991,8 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
-    auto* header = makeCardHeader(QStringLiteral(":/assets/exploration/map.svg"),
-                                  QStringLiteral("Plan"), card);
-    plan_card_title_ = header->findChild<QLabel*>(QStringLiteral("SatCardHeader"));
-    layout->addWidget(header);
+    layout->addWidget(makeCardHeader(QStringLiteral(":/assets/exploration/map.svg"),
+                                     QStringLiteral("Plan"), card));
 
     // Plan selector — office (planning-only) affordance.
     jobs_combo_ = new QComboBox(card);
@@ -2196,14 +2228,185 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     connect(save_button_, &QPushButton::clicked, this,
             &SatelliteScreen::saveJob);
     layout->addWidget(save_button_);
-
-    // Everything that authors the plan. Field step 1 hides these: the name
-    // came from the chosen plan + metadata modal, and ROI work is step 3.
-    plan_card_authoring_ = {job_name_,      job_address_,     shape_row,
-                            draw_row,       place_robot_button_,
-                            roi_numeric_host_, robot_pos_label_, edge_hint,
-                            save_button_};
     return card;
+}
+
+QWidget* SatelliteScreen::buildSearchBar(QWidget* parent) {
+    // Figma 238:4509: 420×48 pill floating 40 px under the step header,
+    // search glyph · input · green "Search". Suggestions drop beneath it.
+    auto* host = new QWidget(parent);
+    host->setObjectName("SatSearchHost");
+    host->setAttribute(Qt::WA_TranslucentBackground, true);
+    host->setFixedWidth(kSearchBarWidth);
+    auto* layout = new QVBoxLayout(host);
+    layout->setContentsMargins(0, 40, 0, 0);
+    layout->setSpacing(8);
+
+    auto* bar = new QWidget(host);
+    bar->setObjectName("SatSearchBar");
+    bar->setAttribute(Qt::WA_StyledBackground, true);
+    bar->setFixedHeight(48);
+    auto* bar_layout = new QHBoxLayout(bar);
+    bar_layout->setContentsMargins(16, 0, 16, 0);
+    bar_layout->setSpacing(12);
+    auto* glyph = new QLabel(bar);
+    glyph->setFixedSize(16, 16);
+    glyph->setPixmap(loadTintedSvg(QStringLiteral(":/assets/satellite/search.svg"),
+                                   16, 16, QStringLiteral("#9f9fa9")));
+    bar_layout->addWidget(glyph);
+    search_edit_ = new QLineEdit(bar);
+    search_edit_->setObjectName("SatSearchEdit");
+    search_edit_->setPlaceholderText(
+        QStringLiteral("Search address or \"lat, lon\""));
+    search_edit_->setFrame(false);
+    search_edit_->installEventFilter(this);
+    bar_layout->addWidget(search_edit_, 1);
+    auto* go = new QPushButton(QStringLiteral("Search"), bar);
+    go->setObjectName("SatSearchGo");
+    go->setFlat(true);
+    go->setCursor(Qt::PointingHandCursor);
+    bar_layout->addWidget(go);
+    layout->addWidget(bar);
+
+    search_popup_ = new QListWidget(host);
+    search_popup_->setObjectName("SatSearchPopup");
+    search_popup_->setFocusPolicy(Qt::NoFocus);  // the edit keeps the caret
+    search_popup_->setFrameShape(QFrame::NoFrame);
+    search_popup_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    search_popup_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    search_popup_->setMouseTracking(true);
+    search_popup_->setCursor(Qt::PointingHandCursor);
+    search_popup_->hide();
+    layout->addWidget(search_popup_);
+    layout->addStretch(1);
+
+    // Debounced type-ahead: 300 ms after the last keystroke, ≥ 3 chars.
+    search_timer_ = new QTimer(this);
+    search_timer_->setSingleShot(true);
+    search_timer_->setInterval(300);
+    connect(search_timer_, &QTimer::timeout, this,
+            &SatelliteScreen::requestSuggestions);
+    connect(search_edit_, &QLineEdit::textEdited, this, [this](const QString& t) {
+        if (t.trimmed().size() < 3) {
+            hideSuggestions();
+            search_timer_->stop();
+            return;
+        }
+        search_timer_->start();
+    });
+    const auto submit = [this] {
+        const int row = search_popup_->isVisible() ? search_popup_->currentRow() : -1;
+        if (row >= 0) {
+            acceptSuggestion(row);
+        } else {
+            hideSuggestions();
+            goToAddress(search_edit_->text(), QString());
+        }
+    };
+    connect(search_edit_, &QLineEdit::returnPressed, this, submit);
+    connect(go, &QPushButton::clicked, this, submit);
+    connect(search_popup_, &QListWidget::itemClicked, this,
+            [this](QListWidgetItem* item) {
+                acceptSuggestion(search_popup_->row(item));
+            });
+    connect(search_popup_, &QListWidget::itemEntered, this,
+            [this](QListWidgetItem* item) {
+                search_popup_->setCurrentItem(item);
+            });
+    return host;
+}
+
+TileService::GeocodeBias SatelliteScreen::geocodeBias() const {
+    TileService::GeocodeBias bias;
+    bias.valid = true;
+    bias.lat = map_->centerLat();
+    bias.lon = map_->centerLon();
+    return bias;
+}
+
+void SatelliteScreen::requestSuggestions() {
+    const QString text = search_edit_->text().trimmed();
+    if (text.size() < 3 || plan_mode_ != PlanMode::Satellite) {
+        return;
+    }
+    const quint64 seq = ++suggest_seq_;
+    tiles_->suggest(text, geocodeBias(),
+                    [this, seq](QVector<TileService::Suggestion> items) {
+                        if (seq != suggest_seq_ || !search_edit_->hasFocus()) {
+                            return;  // stale, or the operator moved on
+                        }
+                        suggestions_ = std::move(items);
+                        search_popup_->clear();
+                        if (suggestions_.isEmpty()) {
+                            hideSuggestions();
+                            return;
+                        }
+                        for (const auto& s : suggestions_) {
+                            auto* item = new QListWidgetItem(s.text);
+                            item->setSizeHint(QSize(0, kSearchRowHeight));
+                            search_popup_->addItem(item);
+                        }
+                        search_popup_->setCurrentRow(-1);
+                        search_popup_->setFixedHeight(
+                            suggestions_.size() * kSearchRowHeight + 2);
+                        search_popup_->show();
+                    });
+}
+
+void SatelliteScreen::hideSuggestions() {
+    if (search_popup_) {
+        search_popup_->hide();
+        search_popup_->clear();
+    }
+    suggestions_.clear();
+}
+
+void SatelliteScreen::acceptSuggestion(int row) {
+    if (row < 0 || row >= suggestions_.size()) {
+        return;
+    }
+    const TileService::Suggestion s = suggestions_[row];
+    search_edit_->setText(s.text);
+    hideSuggestions();
+    goToAddress(s.text, s.magic_key);
+}
+
+void SatelliteScreen::goToAddress(const QString& raw, const QString& magic_key) {
+    const QString query = raw.trimmed();
+    if (query.isEmpty()) {
+        return;
+    }
+    const QStringList parts = query.split(QLatin1Char(','));
+    if (parts.size() == 2) {
+        bool lat_ok = false;
+        bool lon_ok = false;
+        const double lat = parts[0].trimmed().toDouble(&lat_ok);
+        const double lon = parts[1].trimmed().toDouble(&lon_ok);
+        if (lat_ok && lon_ok && std::abs(lat) <= 85.0 &&
+            std::abs(lon) <= 180.0) {
+            map_->setView(lat, lon, 18);
+            canvas_aimed_ = true;
+            refreshStepUi();
+            return;
+        }
+    }
+    appendLog(QStringLiteral("[geo] searching '%1'…").arg(query));
+    TileService::GeocodeBias bias = geocodeBias();
+    bias.magic_key = magic_key;
+    tiles_->geocode(query, bias,
+                    [this](bool ok, double lat, double lon, QString label,
+                           bool rooftop) {
+                        appendLog(QStringLiteral("[geo] %1").arg(label));
+                        if (!ok) {
+                            return;
+                        }
+                        // Rooftop-grade match: land on the roof. An
+                        // interpolated one can be a parcel off, so stay a
+                        // notch wider and let the operator pick the building.
+                        map_->setView(lat, lon, rooftop ? 19 : 18);
+                        canvas_aimed_ = true;
+                        refreshStepUi();
+                    });
 }
 
 QWidget* SatelliteScreen::buildRoiCard(QWidget* parent) {
@@ -2900,6 +3103,32 @@ QPushButton#SatRoiClearButton {
 }
 QPushButton#SatRoiClearButton:hover { background: #3f3f47; color: @TEXT@; }
 #SatRoiNote { background: rgba(39,39,42,0.6); border-radius: 10px; }
+
+/* ---- Step 1 floating search (Figma 238:4509) + layer chip (238:4531) ---- */
+#SatSearchBar { background: rgba(24,24,27,0.95); border: 1px solid #3f3f47; border-radius: 24px; }
+QLineEdit#SatSearchEdit {
+    background: transparent; border: none; padding: 0px;
+    font-size: 14px; color: #ffffff; selection-background-color: #009966;
+}
+QPushButton#SatSearchGo {
+    background: transparent; border: none; padding: 0px 2px 0px 0px;
+    font-size: 12px; font-weight: 600; color: #00d492;
+}
+QPushButton#SatSearchGo:hover { color: #5ee9b5; }
+QListWidget#SatSearchPopup {
+    background: rgba(24,24,27,0.95); border: 1px solid #3f3f47; border-radius: 12px;
+    padding: 0px; outline: none;
+}
+QListWidget#SatSearchPopup::item {
+    height: 40px; padding: 0px 16px; font-size: 14px; color: #e4e4e7; border: none;
+}
+QListWidget#SatSearchPopup::item:hover,
+QListWidget#SatSearchPopup::item:selected { background: #27272a; color: #00d492; }
+#SatLayerChip { background: rgba(24,24,27,0.9); border: 1px solid #3f3f47; border-radius: 10px; }
+QLabel#SatLayerChipText {
+    background: transparent; font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace;
+    font-size: 12px; color: #9f9fa9;
+}
 )QSS");
     qss.replace(QStringLiteral("@PAGE@"), page_bg);
     qss.replace(QStringLiteral("@SURFACE_BORDER@"), surface_border);
@@ -3347,34 +3576,7 @@ void SatelliteScreen::saveSatelliteWithImagery(Job job) {
 // ---- Navigation -------------------------------------------------------------
 
 void SatelliteScreen::onGoToAddress() {
-    const QString query = address_edit_->text().trimmed();
-    if (query.isEmpty()) {
-        return;
-    }
-    const QStringList parts = query.split(QLatin1Char(','));
-    if (parts.size() == 2) {
-        bool lat_ok = false;
-        bool lon_ok = false;
-        const double lat = parts[0].trimmed().toDouble(&lat_ok);
-        const double lon = parts[1].trimmed().toDouble(&lon_ok);
-        if (lat_ok && lon_ok && std::abs(lat) <= 85.0 &&
-            std::abs(lon) <= 180.0) {
-            map_->setView(lat, lon, 18);
-            canvas_aimed_ = true;
-            refreshStepUi();
-            return;
-        }
-    }
-    appendLog(QStringLiteral("[geo] searching '%1'…").arg(query));
-    tiles_->geocode(query,
-                    [this](bool ok, double lat, double lon, QString label) {
-                        appendLog(QStringLiteral("[geo] %1").arg(label));
-                        if (ok) {
-                            map_->setView(lat, lon, 18);
-                            canvas_aimed_ = true;
-                            refreshStepUi();
-                        }
-                    });
+    goToAddress(address_edit_->text(), QString());
 }
 
 void SatelliteScreen::refreshImageryInfo() {
@@ -3408,6 +3610,9 @@ void SatelliteScreen::refreshImageryInfo() {
                 imagery_label_->setText(
                     QStringLiteral("Imagery: capture date unavailable"));
                 imagery_label_->setStyleSheet(normal_color);
+                if (layer_chip_text_) {
+                    layer_chip_text_->setText(QStringLiteral("Satellite"));
+                }
                 return;
             }
 
@@ -3436,6 +3641,14 @@ void SatelliteScreen::refreshImageryInfo() {
             imagery_label_->setStyleSheet(
                 stale ? QStringLiteral("color: %1;").arg(QLatin1String(kAmber))
                       : normal_color);
+            if (layer_chip_text_) {
+                // Step 1 has no rail: the provenance rides the layer chip.
+                layer_chip_text_->setText(
+                    QStringLiteral("Satellite • %1").arg(detail));
+                layer_chip_text_->setStyleSheet(
+                    stale ? QStringLiteral("color: %1;").arg(QLatin1String(kAmber))
+                          : QString());
+            }
 
             if (changed) {
                 // Log it: the whole point is that this changes silently as
@@ -4299,6 +4512,32 @@ void SatelliteScreen::onEstop() {
 // ---- Teleop -----------------------------------------------------------------
 
 bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
+    // Step-1 search: arrow keys walk the suggestions, Esc closes them, and
+    // leaving the field closes them too (clicks on the popup itself never
+    // take focus — NoFocus policy — so this cannot swallow a pick).
+    if (watched == search_edit_) {
+        if (event->type() == QEvent::FocusOut) {
+            hideSuggestions();
+        } else if (event->type() == QEvent::KeyPress &&
+                   search_popup_->isVisible()) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            const int n = search_popup_->count();
+            if (key->key() == Qt::Key_Down) {
+                search_popup_->setCurrentRow((search_popup_->currentRow() + 1) % n);
+                return true;
+            }
+            if (key->key() == Qt::Key_Up) {
+                const int row = search_popup_->currentRow();
+                search_popup_->setCurrentRow(row <= 0 ? n - 1 : row - 1);
+                return true;
+            }
+            if (key->key() == Qt::Key_Escape) {
+                hideSuggestions();
+                return true;
+            }
+        }
+        return QWidget::eventFilter(watched, event);
+    }
     // Step-3 edge rows: hover lights the matching canvas chip green.
     if (event->type() == QEvent::Enter || event->type() == QEvent::Leave) {
         const QVariant idx = watched->property("edgeIndex");

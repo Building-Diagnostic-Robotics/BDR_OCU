@@ -34,6 +34,7 @@
 #include <functional>
 
 class QNetworkAccessManager;
+class QNetworkReply;
 
 namespace f2c_cpp {
 
@@ -90,6 +91,37 @@ public:
      */
     void geocode(const QString& query,
                  std::function<void(bool, double, double, QString)> cb);
+
+    /** Geocode tuning shared by suggest() and geocode(). */
+    struct GeocodeBias {
+        bool valid = false;
+        double lat = 0.0;  // rank candidates near here (the map centre)
+        double lon = 0.0;
+        QString magic_key;  // from a Suggestion: resolves that exact record
+    };
+    /**
+     * As geocode(query, cb) but biased to `bias` and, when `magic_key` is set,
+     * pinned to the suggestion the operator tapped instead of re-guessing
+     * from the text. The extra `rooftop` flag says whether the match is a
+     * PointAddress/Subaddress (rooftop grade) — callers pick the landing zoom
+     * from it.
+     */
+    void geocode(const QString& query, const GeocodeBias& bias,
+                 std::function<void(bool ok, double lat, double lon,
+                                    QString label, bool rooftop)> cb);
+
+    struct Suggestion {
+        QString text;
+        QString magic_key;
+    };
+    /**
+     * Type-ahead via the World Geocoder `suggest` endpoint (free of geocode
+     * credits). Only address / POI categories, ranked around `bias`, ≤ 6
+     * results. A newer call aborts the older in-flight one, so a callback
+     * always describes the latest text. Empty vector on any failure.
+     */
+    void suggest(const QString& text, const GeocodeBias& bias,
+                 std::function<void(QVector<Suggestion>)> cb);
 
     /**
      * Source-imagery provenance under (lat, lon) at `zoom`. Callback fires on
@@ -218,6 +250,7 @@ private:
     static constexpr qint64 kFailedRetryMs = 60 * 1000;
 
     QNetworkAccessManager* nam_ = nullptr;
+    QNetworkReply* suggest_reply_ = nullptr;  // latest suggest() in flight
     QString cache_root_;
     ImageryLayer layer_ = ImageryLayer::World;
     QString wayback_release_;

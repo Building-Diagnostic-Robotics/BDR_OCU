@@ -45,6 +45,10 @@ constexpr const char* kGeocodeUrl =
     "https://geocode-api.arcgis.com/arcgis/rest/services/"
     "World/GeocodeServer/findAddressCandidates";
 
+constexpr const char* kSuggestUrl =
+    "https://geocode-api.arcgis.com/arcgis/rest/services/"
+    "World/GeocodeServer/suggest";
+
 constexpr const char* kWaybackReleasesUrl =
     "https://wayback.maptiles.arcgis.com/arcgis/rest/services/"
     "World_Imagery/MapServer?f=json";
@@ -195,36 +199,127 @@ void TileService::fetch(int z, int x, int y) {
 void TileService::geocode(
     const QString& query_text,
     std::function<void(bool, double, double, QString)> cb) {
+    geocode(query_text, GeocodeBias{},
+            [cb](bool ok, double lat, double lon, QString label, bool) {
+                cb(ok, lat, lon, std::move(label));
+            });
+}
+
+namespace {
+
+/** Parameters common to suggest and findAddressCandidates. */
+void addGeocodeTuning(QUrlQuery& query, const TileService::GeocodeBias& bias) {
+    query.addQueryItem(QStringLiteral("f"), QStringLiteral("json"));
+    // Roofus scans buildings: rank real addresses and named places, never
+    // cities / postcodes / coordinates, and never a lookalike abroad.
+    query.addQueryItem(QStringLiteral("countryCode"), QStringLiteral("USA"));
+    query.addQueryItem(
+        QStringLiteral("category"),
+        QStringLiteral("Address,Point Address,Street Address,POI"));
+    if (bias.valid) {
+        // Nearby first: the operator is standing at (or planning) this site.
+        query.addQueryItem(QStringLiteral("location"),
+                           QStringLiteral("%1,%2")
+                               .arg(bias.lon, 0, 'f', 6)
+                               .arg(bias.lat, 0, 'f', 6));
+    }
+    query.addQueryItem(QStringLiteral("token"), QLatin1String(kArcgisApiKey));
+}
+
+}  // namespace
+
+void TileService::suggest(const QString& text, const GeocodeBias& bias,
+                          std::function<void(QVector<Suggestion>)> cb) {
+    if (suggest_reply_) {
+        // Superseded: drop the older request so its (stale) result never
+        // paints over the newer text.
+        suggest_reply_->abort();
+        suggest_reply_ = nullptr;
+    }
+    if (!hasApiKey() || text.trimmed().size() < 3) {
+        cb({});
+        return;
+    }
+    QUrl url{QLatin1String(kSuggestUrl)};
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("text"), text.trimmed());
+    query.addQueryItem(QStringLiteral("maxSuggestions"), QStringLiteral("6"));
+    addGeocodeTuning(query, bias);
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setTransferTimeout(3000);
+    QNetworkReply* reply = nam_->get(request);
+    suggest_reply_ = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, cb]() {
+        reply->deleteLater();
+        if (suggest_reply_ == reply) {
+            suggest_reply_ = nullptr;
+        }
+        QVector<Suggestion> out;
+        if (reply->error() == QNetworkReply::NoError) {
+            const QJsonArray items = QJsonDocument::fromJson(reply->readAll())
+                                         .object()
+                                         .value(QStringLiteral("suggestions"))
+                                         .toArray();
+            for (const QJsonValue& v : items) {
+                const QJsonObject o = v.toObject();
+                // Collections ("Starbucks" as a category) are not places.
+                if (o.value(QStringLiteral("isCollection")).toBool()) {
+                    continue;
+                }
+                out.append({o.value(QStringLiteral("text")).toString(),
+                            o.value(QStringLiteral("magicKey")).toString()});
+            }
+        } else if (reply->error() == QNetworkReply::OperationCanceledError) {
+            return;  // aborted by a newer suggest(); its callback will fire
+        }
+        cb(out);
+    });
+}
+
+void TileService::geocode(
+    const QString& query_text, const GeocodeBias& bias,
+    std::function<void(bool, double, double, QString, bool)> cb) {
     if (!hasApiKey()) {
-        cb(false, 0.0, 0.0, QStringLiteral("No ArcGIS API key compiled in."));
+        cb(false, 0.0, 0.0, QStringLiteral("No ArcGIS API key compiled in."),
+           false);
         return;
     }
 
     QUrl url{QLatin1String(kGeocodeUrl)};
     QUrlQuery query;
-    query.addQueryItem(QStringLiteral("f"), QStringLiteral("json"));
     query.addQueryItem(QStringLiteral("maxLocations"), QStringLiteral("1"));
     query.addQueryItem(QStringLiteral("singleLine"), query_text);
+    if (!bias.magic_key.isEmpty()) {
+        // Pins the candidate to the suggestion row the operator tapped.
+        query.addQueryItem(QStringLiteral("magicKey"), bias.magic_key);
+    }
+    query.addQueryItem(QStringLiteral("outSR"), QStringLiteral("4326"));
+    // Not stored: keeps the call inside the free geocode allowance.
+    query.addQueryItem(QStringLiteral("forStorage"), QStringLiteral("false"));
     // Without outFields the response carries no attributes at all — no
     // rooftop point and no way to tell an interpolated match from a real one.
-    query.addQueryItem(QStringLiteral("outFields"),
-                       QStringLiteral("DisplayX,DisplayY,Addr_type,Score"));
-    query.addQueryItem(QStringLiteral("token"),
-                       QLatin1String(kArcgisApiKey));
+    query.addQueryItem(
+        QStringLiteral("outFields"),
+        QStringLiteral("DisplayX,DisplayY,Addr_type,Score,LongLabel"));
+    addGeocodeTuning(query, bias);
     url.setQuery(query);
 
-    QNetworkReply* reply = nam_->get(QNetworkRequest(url));
+    QNetworkRequest request(url);
+    request.setTransferTimeout(5000);
+    QNetworkReply* reply = nam_->get(request);
     connect(reply, &QNetworkReply::finished, this, [reply, cb]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            cb(false, 0.0, 0.0, reply->errorString());
+            cb(false, 0.0, 0.0, reply->errorString(), false);
             return;
         }
         const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
         const QJsonArray candidates =
             doc.object().value(QStringLiteral("candidates")).toArray();
         if (candidates.isEmpty()) {
-            cb(false, 0.0, 0.0, QStringLiteral("Address not found."));
+            cb(false, 0.0, 0.0, QStringLiteral("Address not found."), false);
             return;
         }
         const QJsonObject best = candidates.first().toObject();
@@ -259,9 +354,13 @@ void TileService::geocode(
             addr_type == QLatin1String("PointAddress") ||
             addr_type == QLatin1String("Subaddress");
 
+        QString address = attrs.value(QStringLiteral("LongLabel")).toString();
+        if (address.isEmpty()) {
+            address = best.value(QStringLiteral("address")).toString();
+        }
         const QString label =
             QStringLiteral("%1  [%2, score %3]%4")
-                .arg(best.value(QStringLiteral("address")).toString(),
+                .arg(address,
                      addr_type.isEmpty() ? QStringLiteral("?") : addr_type)
                 .arg(score, 0, 'f', 0)
                 .arg(rooftop_grade
@@ -269,7 +368,7 @@ void TileService::geocode(
                          : QStringLiteral("  ** INTERPOLATED — confirm the "
                                           "building before drawing **"));
 
-        cb(true, lat, lon, label);
+        cb(true, lat, lon, label, rooftop_grade);
     });
 }
 

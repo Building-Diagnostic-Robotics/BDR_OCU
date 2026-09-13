@@ -44,6 +44,8 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
+class QListWidget;
+class QListWidgetItem;
 class QNetworkAccessManager;
 class QPlainTextEdit;
 class QProgressBar;
@@ -400,11 +402,25 @@ private:
     QLabel* imagery_label_ = nullptr;  // source capture date / GSD (geo only)
     QPushButton* save_button_ = nullptr;
 
-    // Field step 1 shows the plan card trimmed to locate-only (address / Go,
-    // Find Robot, imagery line); these are the widgets it hides. The header
-    // label is retitled per trim.
-    QLabel* plan_card_title_ = nullptr;
-    QVector<QWidget*> plan_card_authoring_;
+    // Field step 1 — no rail; the floating address search (Figma 238:4509)
+    // and the layer / provenance chip (238:4531) float over the canvas.
+    // Type-ahead comes from TileService::suggest; a pick resolves through
+    // its magicKey so the landing is the tapped record, not a re-guess.
+    QWidget* search_host_ = nullptr;
+    QLineEdit* search_edit_ = nullptr;
+    QListWidget* search_popup_ = nullptr;
+    QTimer* search_timer_ = nullptr;
+    QVector<TileService::Suggestion> suggestions_;
+    quint64 suggest_seq_ = 0;
+    QWidget* layer_chip_ = nullptr;
+    QLabel* layer_chip_text_ = nullptr;
+    QWidget* buildSearchBar(QWidget* parent);
+    TileService::GeocodeBias geocodeBias() const;
+    void requestSuggestions();
+    void hideSuggestions();
+    void acceptSuggestion(int row);
+    /** Shared by the office Go button and the field search bar. */
+    void goToAddress(const QString& raw, const QString& magic_key);
 
     // Field step 3 — ROI Definition rail (Figma 222:1284): stats box, Edge
     // Dimensions list whose value buttons open the canvas chip editor,

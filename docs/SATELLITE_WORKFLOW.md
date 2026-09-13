@@ -196,9 +196,14 @@ still wins; the setback is not a safety system.
    the collected map, picks and fit — a saved anchor stays with the plan,
    but a cloud is never reused across visits. Loading a different plan
    clears them too.
-7. Step 1's rail is only **Locate Building** — the address search, **Find
-   Robot** and the imagery line. The plan name and operator came from the
-   Scan Setup and metadata modals, so nothing is asked again.
+7. Step 1 has no side rail: the canvas is full width with one floating
+   search pill. Type three or more characters and address suggestions
+   drop beneath it (ranked around the current map view, US addresses and
+   named places only); ↑/↓ + Enter or a click picks one and the map lands
+   on that building's rooftop point. Enter without a pick geocodes the
+   typed text; `lat, lon` still works. Bottom-left chip shows the imagery
+   capture date / resolution / age. The plan name and operator came from
+   the Scan Setup and metadata modals, so nothing is asked again.
 8. Step 3, **ROI Definition**, has no Draw button: the canvas is armed the
    moment the step opens. Click the roof corners in order and click near
    the first point (or right-click) to close. The rail shows Vertices /
