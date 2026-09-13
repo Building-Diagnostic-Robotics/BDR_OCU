@@ -460,6 +460,8 @@ private:
     QWidget* map_page_ = nullptr;
     QWidget* canvas_tools_ = nullptr;
     QPushButton* measure_button_ = nullptr;
+    QPushButton* zoom_out_button_ = nullptr;
+    QLabel* back_label_ = nullptr;  // "Dashboard" / "Back" in the field trim
     struct CanvasTool {
         QPushButton* button = nullptr;
         QString icon;  // resource path; empty for glyph-only buttons

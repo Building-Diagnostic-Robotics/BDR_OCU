@@ -115,6 +115,10 @@ public:
     /** Paints `edge`'s chip in the green editing look without opening the
         editor — rail row hover. -1 clears. */
     void setHighlightedEdge(int edge);
+    /** Step 1 shows imagery only: skips the ROI + marker paint and ignores
+        their hit-testing. Drawing / measuring are unaffected. */
+    void setOverlaysHidden(bool hidden);
+    bool overlaysHidden() const { return overlays_hidden_; }
 
     geo::GeoPose marker() const { return marker_; }
     void setMarker(const geo::GeoPose& marker);
@@ -271,6 +275,7 @@ private:
     RoiPolygon polygon_;
     geo::GeoPose marker_;
     bool edit_locked_ = false;
+    bool overlays_hidden_ = false;  // step 1: imagery only, no ROI / marker
     bool place_marker_armed_ = false;
     bool draw_polygon_armed_ = false;
     bool draw_rect_armed_ = false;

@@ -1074,10 +1074,10 @@ QWidget* SatelliteScreen::buildTopBar() {
     auto* back = new QPushButton(top_bar);
     back->setObjectName("SatBackButton");
     back->setCursor(Qt::PointingHandCursor);
-    back->setFixedSize(40, 28);
+    back->setFixedSize(40, 32);
     auto* back_layout = new QHBoxLayout(back);
     back_layout->setContentsMargins(12, 6, 12, 6);
-    back_layout->setSpacing(0);
+    back_layout->setSpacing(8);
     auto* back_icon = new QWidget(back);
     back_icon->setFixedSize(16, 16);
     auto* back_head = makeStatusIconLabel(
@@ -1089,6 +1089,12 @@ QWidget* SatelliteScreen::buildTopBar() {
     back_line->setFixedSize(11, 2);
     back_line->move(3, 7);
     back_layout->addWidget(back_icon, 0, Qt::AlignCenter);
+    // Frames label the back button ("Dashboard" / "Back", 238:4304,
+    // 222:1170); the office trim keeps the icon-only Stage 4/5 button.
+    back_label_ = new QLabel(QStringLiteral("Back"), back);
+    back_label_->setObjectName("SatBackLabel");
+    back_label_->hide();
+    back_layout->addWidget(back_label_, 0, Qt::AlignVCenter);
     connect(back, &QPushButton::clicked, this, [this] {
         if (mission_->missionActive()) {
             appendLog(QStringLiteral(
@@ -1657,6 +1663,39 @@ void SatelliteScreen::applyStepVisibility() {
     }
     if (layer_chip_) {
         layer_chip_->setVisible(locate_step);
+        // Layer name per frame; "Hybrid" would mean labels over imagery,
+        // which World Imagery / Clarity / Wayback do not carry.
+        QString layer = tiles_->layer() == TileService::ImageryLayer::Clarity
+                            ? QStringLiteral("Clarity")
+                            : QStringLiteral("World Imagery");
+        if (!tiles_->waybackRelease().isEmpty()) {
+            layer = QStringLiteral("Wayback");
+        }
+        layer_chip_text_->setText(QStringLiteral("Satellite • %1").arg(layer));
+    }
+    // Frames show a clean canvas on step 1 (238:4289): the saved ROI and
+    // robot marker only appear once the operator reaches the ROI work.
+    map_->setOverlaysHidden(locate_step);
+    // Frame tool stack is zoom-in + fit; zoom-out / ruler are office extras.
+    if (zoom_out_button_) {
+        zoom_out_button_->setVisible(!frame_rail);
+    }
+    if (measure_button_) {
+        measure_button_->setVisible(!frame_rail);
+    }
+    if (back_label_) {
+        // 238:4304 labels the top-bar back "Dashboard" on step 1; the later
+        // frames (222:1170) say "Back".
+        back_label_->setText(locate_step ? QStringLiteral("Dashboard")
+                                         : QStringLiteral("Back"));
+        back_label_->setVisible(frame_rail);
+        // QPushButton::sizeHint ignores child layouts, so size it by hand:
+        // 118 px with "Dashboard", 79 px with "Back" (frame), 40 icon-only.
+        // Text width measured — Arimo runs wider than the frame's Inter.
+        back_label_->adjustSize();
+        back_label_->parentWidget()->setFixedWidth(
+            frame_rail ? 12 + 16 + 8 + back_label_->sizeHint().width() + 12
+                       : 40);
     }
     if (roi_card_) {
         const bool roi_step = frame_rail && step == Step::RoiDefinition;
@@ -2620,35 +2659,38 @@ QWidget* SatelliteScreen::buildCanvasTools(QWidget* parent) {
     // Ported from the Stage 5 PlotWidget tool stack: view tools live on the
     // canvas edge, not in the rail, because they are about looking rather
     // than planning. Icons come from the same missionplanner set.
+    // Figma 238:4518: separate 32 px pills, 6 px apart, 12 px in from the
+    // canvas corner. The frames carry zoom-in + fit only; the field trim
+    // hides the rest (wheel still zooms out), the office keeps all four.
     auto* host = new QWidget(parent);
     host->setObjectName("SatCanvasTools");
-    host->setAttribute(Qt::WA_StyledBackground, true);
+    host->setAttribute(Qt::WA_TranslucentBackground, true);
     auto* layout = new QVBoxLayout(host);
-    layout->setContentsMargins(4, 4, 4, 4);
-    layout->setSpacing(2);
+    layout->setContentsMargins(0, 12, 12, 0);
+    layout->setSpacing(6);
 
     const auto makeTool = [&](const QString& icon, const QString& glyph,
                               const QString& tooltip) {
         auto* button = new QPushButton(glyph, host);
         button->setObjectName("SatCanvasTool");
-        button->setFixedSize(36, 36);
+        button->setFixedSize(32, 32);
         button->setCursor(Qt::PointingHandCursor);
         button->setToolTip(tooltip);
-        button->setIconSize(QSize(16, 16));
+        button->setIconSize(QSize(14, 14));
         layout->addWidget(button);
         canvas_tool_buttons_.append({button, icon});
         return button;
     };
 
     auto* zoom_in = makeTool(
-        QStringLiteral(":/assets/missionplanner/tool_zoom_in.svg"), QString(),
+        QStringLiteral(":/assets/satellite/tool_zoom_in.svg"), QString(),
         QStringLiteral("Zoom in"));
     connect(zoom_in, &QPushButton::clicked, map_, &SatelliteMapWidget::zoomIn);
-    auto* zoom_out = makeTool(QString(), QStringLiteral("−"),
-                              QStringLiteral("Zoom out"));
-    connect(zoom_out, &QPushButton::clicked, map_,
+    zoom_out_button_ = makeTool(QString(), QStringLiteral("−"),
+                                QStringLiteral("Zoom out"));
+    connect(zoom_out_button_, &QPushButton::clicked, map_,
             &SatelliteMapWidget::zoomOut);
-    auto* fit = makeTool(QStringLiteral(":/assets/missionplanner/tool_fit.svg"),
+    auto* fit = makeTool(QStringLiteral(":/assets/satellite/tool_fit.svg"),
                          QString(), QStringLiteral("Fit to ROI"));
     connect(fit, &QPushButton::clicked, this, [this] {
         if (!map_->fitToRoi()) {
@@ -2897,6 +2939,7 @@ void SatelliteScreen::applyTheme() {
     background-color: transparent; border: 1px solid @CARD_BORDER@; border-radius: 8px;
 }
 #SatBackButton:hover { background-color: @BUTTON_HOVER@; }
+QLabel#SatBackLabel { background: transparent; font-size: 14px; color: @TEXT@; }
 #SatMotorsChip {
     background-color: transparent; border: 1px solid @CARD_BORDER@; border-radius: 10px;
 }
@@ -2956,11 +2999,9 @@ QPushButton#SatToggle:checked {
     background-color: rgba(0, 188, 125, 0.15); border-color: #00BC7D; color: @TEXT@;
 }
 QPushButton#SatToggle:disabled { color: @MUTED@; background-color: transparent; }
-#SatCanvasTools {
-    background-color: @SURFACE@; border: 1px solid @CARD_BORDER@; border-radius: 10px;
-}
+#SatCanvasTools { background: transparent; }
 QPushButton#SatCanvasTool {
-    background-color: transparent; border: none; border-radius: 8px;
+    background-color: rgba(24, 24, 27, 0.90); border: 1px solid #3f3f47; border-radius: 10px;
     font-family: 'Arimo'; font-weight: 700; font-size: 16px; color: @TEXT@;
 }
 QPushButton#SatCanvasTool:hover { background-color: @BUTTON_HOVER@; }
@@ -3610,8 +3651,9 @@ void SatelliteScreen::refreshImageryInfo() {
                 imagery_label_->setText(
                     QStringLiteral("Imagery: capture date unavailable"));
                 imagery_label_->setStyleSheet(normal_color);
-                if (layer_chip_text_) {
-                    layer_chip_text_->setText(QStringLiteral("Satellite"));
+                if (layer_chip_) {
+                    layer_chip_->setToolTip(
+                        QStringLiteral("Imagery capture date unavailable"));
                 }
                 return;
             }
@@ -3641,10 +3683,10 @@ void SatelliteScreen::refreshImageryInfo() {
             imagery_label_->setStyleSheet(
                 stale ? QStringLiteral("color: %1;").arg(QLatin1String(kAmber))
                       : normal_color);
-            if (layer_chip_text_) {
-                // Step 1 has no rail: the provenance rides the layer chip.
-                layer_chip_text_->setText(
-                    QStringLiteral("Satellite • %1").arg(detail));
+            if (layer_chip_) {
+                // Step 1 has no rail: the provenance rides the layer chip as
+                // its tooltip; the chip text stays the layer name (238:4537).
+                layer_chip_->setToolTip(QStringLiteral("Imagery: %1").arg(detail));
                 layer_chip_text_->setStyleSheet(
                     stale ? QStringLiteral("color: %1;").arg(QLatin1String(kAmber))
                           : QString());

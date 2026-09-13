@@ -33,6 +33,8 @@
     <file alias="satellite/roi_hint.svg">../App resource/icons/satellite_roi_hint.svg</file>
     <file alias="satellite/search.svg">../App resource/icons/satellite_search.svg</file>
     <file alias="satellite/layers.svg">../App resource/icons/satellite_layers.svg</file>
+    <file alias="satellite/tool_zoom_in.svg">../App resource/icons/satellite_tool_zoom_in.svg</file>
+    <file alias="satellite/tool_fit.svg">../App resource/icons/satellite_tool_fit.svg</file>
 
     <!-- Exploration frame assets (Figma node 58:2) -->
     <file alias="exploration/fpv_feed.svg">../App resource/icons/exploration_fpv_feed.svg</file>

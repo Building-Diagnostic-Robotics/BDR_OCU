@@ -635,7 +635,7 @@ SatelliteMapWidget::Drag SatelliteMapWidget::hitTest(const QPointF& pos,
     if (edge_index) {
         *edge_index = -1;
     }
-    if (edit_locked_) {
+    if (edit_locked_ || overlays_hidden_) {
         return Drag::Pan;
     }
     if (marker_.valid) {
@@ -750,8 +750,12 @@ void SatelliteMapWidget::paintEvent(QPaintEvent*) {
     if (mission_anchor_.valid) {
         paintTelemetry(painter);
     }
-    paintRoi(painter);
-    paintMarker(painter);
+    if (overlays_hidden_) {
+        dim_boxes_.clear();  // no chips on screen → nothing to click
+    } else {
+        paintRoi(painter);
+        paintMarker(painter);
+    }
     paintInteraction(painter);
     paintChrome(painter);
 }
@@ -1207,6 +1211,18 @@ QVector<double> SatelliteMapWidget::edgeLengthsM() const {
         out.append(std::hypot(enu.x(), enu.y()));
     }
     return out;
+}
+
+void SatelliteMapWidget::setOverlaysHidden(bool hidden) {
+    if (overlays_hidden_ == hidden) {
+        return;
+    }
+    overlays_hidden_ = hidden;
+    if (hidden) {
+        cancelEdgeLengthEdit();
+        setMarkerSelected(false);
+    }
+    update();
 }
 
 void SatelliteMapWidget::setHighlightedEdge(int edge) {
