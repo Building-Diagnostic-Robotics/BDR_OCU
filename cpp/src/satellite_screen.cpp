@@ -661,6 +661,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     director_wait_prompted_ = false;
                     start_scan_pending_ = false;
                     metadata_pushed_ = false;
+                    stop_prompt_key_.clear();
                     scan_run_state_ = ScanRunState::Idle;
                     scan_autonomy_ran_ = false;
                     manual_override_ = false;
@@ -6492,8 +6493,10 @@ void SatelliteScreen::updateStatePill() {
             label = QStringLiteral("Manual");
         } else if (state == QLatin1String("WAITING_REVISIT")) {
             label = QStringLiteral("Revisit?");
-        } else if (state == QLatin1String("ERROR")) {
-            label = QStringLiteral("Error");
+        } else if (isStopState(state)) {
+            // The rail's reason label is hidden on step 5; the corner pill is
+            // the operator's only view of WHY the robot is standing still.
+            label = stopHeadline(status);
         }
         scan_status_text_->setText(label);
         scan_status_dot_->setPixmap(loadTintedSvg(
@@ -6524,6 +6527,124 @@ void SatelliteScreen::updateStatePill() {
         coverage_bar_->setVisible(true);
         coverage_bar_->setValue(int(qBound(0.0, frac, 1.0) * 1000));
     }
+    maybePromptStop(status);
+}
+
+bool SatelliteScreen::isStopState(const QString& state) {
+    return state.startsWith(QLatin1String("STOPPED")) ||
+           state == QLatin1String("REPLAN_FAILED") ||
+           state == QLatin1String("STALE_INPUT") ||
+           state == QLatin1String("ERROR");
+}
+
+QString SatelliteScreen::stopHeadline(const CoverageStatus& status) {
+    const QString state = status.state.toUpper();
+    if (state == QLatin1String("ERROR")) {
+        return QStringLiteral("Error");
+    }
+    if (state == QLatin1String("STOPPED_LIVE")) {
+        return QStringLiteral("Blocked");
+    }
+    if (state == QLatin1String("STOPPED_PERSISTENT")) {
+        return QStringLiteral("Blocked · persistent");
+    }
+    if (state == QLatin1String("REPLAN_FAILED")) {
+        return QStringLiteral("Replan failed");
+    }
+    if (state == QLatin1String("STALE_INPUT")) {
+        return QStringLiteral("Input stale · %1").arg(status.stale);
+    }
+    return status.stop.isEmpty() ? QStringLiteral("Stopped")
+                                 : QStringLiteral("Stopped · %1").arg(status.stop);
+}
+
+QString SatelliteScreen::stopGuidance(const CoverageStatus& status) {
+    const QString state = status.state.toUpper();
+    const QString stop = status.stop;
+    if (state == QLatin1String("ERROR")) {
+        return QStringLiteral(
+            "Director fault: %1\n\nCancel Scan and relaunch from Edge Review; "
+            "the plan stays PLANNED.").arg(status.error);
+    }
+    if (state == QLatin1String("STALE_INPUT")) {
+        return QStringLiteral(
+            "A director input went stale: %1.\n\nOdometry, terrain evidence "
+            "or the MPC stopped reporting. Check the BOT pill and the MOTORS "
+            "chip. If the stack does not recover in a few seconds, Cancel "
+            "Scan and relaunch.").arg(status.stale);
+    }
+    if (state == QLatin1String("STOPPED_LIVE")) {
+        return QStringLiteral(
+            "An obstacle is in the path right now.\n\nIf it can move, wait — "
+            "the robot resumes on its own once the path clears. If it is "
+            "fixed, take manual control, drive around it, then click the map "
+            "to hand back to autonomy.");
+    }
+    if (state == QLatin1String("STOPPED_PERSISTENT")) {
+        return QStringLiteral(
+            "The path ahead is persistently blocked.\n\nTake manual control, "
+            "drive past the obstruction, then click the map to hand back to "
+            "autonomy; the director replans from the new position.");
+    }
+    if (state == QLatin1String("REPLAN_FAILED")) {
+        return QStringLiteral(
+            "The director could not plan a route to the remaining area from "
+            "here (%1).\n\nTake manual control and drive closer to the "
+            "uncovered region, then click the map to resume. If that area is "
+            "genuinely unreachable, Complete Mission saves what was covered.")
+            .arg(stop);
+    }
+    if (stop == QLatin1String("obligation_terminal")) {
+        return QStringLiteral(
+            "The current swath reached its end and no follow-on route exists "
+            "from here.\n\nDrive toward the uncovered area and click the map "
+            "to resume, or Complete Mission.");
+    }
+    // degenerate_path, route_invalid, transit_endpoint_lost, topology_replan,
+    // handoff_entry_replan — the route stopped making sense.
+    return QStringLiteral(
+        "The current route became invalid (%1).\n\nThis usually means the "
+        "robot is outside or on the edge of the ROI, or the map changed under "
+        "the route. Take manual control, drive back inside the ROI facing the "
+        "uncovered area, then click the map to resume.").arg(stop);
+}
+
+void SatelliteScreen::maybePromptStop(const CoverageStatus& status) {
+    const QString state = status.state.toUpper();
+    const QString key = state + QLatin1Char('|') + status.stop +
+                        QLatin1Char('|') + status.stale;
+    if (!isStopState(state)) {
+        stop_prompt_key_.clear();   // re-arm for the next distinct stop
+        return;
+    }
+    // Only while the operator expects motion: autonomy on, not already
+    // driving by hand, and not a stop we have already explained.
+    if (!mission_->missionActive() || scan_run_state_ != ScanRunState::Running ||
+        manual_override_ || stop_prompt_open_ || key == stop_prompt_key_) {
+        return;
+    }
+    stop_prompt_key_ = key;
+    stop_prompt_open_ = true;
+    appendLog(QStringLiteral("[director] %1 — %2")
+                  .arg(state, status.stop.isEmpty() ? status.stale : status.stop));
+
+    // Modeless, like the revisit prompt: exec() would spin a nested loop in
+    // which the launch can die underneath the operator.
+    auto* box = new QMessageBox(this);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setIcon(QMessageBox::Warning);
+    box->setWindowTitle(QStringLiteral("Robot stopped — %1").arg(stopHeadline(status)));
+    box->setText(stopGuidance(status));
+    QPushButton* manual = box->addButton(QStringLiteral("Take manual control"),
+                                         QMessageBox::AcceptRole);
+    box->addButton(QStringLiteral("Dismiss"), QMessageBox::RejectRole);
+    connect(box, &QMessageBox::finished, this, [this, box, manual](int) {
+        stop_prompt_open_ = false;
+        if (box->clickedButton() == manual && mission_->missionActive()) {
+            setManualOverride(true);
+        }
+    });
+    box->show();
 }
 
 void SatelliteScreen::appendLog(const QString& line) {

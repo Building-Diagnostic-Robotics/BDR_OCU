@@ -339,6 +339,12 @@ private:
         tell the operator, back to Edge Review. Plan stays PLANNED. */
     void handleLaunchDeath(const QString& side, int exit_code);
     void maybePromptRevisit();
+    /** Director entered a stop state while autonomy was on: one modeless
+        modal per distinct (state, reason) explaining how to resolve it. */
+    void maybePromptStop(const CoverageStatus& status);
+    static bool isStopState(const QString& state);
+    static QString stopHeadline(const CoverageStatus& status);
+    static QString stopGuidance(const CoverageStatus& status);
     void setManualOverride(bool active);
     void refreshScanRunUi();
     void startScanFpv();
@@ -635,6 +641,8 @@ private:
     bool manual_override_ = false;
     bool resume_after_override_ = false;
     bool revisit_prompt_open_ = false;
+    bool stop_prompt_open_ = false;
+    QString stop_prompt_key_;   // last (state|stop|stale) explained
     bool revisit_hold_ = false;  // WAITING_REVISIT latched (prompt edge)
     bool director_failed_ = false;
     // Director-boot bookkeeping. The only hard "death" signal is a launch
