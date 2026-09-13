@@ -36,6 +36,7 @@
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QGraphicsBlurEffect>
+#include <QGraphicsDropShadowEffect>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -2285,6 +2286,13 @@ QWidget* SatelliteScreen::buildSearchBar(QWidget* parent) {
     bar->setObjectName("SatSearchBar");
     bar->setAttribute(Qt::WA_StyledBackground, true);
     bar->setFixedHeight(48);
+    // 238:4509 shadow: 0 25px 50px -12px rgba(0,0,0,.6). The host's bottom
+    // margin below leaves room for the blur to paint.
+    auto* shadow = new QGraphicsDropShadowEffect(bar);
+    shadow->setBlurRadius(50);
+    shadow->setOffset(0, 12);
+    shadow->setColor(QColor(0, 0, 0, 153));
+    bar->setGraphicsEffect(shadow);
     auto* bar_layout = new QHBoxLayout(bar);
     bar_layout->setContentsMargins(16, 0, 16, 0);
     bar_layout->setSpacing(12);
