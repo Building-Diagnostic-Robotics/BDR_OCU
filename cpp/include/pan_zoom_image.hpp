@@ -11,12 +11,14 @@
 
 #pragma once
 
+#include <QColor>
 #include <QImage>
 #include <QPointF>
 #include <QVector>
 #include <QWidget>
 
 class QMouseEvent;
+class QVariantAnimation;
 class QPaintEvent;
 class QResizeEvent;
 class QWheelEvent;
@@ -36,6 +38,14 @@ public:
     void setPickEnabled(bool enabled);
     /** Greys the pane out and refuses picks — used for "not your turn". */
     void setDimmed(bool dimmed);
+    /**
+     * Whose turn it is in the alternating pick flow. `Active` draws an
+     * accent ring + glow around the pane and an accent hint chip beside the
+     * corner tag (with a short pulse on hand-off); `Waiting` dims the pane
+     * hard and greys the hint. `None` clears both.
+     */
+    enum class Turn { None, Active, Waiting };
+    void setTurn(Turn turn, const QColor& accent, const QString& hint);
     /** Off for the point-cloud raster: smoothing blurs sparse hits away. */
     void setSmoothScaling(bool enabled);
     /** Turn prompt, drawn as a pill along the bottom edge. */
@@ -83,6 +93,11 @@ private:
 
     bool pick_enabled_ = false;
     bool dimmed_ = false;
+    Turn turn_ = Turn::None;
+    QColor turn_accent_;
+    QString turn_hint_;
+    double turn_pulse_ = 1.0;  // 0..1, ring alpha during the hand-off pulse
+    QVariantAnimation* turn_anim_ = nullptr;
     bool smooth_scaling_ = true;
     QString status_text_;
     QString corner_tag_;

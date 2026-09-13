@@ -3419,7 +3419,7 @@ void SatelliteScreen::resetAlignmentSession() {
         sat_pick_->setImage(QImage());
         pcd_pick_->clearOverlays();
         pcd_pick_->setImage(QImage());
-        updateCorrespondenceUi();
+        updateCorrespondenceUi();  // also drops both panes' turn highlight
     }
     setAlignStatus(QString());
 }
@@ -3463,8 +3463,35 @@ void SatelliteScreen::updateCorrespondenceUi() {
     // Once aligned both panes stay pickable: an extra pair re-solves.
     sat_pick_->setPickEnabled(can_pick && !have_pending_sat_);
     pcd_pick_->setPickEnabled(can_pick && have_pending_sat_);
-    sat_pick_->setDimmed(can_pick && have_pending_sat_ && !aligned);
-    pcd_pick_->setDimmed(can_pick && !have_pending_sat_ && !aligned);
+    // Turn highlight: the pane to click gets the legend-colour ring + a
+    // "YOUR TURN" chip, the other pane dims hard. Off once aligned (both
+    // panes stay pickable for a refining pair, no ring needed).
+    {
+        using Turn = PanZoomImageWidget::Turn;
+        const int next = correspondences_.size() + 1;
+        const bool show_turn = can_pick && !aligned;
+        const QColor sat_accent(0x2b, 0x7f, 0xff);
+        const QColor pcd_accent(0xfe, 0x9a, 0x00);
+        sat_pick_->setTurn(
+            !show_turn ? Turn::None
+            : have_pending_sat_ ? Turn::Waiting
+                                : Turn::Active,
+            sat_accent,
+            have_pending_sat_
+                ? QStringLiteral("Point %1 picked — now click the point cloud")
+                      .arg(next)
+                : QStringLiteral("YOUR TURN — click point %1 here").arg(next));
+        pcd_pick_->setTurn(
+            !show_turn ? Turn::None
+            : have_pending_sat_ ? Turn::Active
+                                : Turn::Waiting,
+            pcd_accent,
+            have_pending_sat_
+                ? QStringLiteral("YOUR TURN — click the same feature (%1)")
+                      .arg(next)
+                : QStringLiteral("Waiting — pick point %1 on the satellite first")
+                      .arg(next));
+    }
     sat_pick_->setCornerTag(can_pick ? QStringLiteral(
                                            "SATELLITE MAP — click to add "
                                            "correspondences")
@@ -3473,20 +3500,9 @@ void SatelliteScreen::updateCorrespondenceUi() {
                                            "3D POINT CLOUD — click to add "
                                            "correspondences")
                                      : QStringLiteral("3D POINT CLOUD"));
-    const int next = correspondences_.size() + 1;
-    if (can_pick && !aligned) {
-        sat_pick_->setStatusText(
-            have_pending_sat_
-                ? QStringLiteral("Satellite point %1 picked").arg(next)
-                : QStringLiteral("Click satellite point %1").arg(next));
-        pcd_pick_->setStatusText(
-            have_pending_sat_
-                ? QStringLiteral("Click the same feature here (%1)").arg(next)
-                : QStringLiteral("Waiting for satellite point %1").arg(next));
-    } else {
-        sat_pick_->setStatusText(QString());
-        pcd_pick_->setStatusText(QString());
-    }
+    // The turn chips beside the pane tags carry the prompt; no bottom pill.
+    sat_pick_->setStatusText(QString());
+    pcd_pick_->setStatusText(QString());
     refreshCorrespondenceMarkers();
 
     const int required = minCorrespondences();

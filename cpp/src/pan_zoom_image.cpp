@@ -6,6 +6,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QResizeEvent>
+#include <QVariantAnimation>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -56,6 +57,42 @@ void PanZoomImageWidget::setPickEnabled(bool enabled) {
 
 void PanZoomImageWidget::setDimmed(bool dimmed) {
     dimmed_ = dimmed;
+    update();
+}
+
+void PanZoomImageWidget::setTurn(Turn turn, const QColor& accent,
+                                 const QString& hint) {
+    const bool became_active = turn == Turn::Active && turn_ != Turn::Active;
+    turn_ = turn;
+    turn_accent_ = accent;
+    turn_hint_ = hint;
+    if (became_active) {
+        // Hand-off pulse: the ring flashes bright then settles, so the eye
+        // is pulled to the pane that just became clickable.
+        if (!turn_anim_) {
+            turn_anim_ = new QVariantAnimation(this);
+            turn_anim_->setDuration(700);
+            turn_anim_->setStartValue(0.0);
+            turn_anim_->setEndValue(1.0);
+            connect(turn_anim_, &QVariantAnimation::valueChanged, this,
+                    [this](const QVariant& v) {
+                        // Two pulses: alpha rides |sin| so it peaks twice
+                        // before resting at the steady ring.
+                        const double t = v.toDouble();
+                        turn_pulse_ =
+                            t >= 1.0 ? 1.0
+                                     : 0.45 + 0.55 * std::abs(std::sin(t * M_PI * 2.0));
+                        update();
+                    });
+        }
+        turn_anim_->stop();
+        turn_anim_->start();
+    } else if (turn != Turn::Active) {
+        if (turn_anim_) {
+            turn_anim_->stop();
+        }
+        turn_pulse_ = 1.0;
+    }
     update();
 }
 
@@ -220,8 +257,26 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
         painter.drawText(origin + QPointF(10, -6), QStringLiteral("+X"));
     }
 
-    if (dimmed_) {
-        painter.fillRect(rect(), QColor(0, 0, 0, 140));
+    if (dimmed_ || turn_ == Turn::Waiting) {
+        // Waiting is a hard dim: the pane must read as "not now" from
+        // across the roof, not as a slightly darker image.
+        painter.fillRect(rect(), QColor(0, 0, 0, turn_ == Turn::Waiting ? 175 : 140));
+    }
+
+    if (turn_ == Turn::Active && turn_accent_.isValid()) {
+        // Accent ring + inner glow around the whole pane. The glow is three
+        // widening translucent strokes inside the ring.
+        painter.setBrush(Qt::NoBrush);
+        for (int i = 3; i >= 1; --i) {
+            QColor glow = turn_accent_;
+            glow.setAlphaF(0.10 * turn_pulse_ * (4 - i) / 3.0);
+            painter.setPen(QPen(glow, 6.0 * i));
+            painter.drawRect(rect().adjusted(3 * i, 3 * i, -3 * i, -3 * i));
+        }
+        QColor ring = turn_accent_;
+        ring.setAlphaF(0.55 + 0.45 * turn_pulse_);
+        painter.setPen(QPen(ring, 3.0));
+        painter.drawRect(rect().adjusted(1, 1, -2, -2));
     }
 
     if (!corner_tag_.isEmpty()) {
@@ -238,6 +293,33 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
         painter.drawRoundedRect(chip, 4, 4);
         painter.setPen(QColor(0xd4, 0xd4, 0xd8));
         painter.drawText(chip, Qt::AlignCenter, corner_tag_);
+
+        // Turn hint chip right after the tag: accent-filled when it is this
+        // pane's turn, grey outline while waiting on the other pane.
+        if (turn_ != Turn::None && !turn_hint_.isEmpty()) {
+            QFont hint_font(QStringLiteral("Arimo"), 10, QFont::Bold);
+            painter.setFont(hint_font);
+            const QFontMetrics hfm(hint_font);
+            const double hint_w = hfm.horizontalAdvance(turn_hint_) + 20;
+            // Beside the tag when it fits, otherwise on its own row under
+            // it — the narrow point-cloud pane cannot hold both in one line.
+            const bool beside = chip.right() + 8 + hint_w <= width() - 12;
+            const QRectF hint(beside ? chip.right() + 8 : chip.left(),
+                              beside ? chip.top() : chip.bottom() + 6,
+                              hint_w, chip.height());
+            if (turn_ == Turn::Active) {
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(turn_accent_);
+                painter.drawRoundedRect(hint, 4, 4);
+                painter.setPen(QColor(0x0b, 0x0b, 0x0b));
+            } else {
+                painter.setPen(QPen(QColor(0x3f, 0x3f, 0x47), 1));
+                painter.setBrush(QColor(0x18, 0x18, 0x1b, 230));
+                painter.drawRoundedRect(hint, 4, 4);
+                painter.setPen(QColor(0x71, 0x71, 0x7b));
+            }
+            painter.drawText(hint, Qt::AlignCenter, turn_hint_);
+        }
     }
 
     if (!status_text_.isEmpty()) {
@@ -277,7 +359,7 @@ void PanZoomImageWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (event->button() == Qt::LeftButton && pick_enabled_ &&
-        !image_.isNull() && !dimmed_) {
+        !image_.isNull() && !dimmed_ && turn_ != Turn::Waiting) {
         const QPointF img = screenToImage(event->pos());
         if (img.x() >= 0 && img.y() >= 0 && img.x() < image_.width() &&
             img.y() < image_.height()) {
