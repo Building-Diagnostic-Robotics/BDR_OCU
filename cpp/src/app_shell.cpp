@@ -5424,7 +5424,10 @@ void AppShellWindow::onExplorationLiveSlowTick() {
             stage4_ ? stage4_->lastFpvFrameWallMs() : 0;
         const qint64 stage5_last =
             stage5_ ? stage5_->lastScanFpvFrameWallMs() : 0;
-        const qint64 fpv_last = std::max(stage4_last, stage5_last);
+        const qint64 stage6_last =
+            stage6_ ? stage6_->lastScanFpvFrameWallMs() : 0;
+        const qint64 fpv_last =
+            std::max(stage4_last, std::max(stage5_last, stage6_last));
         if (fpv_last > 0) {
             const qint64 age = QDateTime::currentMSecsSinceEpoch() - fpv_last;
             if (age <= 2000) {

@@ -8,7 +8,10 @@
  * Subscribes: /coverage/global_occupancy, /coverage/planned_path,
  *             /coverage/planned_swaths, /coverage/status,
  *             /scan_segment_status, /Odometry_tilt_corrected_diff
- * Services:   /left/request_axis_state, /right/request_axis_state
+ * Services:   /left/request_axis_state, /right/request_axis_state,
+ *             /data_collection_coordinator/set_parameters,
+ *             /dc/finalize_mission (offline fallback only),
+ *             /coverage/conclude, /coverage/abort, /coverage/skip_copy
  *
  * The node spins on a background thread. Snapshots of the latest telemetry
  * are stored under a mutex; parameterless Qt signals notify the GUI thread,
@@ -23,6 +26,7 @@
 #include <QObject>
 #include <QPointF>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <atomic>
@@ -66,13 +70,45 @@ struct MotorStatus {
     qint64 right_wall_ms = 0;
 };
 
+/**
+ * Decoded /coverage/status from coverage_director_node.py (1 Hz JSON).
+ * Field names mirror the director's payload; see `_publish_coverage_status`
+ * there for the authoritative list. `state` is the priority-ordered operator
+ * state (ERROR > COMPLETE > WAITING_REVISIT > GPR_ROLLOVER > MANUAL_TAKEOVER
+ * > DC_PAUSED > DC_STARTING > STALE_INPUT > STOPPED_* / REPLAN_FAILED / IDLE
+ * / SWEEP_DONE > WAITING_READY > POSE_HOLD > PIVOT / TRANSIT / SWEEP_ALIGN /
+ * SWEEP).
+ */
 struct CoverageStatus {
-    QString state;    // executor state string ("running", "blocked", ...)
-    QString mode;     // horizon mode ("TRACKING", "PIVOT", ...)
-    QString reason;   // blocked/idle reason
-    double coverage = -1.0;
+    QString state;
+    QString phase;       // executor phase (TRANSIT / SWEEP / SWEEP_ALIGN / …)
+    QString mode;        // executor mode string (ALIGN / TRACK / …)
+    QString stop;        // stop_reason, empty when moving
+    QString stale;       // staleness_stop_reason, empty when inputs fresh
+    QString dc;          // IDLE / STARTING / RUNNING / PAUSED / ROLLOVER / ERROR
+    QString copy;        // idle / pending / copying / done / failed / skipped
+    QString copy_error;
+    QString error;       // director fault string; state == ERROR when set
+    QStringList not_ready;  // readiness inputs still false (WAITING_READY)
+    bool autonomy = false;
+    bool initialized = false;
+    bool complete = false;
+    bool copy_waived = false;
+    bool waiting_revisit = false;
+    bool takeover = false;
+    bool dc_paused = false;
+    int revisit = 0;
+    // Ledger totals (same unit as each other; only their ratio is used).
+    double remaining = -1.0;
+    double swept = -1.0;
+    double deferred = -1.0;
     qint64 wall_ms = 0;
     bool valid = false;
+
+    /** Fraction swept of everything the ledger ever held, or -1 if unknown. */
+    double coverageFraction() const;
+    /** Status arrived within `max_age_ms` — the director is alive. */
+    bool fresh(qint64 max_age_ms) const;
 };
 
 class RosLink : public QObject {
@@ -100,6 +136,23 @@ public:
      */
     void finalizeMission(std::function<void(bool ok, QString detail)> on_done);
 
+    using TriggerCallback = std::function<void(bool ok, QString detail)>;
+    /**
+     * /coverage/conclude — operator Finish. The director ends and saves the
+     * section (/dc/end_and_save), finalizes the mission and starts the
+     * thumb-drive copy itself; `complete` in /coverage/status goes true only
+     * once all of that is accounted for. Refused while coverage work is
+     * still active, so callers drop autonomy first.
+     */
+    void concludeCoverage(TriggerCallback on_done);
+    /** /coverage/abort — end mid-run. `save` keeps the swept data as a
+        partial section; false discards it. */
+    void abortCoverage(bool save, TriggerCallback on_done);
+    /** /coverage/skip_copy — waive a pending / failed thumb-drive copy. */
+    void skipCopy(TriggerCallback on_done);
+    /** True when /coverage/conclude has a server (director alive). */
+    bool directorServicesReady() const;
+
     /**
      * Push building/operator/units to /data_collection_coordinator as
      * string parameters — the autonomy arming gate (same contract as the
@@ -126,6 +179,8 @@ public:
     MotorStatus motorStatus() const;
     /** True when both axes report IDLE on fresh controller_status. */
     bool motorsIdle() const;
+    /** True when both axes report CLOSED_LOOP_CONTROL on fresh status. */
+    bool motorsArmed() const;
 
     static constexpr int kAxisIdle = 1;
     static constexpr int kAxisClosedLoop = 8;

@@ -14,8 +14,10 @@
 
 #include "link_health_monitor.hpp"
 #include "components/bdr_message_box.hpp"
+#include "components/fpv_camera_view.hpp"
 #include "components/offline_finalize_dialog.hpp"
 #include "components/satellite_plan_confirm_dialog.hpp"
+#include "video_stream_widget.hpp"
 #include "pan_zoom_image.hpp"
 #include "satellite_map_capture.hpp"
 #include "satellite_map_widget.hpp"
@@ -42,6 +44,7 @@
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QLineEdit>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -126,12 +129,16 @@ constexpr StepSpec kStepSpecs[] = {
  * Nullptr keeps the satellite wording.
  */
 constexpr StepSpec kMeasuredStepSpecs[] = {
-    {"Site Setup", "Name the job", "Set Up Site"},
+    {nullptr, nullptr, nullptr},  // SatelliteMap is unavailable in the field
     {"Robot Map", "Collect the point cloud", "Capture Point Cloud"},
     {nullptr, nullptr, nullptr},
     {nullptr, nullptr, nullptr},
     {nullptr, nullptr, nullptr},
 };
+
+constexpr int kScanFpvPort = 5600;
+constexpr qint64 kDirectorFreshMs = 3000;
+constexpr int kDirectorWatchdogMs = 20000;
 
 constexpr const char* kSatViewLatKey = "satellite/center_lat";
 constexpr const char* kSatViewLonKey = "satellite/center_lon";
@@ -333,6 +340,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
 
     tiles_ = new TileService(this);
     map_ = new SatelliteMapWidget(tiles_, this);
+    map_->installEventFilter(this);
     ros_ = new RosLink(this);
     mission_ = new MissionController(this);
 
@@ -531,6 +539,19 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     connect(ros_, &RosLink::statusUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
         updateStatePill();
+        const CoverageStatus status = ros_->coverageStatus();
+        if (autonomy_on_ && status.autonomy) {
+            stopAutonomyLatch();
+        }
+        if (status.state == QLatin1String("ERROR") &&
+            mission_->missionActive() && !director_failed_) {
+            appendLog(QStringLiteral("[director] ERROR: %1")
+                          .arg(status.error.isEmpty()
+                                   ? QStringLiteral("(no error string)")
+                                   : status.error));
+        }
+        maybePromptRevisit();
+        refreshScanRunUi();
     });
     connect(ros_, &RosLink::motorStatusUpdated, this, [this] {
         if (link_monitor_) {
@@ -565,14 +586,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     connect(mission_, &MissionController::missionStateChanged, this,
             [this](bool active) {
                 map_->setEditLocked(active);
-                send_button_->setEnabled(!active);
-                end_button_->setEnabled(active);
-                // Autonomy stays hard-blocked until the metadata push
-                // lands (same arming-gate rule as the classic flow).
-                autonomy_button_->setEnabled(active && metadata_pushed_);
-                arm_button_->setEnabled(active);
-                disarm_button_->setEnabled(active);
-                estop_button_->setEnabled(active);
                 tool_rect_button_->setEnabled(!active);
                 tool_polygon_button_->setEnabled(!active);
                 draw_button_->setEnabled(!active);
@@ -582,25 +595,40 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 updateAlignCardUi();
                 if (active) {
                     canvas_stack_->setCurrentWidget(map_page_);
+                    startScanFpv();
                 }
                 if (!active) {
                     stopMetadataPushLoop();
                     stopAutonomyLatch();
+                    stopScanFpv();
                     if (manager_watch_timer_) {
                         manager_watch_timer_->stop();
                     }
                     autonomy_on_ = false;
                     manager_occupancy_seen_ = false;
-                    autonomy_button_->setText(QStringLiteral("Start Autonomy"));
+                    director_failed_ = false;
+                    scan_run_state_ = ScanRunState::Idle;
+                    scan_autonomy_ran_ = false;
+                    manual_override_ = false;
+                    resume_after_override_ = false;
+                    scan_started_wall_ms_ = 0;
+                    scan_elapsed_ms_ = 0;
                     map_->clearMissionAnchor();
                     map_->clearTelemetry();
                     setStatePill(QStringLiteral("NO MISSION"),
                                  QColor(mutedColor(dark_mode_)));
-                    reason_label_->clear();
-                    coverage_bar_->setVisible(false);
+                    if (reason_label_) {
+                        reason_label_->clear();
+                    }
+                    if (coverage_bar_) {
+                        coverage_bar_->setVisible(false);
+                    }
                 }
+                refreshScanRunUi();
                 emit missionActiveChanged(active);
             });
+    connect(mission_, &MissionController::robotLaunchDied, this,
+            &SatelliteScreen::handleDirectorDeath);
 
     teleop_timer_ = new QTimer(this);
     teleop_timer_->setInterval(100);
@@ -629,13 +657,14 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     manager_watch_timer_->setSingleShot(true);
     manager_watch_timer_->setInterval(20000);
     connect(manager_watch_timer_, &QTimer::timeout, this, [this] {
-        if (mission_->missionActive() && !manager_occupancy_seen_) {
-            appendLog(QStringLiteral(
-                "[send] no /coverage/global_occupancy after 20 s — the "
-                "coverage manager may have died on roi_vertices parse. "
-                "On the robot look for "
-                "'Coverage horizon manager started'"));
+        if (!mission_->missionActive() || director_failed_) {
+            return;
         }
+        const CoverageStatus status = ros_->coverageStatus();
+        if (status.fresh(kDirectorWatchdogMs)) {
+            return;
+        }
+        handleDirectorDeath(-1);
     });
 
     slow_timer_ = new QTimer(this);
@@ -644,17 +673,20 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &SatelliteScreen::updateBotPill);
     connect(slow_timer_, &QTimer::timeout, this,
             &SatelliteScreen::refreshImageryInfo);
+    connect(slow_timer_, &QTimer::timeout, this, [this] {
+        if (scan_run_state_ == ScanRunState::Running &&
+            scan_started_wall_ms_ > 0) {
+            scan_elapsed_ms_ =
+                QDateTime::currentMSecsSinceEpoch() - scan_started_wall_ms_;
+            refreshScanRunUi();
+        }
+    });
     slow_timer_->start();
 
     setStatePill(QStringLiteral("NO MISSION"), QColor(mutedColor(true)));
     setBotPill(QStringLiteral("BOT —"), QColor(mutedColor(true)));
     setMotorsChip(QStringLiteral("MOTORS —"), QColor(mutedColor(true)));
-    send_button_->setEnabled(true);
-    end_button_->setEnabled(false);
-    autonomy_button_->setEnabled(false);
-    arm_button_->setEnabled(false);
-    disarm_button_->setEnabled(false);
-    estop_button_->setEnabled(false);
+    refreshScanRunUi();
 
     // NOTE: no applyTheme() here. AppShellWindow::ensureStage6() always
     // calls setDarkMode() immediately after construction; applying a
@@ -698,7 +730,7 @@ void SatelliteScreen::attachLinkHealthMonitor(LinkHealthMonitor* monitor) {
 void SatelliteScreen::startMetadataPushLoop() {
     metadata_pushed_ = false;
     metadata_attempts_ = 0;
-    autonomy_button_->setEnabled(false);
+    refreshScanRunUi();
     attemptMetadataPush();
     metadata_timer_->start();
 }
@@ -728,11 +760,13 @@ void SatelliteScreen::attemptMetadataPush() {
             if (ok) {
                 metadata_pushed_ = true;
                 stopMetadataPushLoop();
-                autonomy_button_->setEnabled(true);
                 appendLog(QStringLiteral(
                     "[send] session metadata accepted by coordinator"));
-                reason_label_->setText(QStringLiteral(
-                    "Robot stack ready. Arm motors, then Start Autonomy."));
+                if (reason_label_) {
+                    reason_label_->setText(QStringLiteral(
+                        "Waiting for the coverage director…"));
+                }
+                refreshScanRunUi();
             } else if (metadata_attempts_ % 5 == 1) {
                 appendLog(QStringLiteral(
                               "[send] waiting for coordinator (metadata "
@@ -1261,11 +1295,36 @@ QWidget* SatelliteScreen::buildStepHeader() {
 
         const Step step = Step(i);
         connect(chip.button, &QPushButton::clicked, this, [this, step] {
+            if (step == selected_step_) {
+                return;
+            }
+            if (selected_step_ == Step::AutonomousScan &&
+                mission_->missionActive()) {
+                if (scan_autonomy_ran_) {
+                    appendLog(QStringLiteral(
+                        "[nav] scan has run — Cancel or Complete Mission "
+                        "to leave"));
+                    return;
+                }
+                if (!confirmDialog(
+                        QStringLiteral("Stop robot stack?"),
+                        QStringLiteral(
+                            "The coverage launch is up. Going back tears "
+                            "it down. The plan stays PLANNED."),
+                        QStringLiteral("Stop & Go Back"))) {
+                    return;
+                }
+                mission_->teardownMission();
+            }
             if (step == Step::Alignment && !planning_only_ &&
                 plan_mode_ == PlanMode::Satellite &&
                 !currentJobImageryCached()) {
-                // Same gate as Next: alignment needs the cached site image.
                 cacheSiteThenAdvance();
+                return;
+            }
+            if (step == Step::AutonomousScan &&
+                !mission_->missionActive()) {
+                launchMissionFromEdgeReview();
                 return;
             }
             setSelectedStep(step);
@@ -1307,14 +1366,8 @@ QWidget* SatelliteScreen::buildFooterBar() {
     back_button_->setIconSize(QSize(16, 16));
     back_button_->setCursor(Qt::PointingHandCursor);
     back_button_->setFixedHeight(kFooterGhostButtonHeight);
-    connect(back_button_, &QPushButton::clicked, this, [this] {
-        for (int i = int(selected_step_) - 1; i >= 0; --i) {
-            if (stepAvailable(Step(i))) {
-                setSelectedStep(Step(i));
-                return;
-            }
-        }
-    });
+    connect(back_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onFooterBackClicked);
     layout->addWidget(back_button_, 0, Qt::AlignVCenter);
 
     clear_pairs_button_ =
@@ -1358,6 +1411,35 @@ QWidget* SatelliteScreen::buildFooterBar() {
     connect(next_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onNextClicked);
     layout->addWidget(next_button_, 0, Qt::AlignVCenter);
+
+    scan_start_pause_button_ =
+        new QPushButton(QStringLiteral("Start Scan"), footer_bar_);
+    scan_start_pause_button_->setObjectName("SatNextButton");
+    scan_start_pause_button_->setCursor(Qt::PointingHandCursor);
+    scan_start_pause_button_->setFixedHeight(kFooterButtonHeight);
+    scan_start_pause_button_->hide();
+    connect(scan_start_pause_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onScanStartPauseClicked);
+    layout->addWidget(scan_start_pause_button_, 0, Qt::AlignVCenter);
+
+    scan_cancel_button_ =
+        new QPushButton(QStringLiteral("Cancel Mission"), footer_bar_);
+    scan_cancel_button_->setObjectName("SatGhostButtonMuted");
+    scan_cancel_button_->setCursor(Qt::PointingHandCursor);
+    scan_cancel_button_->setFixedHeight(kFooterGhostButtonHeight);
+    scan_cancel_button_->hide();
+    connect(scan_cancel_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onScanCancelClicked);
+    layout->addWidget(scan_cancel_button_, 0, Qt::AlignVCenter);
+
+    end_button_ = new QPushButton(QStringLiteral("Complete Mission"), footer_bar_);
+    end_button_->setObjectName("SatGhostButton");
+    end_button_->setCursor(Qt::PointingHandCursor);
+    end_button_->setFixedHeight(kFooterGhostButtonHeight);
+    end_button_->hide();
+    connect(end_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onCompleteMission);
+    layout->addWidget(end_button_, 0, Qt::AlignVCenter);
     return footer_bar_;
 }
 
@@ -1366,11 +1448,32 @@ void SatelliteScreen::onNextClicked() {
         !planning_only_ && plan_mode_ == PlanMode::Satellite;
     if (field_satellite && selected_step_ == Step::SatelliteMap &&
         !currentJobImageryCached()) {
-        // Step 1 of a plan created on site: 3D Alignment needs the stitched
-        // site image, which only the save-with-prefetch produces. Cache it
-        // now, around the located address, before letting the operator on.
         cacheSiteThenAdvance();
         return;
+    }
+    if (selected_step_ == Step::RoiDefinition) {
+        if (!map_ || !map_->polygon().valid() || map_->isDrawing()) {
+            return;
+        }
+        if (!confirmDialog(QStringLiteral("Confirm ROI"), roiConfirmSummary(),
+                           QStringLiteral("Confirm ROI"))) {
+            return;
+        }
+        confirmed_vertices_ = map_->polygon().vertices;
+        refreshStepUi();
+    }
+    if (selected_step_ == Step::EdgeReview) {
+        if (!confirmDialog(QStringLiteral("Edges Reviewed"),
+                           edgeReviewSummary(),
+                           QStringLiteral("Confirm"))) {
+            return;
+        }
+        edges_reviewed_ = true;
+        refreshStepUi();
+        if (!planning_only_) {
+            launchMissionFromEdgeReview();
+            return;
+        }
     }
     setSelectedStep(nextAvailableStep(selected_step_));
 }
@@ -1420,12 +1523,12 @@ void SatelliteScreen::cacheSiteThenAdvance() {
 
 bool SatelliteScreen::stepAvailable(Step step) const {
     switch (step) {
+        case Step::SatelliteMap:
+            // Measured has no imagery to aim: Robot Map is step 1.
+            return plan_mode_ == PlanMode::Satellite;
         case Step::Alignment:
         case Step::AutonomousScan:
-            // Both need a robot on site, so neither is reachable from the
-            // office planning trim.
             return !planning_only_;
-        case Step::SatelliteMap:
         case Step::RoiDefinition:
         case Step::EdgeReview:
             break;
@@ -1452,14 +1555,8 @@ bool SatelliteScreen::stepComplete(Step step) const {
                        ? !pcd_image_.isNull()
                        : pcd_to_sat_.valid && alignment_confirmed_;
         case Step::RoiDefinition:
-            if (!map_ || !map_->polygon().valid()) {
-                return false;
-            }
-            // Frame 222:1155 has no confirm checkbox: a closed polygon is
-            // the deliverable. Office / measured keep the acknowledgement.
-            if (!planning_only_ && plan_mode_ == PlanMode::Satellite) {
-                return !map_->isDrawing();
-            }
+            // The closed polygon is readiness; the confirm modal is what
+            // completes the step (same for both trims — no rail checkbox).
             return roiMatchesConfirmed();
         case Step::EdgeReview:
             return edges_reviewed_;
@@ -1582,6 +1679,7 @@ void SatelliteScreen::refreshStepUi() {
     const QString active_fg = dark ? QStringLiteral("#00D492")
                                    : QStringLiteral("#00A86D");
 
+    int visible_number = 0;
     for (int i = 0; i < kStepCount; ++i) {
         const Step step = Step(i);
         const StepChip& chip = step_chips_[i];
@@ -1589,6 +1687,18 @@ void SatelliteScreen::refreshStepUi() {
         const bool available = stepAvailable(step);
         const bool complete = stepComplete(step);
         const bool clickable = stepReachable(step);
+        chip.button->setVisible(available);
+        if (chip.chevron) {
+            bool next_visible = false;
+            for (int j = i + 1; j < kStepCount && !next_visible; ++j) {
+                next_visible = stepAvailable(Step(j));
+            }
+            chip.chevron->setVisible(available && next_visible);
+        }
+        if (!available) {
+            continue;
+        }
+        ++visible_number;
 
         chip.label->setText(QString::fromLatin1(spec(i).title));
         chip.detail->setText(
@@ -1619,10 +1729,9 @@ void SatelliteScreen::refreshStepUi() {
         } else if (complete) {
             fg = muted;
         }
-        chip.badge->setText(!available ? QStringLiteral("–")
-                                       : (complete && !active
-                                              ? QStringLiteral("✓")
-                                              : QString::number(i + 1)));
+        chip.badge->setText(complete && !active
+                                ? QStringLiteral("✓")
+                                : QString::number(visible_number));
         chip.badge->setStyleSheet(
             QStringLiteral("QLabel#SatStepBadge { background-color: %1;"
                            " border: %2; border-radius: %3px;"
@@ -1668,16 +1777,28 @@ void SatelliteScreen::refreshStepUi() {
     }
 
     if (next_button_) {
+        const bool scan_step =
+            !planning_only_ && selected_step_ == Step::AutonomousScan;
         const Step next = nextAvailableStep(selected_step_);
-        const bool has_next = next != selected_step_ && !planning_only_;
+        const bool has_next =
+            next != selected_step_ && !planning_only_ && !scan_step;
         bool has_prev = false;
         for (int i = int(selected_step_) - 1; i >= 0 && !has_prev; --i) {
             has_prev = stepAvailable(Step(i));
         }
         has_prev = has_prev && !planning_only_;
-        footer_bar_->setVisible(has_next || has_prev);
+        footer_bar_->setVisible(has_next || has_prev || scan_step);
         back_button_->setVisible(has_prev);
         next_button_->setVisible(has_next);
+        if (scan_start_pause_button_) {
+            scan_start_pause_button_->setVisible(scan_step);
+        }
+        if (scan_cancel_button_) {
+            scan_cancel_button_->setVisible(scan_step);
+        }
+        if (end_button_) {
+            end_button_->setVisible(scan_step);
+        }
         // Clear pairs / Align belong to the satellite picker, and only once
         // there is a cloud to pick against (frames 219:291 vs 234:1954).
         const bool picker_actions = !planning_only_ &&
@@ -1692,11 +1813,14 @@ void SatelliteScreen::refreshStepUi() {
             next_button_->setText(
                 QStringLiteral("Next: %1")
                     .arg(QString::fromLatin1(spec(int(next)).arrive)));
-            next_button_->setEnabled(stepComplete(selected_step_));
+            next_button_->setEnabled(stepReadyForAdvance(selected_step_));
             next_button_->setToolTip(
-                stepComplete(selected_step_)
+                stepReadyForAdvance(selected_step_)
                     ? QString()
                     : QStringLiteral("Finish this step first"));
+        }
+        if (scan_step) {
+            refreshScanRunUi();
         }
     }
 }
@@ -1712,8 +1836,7 @@ void SatelliteScreen::applyStepVisibility() {
     // name came from the chosen plan + metadata modal), step 3 the ROI
     // Definition rail (222:1284), step 4 the edge review card. The office
     // and the measured canvas keep the single authoring card.
-    const bool frame_rail =
-        !planning_only_ && plan_mode_ == PlanMode::Satellite;
+    const bool frame_rail = !planning_only_;
     const bool locate_step = frame_rail && step == Step::SatelliteMap;
     if (plan_card_) {
         plan_card_->setVisible(!frame_rail && (step == Step::SatelliteMap ||
@@ -1765,10 +1888,12 @@ void SatelliteScreen::applyStepVisibility() {
                        : 40);
     }
     if (roi_card_) {
-        const bool roi_step = frame_rail && step == Step::RoiDefinition;
+        const bool roi_step = !planning_only_ &&
+                              (step == Step::RoiDefinition ||
+                               step == Step::EdgeReview);
         roi_card_->setVisible(roi_step);
-        if (roi_step && !map_->polygon().valid() && !map_->isDrawing()) {
-            // No Draw button on this rail: the canvas is armed on entry.
+        if (step == Step::RoiDefinition && !map_->polygon().valid() &&
+            !map_->isDrawing()) {
             map_->armPolygonDraw();
         }
         refreshRoiCard();
@@ -1786,19 +1911,22 @@ void SatelliteScreen::applyStepVisibility() {
                                 plan_mode_ == PlanMode::Measured);
     }
     if (roi_confirm_card_) {
-        roi_confirm_card_->setVisible(!frame_rail &&
-                                      step == Step::RoiDefinition);
+        roi_confirm_card_->setVisible(false);
     }
     if (edge_review_card_) {
-        edge_review_card_->setVisible(step == Step::EdgeReview);
+        edge_review_card_->setVisible(false);
     }
     if (mission_card_) {
         mission_card_->setVisible(!planning_only_ &&
                                   step == Step::AutonomousScan);
     }
     if (teleop_card_) {
-        teleop_card_->setVisible(!planning_only_ &&
-                                 step == Step::AutonomousScan);
+        teleop_card_->setVisible(false);
+    }
+    if (step == Step::AutonomousScan && mission_->missionActive()) {
+        startScanFpv();
+    } else {
+        stopScanFpv();
     }
     if (log_card_) {
         // The frame rails carry no log; it stays on the scan step where the
@@ -2834,7 +2962,17 @@ QWidget* SatelliteScreen::buildMissionCard(QWidget* parent) {
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
-    layout->addWidget(makeCardHeader(QStringLiteral(":/assets/exploration/start_scan.svg"), QStringLiteral("Mission"), card));
+    layout->addWidget(makeCardHeader(
+        QStringLiteral(":/assets/exploration/start_scan.svg"),
+        QStringLiteral("Scan Progress"), card));
+
+    scan_elapsed_label_ = new QLabel(QStringLiteral("Elapsed  00:00"), card);
+    scan_elapsed_label_->setObjectName("SatFieldLabel");
+    layout->addWidget(scan_elapsed_label_);
+
+    scan_coverage_label_ = new QLabel(QStringLiteral("Coverage  —"), card);
+    scan_coverage_label_->setObjectName("SatFieldLabel");
+    layout->addWidget(scan_coverage_label_);
 
     reason_label_ = new QLabel(card);
     reason_label_->setObjectName("SatFieldLabel");
@@ -2849,58 +2987,50 @@ QWidget* SatelliteScreen::buildMissionCard(QWidget* parent) {
     coverage_bar_->setVisible(false);
     layout->addWidget(coverage_bar_);
 
+    scan_copy_label_ = new QLabel(card);
+    scan_copy_label_->setObjectName("SatFieldLabel");
+    scan_copy_label_->setWordWrap(true);
+    scan_copy_label_->hide();
+    layout->addWidget(scan_copy_label_);
+
     segment_label_ = new QLabel(card);
     segment_label_->setObjectName("SatFieldLabel");
     layout->addWidget(segment_label_);
 
-    send_button_ = new QPushButton(QStringLiteral("Send to Robot"), card);
-    send_button_->setObjectName("SatSendButton");
-    send_button_->setFixedHeight(kSendButtonHeight);
-    send_button_->setCursor(Qt::PointingHandCursor);
-    connect(send_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::onSendMission);
-    layout->addWidget(send_button_);
+    layout->addWidget(makeCardHeader(
+        QStringLiteral(":/assets/missionplanner/scan_card_telemetry.svg"),
+        QStringLiteral("Manual Override"), card));
 
-    auto* row1 = new QWidget(card);
-    auto* row1_layout = new QHBoxLayout(row1);
-    row1_layout->setContentsMargins(0, 0, 0, 0);
-    row1_layout->setSpacing(8);
-    autonomy_button_ = new QPushButton(QStringLiteral("Start Autonomy"), row1);
-    end_button_ = new QPushButton(QStringLiteral("Complete Mission"), row1);
-    for (QPushButton* button : {autonomy_button_, end_button_}) {
-        button->setObjectName("SatButton");
-        button->setFixedHeight(36);
-        button->setCursor(Qt::PointingHandCursor);
-        row1_layout->addWidget(button, 1);
+    scan_camera_view_ = new FPVCameraView(card);
+    scan_camera_view_->setObjectName("SatScanFpv");
+    scan_camera_view_->setCursor(Qt::PointingHandCursor);
+    scan_camera_view_->setFixedHeight(196);
+    scan_camera_view_->setPlaceholderText(
+        QStringLiteral("Camera View"),
+        QStringLiteral("Click to enter manual teleop"));
+    if (auto* stream = scan_camera_view_->streamWidget()) {
+        stream->setMinimumSize(240, 140);
     }
-    connect(autonomy_button_, &QPushButton::clicked, this, [this] {
-        setAutonomyEnabled(!autonomy_on_);
-    });
-    connect(end_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::onCompleteMission);
-    layout->addWidget(row1);
+    scan_camera_view_->installEventFilter(this);
+    layout->addWidget(scan_camera_view_);
 
-    auto* row2 = new QWidget(card);
-    auto* row2_layout = new QHBoxLayout(row2);
-    row2_layout->setContentsMargins(0, 0, 0, 0);
-    row2_layout->setSpacing(8);
-    arm_button_ = new QPushButton(QStringLiteral("Arm Motors"), row2);
-    disarm_button_ = new QPushButton(QStringLiteral("Disarm"), row2);
-    for (QPushButton* button : {arm_button_, disarm_button_}) {
-        button->setObjectName("SatButton");
-        button->setFixedHeight(36);
-        button->setCursor(Qt::PointingHandCursor);
-        row2_layout->addWidget(button, 1);
-    }
-    connect(arm_button_, &QPushButton::clicked, this, [this] {
-        ros_->requestAxisState(RosLink::kAxisClosedLoop);
-        appendLog(QStringLiteral("[cmd] arm (CLOSED_LOOP_CONTROL)"));
-    });
+    scan_override_label_ =
+        new QLabel(QStringLiteral("Manual Override: Inactive"), card);
+    scan_override_label_->setObjectName("SatFieldLabel");
+    layout->addWidget(scan_override_label_);
+
+    disarm_button_ = new QPushButton(QStringLiteral("Disarm"), card);
+    disarm_button_->setObjectName("SatButton");
+    disarm_button_->setFixedHeight(36);
+    disarm_button_->setCursor(Qt::PointingHandCursor);
     connect(disarm_button_, &QPushButton::clicked, this, [this] {
+        setAutonomyEnabled(false);
         ros_->requestAxisState(RosLink::kAxisIdle);
+        scan_run_state_ = ScanRunState::Paused;
         appendLog(QStringLiteral("[cmd] disarm (IDLE)"));
+        refreshScanRunUi();
     });
-    layout->addWidget(row2);
+    layout->addWidget(disarm_button_);
 
     estop_button_ = new QPushButton(QStringLiteral("Emergency Stop"), card);
     estop_button_->setObjectName("SatEstopButton");
@@ -4437,9 +4567,13 @@ bool SatelliteScreen::confirmDialog(const QString& title, const QString& body,
     return dialog.exec() == QDialog::Accepted;
 }
 
-void SatelliteScreen::onSendMission() {
-    // The polygon is the authored geometry; the rectangle is only its
-    // four-corner special case kept for the rail's length/width spinboxes.
+void SatelliteScreen::onSendMission() { launchMissionFromEdgeReview(); }
+
+void SatelliteScreen::launchMissionFromEdgeReview() {
+    if (mission_->missionActive()) {
+        setSelectedStep(Step::AutonomousScan);
+        return;
+    }
     const RoiPolygon poly = map_->polygon().valid()
                                 ? map_->polygon()
                                 : RoiPolygon::fromRect(map_->roi());
@@ -4452,7 +4586,7 @@ void SatelliteScreen::onSendMission() {
     const QString roi_arg =
         MissionController::roiVerticesArgument(poly, marker);
     if (!confirmDialog(
-            QStringLiteral("Send Mission to Robot"),
+            QStringLiteral("Launch coverage stack"),
             QStringLiteral(
                 "Confirm before launch:\n\n"
                 "• The robot is physically at the marker position.\n"
@@ -4461,7 +4595,7 @@ void SatelliteScreen::onSendMission() {
                 "roi_vertices (robot frame): %2")
                 .arg(marker.heading_deg, 0, 'f', 1)
                 .arg(roi_arg),
-            QStringLiteral("Launch Mission"))) {
+            QStringLiteral("Launch"))) {
         return;
     }
     QString error;
@@ -4470,10 +4604,6 @@ void SatelliteScreen::onSendMission() {
         return;
     }
     map_->setMissionAnchor(marker);
-    // Persist what was actually sent: the field rail has no Save Plan, so
-    // the roof-drawn polygon, edge flags and surveyed anchor would otherwise
-    // never reach disk and the COMPLETED record would hold the office draft.
-    // Direct save (no loadJob round-trip): mid-mission state must not reset.
     if (!current_job_id_.isEmpty()) {
         for (Job& job : jobs_) {
             if (job.id == current_job_id_) {
@@ -4491,23 +4621,396 @@ void SatelliteScreen::onSendMission() {
             }
         }
     }
+    director_failed_ = false;
+    scan_run_state_ = ScanRunState::Idle;
     setStatePill(QStringLiteral("LAUNCHING"), QColor(kAmber));
-    reason_label_->setText(
-        QStringLiteral("Launching robot stack… Start Autonomy unlocks once "
-                       "the session metadata push is accepted."));
-    // The arming gate: autonomy stays locked until the coordinator accepts
-    // building/operator/units (retried while the stack boots).
+    if (reason_label_) {
+        reason_label_->setText(QStringLiteral(
+            "Launching robot stack… Start Scan unlocks when the director "
+            "reports initialized."));
+    }
     startMetadataPushLoop();
     manager_occupancy_seen_ = false;
     manager_watch_timer_->start();
-    // The plan is NOT stamped here. Launching is not collecting: the plan
-    // moves to COMPLETED only when finalize succeeds
-    // (markCurrentPlanCompleted), so an aborted mission leaves it PLANNED.
+    setSelectedStep(Step::AutonomousScan);
 }
 
 bool SatelliteScreen::isRobotLinkUnreachable() const {
     return link_monitor_ && link_monitor_->isArmed() &&
            link_monitor_->state() == LinkHealthMonitor::State::Disconnected;
+}
+
+void SatelliteScreen::onFooterBackClicked() {
+    if (selected_step_ == Step::AutonomousScan &&
+        mission_->missionActive()) {
+        if (scan_autonomy_ran_) {
+            appendLog(QStringLiteral(
+                "[nav] scan has run — Cancel or Complete Mission to leave"));
+            return;
+        }
+        if (!confirmDialog(
+                QStringLiteral("Stop robot stack?"),
+                QStringLiteral(
+                    "The coverage launch is up. Going back tears it down. "
+                    "The plan stays PLANNED."),
+                QStringLiteral("Stop & Go Back"))) {
+            return;
+        }
+        mission_->teardownMission();
+    }
+    for (int i = int(selected_step_) - 1; i >= 0; --i) {
+        if (stepAvailable(Step(i))) {
+            setSelectedStep(Step(i));
+            return;
+        }
+    }
+}
+
+bool SatelliteScreen::stepReadyForAdvance(Step step) const {
+    switch (step) {
+        case Step::RoiDefinition:
+            return map_ && map_->polygon().valid() && !map_->isDrawing();
+        case Step::EdgeReview:
+            return map_ && map_->polygon().valid() && !map_->isDrawing();
+        default:
+            return stepComplete(step);
+    }
+}
+
+QString SatelliteScreen::roiConfirmSummary() const {
+    const RoiPolygon poly = map_->polygon();
+    const int n = poly.vertices.size();
+    return QStringLiteral(
+               "%1 vertices. Does this outline match the roof?")
+        .arg(n);
+}
+
+QString SatelliteScreen::edgeReviewSummary() const {
+    const RoiPolygon poly = map_->polygon();
+    int marked = 0;
+    for (bool flag : poly.roof_edges) {
+        marked += flag ? 1 : 0;
+    }
+    return QStringLiteral(
+               "%1 of %2 edges marked as roof edges. Confirm?")
+        .arg(marked)
+        .arg(poly.vertices.size());
+}
+
+bool SatelliteScreen::directorReady() const {
+    const CoverageStatus status = ros_->coverageStatus();
+    return status.fresh(kDirectorFreshMs) && status.initialized &&
+           status.state != QLatin1String("ERROR") && !director_failed_;
+}
+
+void SatelliteScreen::onScanStartPauseClicked() {
+    if (manual_override_) {
+        if (reason_label_) {
+            reason_label_->setText(QStringLiteral(
+                "Click the map to hand control back to autonomy."));
+        }
+        return;
+    }
+    switch (scan_run_state_) {
+        case ScanRunState::Idle:
+            beginStartScan();
+            break;
+        case ScanRunState::Running:
+            setAutonomyEnabled(false);
+            scan_run_state_ = ScanRunState::Paused;
+            refreshScanRunUi();
+            break;
+        case ScanRunState::Paused:
+            beginStartScan();
+            break;
+        case ScanRunState::Completed:
+            break;
+    }
+}
+
+void SatelliteScreen::beginStartScan() {
+    if (!mission_->missionActive() || director_failed_) {
+        return;
+    }
+    if (!metadata_pushed_) {
+        appendLog(QStringLiteral(
+            "[scan] waiting for coordinator metadata before Start Scan"));
+        startMetadataPushLoop();
+        return;
+    }
+    if (!directorReady()) {
+        appendLog(QStringLiteral(
+            "[scan] director not ready — Start Scan stays locked"));
+        refreshScanRunUi();
+        return;
+    }
+    if (ros_->motorsArmed()) {
+        setAutonomyEnabled(true);
+        if (scan_started_wall_ms_ == 0) {
+            scan_started_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
+        }
+        scan_run_state_ = ScanRunState::Running;
+        scan_autonomy_ran_ = true;
+        refreshScanRunUi();
+        return;
+    }
+    ros_->requestAxisState(RosLink::kAxisClosedLoop);
+    appendLog(QStringLiteral("[scan] arming motors…"));
+    if (!arm_wait_timer_) {
+        arm_wait_timer_ = new QTimer(this);
+        arm_wait_timer_->setInterval(100);
+    }
+    arm_wait_ticks_ = 0;
+    disconnect(arm_wait_timer_, &QTimer::timeout, nullptr, nullptr);
+    connect(arm_wait_timer_, &QTimer::timeout, this, [this] {
+        ++arm_wait_ticks_;
+        if (ros_->motorsArmed()) {
+            arm_wait_timer_->stop();
+            setAutonomyEnabled(true);
+            if (scan_started_wall_ms_ == 0) {
+                scan_started_wall_ms_ =
+                    QDateTime::currentMSecsSinceEpoch();
+            }
+            scan_run_state_ = ScanRunState::Running;
+            scan_autonomy_ran_ = true;
+            refreshScanRunUi();
+            return;
+        }
+        if (arm_wait_ticks_ >= 60) {
+            arm_wait_timer_->stop();
+            appendLog(QStringLiteral(
+                "[scan] motors did not reach CLOSED_LOOP within 6 s"));
+            refreshScanRunUi();
+        }
+    });
+    arm_wait_timer_->start();
+}
+
+void SatelliteScreen::onScanCancelClicked() {
+    if (!mission_->missionActive()) {
+        return;
+    }
+    if (!confirmDialog(
+            QStringLiteral("Cancel Mission"),
+            QStringLiteral(
+                "Autonomy will stop, the launch trees will be torn down, "
+                "and the plan stays PLANNED so it can be re-run."),
+            QStringLiteral("Cancel Mission"))) {
+        return;
+    }
+    setAutonomyEnabled(false);
+    ros_->abortCoverage(true, [this](bool ok, const QString& detail) {
+        appendLog(ok ? QStringLiteral("[scan] abort accepted: %1").arg(detail)
+                     : QStringLiteral("[scan] abort unavailable (%1) — "
+                                      "tearing down anyway")
+                           .arg(detail));
+        ros_->requestAxisState(RosLink::kAxisIdle);
+        mission_->teardownMission();
+        setSelectedStep(Step::EdgeReview);
+    });
+}
+
+void SatelliteScreen::handleDirectorDeath(int exit_code) {
+    if (!mission_->missionActive() || director_failed_) {
+        return;
+    }
+    director_failed_ = true;
+    stopAutonomyLatch();
+    setAutonomyEnabled(false);
+    const QStringList tail = mission_->recentRobotOutput(8);
+    appendLog(QStringLiteral("[director] stack died (rc=%1)")
+                  .arg(exit_code));
+    for (const QString& line : tail) {
+        appendLog(QStringLiteral("  %1").arg(line));
+    }
+    mission_->teardownMission();
+    QString body = QStringLiteral(
+        "The coverage director exited before a scan could run. "
+        "The plan stays PLANNED — press Next on Edge Review to relaunch.\n");
+    if (!tail.isEmpty()) {
+        body += QStringLiteral("\nLast robot output:\n%1")
+                    .arg(tail.join(QLatin1Char('\n')));
+    }
+    BdrMessageBox::warning(this, QStringLiteral("Robot stack failed"), body);
+    setSelectedStep(Step::EdgeReview);
+}
+
+void SatelliteScreen::maybePromptRevisit() {
+    const CoverageStatus status = ros_->coverageStatus();
+    if (!status.waiting_revisit || revisit_prompt_open_ ||
+        !mission_->missionActive()) {
+        return;
+    }
+    revisit_prompt_open_ = true;
+    scan_run_state_ = ScanRunState::Paused;
+    setAutonomyEnabled(false);
+    const QString body =
+        QStringLiteral(
+            "Coverage paused: %1 deferred area(s) were skipped.\n\n"
+            "Retry them now, or finish the scan as-is.")
+            .arg(status.revisit > 0 ? status.revisit
+                                    : int(qMax(0.0, status.deferred)));
+    const bool retry = confirmDialog(QStringLiteral("Areas skipped"), body,
+                                     QStringLiteral("Retry skipped"));
+    revisit_prompt_open_ = false;
+    if (retry) {
+        beginStartScan();
+    } else {
+        onCompleteMission();
+    }
+}
+
+void SatelliteScreen::setManualOverride(bool active) {
+    if (manual_override_ == active) {
+        return;
+    }
+    manual_override_ = active;
+    if (active) {
+        resume_after_override_ = scan_run_state_ == ScanRunState::Running;
+        if (scan_run_state_ == ScanRunState::Running) {
+            scan_run_state_ = ScanRunState::Paused;
+        }
+        setAutonomyEnabled(false);
+        if (teleop_check_) {
+            teleop_check_->setChecked(true);
+        }
+        if (teleop_timer_ && !teleop_timer_->isActive()) {
+            teleop_timer_->start();
+        }
+        setFocus(Qt::OtherFocusReason);
+    } else {
+        pressed_keys_.clear();
+        if (teleop_check_) {
+            teleop_check_->setChecked(false);
+        }
+        if (teleop_timer_) {
+            teleop_timer_->stop();
+        }
+        ros_->publishTwist(0.0, 0.0);
+        if (resume_after_override_ &&
+            scan_run_state_ != ScanRunState::Completed) {
+            beginStartScan();
+        }
+        resume_after_override_ = false;
+    }
+    refreshScanRunUi();
+}
+
+void SatelliteScreen::refreshScanRunUi() {
+    const bool active = mission_->missionActive();
+    const bool ready = active && metadata_pushed_ && directorReady() &&
+                       !director_failed_;
+    if (disarm_button_) {
+        disarm_button_->setEnabled(active);
+    }
+    if (estop_button_) {
+        estop_button_->setEnabled(active);
+    }
+    if (end_button_) {
+        end_button_->setEnabled(active);
+    }
+    if (scan_cancel_button_) {
+        scan_cancel_button_->setEnabled(active);
+    }
+    if (scan_start_pause_button_) {
+        QString label = QStringLiteral("Start Scan");
+        bool enable = ready && scan_run_state_ == ScanRunState::Idle &&
+                      !manual_override_;
+        if (scan_run_state_ == ScanRunState::Running) {
+            label = QStringLiteral("Pause");
+            enable = !manual_override_;
+        } else if (scan_run_state_ == ScanRunState::Paused) {
+            label = QStringLiteral("Resume");
+            enable = ready && !manual_override_;
+        } else if (scan_run_state_ == ScanRunState::Completed) {
+            label = QStringLiteral("Scan Complete");
+            enable = false;
+        }
+        scan_start_pause_button_->setText(label);
+        scan_start_pause_button_->setEnabled(enable);
+        if (manual_override_) {
+            scan_start_pause_button_->setToolTip(QStringLiteral(
+                "Click the map view to hand control back to autonomy."));
+        } else if (!ready && active) {
+            scan_start_pause_button_->setToolTip(
+                metadata_pushed_
+                    ? QStringLiteral("Waiting for the coverage director…")
+                    : QStringLiteral("Waiting for session metadata…"));
+        } else {
+            scan_start_pause_button_->setToolTip(QString());
+        }
+    }
+    if (scan_elapsed_label_) {
+        const int total_s = int(scan_elapsed_ms_ / 1000);
+        scan_elapsed_label_->setText(
+            QStringLiteral("Elapsed  %1:%2")
+                .arg(total_s / 60, 2, 10, QLatin1Char('0'))
+                .arg(total_s % 60, 2, 10, QLatin1Char('0')));
+    }
+    if (scan_coverage_label_) {
+        const double frac = ros_->coverageStatus().coverageFraction();
+        scan_coverage_label_->setText(
+            frac >= 0.0 ? QStringLiteral("Coverage  %1%")
+                              .arg(int(std::lround(frac * 100.0)))
+                        : QStringLiteral("Coverage  —"));
+    }
+    if (scan_copy_label_) {
+        const CoverageStatus status = ros_->coverageStatus();
+        const QString copy = status.copy.toLower();
+        if (copy == QLatin1String("copying") ||
+            copy == QLatin1String("pending")) {
+            scan_copy_label_->setVisible(true);
+            scan_copy_label_->setText(
+                QStringLiteral("Thumb-drive copy in progress…"));
+        } else if (!status.copy_error.isEmpty()) {
+            scan_copy_label_->setVisible(true);
+            scan_copy_label_->setText(
+                QStringLiteral("Copy failed: %1").arg(status.copy_error));
+        } else {
+            scan_copy_label_->hide();
+        }
+    }
+    if (scan_override_label_) {
+        if (manual_override_) {
+            scan_override_label_->setText(
+                QStringLiteral("Manual Override: Active"));
+        } else {
+            scan_override_label_->setText(
+                QStringLiteral("Manual Override: Inactive"));
+        }
+    }
+    if (back_button_ && selected_step_ == Step::AutonomousScan) {
+        back_button_->setEnabled(!scan_autonomy_ran_);
+        back_button_->setToolTip(
+            scan_autonomy_ran_
+                ? QStringLiteral("Cancel or Complete Mission to leave")
+                : QString());
+    }
+}
+
+void SatelliteScreen::startScanFpv() {
+    if (!scan_camera_view_) {
+        return;
+    }
+    if (!scan_camera_view_->isPlaying()) {
+        scan_camera_view_->startStream(kScanFpvPort);
+    }
+}
+
+void SatelliteScreen::stopScanFpv() {
+    if (scan_camera_view_ && scan_camera_view_->isPlaying()) {
+        scan_camera_view_->stopStream();
+    }
+}
+
+qint64 SatelliteScreen::lastScanFpvFrameWallMs() const {
+    if (!scan_camera_view_ || !scan_camera_view_->isPlaying()) {
+        return 0;
+    }
+    if (auto* stream = scan_camera_view_->streamWidget()) {
+        return stream->lastFrameWallMs();
+    }
+    return 0;
 }
 
 void SatelliteScreen::onCompleteMission() {
@@ -4588,26 +5091,56 @@ void SatelliteScreen::beginMotorsIdleWait(
 }
 
 void SatelliteScreen::executeCompleteMissionNormalPath() {
-    appendLog(QStringLiteral("[mission] disarming motors…"));
-    beginMotorsIdleWait([this](bool timed_out) {
-        appendLog(timed_out
-                      ? QStringLiteral("[mission] motors did not confirm IDLE "
-                                       "within 6 s — continuing")
-                      : QStringLiteral("[mission] motors IDLE"));
-        ros_->finalizeMission([this](bool ok, const QString& detail) {
-            appendLog(ok ? QStringLiteral("[mission] finalized: %1").arg(detail)
-                         : QStringLiteral(
-                               "[mission] finalize failed (%1) — the robot's "
-                               "idle watchdog will finalize instead")
-                               .arg(detail));
-            if (ok) {
-                // The coordinator closed and tagged the mission folder —
-                // that is the OCU's "data collected" signal.
-                markCurrentPlanCompleted();
+    appendLog(QStringLiteral("[mission] concluding coverage…"));
+    ros_->concludeCoverage([this](bool ok, const QString& detail) {
+        appendLog(ok ? QStringLiteral("[mission] conclude accepted: %1")
+                           .arg(detail)
+                     : QStringLiteral("[mission] conclude failed (%1) — "
+                                      "waiting briefly for director status")
+                           .arg(detail));
+        if (!conclude_wait_timer_) {
+            conclude_wait_timer_ = new QTimer(this);
+            conclude_wait_timer_->setInterval(250);
+        }
+        conclude_wait_ticks_ = 0;
+        disconnect(conclude_wait_timer_, &QTimer::timeout, nullptr, nullptr);
+        connect(conclude_wait_timer_, &QTimer::timeout, this, [this] {
+            ++conclude_wait_ticks_;
+            const CoverageStatus status = ros_->coverageStatus();
+            const QString copy = status.copy.toLower();
+            const bool save_done =
+                status.complete || copy == QLatin1String("pending") ||
+                copy == QLatin1String("copying") ||
+                copy == QLatin1String("done") ||
+                copy == QLatin1String("skipped") ||
+                copy == QLatin1String("failed");
+            // 250 ms × 120 = 30 s. Copy itself is not waited on — the
+            // Dashboard surfaces that later.
+            if (save_done || conclude_wait_ticks_ >= 120) {
+                conclude_wait_timer_->stop();
+                if (save_done || status.complete) {
+                    markCurrentPlanCompleted();
+                }
+                if (copy == QLatin1String("pending") ||
+                    copy == QLatin1String("copying")) {
+                    appendLog(QStringLiteral(
+                        "[mission] thumb-drive copy still running — "
+                        "Dashboard will show progress"));
+                }
+                beginMotorsIdleWait([this](bool timed_out) {
+                    appendLog(timed_out
+                                  ? QStringLiteral(
+                                        "[mission] motors did not confirm "
+                                        "IDLE within 6 s — continuing")
+                                  : QStringLiteral("[mission] motors IDLE"));
+                    mission_->teardownMission();
+                    complete_mission_in_flight_ = false;
+                    scan_run_state_ = ScanRunState::Completed;
+                    refreshScanRunUi();
+                });
             }
-            mission_->teardownMission();
-            complete_mission_in_flight_ = false;
         });
+        conclude_wait_timer_->start();
     });
 }
 
@@ -4672,6 +5205,30 @@ void SatelliteScreen::onEstop() {
 // ---- Teleop -----------------------------------------------------------------
 
 bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::MouseButtonPress &&
+        selected_step_ == Step::AutonomousScan) {
+        auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() == Qt::LeftButton) {
+            auto is_under = [](const QObject* obj, const QWidget* ancestor) {
+                const QObject* cursor = obj;
+                while (cursor) {
+                    if (cursor == ancestor) {
+                        return true;
+                    }
+                    cursor = cursor->parent();
+                }
+                return false;
+            };
+            if (scan_camera_view_ && is_under(watched, scan_camera_view_)) {
+                setManualOverride(true);
+                return false;
+            }
+            if (map_ && is_under(watched, map_) && manual_override_) {
+                setManualOverride(false);
+                return false;
+            }
+        }
+    }
     // Step-1 search: arrow keys walk the suggestions, Esc closes them, and
     // leaving the field closes them too (clicks on the popup itself never
     // take focus — NoFocus policy — so this cannot swallow a pick).
@@ -4740,14 +5297,10 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
 void SatelliteScreen::setAutonomyEnabled(bool enabled) {
     const bool rising = enabled && !autonomy_on_;
     autonomy_on_ = enabled;
-    autonomy_button_->setText(autonomy_on_
-                                  ? QStringLiteral("Pause Autonomy")
-                                  : QStringLiteral("Start Autonomy"));
     if (autonomy_on_) {
-        teleop_check_->setChecked(false);
-        // Force a false→true edge. The manager only starts planning on
-        // that edge; a lone true can be dropped while it is still
-        // constructing, and later trues are ignored.
+        if (teleop_check_) {
+            teleop_check_->setChecked(false);
+        }
         if (rising) {
             ros_->publishAutonomyEnable(false);
         }
@@ -4930,25 +5483,58 @@ void SatelliteScreen::updateStatePill() {
     }
     const QString state = status.state.toUpper();
     QColor color(mutedColor(dark_mode_));
-    if (state == QLatin1String("RUNNING")) {
+    if (state == QLatin1String("TRANSIT") || state == QLatin1String("SWEEP") ||
+        state == QLatin1String("SWEEP_ALIGN") ||
+        state == QLatin1String("PIVOT") ||
+        state == QLatin1String("SWEEP_DONE")) {
         color = QColor(kAccent);
-    } else if (state == QLatin1String("BLOCKED")) {
-        color = QColor(kEstopRed);
-    } else if (state == QLatin1String("PAUSED") ||
-               state == QLatin1String("REPLANNING") ||
-               state.contains(QLatin1String("COLLECTION"))) {
+    } else if (state == QLatin1String("WAITING_READY") ||
+               state == QLatin1String("POSE_HOLD") ||
+               state == QLatin1String("DC_STARTING") ||
+               state == QLatin1String("DC_PAUSED") ||
+               state == QLatin1String("STALE_INPUT") ||
+               state == QLatin1String("WAITING_REVISIT") ||
+               state == QLatin1String("GPR_ROLLOVER") ||
+               state == QLatin1String("MANUAL_TAKEOVER")) {
         color = QColor(kAmber);
+    } else if (state.startsWith(QLatin1String("STOPPED")) ||
+               state == QLatin1String("REPLAN_FAILED") ||
+               state == QLatin1String("ERROR")) {
+        color = QColor(kEstopRed);
     } else if (state == QLatin1String("COMPLETE")) {
         color = QColor(0x2B, 0x7F, 0xFF);
+        scan_run_state_ = ScanRunState::Completed;
     }
-    setStatePill(status.mode.isEmpty()
-                     ? state
-                     : QStringLiteral("%1 · %2").arg(state, status.mode),
-                 color);
-    reason_label_->setText(status.reason);
-    if (status.coverage >= 0.0) {
+    QString pill = state;
+    if (state == QLatin1String("WAITING_READY") && !status.not_ready.isEmpty()) {
+        pill = QStringLiteral("WAITING_READY · %1").arg(status.not_ready.first());
+    } else if (!status.phase.isEmpty() &&
+               (state == QLatin1String("TRANSIT") ||
+                state == QLatin1String("SWEEP") ||
+                state == QLatin1String("SWEEP_ALIGN"))) {
+        pill = QStringLiteral("%1 · %2").arg(state, status.phase);
+    }
+    setStatePill(pill, color);
+
+    QString reason;
+    if (!status.error.isEmpty()) {
+        reason = status.error;
+    } else if (!status.stop.isEmpty()) {
+        reason = status.stop;
+    } else if (!status.stale.isEmpty()) {
+        reason = status.stale;
+    } else if (state == QLatin1String("WAITING_READY") &&
+               !status.not_ready.isEmpty()) {
+        reason = QStringLiteral("Waiting on: %1")
+                     .arg(status.not_ready.join(QStringLiteral(", ")));
+    }
+    if (reason_label_) {
+        reason_label_->setText(reason);
+    }
+    const double frac = status.coverageFraction();
+    if (coverage_bar_ && frac >= 0.0) {
         coverage_bar_->setVisible(true);
-        coverage_bar_->setValue(int(qBound(0.0, status.coverage, 1.0) * 1000));
+        coverage_bar_->setValue(int(qBound(0.0, frac, 1.0) * 1000));
     }
 }
 

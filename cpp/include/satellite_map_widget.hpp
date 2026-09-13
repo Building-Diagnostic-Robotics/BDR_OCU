@@ -153,7 +153,7 @@ public:
     static constexpr int kMaxZoom = 20;
     /** The grid canvas has no imagery-resolution ceiling — allow zooming to
         centimeter scale for small roofs. */
-    static constexpr int kMaxZoomGrid = 23;
+    static constexpr int kMaxZoomGrid = 26;
     /**
      * Levels the imagery canvas may zoom PAST the fetch ceiling, painting
      * the deepest available tiles scaled up. A 16 m roof at z19 is ~70 px
@@ -163,6 +163,13 @@ public:
     static constexpr int kOverzoomLevels = 3;
     /** View ceiling: what the wheel, zoomIn and fitToRoi clamp to. */
     int maxZoomNow() const;
+    /**
+     * View floor. Imagery keeps `kMinZoom`. The measured canvas cannot
+     * zoom out past the collected map's hull plus an offset (15 m or 25 %
+     * of the larger side), so the operator stays on the roof instead of
+     * the empty grid. Empty-map fallback is a 100 m disc.
+     */
+    int minZoomNow() const;
     /** Fetch ceiling: the cached / native limit tiles are requested at. */
     int fetchZoomCeiling() const;
 

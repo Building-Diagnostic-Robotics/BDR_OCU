@@ -17,6 +17,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_srvs/srv/set_bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
@@ -33,15 +34,31 @@ double yawFromQuaternion(double qx, double qy, double qz, double qw) {
     return std::atan2(siny_cosp, cosy_cosp);
 }
 
-QString modeName(double mode) {
-    if (mode < 0.5) return QStringLiteral("IDLE");
-    if (mode < 1.5) return QStringLiteral("TRACKING");
-    if (mode < 2.5) return QStringLiteral("PIVOT");
-    if (mode < 3.5) return QStringLiteral("COMPLETE");
-    return QStringLiteral("BLOCKED");
+/** JSON null / missing / non-string all read as empty. */
+QString jsonString(const QJsonObject& obj, const char* key) {
+    const QJsonValue v = obj.value(QLatin1String(key));
+    return v.isString() ? v.toString() : QString();
+}
+
+double jsonNumber(const QJsonObject& obj, const char* key, double fallback) {
+    const QJsonValue v = obj.value(QLatin1String(key));
+    return v.isDouble() ? v.toDouble() : fallback;
 }
 
 }  // namespace
+
+double CoverageStatus::coverageFraction() const {
+    if (swept < 0.0 || remaining < 0.0) {
+        return -1.0;
+    }
+    const double total = swept + remaining + std::max(0.0, deferred);
+    return total > 0.0 ? swept / total : -1.0;
+}
+
+bool CoverageStatus::fresh(qint64 max_age_ms) const {
+    return valid && wall_ms > 0 &&
+           QDateTime::currentMSecsSinceEpoch() - wall_ms <= max_age_ms;
+}
 
 class RosLink::Impl {
 public:
@@ -63,6 +80,9 @@ public:
     rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr
         coordinator_params;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr dc_finalize_mission;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr coverage_conclude;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr coverage_skip_copy;
+    rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr coverage_abort;
 };
 
 RosLink::RosLink(QObject* parent) : QObject(parent), impl_(new Impl) {}
@@ -214,18 +234,44 @@ bool RosLink::start(QString* error) {
                         return;
                     }
                     const QJsonObject obj = doc.object();
+                    CoverageStatus s;
+                    s.state = jsonString(obj, "state").toUpper();
+                    s.phase = jsonString(obj, "phase");
+                    s.mode = jsonString(obj, "mode");
+                    s.stop = jsonString(obj, "stop");
+                    s.stale = jsonString(obj, "stale");
+                    s.dc = jsonString(obj, "dc");
+                    s.copy = jsonString(obj, "copy");
+                    s.copy_error = jsonString(obj, "copy_error");
+                    s.error = jsonString(obj, "error");
+                    s.autonomy = obj.value(QLatin1String("autonomy")).toBool();
+                    s.initialized =
+                        obj.value(QLatin1String("initialized")).toBool();
+                    s.complete = obj.value(QLatin1String("complete")).toBool();
+                    s.copy_waived =
+                        obj.value(QLatin1String("copy_waived")).toBool();
+                    s.waiting_revisit =
+                        obj.value(QLatin1String("waiting_revisit")).toBool();
+                    s.takeover = obj.value(QLatin1String("takeover")).toBool();
+                    s.dc_paused =
+                        obj.value(QLatin1String("dc_paused")).toBool();
+                    s.revisit = int(jsonNumber(obj, "revisit", 0.0));
+                    s.remaining = jsonNumber(obj, "remaining", -1.0);
+                    s.swept = jsonNumber(obj, "swept", -1.0);
+                    s.deferred = jsonNumber(obj, "deferred", -1.0);
+                    const QJsonObject ready =
+                        obj.value(QLatin1String("ready")).toObject();
+                    for (auto it = ready.begin(); it != ready.end(); ++it) {
+                        if (!it.value().toBool()) {
+                            s.not_ready.append(it.key());
+                        }
+                    }
+                    s.not_ready.sort();
+                    s.wall_ms = QDateTime::currentMSecsSinceEpoch();
+                    s.valid = true;
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
-                        status_.state = obj.value("state").toString();
-                        status_.mode = obj.contains("mode_name")
-                            ? obj.value("mode_name").toString()
-                            : modeName(obj.value("mode").toDouble(0.0));
-                        status_.reason = obj.value("reason").toString();
-                        status_.coverage =
-                            obj.value("coverage").toDouble(-1.0);
-                        status_.wall_ms =
-                            QDateTime::currentMSecsSinceEpoch();
-                        status_.valid = true;
+                        status_ = s;
                     }
                     emit statusUpdated();
                 });
@@ -283,6 +329,15 @@ bool RosLink::start(QString* error) {
         impl_->dc_finalize_mission =
             impl_->node->create_client<std_srvs::srv::Trigger>(
                 "/dc/finalize_mission");
+        impl_->coverage_conclude =
+            impl_->node->create_client<std_srvs::srv::Trigger>(
+                "/coverage/conclude");
+        impl_->coverage_skip_copy =
+            impl_->node->create_client<std_srvs::srv::Trigger>(
+                "/coverage/skip_copy");
+        impl_->coverage_abort =
+            impl_->node->create_client<std_srvs::srv::SetBool>(
+                "/coverage/abort");
     } catch (const std::exception& exc) {
         if (error) {
             *error = QString::fromUtf8(exc.what());
@@ -490,29 +545,36 @@ bool RosLink::motorsIdle() const {
            motors.right_axis_state == kAxisIdle;
 }
 
-void RosLink::finalizeMission(
-    std::function<void(bool ok, QString detail)> on_done) {
-    const auto complete = [this, on_done](bool ok, const QString& detail) {
+namespace {
+
+/**
+ * Fire a std_srvs Trigger and marshal the outcome to `owner`'s thread.
+ * Discovery may not have settled if the operator acts immediately after
+ * launch: a brief wait, then give up rather than block the caller's flow.
+ */
+void callTrigger(QObject* owner,
+                 rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr client,
+                 const char* service_name, bool running,
+                 RosLink::TriggerCallback on_done) {
+    const auto complete = [owner, on_done](bool ok, const QString& detail) {
         if (!on_done) {
             return;
         }
         QMetaObject::invokeMethod(
-            this, [on_done, ok, detail]() { on_done(ok, detail); },
+            owner, [on_done, ok, detail]() { on_done(ok, detail); },
             Qt::QueuedConnection);
     };
-    if (!running_ || !impl_->dc_finalize_mission) {
+    if (!running || !client) {
         complete(false, QStringLiteral("ROS link not running"));
         return;
     }
-    // Discovery may not have settled if the operator completes immediately
-    // after launch. A brief wait, then give up rather than block teardown.
-    if (!impl_->dc_finalize_mission->wait_for_service(
-            std::chrono::milliseconds(250))) {
-        complete(false, QStringLiteral("/dc/finalize_mission unavailable"));
+    if (!client->wait_for_service(std::chrono::milliseconds(250))) {
+        complete(false, QStringLiteral("%1 unavailable")
+                            .arg(QLatin1String(service_name)));
         return;
     }
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-    (void)impl_->dc_finalize_mission->async_send_request(
+    (void)client->async_send_request(
         request,
         [complete](
             rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
@@ -525,6 +587,78 @@ void RosLink::finalizeMission(
                 complete(false, QString::fromUtf8(exc.what()));
             }
         });
+}
+
+}  // namespace
+
+void RosLink::finalizeMission(
+    std::function<void(bool ok, QString detail)> on_done) {
+    callTrigger(this, impl_->dc_finalize_mission, "/dc/finalize_mission",
+                running_, std::move(on_done));
+}
+
+void RosLink::concludeCoverage(TriggerCallback on_done) {
+    callTrigger(this, impl_->coverage_conclude, "/coverage/conclude",
+                running_, std::move(on_done));
+}
+
+void RosLink::skipCopy(TriggerCallback on_done) {
+    callTrigger(this, impl_->coverage_skip_copy, "/coverage/skip_copy",
+                running_, std::move(on_done));
+}
+
+void RosLink::abortCoverage(bool save, TriggerCallback on_done) {
+    const auto complete = [this, on_done](bool ok, const QString& detail) {
+        if (!on_done) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            this, [on_done, ok, detail]() { on_done(ok, detail); },
+            Qt::QueuedConnection);
+    };
+    if (!running_ || !impl_->coverage_abort) {
+        complete(false, QStringLiteral("ROS link not running"));
+        return;
+    }
+    if (!impl_->coverage_abort->wait_for_service(
+            std::chrono::milliseconds(250))) {
+        complete(false, QStringLiteral("/coverage/abort unavailable"));
+        return;
+    }
+    auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+    request->data = save;
+    (void)impl_->coverage_abort->async_send_request(
+        request,
+        [complete](
+            rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
+            try {
+                auto result = future.get();
+                complete(result && result->success,
+                         result ? QString::fromStdString(result->message)
+                                : QStringLiteral("null response"));
+            } catch (const std::exception& exc) {
+                complete(false, QString::fromUtf8(exc.what()));
+            }
+        });
+}
+
+bool RosLink::directorServicesReady() const {
+    return running_ && impl_->coverage_conclude &&
+           impl_->coverage_conclude->service_is_ready();
+}
+
+bool RosLink::motorsArmed() const {
+    const MotorStatus motors = motorStatus();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (motors.left_wall_ms <= 0 || motors.right_wall_ms <= 0) {
+        return false;
+    }
+    if (now - motors.left_wall_ms > kControllerStatusStaleMs ||
+        now - motors.right_wall_ms > kControllerStatusStaleMs) {
+        return false;
+    }
+    return motors.left_axis_state == kAxisClosedLoop &&
+           motors.right_axis_state == kAxisClosedLoop;
 }
 
 }  // namespace f2c_cpp

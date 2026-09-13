@@ -51,21 +51,44 @@ MissionController::MissionController(QObject* parent) : QObject(parent) {
 }
 
 void MissionController::hookProcessLogging(QProcess* proc, const QString& tag) {
-    connect(proc, &QProcess::readyReadStandardOutput, this, [this, proc, tag] {
-        const QStringList lines =
-            QString::fromUtf8(proc->readAllStandardOutput())
-                .split('\n', Qt::SkipEmptyParts);
-        for (const QString& line : lines) {
-            emit logLine(QStringLiteral("[%1] %2").arg(tag, line.trimmed()));
-        }
-    });
+    const bool is_robot = proc == robot_proc_;
+    connect(proc, &QProcess::readyReadStandardOutput,
+            this, [this, proc, tag, is_robot] {
+                const QStringList lines =
+                    QString::fromUtf8(proc->readAllStandardOutput())
+                        .split('\n', Qt::SkipEmptyParts);
+                for (const QString& line : lines) {
+                    const QString trimmed = line.trimmed();
+                    emit logLine(QStringLiteral("[%1] %2").arg(tag, trimmed));
+                    if (is_robot) {
+                        robot_output_tail_.append(trimmed);
+                        while (robot_output_tail_.size() > kRobotOutputTailMax) {
+                            robot_output_tail_.removeFirst();
+                        }
+                    }
+                }
+            });
     connect(proc,
             QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, tag](int code, QProcess::ExitStatus) {
+            this, [this, tag, is_robot](int code, QProcess::ExitStatus) {
                 emit logLine(QStringLiteral("[%1] launch exited (rc=%2)")
                                  .arg(tag)
                                  .arg(code));
+                // The SSH session carrying the robot launch ended on its
+                // own: the director (and everything under it) is gone. The
+                // screen turns this into an operator-facing failure; during
+                // teardown it is the expected outcome and stays quiet.
+                if (is_robot && mission_active_ && !tearing_down_) {
+                    emit robotLaunchDied(code);
+                }
             });
+}
+
+QStringList MissionController::recentRobotOutput(int max_lines) const {
+    if (max_lines <= 0 || robot_output_tail_.size() <= max_lines) {
+        return robot_output_tail_;
+    }
+    return robot_output_tail_.mid(robot_output_tail_.size() - max_lines);
 }
 
 RobotTarget MissionController::resolveRobotTarget(QString* error) {
@@ -118,6 +141,7 @@ bool MissionController::startMission(const RoiPolygon& poly,
         if (error) *error = QStringLiteral("A mission is already active.");
         return false;
     }
+    robot_output_tail_.clear();
     if (!poly.valid() || !robot.valid) {
         if (error) *error = QStringLiteral("ROI and robot placement are both required.");
         return false;
@@ -163,8 +187,12 @@ bool MissionController::startMission(const RoiPolygon& poly,
     {
         QProcess cleanup;
         QStringList args = sshBaseArgs(target_);
+        // A lingering step-2 map-collection tree must not coexist with the
+        // director: both own the LiDAR / FAST-LIO / ODrive nodes.
         args << "pkill -f '[r]os2 launch pilot_control "
-                "robot_autonomous_coverage' >/dev/null 2>&1 || true";
+                "robot_autonomous_coverage' >/dev/null 2>&1 || true; "
+                "pkill -f '[r]os2 launch pilot_control "
+                "robot_map_collection' >/dev/null 2>&1 || true";
         cleanup.start("ssh", args);
         cleanup.waitForFinished(8000);
     }
@@ -224,6 +252,7 @@ void MissionController::teardownMission() {
         return;
     }
     emit logLine(QStringLiteral("[teardown] stopping launches…"));
+    tearing_down_ = true;
 
     if (target_.valid) {
         QProcess killer;
@@ -260,6 +289,7 @@ void MissionController::teardownMission() {
     }
 
     mission_active_ = false;
+    tearing_down_ = false;
     emit missionStateChanged(false);
     emit logLine(QStringLiteral("[teardown] done"));
 }

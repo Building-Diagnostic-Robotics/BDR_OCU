@@ -20,6 +20,7 @@
 #include <QObject>
 #include <QProcess>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 namespace f2c_cpp {
@@ -65,9 +66,19 @@ public:
     /** Kills both launch trees (remote pkill + local process kill). */
     void teardownMission();
 
+    /** Last lines of the robot launch's merged stdout/stderr — the
+        director's traceback lives here when the stack dies at startup. */
+    QStringList recentRobotOutput(int max_lines = 12) const;
+
 signals:
     void logLine(const QString& line);
     void missionStateChanged(bool active);
+    /**
+     * The robot-side `ros2 launch` exited while the mission was active and
+     * nobody asked it to (not during teardownMission). rc=0 included: an
+     * SSH session that ends is a stack that is gone either way.
+     */
+    void robotLaunchDied(int exit_code);
 
 private:
     void hookProcessLogging(QProcess* proc, const QString& tag);
@@ -76,6 +87,9 @@ private:
     QProcess* laptop_proc_ = nullptr;
     QProcess* robot_proc_ = nullptr;
     bool mission_active_ = false;
+    bool tearing_down_ = false;
+    QStringList robot_output_tail_;
+    static constexpr int kRobotOutputTailMax = 40;
 };
 
 }  // namespace f2c_cpp

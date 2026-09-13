@@ -57,6 +57,7 @@ class QVBoxLayout;
 
 namespace f2c_cpp {
 
+class FPVCameraView;
 class LinkHealthMonitor;
 class MissionController;
 class PanZoomImageWidget;
@@ -117,6 +118,12 @@ public:
     bool missionActive() const;
     /** Safe teardown for app close: autonomy off, disarm, kill launches. */
     void shutdownMission();
+    /**
+     * Last decoded FPV frame on the scan-step camera (0 if the stream is
+     * not playing). AppShell stamps LinkHealthMonitor::FpvFrame from this
+     * the same way it does Stage 4/5.
+     */
+    qint64 lastScanFpvFrameWallMs() const;
 
 signals:
     void backRequested();
@@ -300,7 +307,29 @@ private:
      * drag step, so querying directly from it would be a request storm.
      */
     void refreshImageryInfo();
+    /**
+     * Edge-Review Next / chip-5: marker confirm, persist geometry, launch
+     * the director stack, advance to Autonomous Scan. Replaces the old
+     * Send button — same contract as Stage 4's "Start Scan" launch.
+     */
+    void launchMissionFromEdgeReview();
+    /** Legacy name kept as a thin wrapper so stray call sites compile. */
     void onSendMission();
+    void onFooterBackClicked();
+    void onScanStartPauseClicked();
+    void onScanCancelClicked();
+    void beginStartScan();
+    void handleDirectorDeath(int exit_code);
+    void maybePromptRevisit();
+    void setManualOverride(bool active);
+    void refreshScanRunUi();
+    void startScanFpv();
+    void stopScanFpv();
+    bool directorReady() const;
+    /** Next-enable, distinct from stepComplete: ROI/edge confirm is a modal. */
+    bool stepReadyForAdvance(Step step) const;
+    QString roiConfirmSummary() const;
+    QString edgeReviewSummary() const;
     /**
      * Operator-facing mission end. Branches on the strict link state: normal
      * path when we can talk to the robot, OfflineFinalizeDialog when we
@@ -536,12 +565,30 @@ private:
     QLabel* reason_label_ = nullptr;
     QProgressBar* coverage_bar_ = nullptr;
     QLabel* segment_label_ = nullptr;
-    QPushButton* send_button_ = nullptr;
     QPushButton* end_button_ = nullptr;
-    QPushButton* autonomy_button_ = nullptr;
-    QPushButton* arm_button_ = nullptr;
     QPushButton* disarm_button_ = nullptr;
     QPushButton* estop_button_ = nullptr;
+    QPushButton* scan_start_pause_button_ = nullptr;
+    QPushButton* scan_cancel_button_ = nullptr;
+    QLabel* scan_elapsed_label_ = nullptr;
+    QLabel* scan_coverage_label_ = nullptr;
+    QLabel* scan_copy_label_ = nullptr;
+    QLabel* scan_override_label_ = nullptr;
+    FPVCameraView* scan_camera_view_ = nullptr;
+
+    enum class ScanRunState { Idle, Running, Paused, Completed };
+    ScanRunState scan_run_state_ = ScanRunState::Idle;
+    bool scan_autonomy_ran_ = false;
+    bool manual_override_ = false;
+    bool resume_after_override_ = false;
+    bool revisit_prompt_open_ = false;
+    bool director_failed_ = false;
+    qint64 scan_started_wall_ms_ = 0;
+    qint64 scan_elapsed_ms_ = 0;
+    QTimer* arm_wait_timer_ = nullptr;
+    int arm_wait_ticks_ = 0;
+    QTimer* conclude_wait_timer_ = nullptr;
+    int conclude_wait_ticks_ = 0;
 
     // Teleop card.
     QWidget* teleop_card_ = nullptr;

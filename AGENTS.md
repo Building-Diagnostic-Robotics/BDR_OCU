@@ -823,8 +823,8 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  no Wayback) from `newJob()` and the uncached branch of `loadJob()` —
  without it a new plan keeps writing tiles into the previous plan's
  assets folder and inherits its zoom ceiling.
- **The field satellite rail is per step** (`applyStepVisibility`,
- `frame_rail = !planning_only_ && Satellite`; rail is 288 px =
+ **The field rail is per step** (`applyStepVisibility`,
+ `frame_rail = !planning_only_`; rail is 288 px =
  `kLeftRailWidth`, frames 238:4289 / 222:1155): **step 1 has no rail**
  (`rail_scroll_` hidden like the picker) — a 420 px floating search pill
  (`buildSearchBar`, `#SatSearchBar`) sits 40 px under the step header
@@ -854,10 +854,14 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  spinbox on this rail**: entering step 3 with no polygon
  `armPolygonDraw()`s the canvas, Clear ROI re-arms it, and clicking near
  the first vertex closes the polygon (right-click still works). Step-3
- gate = closed polygon (`!isDrawing()`); the Confirm-ROI ack card is
- hidden there. Step 4 = `edge_review_card_` only. The log card only
- shows on step 5. Office and measured keep the single authoring card +
- ack.
+ Next pops a **Confirm ROI modal** (closed polygon is readiness,
+ `confirmed_vertices_` is completion). Step-4 Next pops **Edges Reviewed**
+ then, in the field, **launches** the director stack (marker-at-pose
+ confirm) — there is no Send button. Ack checkboxes are gone. Measured
+ field trim hides Satellite Map (Robot Map is step 1); chips renumber
+ 1–4. Step 5 is the Stage 5 scan run: FPV click = teleop, footer is
+ Start Scan / Pause / Cancel / Complete Mission. The log card only
+ shows on step 5.
 
 ### Alignment: robot map -> satellite imagery
 
@@ -955,10 +959,11 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 
 ### Rules for agents touching Stage 6
 
-- **The metadata push is the arming gate**: Start Autonomy stays disabled
- until `/data_collection_coordinator/set_parameters` accepts
- building/operator/units (retried 3 s while the stack boots). Same
- hard-block contract as Stage 5 — do not weaken it.
+- **Start Scan is the arming gate**: metadata push (retried 3 s) AND
+ `/coverage/status` arriving `initialized` and not `ERROR` (fresh < 3 s).
+ Start Scan then requests CLOSED_LOOP and only publishes
+ `/mpc_autonomy_enable` once both axes report armed. Do not unlock on
+ coordinator metadata alone — that is how a dead director looked ready.
 - The BOT pill runs the layered link model: AppShell arms
  `link_monitor_` + `reachability_probe_` on `missionActiveChanged(true)`
  (probe host = the Send SSH target) and every Stage 6 ROS callback stamps
@@ -985,24 +990,19 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  cell and notifies **every** waiting callback. Do not go back to dropping
  coalesced callers: the download dialog gates its whole prefetch on that
  callback, so a dropped one hangs the download forever.
-- **Complete Mission** runs the same data-first contract as Stage 5, but
- self-contained on this screen (Stage 6 owns its own rclcpp node and launch
- orchestration, so it cannot reuse AppShell's `exploration_ros_node_`
- clients). `onCompleteMission` branches on `isRobotLinkUnreachable()`
- (strict — Disconnected only):
- - reachable → `executeCompleteMissionNormalPath()`: `beginMotorsIdleWait`
- (request IDLE, poll `RosLink::motorsIdle()`, 6 s ceiling) →
- `RosLink::finalizeMission()` (/dc/finalize_mission, 250 ms discovery
- wait then give up) → `teardownMission()`.
- - Disconnected → `OfflineFinalizeDialog`, same three CTAs as Stage 5;
- `FinalizeOverSsh` runs `finalize_mission_local.py` via **direct
- `python3`** and skips both the disarm wait and the RPC.
- Cancel is legitimate: the robot's 10-min idle watchdog is the net.
- **Complete Mission is deliberately NOT link-gated here** (it enables on
- mission-active alone). Stage 5 disables it on link loss and treats its
- strict check as defence-in-depth; Stage 6 instead wants the offline dialog
- to be reachable, because that dialog is the only way to land finalize
- metadata on a dead link. Do not add a link gate to `end_button_`.
+- **Complete Mission** is reachable on mission-active alone (offline
+ dialog on true Disconnected). Reachable path: `concludeCoverage()` →
+ wait until `/coverage/status` shows save done (`complete` or `copy` in
+ pending/copying/done/skipped, 30 s ceiling) → motors IDLE wait →
+ teardown. Do **not** wait for the thumb-drive copy; that surfaces later
+ on the Dashboard. SSH-offline fallback is unchanged
+ (`finalize_mission_local.py` via direct `python3`). A director process
+ death auto-teardowns, keeps the plan PLANNED, and returns to Edge Review.
+ Do not add a link gate to `end_button_`.
+- **Launch is Edge Review Next**, not a Send button. Back from step 5
+ while the stack is up (and Start Scan has never run) confirms teardown;
+ once autonomy has run, Back is disabled — Cancel / Complete are the exits.
+ `startMission` pkills `robot_map_collection` as well as the director tree.
 - `RosLink::motorsIdle()` requires **fresh** controller_status on both
  axes. Do not relax that to "state == IDLE" alone — a dead CAN bus would
  then read as disarmed while the axes are still in closed loop.
@@ -1028,7 +1028,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 - **Do not drop the imagery knobs** (radius / zoom / age / Clarity /
  Wayback). They are defaulted and behind Advanced, not removed — the
  operator asked for that explicitly.
-- **Do not stamp `last_executed_at` at Send** or on a failed / cancelled /
+- **Do not stamp `last_executed_at` at launch** or on a failed / cancelled /
  watchdog-deferred finalize. COMPLETED means data is on disk; an aborted
  mission must leave the plan PLANNED so it can be re-run. Only
  `markCurrentPlanCompleted()` writes the stamp, and only from the two

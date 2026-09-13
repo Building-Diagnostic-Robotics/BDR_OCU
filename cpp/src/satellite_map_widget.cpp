@@ -63,7 +63,7 @@ SatelliteMapWidget::SatelliteMapWidget(TileService* tiles, QWidget* parent)
 
 void SatelliteMapWidget::setImageryEnabled(bool enabled) {
     imagery_enabled_ = enabled;
-    zoom_ = qBound(kMinZoom, zoom_, maxZoomNow());
+    zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
     update();
 }
 
@@ -81,10 +81,31 @@ int SatelliteMapWidget::maxZoomNow() const {
     return std::min(fetchZoomCeiling() + kOverzoomLevels, kMaxZoomGrid);
 }
 
+int SatelliteMapWidget::minZoomNow() const {
+    if (imagery_enabled_) {
+        return kMinZoom;
+    }
+    // Equatorial Web-Mercator metres/pixel at zoom 0 (256 px tile).
+    constexpr double kMpp0 = 156543.03392804097;
+    QRectF hull = map_raster_m_;
+    if (!hull.isValid() || hull.isEmpty()) {
+        hull = QRectF(-50.0, -50.0, 100.0, 100.0);
+    }
+    const double larger = std::max(hull.width(), hull.height());
+    const double margin = std::max(15.0, 0.25 * larger);
+    hull.adjust(-margin, -margin, margin, margin);
+    const double vw = std::max(1, width());
+    const double vh = std::max(1, height());
+    const double zx = std::log2(kMpp0 * vw / std::max(1.0, hull.width()));
+    const double zy = std::log2(kMpp0 * vh / std::max(1.0, hull.height()));
+    const int z = int(std::ceil(std::max(zx, zy)));
+    return qBound(kMinZoom, z, maxZoomNow());
+}
+
 void SatelliteMapWidget::setView(double lat, double lon, int zoom) {
     center_nx_ = geo::lonToNormX(lon);
     center_ny_ = geo::latToNormY(lat);
-    zoom_ = qBound(kMinZoom, zoom, maxZoomNow());
+    zoom_ = qBound(minZoomNow(), zoom, maxZoomNow());
     clampCenter();
     update();
     emitViewChanged();
@@ -92,7 +113,7 @@ void SatelliteMapWidget::setView(double lat, double lon, int zoom) {
 
 void SatelliteMapWidget::zoomBy(int delta) {
     cancelEdgeLengthEdit();
-    const int new_zoom = qBound(kMinZoom, zoom_ + delta, maxZoomNow());
+    const int new_zoom = qBound(minZoomNow(), zoom_ + delta, maxZoomNow());
     if (new_zoom == zoom_) {
         return;
     }
@@ -129,8 +150,8 @@ bool SatelliteMapWidget::fitToRoi(int margin_px) {
     // dividing by zero.
     const double avail_w = width() - 2.0 * margin_px;
     const double avail_h = height() - 2.0 * margin_px;
-    int chosen = kMinZoom;
-    for (int z = maxZoomNow(); z >= kMinZoom; --z) {
+    int chosen = minZoomNow();
+    for (int z = maxZoomNow(); z >= minZoomNow(); --z) {
         const double world_px = double(kTileSize) * (1 << z);
         if ((max_nx - min_nx) * world_px <= avail_w &&
             (max_ny - min_ny) * world_px <= avail_h) {
@@ -923,6 +944,7 @@ void SatelliteMapWidget::setMapRaster(const QImage& image,
                                       const QRectF& bounds_m) {
     map_raster_ = image;
     map_raster_m_ = bounds_m;
+    zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
     update();
 }
 
@@ -1768,7 +1790,7 @@ void SatelliteMapWidget::wheelEvent(QWheelEvent* event) {
     // commit via focus-out, but the wheel never takes focus away.
     cancelEdgeLengthEdit();
     const int dz = event->angleDelta().y() > 0 ? 1 : -1;
-    const int new_zoom = qBound(kMinZoom, zoom_ + dz, maxZoomNow());
+    const int new_zoom = qBound(minZoomNow(), zoom_ + dz, maxZoomNow());
     if (new_zoom == zoom_) {
         return;
     }
