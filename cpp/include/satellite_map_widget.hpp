@@ -106,6 +106,15 @@ public:
     bool setEdgeLength(int edge, double meters, bool pin = false);
     /** Releases a pinned edge length. */
     void clearEdgeLock(int edge);
+    /** Current edge lengths in metres, edge i = vertex i -> i+1. Empty
+        when there is no ROI. Drives the step-3 rail's Edge Dimensions list. */
+    QVector<double> edgeLengthsM() const;
+    /** Opens the inline editor over `edge`'s dimension chip (the rail's
+        value buttons call this so the chip and the row edit together). */
+    void beginEdgeLengthEdit(int edge);
+    /** Paints `edge`'s chip in the green editing look without opening the
+        editor — rail row hover. -1 clears. */
+    void setHighlightedEdge(int edge);
 
     geo::GeoPose marker() const { return marker_; }
     void setMarker(const geo::GeoPose& marker);
@@ -157,6 +166,8 @@ signals:
     void viewChanged(double lat, double lon, int zoom);
     void roiChanged();
     void markerChanged();
+    /** Inline edge editor opened on `edge` (>= 0) or closed (-1). */
+    void edgeEditChanged(int edge);
     /** An armed draw / placement / ruler started or ended. Lets the rail
         relabel its tool buttons ("Drawing…") without polling. */
     void interactionChanged();
@@ -231,8 +242,6 @@ private:
     bool solveEdgeLocks(int held, const QVector<double>& locks,
                         QVector<geo::GeoPoint>& verts) const;
 
-    /** Opens the inline editor over `edge`'s dimension chip. */
-    void beginEdgeLengthEdit(int edge);
     void commitEdgeLengthEdit();
     void cancelEdgeLengthEdit();
 
@@ -280,6 +289,7 @@ private:
     // count changes as the operator edits the polygon.
     QLineEdit* dim_edit_ = nullptr;
     int dim_edit_edge_ = -1;
+    int dim_hover_edge_ = -1;
 
     geo::GeoPose mission_anchor_;
     GridSnapshot grid_;

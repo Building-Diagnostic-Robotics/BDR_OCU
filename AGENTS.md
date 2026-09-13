@@ -805,6 +805,26 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  the office; offline → geometry-only save plus a `BdrMessageBox::warning`
  that 3D Alignment needs the site cached once. Connectivity, not trim,
  decides whether a save fetches.
+ **The field satellite rail is per step** (`applyStepVisibility`,
+ `frame_rail = !planning_only_ && Satellite`; rail is 288 px =
+ `kLeftRailWidth`, frame 222:1155): step 1 shows `plan_card_` trimmed to
+ **Locate Building** (address / Go, Find Robot, imagery line — every
+ widget in `plan_card_authoring_` hidden; name comes from the chosen plan
+ + metadata modal and `loadJob()` still fills the hidden `job_name_` so
+ the step-1 gate holds). Step 3 shows `roi_card_` (`buildRoiCard`, Figma
+ 222:1284): title/blurb, Vertices/Status/Area stats box, **Edge
+ Dimensions** rows whose value buttons call
+ `SatelliteMapWidget::beginEdgeLengthEdit(i)` (row hover →
+ `setHighlightedEdge`; the open row + chip both go green via
+ `edgeEditChanged`), Clear ROI, boundary note, plus the `canvas_tag_`
+ over the map. There is **no Draw button and no along/across/heading
+ spinbox on this rail**: entering step 3 with no polygon
+ `armPolygonDraw()`s the canvas, Clear ROI re-arms it, and clicking near
+ the first vertex closes the polygon (right-click still works). Step-3
+ gate = closed polygon (`!isDrawing()`); the Confirm-ROI ack card is
+ hidden there. Step 4 = `edge_review_card_` only. The log card only
+ shows on step 5. Office and measured keep the single authoring card +
+ ack.
 
 ### Alignment: robot map -> satellite imagery
 
@@ -957,7 +977,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  controller_status, not by the axis-state RPC's ack. The request being
  accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
- (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|plan|
+ (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|plan|
  plan_confirm`, `_STAGE=3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog
  to `<png>_dialog.png` / `_dialog_adv.png`. See docs/DEV_BYPASSES.md.

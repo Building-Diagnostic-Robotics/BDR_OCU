@@ -29,6 +29,8 @@
     <file alias="satellite/clear_pairs.svg">../App resource/icons/satellite_clear_pairs.svg</file>
     <file alias="satellite/footer_back.svg">../App resource/icons/satellite_footer_back.svg</file>
     <file alias="satellite/footer_next.svg">../App resource/icons/satellite_footer_next.svg</file>
+    <file alias="satellite/clear_roi.svg">../App resource/icons/satellite_clear_roi.svg</file>
+    <file alias="satellite/roi_hint.svg">../App resource/icons/satellite_roi_hint.svg</file>
 
     <!-- Exploration frame assets (Figma node 58:2) -->
     <file alias="exploration/fpv_feed.svg">../App resource/icons/exploration_fpv_feed.svg</file>

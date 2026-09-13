@@ -51,6 +51,7 @@ class QPushButton;
 class QSlider;
 class QStackedWidget;
 class QTimer;
+class QVBoxLayout;
 
 namespace f2c_cpp {
 
@@ -92,6 +93,8 @@ public:
     void devSeedDemoAlignment(bool review);
     /** Dev shot only: step 2 before any capture (site + capture CTA). */
     void devSeedDemoAlignmentEmpty();
+    /** Dev shot only: aligned, then step 3 with the demo polygon closed. */
+    void devSeedDemoRoiStep();
 
     /** Mirrors the Dashboard MQTT battery sample onto the top-bar pill
         (same contract as ExplorationScreen/PlannerScreen). */
@@ -397,6 +400,27 @@ private:
     QLabel* imagery_label_ = nullptr;  // source capture date / GSD (geo only)
     QPushButton* save_button_ = nullptr;
 
+    // Field step 1 shows the plan card trimmed to locate-only (address / Go,
+    // Find Robot, imagery line); these are the widgets it hides. The header
+    // label is retitled per trim.
+    QLabel* plan_card_title_ = nullptr;
+    QVector<QWidget*> plan_card_authoring_;
+
+    // Field step 3 — ROI Definition rail (Figma 222:1284): stats box, Edge
+    // Dimensions list whose value buttons open the canvas chip editor,
+    // Clear ROI, boundary hint.
+    QWidget* roi_card_ = nullptr;
+    QLabel* canvas_tag_ = nullptr;  // "ROI DEFINED — …" over the map (222:1391)
+    QLabel* roi_stat_vertices_ = nullptr;
+    QLabel* roi_stat_status_ = nullptr;
+    QLabel* roi_stat_area_ = nullptr;
+    QVBoxLayout* edge_rows_layout_ = nullptr;
+    QVector<QWidget*> edge_rows_;
+    QVector<QPushButton*> edge_value_buttons_;
+    QPushButton* roi_clear_button_ = nullptr;
+    QWidget* buildRoiCard(QWidget* parent);
+    void refreshRoiCard();
+
     // Step 3 / step 4 acknowledgement cards.
     QWidget* roi_confirm_card_ = nullptr;
     QCheckBox* roi_confirm_check_ = nullptr;
@@ -495,6 +519,7 @@ private:
 
     // Teleop card.
     QWidget* teleop_card_ = nullptr;
+    QWidget* log_card_ = nullptr;
     QCheckBox* teleop_check_ = nullptr;
     QSlider* teleop_speed_ = nullptr;
     QLabel* teleop_speed_label_ = nullptr;

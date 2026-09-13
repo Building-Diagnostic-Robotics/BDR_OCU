@@ -323,7 +323,7 @@ enumerates all sites.
 - [ ] `BDR_DEV_STAGE6_SHOT=<png path>` — jumps to the Stage 6 planning
       screen on startup, renders offscreen, saves a PNG, and exits.
       Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
-      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|align_empty|correspond|review|plan|plan_confirm|scan_setup`,
+      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|plan|plan_confirm|scan_setup`,
       `BDR_DEV_STAGE6_SHOT_STAGE=3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`,
       `BDR_DEV_STAGE6_SHOT_FIT=1` (`plan` only: `fitToRoi()` after seeding,
       lands past the fetch ceiling to exercise scaled-tile overzoom).

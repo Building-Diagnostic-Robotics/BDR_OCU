@@ -730,7 +730,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     // offscreen, saves a PNG, and exits — the agent-side visual feedback
     // loop for design iteration without a robot or an operator. Optional:
     // BDR_DEV_STAGE6_SHOT_DARK=1 (dark theme), BDR_DEV_STAGE6_SHOT_MODE=
-    // measured|measured_map|scan|correspond|review|plan|plan_confirm
+    // measured|measured_map|scan|correspond|review|roi|plan|plan_confirm
     // (default: planning-only satellite trim). See docs/DEV_BYPASSES.md.
     if (!qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
         const QString shot_path =
@@ -826,6 +826,11 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     stage6_->devSeedDemoPlan();
                     stage6_->devSeedDemoAlignment(
                         shot_mode == QStringLiteral("review"));
+                } else if (shot_mode == QStringLiteral("roi")) {
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
+                    stage6_->devSeedDemoPlan();
+                    stage6_->devSeedDemoRoiStep();
                 } else if (shot_mode == QStringLiteral("plan")) {
                     stage6_->configureForPlanning();
                     stage6_->devSeedDemoPlan();

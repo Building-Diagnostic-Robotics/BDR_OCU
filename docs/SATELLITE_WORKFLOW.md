@@ -50,7 +50,7 @@ button advances to the next one.
 |---|------|---------------|------------------|
 | 1 | Satellite Map | a job is named and the canvas has been aimed at the building | — |
 | 2 | 3D Alignment | measured: a map has been collected · satellite: the fit is confirmed | planning-only trim |
-| 3 | ROI Definition | the operator confirms the ROI against the aligned map | — |
+| 3 | ROI Definition | satellite: the polygon is closed · measured: the operator confirms the ROI against the aligned map | — |
 | 4 | Edge Review | the operator acknowledges having reviewed the edges | — |
 | 5 | Autonomous Scan | the mission is finalized | planning-only trim |
 
@@ -196,6 +196,17 @@ still wins; the setback is not a safety system.
    the collected map, picks and fit — a saved anchor stays with the plan,
    but a cloud is never reused across visits. Loading a different plan
    clears them too.
+7. Step 1's rail is only **Locate Building** — the address search, **Find
+   Robot** and the imagery line. The plan name and operator came from the
+   Scan Setup and metadata modals, so nothing is asked again.
+8. Step 3, **ROI Definition**, has no Draw button: the canvas is armed the
+   moment the step opens. Click the roof corners in order and click near
+   the first point (or right-click) to close. The rail shows Vertices /
+   Status / Area and an **Edge Dimensions** list — click a value there or
+   the amber chip on the canvas and both turn green while you type; Enter
+   slides the edge's far vertex to the entered length. Hovering a row lights
+   its chip. **Clear ROI** empties the canvas and re-arms drawing. Next
+   enables once the polygon is closed.
 
 ### Plans created in the field
 

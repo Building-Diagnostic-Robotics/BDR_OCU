@@ -75,7 +75,7 @@ constexpr int kTopStatusMotorsChipHeight = 20;
 // Floating window controls (theme toggle + min/max/close) overlay the
 // top-right corner — same reservation Stage 4/5 make.
 constexpr int kTopStatusWindowControlsReservedWidth = 184;
-constexpr int kLeftRailWidth = 320;
+constexpr int kLeftRailWidth = 288;
 constexpr int kSendButtonHeight = 44;
 constexpr int kEstopButtonHeight = 44;
 constexpr int kStepHeaderHeight = 55;
@@ -363,6 +363,11 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     canvas_tools_ = buildCanvasTools(map_page_);
     map_page_layout->addWidget(canvas_tools_, 0, 0,
                                Qt::AlignRight | Qt::AlignTop);
+    // Step-3 status tag (222:1391), top-left over the map.
+    canvas_tag_ = new QLabel(map_page_);
+    canvas_tag_->setObjectName("SatPaneTag");
+    canvas_tag_->hide();
+    map_page_layout->addWidget(canvas_tag_, 0, 0, Qt::AlignLeft | Qt::AlignTop);
     canvas_stack_->addWidget(map_page_);
     correspond_page_ = buildCorrespondPage();
     canvas_stack_->addWidget(correspond_page_);
@@ -419,6 +424,10 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         }
         refreshStepUi();
     });
+    // Closing the polygon (click-near-first / right-click) changes no vertex
+    // but does flip the step-3 gate, so the footer must re-evaluate.
+    connect(map_, &SatelliteMapWidget::interactionChanged, this,
+            &SatelliteScreen::refreshStepUi);
     // Units toggle: re-suffix + re-display the length fields (values stay
     // SI in the model; only the presentation flips — house rule).
     connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
@@ -850,6 +859,15 @@ void SatelliteScreen::devSeedDemoAlignment(bool review) {
         onAlignClicked();
     }
     updateAlignCardUi();
+}
+
+void SatelliteScreen::devSeedDemoRoiStep() {
+    // Step 3 as the frame shows it: aligned, a closed polygon on the canvas,
+    // the Edge Dimensions rail live.
+    devSeedDemoAlignment(true);
+    setSelectedStep(Step::RoiDefinition);
+    // Deferred: the canvas has no size until the shot's first layout pass.
+    QTimer::singleShot(400, this, [this] { map_->fitToRoi(); });
 }
 
 void SatelliteScreen::devSeedDemoAlignmentEmpty() {
@@ -1316,6 +1334,8 @@ bool SatelliteScreen::stepComplete(Step step) const {
             // someone merely drafting, and hard-block a satellite plan
             // started in the field, where there is no internet to cache
             // from. Measured mode has no imagery to aim at at all.
+            // The field rail hides the name field; loadJob() still fills it
+            // from the chosen plan, so the check holds there too.
             return job_name_ && !job_name_->text().trimmed().isEmpty() &&
                    (plan_mode_ == PlanMode::Measured || canvas_aimed_);
         case Step::Alignment:
@@ -1325,7 +1345,15 @@ bool SatelliteScreen::stepComplete(Step step) const {
                        ? !pcd_image_.isNull()
                        : pcd_to_sat_.valid && alignment_confirmed_;
         case Step::RoiDefinition:
-            return map_ && map_->polygon().valid() && roiMatchesConfirmed();
+            if (!map_ || !map_->polygon().valid()) {
+                return false;
+            }
+            // Frame 222:1155 has no confirm checkbox: a closed polygon is
+            // the deliverable. Office / measured keep the acknowledgement.
+            if (!planning_only_ && plan_mode_ == PlanMode::Satellite) {
+                return !map_->isDrawing();
+            }
+            return roiMatchesConfirmed();
         case Step::EdgeReview:
             return edges_reviewed_;
         case Step::AutonomousScan:
@@ -1572,13 +1600,38 @@ void SatelliteScreen::applyStepVisibility() {
     // sections in its own change, so the step machinery below is not
     // churning at the same time as the widgets it governs.
     const Step step = selected_step_;
+    // Field satellite trim follows the Figma frames step by step: step 1 is
+    // locate-only (the name came from the chosen plan + metadata modal), step
+    // 3 is the ROI Definition rail (222:1284), step 4 the edge review card.
+    // The office and the measured canvas keep the single authoring card.
+    const bool frame_rail =
+        !planning_only_ && plan_mode_ == PlanMode::Satellite;
     if (plan_card_) {
-        // The plan card currently carries step 1's identity fields, step 3's
-        // drawing tools and step 4's edge hint, so it appears in all three
-        // until it is split.
-        plan_card_->setVisible(step == Step::SatelliteMap ||
-                               step == Step::RoiDefinition ||
-                               step == Step::EdgeReview);
+        plan_card_->setVisible(frame_rail
+                                   ? step == Step::SatelliteMap
+                                   : (step == Step::SatelliteMap ||
+                                      step == Step::RoiDefinition ||
+                                      step == Step::EdgeReview));
+        for (QWidget* w : plan_card_authoring_) {
+            w->setVisible(!frame_rail);
+        }
+        if (roi_numeric_host_ && !frame_rail) {
+            roi_numeric_host_->setVisible(!planning_only_);
+        }
+        if (plan_card_title_) {
+            plan_card_title_->setText(frame_rail
+                                          ? QStringLiteral("Locate Building")
+                                          : QStringLiteral("Plan"));
+        }
+    }
+    if (roi_card_) {
+        const bool roi_step = frame_rail && step == Step::RoiDefinition;
+        roi_card_->setVisible(roi_step);
+        if (roi_step && !map_->polygon().valid() && !map_->isDrawing()) {
+            // No Draw button on this rail: the canvas is armed on entry.
+            map_->armPolygonDraw();
+        }
+        refreshRoiCard();
     }
     // Satellite alignment is the full-width picker: no rail at all. The
     // measured variant keeps the rail card (capture + status), since its
@@ -1593,7 +1646,8 @@ void SatelliteScreen::applyStepVisibility() {
                                 plan_mode_ == PlanMode::Measured);
     }
     if (roi_confirm_card_) {
-        roi_confirm_card_->setVisible(step == Step::RoiDefinition);
+        roi_confirm_card_->setVisible(!frame_rail &&
+                                      step == Step::RoiDefinition);
     }
     if (edge_review_card_) {
         edge_review_card_->setVisible(step == Step::EdgeReview);
@@ -1606,6 +1660,11 @@ void SatelliteScreen::applyStepVisibility() {
         teleop_card_->setVisible(!planning_only_ &&
                                  step == Step::AutonomousScan);
     }
+    if (log_card_) {
+        // The frame rails carry no log; it stays on the scan step where the
+        // mission events actually land.
+        log_card_->setVisible(!frame_rail || step == Step::AutonomousScan);
+    }
 }
 
 QWidget* SatelliteScreen::buildLeftRail() {
@@ -1617,6 +1676,8 @@ QWidget* SatelliteScreen::buildLeftRail() {
     layout->setSpacing(12);
     plan_card_ = buildPlanCard(rail_content);
     layout->addWidget(plan_card_);
+    roi_card_ = buildRoiCard(rail_content);
+    layout->addWidget(roi_card_);
     align_card_ = buildAlignCard(rail_content);
     layout->addWidget(align_card_);
     roi_confirm_card_ = buildAckCard(
@@ -1642,7 +1703,8 @@ QWidget* SatelliteScreen::buildLeftRail() {
     layout->addWidget(mission_card_);
     teleop_card_ = buildTeleopCard(rail_content);
     layout->addWidget(teleop_card_);
-    layout->addWidget(buildLogCard(rail_content));
+    log_card_ = buildLogCard(rail_content);
+    layout->addWidget(log_card_);
     layout->addStretch(1);
 
     auto* scroll = new QScrollArea(this);
@@ -1895,7 +1957,10 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(16, 14, 16, 16);
     layout->setSpacing(8);
-    layout->addWidget(makeCardHeader(QStringLiteral(":/assets/exploration/map.svg"), QStringLiteral("Plan"), card));
+    auto* header = makeCardHeader(QStringLiteral(":/assets/exploration/map.svg"),
+                                  QStringLiteral("Plan"), card);
+    plan_card_title_ = header->findChild<QLabel*>(QStringLiteral("SatCardHeader"));
+    layout->addWidget(header);
 
     // Plan selector — office (planning-only) affordance.
     jobs_combo_ = new QComboBox(card);
@@ -2131,7 +2196,221 @@ QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
     connect(save_button_, &QPushButton::clicked, this,
             &SatelliteScreen::saveJob);
     layout->addWidget(save_button_);
+
+    // Everything that authors the plan. Field step 1 hides these: the name
+    // came from the chosen plan + metadata modal, and ROI work is step 3.
+    plan_card_authoring_ = {job_name_,      job_address_,     shape_row,
+                            draw_row,       place_robot_button_,
+                            roi_numeric_host_, robot_pos_label_, edge_hint,
+                            save_button_};
     return card;
+}
+
+QWidget* SatelliteScreen::buildRoiCard(QWidget* parent) {
+    // Figma 222:1284 — 16px padding, 255px content column.
+    auto* card = new QWidget(parent);
+    card->setObjectName("SatRoiCard");
+    auto* layout = new QVBoxLayout(card);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    auto* title = new QLabel(QStringLiteral("ROI Definition"), card);
+    title->setObjectName("SatRoiTitle");
+    layout->addWidget(title);
+    auto* blurb = new QLabel(
+        QStringLiteral("Click on the roof area to add polygon vertices. "
+                       "Click near the first point to close the region."),
+        card);
+    blurb->setObjectName("SatRoiBlurb");
+    blurb->setWordWrap(true);
+    layout->addSpacing(4);
+    layout->addWidget(blurb);
+
+    // Stats box (222:1294).
+    auto* stats = new QWidget(card);
+    stats->setObjectName("SatRoiStats");
+    stats->setAttribute(Qt::WA_StyledBackground, true);
+    auto* stats_layout = new QVBoxLayout(stats);
+    stats_layout->setContentsMargins(12, 12, 12, 12);
+    stats_layout->setSpacing(6);
+    const auto statRow = [&](const QString& key, QLabel** value) {
+        auto* row = new QWidget(stats);
+        auto* rl = new QHBoxLayout(row);
+        rl->setContentsMargins(0, 0, 0, 0);
+        auto* k = new QLabel(key, row);
+        k->setObjectName("SatRoiStatKey");
+        *value = new QLabel(row);
+        (*value)->setObjectName("SatRoiStatValue");
+        rl->addWidget(k);
+        rl->addStretch(1);
+        rl->addWidget(*value);
+        stats_layout->addWidget(row);
+    };
+    statRow(QStringLiteral("Vertices"), &roi_stat_vertices_);
+    statRow(QStringLiteral("Status"), &roi_stat_status_);
+    statRow(QStringLiteral("Area"), &roi_stat_area_);
+    layout->addSpacing(16);
+    layout->addWidget(stats);
+
+    // Edge Dimensions (222:1318).
+    auto* edges_title = new QLabel(QStringLiteral("EDGE DIMENSIONS"), card);
+    edges_title->setObjectName("SatRoiSection");
+    layout->addSpacing(16);
+    layout->addWidget(edges_title);
+    auto* rows_host = new QWidget(card);
+    edge_rows_layout_ = new QVBoxLayout(rows_host);
+    edge_rows_layout_->setContentsMargins(0, 8, 0, 0);
+    edge_rows_layout_->setSpacing(4);
+    layout->addWidget(rows_host);
+    auto* edges_hint = new QLabel(
+        QStringLiteral("Click a value to edit it. Endpoint moves to match."),
+        card);
+    edges_hint->setObjectName("SatRoiHint");
+    edges_hint->setWordWrap(true);
+    edges_hint->setContentsMargins(4, 6, 0, 0);
+    layout->addWidget(edges_hint);
+
+    // Clear ROI (222:1367).
+    roi_clear_button_ = new QPushButton(QStringLiteral("Clear ROI"), card);
+    roi_clear_button_->setObjectName("SatRoiClearButton");
+    roi_clear_button_->setIcon(QIcon(loadTintedSvg(
+        QStringLiteral(":/assets/satellite/clear_roi.svg"), 14, 14)));
+    roi_clear_button_->setIconSize(QSize(14, 14));
+    roi_clear_button_->setFixedHeight(36);
+    roi_clear_button_->setCursor(Qt::PointingHandCursor);
+    connect(roi_clear_button_, &QPushButton::clicked, this, [this] {
+        map_->cancelInteraction();
+        map_->setRoi(RoiRect{});
+        map_->clearPolygon();
+        // The frame has no Draw button: an empty step 3 canvas is always
+        // ready to take vertices.
+        map_->armPolygonDraw();
+    });
+    layout->addSpacing(16);
+    layout->addWidget(roi_clear_button_);
+
+    // Boundary note (222:1380).
+    auto* note = new QWidget(card);
+    note->setObjectName("SatRoiNote");
+    note->setAttribute(Qt::WA_StyledBackground, true);
+    auto* note_layout = new QHBoxLayout(note);
+    note_layout->setContentsMargins(12, 12, 12, 12);
+    note_layout->setSpacing(8);
+    auto* note_icon = new QLabel(note);
+    note_icon->setPixmap(loadTintedSvg(
+        QStringLiteral(":/assets/satellite/roi_hint.svg"), 16, 16));
+    note_icon->setFixedSize(16, 16);
+    note_layout->addWidget(note_icon, 0, Qt::AlignTop);
+    auto* note_text = new QLabel(
+        QStringLiteral("Stay within the building boundary. The robot will "
+                       "autonomously scan the entire ROI."),
+        note);
+    note_text->setObjectName("SatRoiBlurb");
+    note_text->setWordWrap(true);
+    note_layout->addWidget(note_text, 1);
+    layout->addSpacing(24);
+    layout->addWidget(note);
+
+    connect(map_, &SatelliteMapWidget::roiChanged, this,
+            &SatelliteScreen::refreshRoiCard);
+    connect(map_, &SatelliteMapWidget::interactionChanged, this,
+            &SatelliteScreen::refreshRoiCard);
+    // The row whose chip is open turns green with it.
+    connect(map_, &SatelliteMapWidget::edgeEditChanged, this, [this](int edge) {
+        for (int i = 0; i < edge_rows_.size(); ++i) {
+            edge_rows_[i]->setProperty("editing", i == edge);
+            edge_rows_[i]->style()->unpolish(edge_rows_[i]);
+            edge_rows_[i]->style()->polish(edge_rows_[i]);
+            edge_value_buttons_[i]->style()->unpolish(edge_value_buttons_[i]);
+            edge_value_buttons_[i]->style()->polish(edge_value_buttons_[i]);
+        }
+        if (edge < 0) {
+            refreshRoiCard();
+        }
+    });
+    connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
+            [this] { refreshRoiCard(); });
+    refreshRoiCard();
+    return card;
+}
+
+void SatelliteScreen::refreshRoiCard() {
+    if (!roi_card_) {
+        return;
+    }
+    const RoiPolygon& poly = map_->polygon();
+    const QVector<double> lengths = map_->edgeLengthsM();
+    const int n = poly.vertices.size();
+    const bool drawing = map_->isDrawing();
+    const bool closed = poly.valid() && !drawing;
+
+    roi_stat_vertices_->setText(QString::number(n));
+    roi_stat_status_->setText(closed  ? QStringLiteral("Closed ✓")
+                              : drawing ? QStringLiteral("Drawing…")
+                                        : QStringLiteral("No ROI"));
+    roi_stat_status_->setProperty("state", closed ? "closed" : drawing ? "drawing" : "none");
+    roi_stat_status_->style()->unpolish(roi_stat_status_);
+    roi_stat_status_->style()->polish(roi_stat_status_);
+    double area = 0.0;
+    if (closed) {
+        // Shoelace on ENU metres about the first vertex.
+        for (int i = 0; i < n; ++i) {
+            const QPointF a = geo::enuFromGeo(poly.vertices[0], poly.vertices[i]);
+            const QPointF b =
+                geo::enuFromGeo(poly.vertices[0], poly.vertices[(i + 1) % n]);
+            area += a.x() * b.y() - b.x() * a.y();
+        }
+        area = std::abs(area) * 0.5;
+    }
+    roi_stat_area_->setText(closed ? units::formatArea(area, 1)
+                                   : QStringLiteral("—"));
+    if (canvas_tag_) {
+        canvas_tag_->setText(
+            closed ? QStringLiteral("ROI DEFINED — click edge labels to edit "
+                                    "dimensions")
+            : drawing ? QStringLiteral("DRAWING ROI — click corners; click "
+                                       "the first point to close")
+                      : QStringLiteral("NO ROI — click the roof to start"));
+        canvas_tag_->setVisible(!roi_card_->isHidden());
+    }
+
+    // Rows: only rebuild when the count changes; retitle otherwise.
+    const int rows_wanted = closed ? lengths.size() : 0;
+    if (edge_rows_.size() != rows_wanted) {
+        for (QWidget* row : edge_rows_) {
+            row->deleteLater();
+        }
+        edge_rows_.clear();
+        edge_value_buttons_.clear();
+        for (int i = 0; i < rows_wanted; ++i) {
+            auto* row = new QWidget(edge_rows_layout_->parentWidget());
+            row->setObjectName("SatRoiEdgeRow");
+            row->setAttribute(Qt::WA_StyledBackground, true);
+            row->setFixedHeight(28);
+            auto* rl = new QHBoxLayout(row);
+            rl->setContentsMargins(10, 0, 10, 0);
+            auto* name = new QLabel(QStringLiteral("Edge %1").arg(i + 1), row);
+            name->setObjectName("SatRoiEdgeName");
+            rl->addWidget(name);
+            rl->addStretch(1);
+            auto* value = new QPushButton(row);
+            value->setObjectName("SatRoiEdgeValue");
+            value->setCursor(Qt::PointingHandCursor);
+            value->setFlat(true);
+            connect(value, &QPushButton::clicked, this,
+                    [this, i] { map_->beginEdgeLengthEdit(i); });
+            // Hovering the row lights the matching chip on the canvas.
+            row->installEventFilter(this);
+            row->setProperty("edgeIndex", i);
+            rl->addWidget(value);
+            edge_rows_layout_->addWidget(row);
+            edge_rows_.append(row);
+            edge_value_buttons_.append(value);
+        }
+    }
+    for (int i = 0; i < rows_wanted; ++i) {
+        edge_value_buttons_[i]->setText(units::formatLength(lengths[i], 2));
+    }
 }
 
 QWidget* SatelliteScreen::buildCanvasTools(QWidget* parent) {
@@ -2590,6 +2869,37 @@ QLabel#SatAlignSuccessRmse {
     background: transparent; font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace;
     font-size: 14px; color: #9f9fa9;
 }
+
+/* ---- Step 3 ROI Definition rail (Figma 222:1284) ---- */
+QLabel#SatRoiTitle { background: transparent; font-size: 18px; font-weight: 600; color: @TEXT@; }
+QLabel#SatRoiBlurb { background: transparent; font-size: 12px; color: #71717b; line-height: 19px; }
+#SatRoiStats { background: #27272a; border: 1px solid #3f3f47; border-radius: 10px; }
+QLabel#SatRoiStatKey, QLabel#SatRoiStatValue {
+    background: transparent; font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px;
+}
+QLabel#SatRoiStatKey { color: #9f9fa9; }
+QLabel#SatRoiStatValue { color: @TEXT@; }
+QLabel#SatRoiStatValue[state="closed"] { color: #00d492; }
+QLabel#SatRoiStatValue[state="drawing"] { color: #fe9a00; }
+QLabel#SatRoiSection { background: transparent; font-size: 12px; color: #71717b; letter-spacing: 0.6px; }
+#SatRoiEdgeRow { background: #27272a; border-radius: 4px; }
+#SatRoiEdgeRow:hover { background: #3f3f47; }
+#SatRoiEdgeRow[editing="true"] { background: rgba(0,153,102,0.25); border: 1px solid #00d492; }
+QLabel#SatRoiEdgeName { background: transparent; font-size: 12px; color: #9f9fa9; }
+QPushButton#SatRoiEdgeValue {
+    background: transparent; border: none; padding: 0px;
+    font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px; font-weight: 500;
+    color: @TEXT@; text-decoration: underline;
+}
+QPushButton#SatRoiEdgeValue:hover { color: #00d492; }
+#SatRoiEdgeRow[editing="true"] QPushButton#SatRoiEdgeValue { color: #00d492; }
+QLabel#SatRoiHint { background: transparent; font-size: 12px; color: #52525c; }
+QPushButton#SatRoiClearButton {
+    background: #27272a; border: none; border-radius: 10px; padding: 8px 12px;
+    font-size: 14px; font-weight: 500; color: #9f9fa9;
+}
+QPushButton#SatRoiClearButton:hover { background: #3f3f47; color: @TEXT@; }
+#SatRoiNote { background: rgba(39,39,42,0.6); border-radius: 10px; }
 )QSS");
     qss.replace(QStringLiteral("@PAGE@"), page_bg);
     qss.replace(QStringLiteral("@SURFACE_BORDER@"), surface_border);
@@ -3989,6 +4299,15 @@ void SatelliteScreen::onEstop() {
 // ---- Teleop -----------------------------------------------------------------
 
 bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
+    // Step-3 edge rows: hover lights the matching canvas chip green.
+    if (event->type() == QEvent::Enter || event->type() == QEvent::Leave) {
+        const QVariant idx = watched->property("edgeIndex");
+        if (idx.isValid()) {
+            map_->setHighlightedEdge(event->type() == QEvent::Enter ? idx.toInt()
+                                                                    : -1);
+            return false;
+        }
+    }
     if (!isVisible() || !teleop_check_ || !teleop_check_->isChecked()) {
         return QWidget::eventFilter(watched, event);
     }

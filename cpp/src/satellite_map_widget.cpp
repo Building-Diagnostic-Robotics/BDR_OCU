@@ -1146,8 +1146,11 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
         painter.setBrush(Qt::NoBrush);
     }
 
+    // Edge chips per Figma 222:1492: amber bold label on a near-black chip
+    // with a 40 % amber hairline. The chip being edited (or hovered) goes
+    // green so the operator can see which endpoint is about to move.
     QFont dim_font = font();
-    dim_font.setPointSizeF(10.0);
+    dim_font.setPixelSize(14);
     dim_font.setBold(true);
     painter.setFont(dim_font);
     dim_boxes_.fill(QRectF(), n);
@@ -1164,23 +1167,54 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
         const QString text = units::formatLength(len, 1);
         const QPointF at = (corners[i] + corners[(i + 1) % n]) / 2.0;
         const QFontMetricsF fm(dim_font);
-        const QRectF box(at.x() - fm.horizontalAdvance(text) / 2.0 - 6,
-                         at.y() - fm.height() / 2.0 - 3,
-                         fm.horizontalAdvance(text) + 12, fm.height() + 6);
+        const QRectF box(at.x() - fm.horizontalAdvance(text) / 2.0 - 10,
+                         at.y() - fm.height() / 2.0 - 6,
+                         fm.horizontalAdvance(text) + 20, fm.height() + 12);
         dim_boxes_[i] = box;
         if (i == dim_edit_edge_) {
             continue;  // the inline editor is drawn over this chip
         }
-        // A pinned edge gets an accent outline: the operator has to be able to
-        // see which dimensions are holding before they drag a vertex and find
-        // it sliding along an arc.
         const bool pinned = polygon_.lockedLength(i) > 0.0;
-        painter.setPen(pinned ? QPen(satpal::accent(), 1.5) : QPen(Qt::NoPen));
-        painter.setBrush(QColor(0, 0, 0, pinned ? 200 : 170));
-        painter.drawRoundedRect(box, 5, 5);
-        painter.setPen(satpal::text());
+        const bool hot = i == dim_hover_edge_;
+        if (hot) {
+            painter.setPen(QPen(QColor(0x00, 0xd4, 0x92), 1.5));
+            painter.setBrush(QColor(0x00, 0x99, 0x66, 70));
+        } else {
+            // A pinned edge keeps a solid ring: the operator has to see which
+            // dimensions are holding before a vertex drag slides on an arc.
+            QColor ring(0xf5, 0x9e, 0x0b);
+            ring.setAlphaF(pinned ? 1.0 : 0.4);
+            painter.setPen(QPen(ring, pinned ? 1.5 : 1.0));
+            painter.setBrush(QColor(0x1c, 0x1a, 0x12, 230));
+        }
+        painter.drawRoundedRect(box, 6, 6);
+        painter.setPen(hot ? QColor(0x00, 0xd4, 0x92) : QColor(0xf5, 0x9e, 0x0b));
         painter.drawText(box, Qt::AlignCenter, text);
     }
+}
+
+QVector<double> SatelliteMapWidget::edgeLengthsM() const {
+    QVector<double> out;
+    const int n = polygon_.valid() ? polygon_.vertices.size()
+                                   : (roi_.valid ? 4 : 0);
+    for (int i = 0; i < n; ++i) {
+        const geo::GeoPoint a =
+            polygon_.valid() ? polygon_.vertices[i] : roi_.corners()[i];
+        const geo::GeoPoint b = polygon_.valid()
+                                    ? polygon_.vertices[(i + 1) % n]
+                                    : roi_.corners()[(i + 1) % 4];
+        const QPointF enu = geo::enuFromGeo(a, b);
+        out.append(std::hypot(enu.x(), enu.y()));
+    }
+    return out;
+}
+
+void SatelliteMapWidget::setHighlightedEdge(int edge) {
+    if (dim_hover_edge_ == edge) {
+        return;
+    }
+    dim_hover_edge_ = edge;
+    update();
 }
 
 void SatelliteMapWidget::beginEdgeLengthEdit(int edge) {
@@ -1222,14 +1256,16 @@ void SatelliteMapWidget::beginEdgeLengthEdit(int edge) {
     dim_edit_->setValidator(validator);
 
     QFont edit_font = font();
-    edit_font.setPointSizeF(10.0);
+    edit_font.setPixelSize(14);
     edit_font.setBold(true);
     dim_edit_->setFont(edit_font);
-    dim_edit_->setStyleSheet(
-        QStringLiteral("QLineEdit#SatDimEdit { background-color: rgba(0,0,0,210);"
-                       " color: %1; border: 1px solid %2; border-radius: 5px;"
-                       " padding: 0px; }")
-            .arg(satpal::text().name(), satpal::accent().name()));
+    // Editing state: the chip turns green (operator's spec) — filled tint,
+    // 2 px ring, green digits.
+    dim_edit_->setStyleSheet(QStringLiteral(
+        "QLineEdit#SatDimEdit { background-color: rgba(0,153,102,0.30);"
+        " color: #00d492; border: 2px solid #00d492; border-radius: 6px;"
+        " padding: 0px; selection-background-color: #009966;"
+        " selection-color: #ffffff; }"));
 
     // Widen the chip rect a little: the caret and a longer typed value need
     // more room than the formatted label did.
@@ -1242,6 +1278,7 @@ void SatelliteMapWidget::beginEdgeLengthEdit(int edge) {
     dim_edit_->setFocus(Qt::MouseFocusReason);
     dim_edit_->selectAll();
     update();
+    emit edgeEditChanged(edge);
 }
 
 void SatelliteMapWidget::commitEdgeLengthEdit() {
@@ -1254,6 +1291,7 @@ void SatelliteMapWidget::commitEdgeLengthEdit() {
     dim_edit_edge_ = -1;
     const QString typed = dim_edit_->text().trimmed();
     dim_edit_->hide();
+    emit edgeEditChanged(-1);
     if (typed.isEmpty()) {
         // Empty field releases the pin — the only way back to a free edge
         // once a dimension has been committed.
@@ -1291,6 +1329,7 @@ void SatelliteMapWidget::cancelEdgeLengthEdit() {
     dim_edit_edge_ = -1;
     dim_edit_->hide();
     update();
+    emit edgeEditChanged(-1);
 }
 
 bool SatelliteMapWidget::eventFilter(QObject* watched, QEvent* event) {
@@ -1464,6 +1503,20 @@ void SatelliteMapWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (draw_polygon_armed_ && !edit_locked_) {
+        // Frame 222:1155: "Click near the first point to close the region."
+        // Right-click still closes too.
+        if (polygon_.vertices.size() >= 3) {
+            const QPointF first = screenFromGeo(polygon_.vertices.first());
+            if (QLineF(first, QPointF(event->pos())).length() <=
+                kHandleRadiusPx * 2.0) {
+                draw_polygon_armed_ = false;
+                setCursor(Qt::OpenHandCursor);
+                update();
+                emit interactionChanged();
+                emit drawFinished();
+                return;
+            }
+        }
         polygon_.vertices.append(maybeSnap(geoFromScreen(event->pos())));
         polygon_.ensureEdgeFlags();
         update();
