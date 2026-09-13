@@ -163,6 +163,7 @@ set(HEADERS
     include/robot_registry.hpp
     include/upload_runner.hpp
     include/upload_dialog.hpp
+    include/thumb_drive_watcher.hpp
     include/components/bdr_message_box.hpp
     include/components/bdr_input_dialog.hpp
     include/components/bdr_progress_dialog.hpp
@@ -244,6 +245,7 @@ set(GUI_SOURCES
     src/cloud_upload_manager.cpp
     src/upload_runner.cpp
     src/upload_dialog.cpp
+    src/thumb_drive_watcher.cpp
     src/video_stream_widget.cpp
     src/robot_registry.cpp
     src/robot_login.cpp
@@ -519,7 +521,28 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME satellite_job_store_tests COMMAND satellite_job_store_tests)
-        message(STATUS "Unit tests: enabled (obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests)")
+
+        # Thumb-drive upload: local data-root walk, script resolver and
+        # the /proc/mounts lookup. Headers listed so AUTOMOC mocs the
+        # QObjects that live in include/.
+        add_executable(upload_thumb_drive_tests
+            tests/upload_thumb_drive_tests.cpp
+            src/upload_runner.cpp
+            src/thumb_drive_watcher.cpp
+            include/upload_runner.hpp
+            include/thumb_drive_watcher.hpp
+        )
+        target_include_directories(upload_thumb_drive_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(upload_thumb_drive_tests PRIVATE
+            ${QT_CORE_LIBS}
+            $<IF:$<TARGET_EXISTS:Qt5::Concurrent>,Qt5::Concurrent,Qt6::Concurrent>
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME upload_thumb_drive_tests COMMAND upload_thumb_drive_tests)
+        message(STATUS "Unit tests: enabled (obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

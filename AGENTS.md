@@ -546,119 +546,146 @@ autonomy arms.
 
 ## Upload pipeline (Stage 3 Dashboard, production-wired)
 
-Operator-driven cloud upload. Replaces the legacy
-`CloudUploadDialog`/`DataTransferDialog` pair (which orchestrated
-`aws s3 sync` from the laptop with IAM credentials in `~/.aws/`). The
-new flow runs **robot → S3 directly** via presigned URLs minted by the
-BDR backend's API Gateway + Lambda; the laptop holds zero AWS state and
-just observes progress over SSH.
+Operator-driven cloud upload **from the laptop, off the RDATA_EXT thumb
+drive**. The robot's offload worker (`rdata_offload.py` +
+`rdata_thumbdrive_sync.py`, systemd-owned, branch `cliff-on-autonomy`)
+copies every finalized mission onto a USB stick labelled `RDATA_EXT`,
+mirroring `/R_DATA/<date>/<building>/{Mission_HHMMSS,Section_*}`
+(`thumbsync_manifest.json` written last = copy verified). The operator
+carries the stick to the laptop; the OCU walks it and runs `uploader.py`
+locally: `POST /presign` per file → single PUT to S3 → `POST /complete`.
+The laptop holds **zero** AWS credentials — only the per-robot
+`cloud_client_id` / `cloud_device_token` from `robots.json`.
+
+The original **robot → S3 over SSH** path (`UploadSource::RobotSsh`) is
+still compiled and selectable through `UploadDialog::setSource()`, but
+it is **not wired from the UI**. It exists as a fallback; the robot copy
+of the script under `pilot_control/scripts/uploader.py` is legacy and
+kept in sync by hand.
 
 ### Topology
 
-- **Robot side** (`pilot_ws/src/pilot_control/scripts/uploader.py`):
-  Python 3 script that walks a single section/mission folder, calls
-  `POST /presign` per file, PUTs to the returned S3 URL, writes
-  `upload_state.json` after each file (atomic tmp + `os.replace`),
-  generates `manifest.json`, and finally calls `POST /complete`. Reads
-  `BDR_CLOUD_API_BASE` / `BDR_CLOUD_CLIENT_ID` /
-  `BDR_CLOUD_DEVICE_TOKEN` / `BDR_UPLOAD_WORKERS` from the environment
-  so the OCU can push per-robot creds via the SSH `env(1)` prefix
-  without editing the script per laptop.
-- **OCU side** (`cpp/include/upload_runner.hpp` +
-  `cpp/include/upload_dialog.hpp`): two helpers + a frameless
-  `UploadDialog` reachable from the Stage 3 "Upload Data" quick-action
-  card.
-  - `UploadStateProbe` — one-shot SSH `find /R_DATA -mindepth 3
-    -maxdepth 3` walk that emits `SECTION|<date>|<building>|<section>|
-    <state>|<completed>|<total>|<size>` lines. State derives from
-    on-robot sentinels: `manifest.json` present → Done,
-    `upload_state.json` present → Partial, neither → None.
-  - `UploadRunner` — sequential queue driver. One `QProcess` per
-    target running `ssh -tt user@host env … python3 -u uploader.py
-    <data_root> <robot_id> <run_id>`. Stdout is parsed line-by-line
-    for `^✓ Uploaded:`, `^Skipping already uploaded:`, `^Connection
-    error:`, `^Manual pause detected.`, `^Unexpected error:`, etc.,
-    and emitted as Qt signals.
+- **Script** (`cpp/scripts/uploader.py`, canonical; installed by the
+  `.deb` at `/usr/share/bdr-coverage-planner/uploader.py`): Python 3 +
+  `requests`. Walks a single section/mission folder, calls `/presign`
+  per file, PUTs, writes `upload_state.json` after each file (atomic tmp
+  + `os.replace`), generates `manifest.json`, then `/complete`. Reads
+  `BDR_CLOUD_API_BASE` / `BDR_CLOUD_CLIENT_ID` / `BDR_CLOUD_DEVICE_TOKEN`
+  / `BDR_UPLOAD_WORKERS` from the environment. **State lives on the
+  stick next to the data**, so a resume works from any laptop.
+- **`ThumbDriveWatcher`** (`cpp/include/thumb_drive_watcher.hpp`): 2 s
+  poll, pure file I/O — `/dev/disk/by-label/RDATA_EXT` → device →
+  `/proc/self/mounts` mount point; device present but unmounted →
+  one `udisksctl mount -b` per insertion; fallbacks
+  `/media/$USER/RDATA_EXT`, `/run/media/$USER/RDATA_EXT`; an operator
+  **Browse…** path wins while it exists. States Absent /
+  PresentUnmounted / Mounted; `freeBytes()` via `QStorageInfo`.
+- **`UploadStateProbe`** (`cpp/include/upload_runner.hpp`): ThumbDrive
+  mode is a `QDirIterator` walk of `<mount>/<date>/<building>/<section>`
+  on a `QtConcurrent` worker (generation-counted so a stick swapped
+  mid-scan is discarded, and a re-probe supersedes a running walk).
+  Same classification as the SSH `find` probe: `manifest.json` → Done,
+  `upload_state.json` → Partial, neither → None; file count excludes the
+  three sentinels. `scanLocalDataRoot()` is the pure engine (tested).
+- **`UploadRunner`**: ThumbDrive mode runs `python3 -u <script>
+  <data_path> <robot_id> <run_id>` as a plain `QProcess` with the creds
+  in `QProcessEnvironment`; `resolveLocalScriptPath()` tries the
+  override → `/usr/share/bdr-coverage-planner/uploader.py` →
+  `<appdir>/../scripts/uploader.py` (dev). `FailedToStart` (no python3)
+  is routed into the normal finish path so the queue never sticks busy.
+  Stdout parsing (`^✓ Uploaded:`, `^Skipping already uploaded:`,
+  `^Connection error:`, `^Unexpected error:` …) is unchanged and shared
+  with the SSH mode.
+- **`UploadDialog`**: frameless modal from the Stage 3 "Upload Data"
+  card. Header names the robot the upload is attributed to **and** the
+  drive (`Drive: RDATA_EXT at /media/… · N GB free`). Banner + Upload
+  gating = drive mounted AND cloud reachable (2 s `curl` HEAD, 2-miss
+  debounce). Pulling the stick mid-upload pauses the runner.
+- **`AppShellWindow::onUploadDataRequested`**: hard launch-active block,
+  `robots.json` lookup by `setup/robot_id`, `setSource(ThumbDrive)`. No
+  SSH target is resolved any more.
 
 ### Decisions baked into the design
 
-- **Robot-side, not laptop-side.** Robot has direct internet on base
-  wifi. Skips the rsync robot→laptop hop entirely. Laptop reimage
-  loses nothing because all state (`upload_state.json`,
-  `manifest.json`) lives on robot disk.
+- **One stick per robot.** The stick carries no robot identity (neither
+  `mission_config.json` nor `thumbsync_manifest.json` has a robot id);
+  everything on it uploads under the robot the operator logged into at
+  Setup (`QSettings setup/robot_id`), exactly as the SSH path did. The
+  dialog header shows that robot beside the drive so a mismatch is
+  visible before Upload. If the fleet ever shares sticks, add a marker
+  file robot-side — do not guess from folder names.
 - **Per-section `run_id`.** `run_id = "<date>/<building>/<section>"`
   (or `Mission_HHMMSS`). Atomic — one section failure ≠ whole-day
   failure. S3 layout `<client_id>/<robot_id>/<run_id>/<relpath>` mirrors
-  on-disk reality 1:1.
+  the stick 1:1. `thumbsync_manifest.json` is ordinary data to the
+  uploader and ships with the mission (useful provenance).
 - **Single PUT only.** Backend mints single-PUT presigns; per-file
-  ceiling is 5 GB. Roofus rosbags / PCDs are sized below this; if
-  that ever stops being true the backend has to add multipart presigns.
+  ceiling is 5 GB.
 - **Sequential targets, parallel files within a target.** Script's
-  internal `UPLOAD_WORKERS=12` provides per-section parallelism. OCU
-  walks the queue one section at a time so the dialog has a single
-  progress story.
-- **Per-file progress.** Stdout `^✓ Uploaded:` line per file is the
-  unit of progress — the bar updates once per file completion. Per-
-  byte streaming is a future option (would require chunked PUT in
-  `uploader.py` + a callback signal); not needed for v1.
-- **Manifest schema is strict.** `{client_id, robot_id, run_id,
-  files[]}` only. Operator-entered metadata
-  (`session_config.json`, `mission_config.json`) ships as ordinary
-  files in the section folder so backend can index without
-  schema-migrating the manifest.
-- **State on robot, not laptop.** No backend `GET /manifest`
-  endpoint required. The probe re-derives Done/Partial/None from
-  on-disk truth on every dialog open.
+  `UPLOAD_WORKERS=12`; OCU walks the queue one section at a time.
+- **Per-file progress.** One `^✓ Uploaded:` line per file is the unit of
+  progress.
+- **Manifest schema is strict.** `{client_id, robot_id, run_id, files[]}`.
+- **State on the stick, not the laptop.** The probe re-derives
+  Done/Partial/None from on-disk truth on every dialog open / stick
+  insertion.
 - **Hard-blocked while a scan is alive.** `onUploadDataRequested`
-  reuses the same `launch_active` composite the close-event guard
-  uses (`exploration_launch_in_progress_ ||
-  exploration_launch_ready_ || laptop_launch_started_ ||
-  robot_launch_started_`). Operators must Complete Mission first.
+  reuses the `launch_active` composite the close-event guard uses.
+  Operator-locked: Complete Mission first.
 
 ### Configuration
 
-- `cpp/config/robots.json` carries:
-  - top-level `cloud_api_base` (global; one URL across the fleet)
-  - per-robot `cloud_client_id` + `cloud_device_token`
-- An optional sibling `cloud_config.json` with `{"cloud_api_base":
-  "..."}` overrides the top-level key — useful for dev installs.
-- Compiled-in fallback in `kDefaultCloudApiBase` keeps the OCU usable
-  on a fresh checkout.
-- `RobotProfile::cloud_client_id` / `cloud_device_token` are read by
-  `AppShellWindow::onUploadDataRequested`; missing values produce a
-  `BdrMessageBox` and refuse to open the dialog.
+- `cpp/config/robots.json`: top-level `cloud_api_base` (fleet-wide) and
+  per-robot `cloud_client_id` + `cloud_device_token`. Optional sibling
+  `cloud_config.json` overrides the API base; `kDefaultCloudApiBase` is
+  the compiled-in fallback.
+- `.deb` `Depends:` now includes `python3, python3-requests, udisks2`;
+  `create_deb.sh` fails if `cpp/scripts/uploader.py` is missing.
+- Drive label defaults to `RDATA_EXT` (`ThumbDriveWatcher::kDefaultLabel`)
+  and must match the director's `thumbdrive_copy_label` parameter.
 
 ### Pause / cancel
 
-- **Pause** SSH-touches `<remote_path>/pause.flag`. The script polls
-  for it and exits cleanly at the next file boundary. Resume = press
-  Upload again with the same selection — script re-reads
-  `upload_state.json` and skips completed files.
-- **Cancel** SIGTERMs the SSH process. State on disk is preserved
-  (writes are post-file), so the next run resumes cleanly.
-- **Closing the dialog while busy** routes through `requestPause()`
-  for graceful resume — see `UploadDialog::closeEvent`.
+- **Pause** touches `<data_path>/pause.flag` on the stick; the script
+  exits at the next file boundary. Resume = press Upload again. **The
+  runner deletes a stale `pause.flag` before every launch** (locally, or
+  via `rm -f` inside the SSH command) — the script never removes it, and
+  before this fix a resume re-paused at its first file.
+- **Cancel** SIGTERMs the process. State on disk is preserved.
+- **Closing the dialog while busy** routes through `requestPause()`.
+
+### Tests
+
+`tests/upload_thumb_drive_tests.cpp` — local walk classification,
+script resolver, `/proc/mounts` escape decoding, and an end-to-end
+runner launch against a stub script (env, argv, stdout contract,
+pause-flag clearing, `FailedToStart` handling).
 
 ### Rules for agents touching this path
 
 - **Do NOT remove or "simplify"** any of the following — they are
   load-bearing:
   - `uploader.py`'s atomic state writes (`os.replace`).
-  - `python3 -u` in the SSH invocation (without it the OCU's stdout
-    parser stalls 4 KB at a time and operators see no progress).
-  - The SSH `find -mindepth 3 -maxdepth 3` probe — depth-3 is the
-    canonical layout (`<date>/<building>/<section>`).
-  - `RobotRegistry::cloudApiBase()` and the three-tier resolution
-    (top-level → sibling cloud_config.json → compiled-in fallback).
-- **Do NOT downgrade the launch-active gate** in
-  `onUploadDataRequested` — uploads during a live scan would race
-  with `unified_data_collector` writes.
-- **Do NOT add IAM credentials to the OCU.** This is the security
-  posture the new design exists to enforce.
-- The script invocation **must NOT** go through `ros2 run` — non-
-  interactive SSH doesn't source the ROS env, same gotcha as
-  `finalize_mission_local.py`. Always invoke via direct
-  `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`.
+  - `python3 -u` (+ `PYTHONUNBUFFERED=1`) in the launch — without it
+    the stdout parser stalls 4 KB at a time and operators see no
+    progress.
+  - The depth-3 walk (`<date>/<building>/<section>`) in both probes.
+  - `ThumbDriveWatcher`'s by-label → `/proc/self/mounts` resolution and
+    the one-attempt-per-device `udisksctl` mount.
+  - The pause-flag clear before launch.
+  - `UploadSource::RobotSsh` and `setRemote()`/`setRemoteScriptPath()`
+    — inactive, but the fallback the operator asked to keep.
+  - `RobotRegistry::cloudApiBase()` and its three-tier resolution.
+- **Do NOT downgrade the launch-active gate** in `onUploadDataRequested`.
+- **Do NOT add IAM credentials to the OCU.**
+- **Do NOT make the dialog write anything to the stick except through
+  `uploader.py`** (`upload_state.json`, `manifest.json`, `pause.flag`).
+  The robot's `rdata_thumbdrive_sync.py` treats a destination with
+  `thumbsync_manifest.json` as done and never re-copies, so anything
+  else the laptop leaves there is permanent.
+- The SSH fallback **must NOT** go through `ros2 run` — invoke
+  `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`
+  directly.
 
 ## FAST-LIVO2 migration (planned, not yet built)
 

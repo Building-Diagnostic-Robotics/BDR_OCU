@@ -1,33 +1,42 @@
 /**
  * @file upload_dialog.hpp
- * @brief Stage 3 Upload Data dialog — robot-side cloud upload UI.
+ * @brief Stage 3 Upload Data dialog — cloud upload from the RDATA_EXT stick.
  *
- * Replaces the legacy `CloudUploadDialog` + `DataTransferDialog` pair.
- * Where the legacy dialogs orchestrated `aws s3 sync` from the laptop
- * (with IAM credentials baked into `~/.aws`), this dialog is a thin
- * driver for `pilot_control/scripts/uploader.py` running on the robot
- * over SSH. The robot holds a presigned-URL `device_token`, the laptop
- * has zero AWS state, and progress streams back via stdout regex.
+ * The robot's offload worker copies every finalized mission to a USB
+ * stick labelled `RDATA_EXT`. The operator carries the stick to the
+ * laptop, and this dialog drives `uploader.py` locally against it: the
+ * script asks the BDR backend for a presigned URL per file and PUTs to S3.
+ * The laptop holds no AWS credentials — only the per-robot
+ * `cloud_client_id` / `cloud_device_token` from `robots.json`. Upload
+ * state is written on the stick next to the data, so a resume works from
+ * any laptop.
+ *
+ * `UploadSource::RobotSsh` — the original design, same script run on the
+ * robot over SSH — is still compiled behind `setSource()` but is not
+ * reachable from the UI. Fallback only.
  *
  * Lifecycle:
- *  1. `setRemote()` + `setCloudAuth()` + `setRobotId()` from
+ *  1. `setSource()` + `setCloudAuth()` + `setRobotId()` from
  *     `AppShellWindow::onUploadDataRequested()` (called whenever the
  *     dashboard "Upload Data" quick-action fires).
- *  2. `showEvent` triggers `UploadStateProbe` → the dialog populates
- *     a date → building → section/mission tree, classifying each
- *     section as None/Partial/Done from sentinel files on the robot.
+ *  2. `showEvent` arms `ThumbDriveWatcher`. Once the stick is mounted,
+ *     `UploadStateProbe` walks it and the dialog populates a
+ *     date → building → section/mission tree, classifying each section
+ *     as None/Partial/Done from the sentinel files beside the data.
+ *     Browse… lets the operator point at an unlabelled stick or a
+ *     local copy.
  *  3. Operator selects sections, presses **Upload Data**. The dialog
  *     builds a queue of `UploadTarget`s (sequential per design
- *     decision) and feeds it to `UploadRunner`, which spawns one SSH
+ *     decision) and feeds it to `UploadRunner`, which spawns one
  *     `python3 -u uploader.py …` subprocess per target.
  *  4. Per-file events stream in via `UploadRunner::fileUploaded`;
  *     the tree row's per-section count + progress bar update live.
- *  5. **Pause** SSH-touches `pause.flag`; the script exits cleanly at
- *     the next file boundary. Resume = re-press Upload.
+ *  5. **Pause** touches `pause.flag`; the script exits cleanly at the
+ *     next file boundary. Resume = re-press Upload.
  *  6. **Cancel** SIGTERMs the subprocess. State on disk is preserved
  *     so the next run picks up where the kill landed.
  *  7. Closing the dialog while busy implicitly pauses (graceful) — see
- *     `closeEvent`.
+ *     `closeEvent`. Pulling the stick mid-upload does the same.
  *
  * Visual style follows the existing frameless dialog family
  * (`OfflineFinalizeDialog`, `MissionMetadataDialog`,
@@ -44,6 +53,7 @@
 #include <QString>
 
 #include "robot_reachability_probe.hpp"
+#include "thumb_drive_watcher.hpp"
 #include "upload_runner.hpp"
 
 class QCheckBox;
@@ -74,12 +84,22 @@ public:
     ~UploadDialog() override;
 
     void setDarkMode(bool dark);
+
+    /// Defaults to ThumbDrive. Ignored while an upload is running.
+    void setSource(UploadSource source);
+    UploadSource source() const { return source_; }
+
+    /// RobotSsh only.
     void setRemote(const QString& host, const QString& ssh_user);
     void setCloudAuth(const QString& api_base,
                       const QString& client_id,
                       const QString& device_token);
     void setRobotId(const QString& robot_id);
-    void setDataRoot(const QString& root);  // defaults to "/R_DATA"
+    /// RobotSsh only — the robot's data root, defaults to "/R_DATA".
+    /// ThumbDrive derives the root from the mount point.
+    void setDataRoot(const QString& root);
+    /// ThumbDrive: filesystem label to wait for. Defaults to RDATA_EXT.
+    void setDriveLabel(const QString& label);
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -92,6 +112,7 @@ private slots:
     void onProbeReady(bool ok, const QList<UploadTarget>& targets,
                       const QString& error);
     void onRefreshClicked();
+    void onBrowseClicked();
     void onDateChanged(int index);
     void onSelectAllClicked();
     void onTreeItemChanged(QTreeWidgetItem* item, int column);
@@ -115,6 +136,8 @@ private slots:
     // Connectivity gating.
     void onReachabilityChanged(RobotReachabilityProbe::State old_state,
                                RobotReachabilityProbe::State new_state);
+    void onDriveStateChanged(ThumbDriveWatcher::State state,
+                             const QString& mount_path);
     void onCloudProbeTick();
     void onCloudProbeFinished(int exit_code, int /*QProcess::ExitStatus*/ status);
 
@@ -138,13 +161,23 @@ private:
     void disarmConnectivityProbes();
     void refreshConnectivityBanner();
     void handleConnectivityTransition();
-    bool isFullyOnline() const { return robot_reachable_ && cloud_reachable_; }
+    /// The data source is usable: stick mounted (ThumbDrive) or robot
+    /// reachable (RobotSsh).
+    bool isSourceReady() const;
+    bool isFullyOnline() const { return isSourceReady() && cloud_reachable_; }
+    bool isThumbDrive() const { return source_ == UploadSource::ThumbDrive; }
+    /// Human name of the source for status strings ("drive" / "robot").
+    QString sourceNoun() const;
 
     bool dark_mode_ = false;
+    UploadSource source_ = UploadSource::ThumbDrive;
     QString remote_host_;
     QString ssh_user_;
     QString robot_id_;
-    QString data_root_ = QStringLiteral("/R_DATA");
+    QString data_root_ = QStringLiteral("/R_DATA");   // RobotSsh root
+    QString drive_mount_;                             // ThumbDrive root (live)
+    bool drive_mounted_ = false;
+    ThumbDriveWatcher::State drive_state_ = ThumbDriveWatcher::State::Absent;
     QString cloud_api_base_;
     QString cloud_client_id_;
     QString cloud_device_token_;
@@ -170,7 +203,8 @@ private:
     // green before Upload is enabled; either flipping red mid-upload
     // pauses the runner gracefully (no auto-resume on recovery —
     // operator clicks Upload again).
-    RobotReachabilityProbe* reachability_probe_ = nullptr;
+    RobotReachabilityProbe* reachability_probe_ = nullptr;   // RobotSsh
+    ThumbDriveWatcher* drive_watcher_ = nullptr;             // ThumbDrive
     QTimer* cloud_probe_timer_ = nullptr;
     QProcess* cloud_probe_proc_ = nullptr;
     bool robot_reachable_ = false;
@@ -198,6 +232,7 @@ private:
     // Filter row.
     QComboBox* combo_date_ = nullptr;
     QPushButton* btn_refresh_ = nullptr;
+    QPushButton* btn_browse_ = nullptr;   // ThumbDrive only
     QLabel* lbl_probe_status_ = nullptr;
 
     // Tree + summary.

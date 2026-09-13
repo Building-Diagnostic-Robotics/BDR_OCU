@@ -9,6 +9,8 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDebug>
+#include <QDir>
+#include <QFileDialog>
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
@@ -88,6 +90,10 @@ UploadDialog::UploadDialog(QWidget* parent) : QDialog(parent) {
     connect(reachability_probe_, &RobotReachabilityProbe::reachabilityChanged,
             this, &UploadDialog::onReachabilityChanged);
 
+    drive_watcher_ = new ThumbDriveWatcher(this);
+    connect(drive_watcher_, &ThumbDriveWatcher::stateChanged,
+            this, &UploadDialog::onDriveStateChanged);
+
     cloud_probe_timer_ = new QTimer(this);
     cloud_probe_timer_->setInterval(2000);
     cloud_probe_timer_->setSingleShot(false);
@@ -111,6 +117,24 @@ UploadDialog::~UploadDialog() {
 void UploadDialog::setDarkMode(bool dark) {
     dark_mode_ = dark;
     applyStyle();
+}
+
+void UploadDialog::setSource(UploadSource source) {
+    if (runner_ && runner_->isBusy()) {
+        qWarning("[UploadDialog] setSource while uploading: ignored.");
+        return;
+    }
+    source_ = source;
+    if (probe_) probe_->setSource(source_);
+    if (runner_) runner_->setSource(source_);
+    if (btn_browse_) btn_browse_->setVisible(isThumbDrive());
+    refreshHeaderSubtitle();
+    refreshButtonStates();
+}
+
+void UploadDialog::setDriveLabel(const QString& label) {
+    if (drive_watcher_) drive_watcher_->setLabel(label);
+    refreshHeaderSubtitle();
 }
 
 void UploadDialog::setRemote(const QString& host, const QString& ssh_user) {
@@ -143,7 +167,16 @@ void UploadDialog::setDataRoot(const QString& root) {
     if (!root.trimmed().isEmpty()) {
         data_root_ = root.trimmed();
     }
-    if (probe_) probe_->setDataRoot(data_root_);
+    // The probe's root is set at probe time (ThumbDrive uses the live
+    // mount); nothing more to push here.
+}
+
+bool UploadDialog::isSourceReady() const {
+    return isThumbDrive() ? drive_mounted_ : robot_reachable_;
+}
+
+QString UploadDialog::sourceNoun() const {
+    return isThumbDrive() ? QStringLiteral("drive") : QStringLiteral("robot");
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +263,19 @@ void UploadDialog::buildUi() {
     connect(btn_refresh_, &QPushButton::clicked,
             this, &UploadDialog::onRefreshClicked);
     filter_row->addWidget(btn_refresh_, 0);
+
+    // ThumbDrive only: point at an unlabelled stick or a local copy.
+    btn_browse_ = new QPushButton(QStringLiteral("Browse…"), card);
+    btn_browse_->setObjectName("UploadDialogSecondary");
+    btn_browse_->setCursor(Qt::PointingHandCursor);
+    btn_browse_->setMinimumHeight(34);
+    btn_browse_->setToolTip(
+        QStringLiteral("Choose the data folder manually if the drive is not "
+                       "labelled RDATA_EXT."));
+    btn_browse_->setVisible(isThumbDrive());
+    connect(btn_browse_, &QPushButton::clicked,
+            this, &UploadDialog::onBrowseClicked);
+    filter_row->addWidget(btn_browse_, 0);
 
     filter_row->addStretch(1);
 
@@ -603,8 +649,12 @@ void UploadDialog::showEvent(QShowEvent* event) {
     refreshButtonStates();
     armConnectivityProbes();
     // Kick a probe each time the dialog opens. Operators expect a fresh
-    // listing every time they hit the dashboard quick-action.
-    startProbe();
+    // listing every time they hit the dashboard quick-action. (Arming
+    // the drive watcher may already have started one via
+    // onDriveStateChanged — don't walk the stick twice.)
+    if (!probe_in_progress_) {
+        startProbe();
+    }
 }
 
 void UploadDialog::closeEvent(QCloseEvent* event) {
@@ -653,29 +703,57 @@ void UploadDialog::mouseReleaseEvent(QMouseEvent* event) {
 // ---------------------------------------------------------------------------
 
 void UploadDialog::startProbe() {
-    if (probe_in_progress_) {
-        return;
-    }
-    if (remote_host_.isEmpty() || ssh_user_.isEmpty()) {
-        if (lbl_probe_status_) {
-            lbl_probe_status_->setText(
-                QStringLiteral("No robot connection — set robot in Setup."));
+    if (isThumbDrive()) {
+        if (!drive_mounted_ || drive_mount_.isEmpty()) {
+            const QString label = drive_watcher_ ? drive_watcher_->label()
+                                                 : QString::fromLatin1(
+                                                       ThumbDriveWatcher::kDefaultLabel);
+            const QString msg =
+                drive_state_ == ThumbDriveWatcher::State::PresentUnmounted
+                    ? QStringLiteral("%1 drive detected — mounting…").arg(label)
+                    : QStringLiteral("Insert the %1 thumb drive.").arg(label);
+            if (lbl_probe_status_) lbl_probe_status_->setText(msg);
+            if (lbl_tree_status_) {
+                lbl_tree_status_->setText(msg);
+                lbl_tree_status_->setVisible(true);
+            }
+            if (tree_) tree_->clear();
+            all_targets_.clear();
+            ordered_dates_.clear();
+            rebuildDateCombo();
+            refreshSelectionSummary();
+            refreshButtonStates();
+            return;
         }
-        return;
+    } else {
+        if (probe_in_progress_) {
+            return;
+        }
+        if (remote_host_.isEmpty() || ssh_user_.isEmpty()) {
+            if (lbl_probe_status_) {
+                lbl_probe_status_->setText(
+                    QStringLiteral("No robot connection — set robot in Setup."));
+            }
+            return;
+        }
     }
     probe_in_progress_ = true;
     last_probe_error_.clear();
-    if (lbl_probe_status_) {
-        lbl_probe_status_->setText(QStringLiteral("Scanning robot…"));
-    }
+    const QString scanning = QStringLiteral("Scanning %1…").arg(sourceNoun());
+    if (lbl_probe_status_) lbl_probe_status_->setText(scanning);
     if (lbl_tree_status_) {
-        lbl_tree_status_->setText(QStringLiteral("Scanning robot…"));
+        lbl_tree_status_->setText(scanning);
         lbl_tree_status_->setVisible(true);
     }
     if (tree_) tree_->clear();
     refreshButtonStates();
-    probe_->setDataRoot(data_root_);
-    probe_->setRemote(remote_host_, ssh_user_);
+    probe_->setSource(source_);
+    if (isThumbDrive()) {
+        probe_->setDataRoot(drive_mount_);
+    } else {
+        probe_->setDataRoot(data_root_);
+        probe_->setRemote(remote_host_, ssh_user_);
+    }
     probe_->start();
 }
 
@@ -691,7 +769,8 @@ void UploadDialog::onProbeReady(bool ok, const QList<UploadTarget>& targets,
         }
         if (lbl_tree_status_) {
             lbl_tree_status_->setText(
-                QStringLiteral("Could not reach the robot:\n%1").arg(error));
+                QStringLiteral("Could not read the %1:\n%2")
+                    .arg(sourceNoun(), error));
             lbl_tree_status_->setVisible(true);
         }
         if (tree_) tree_->clear();
@@ -714,7 +793,7 @@ void UploadDialog::onProbeReady(bool ok, const QList<UploadTarget>& targets,
         }
     }
     // Show newest dates first. `Month_DD_YYYY` strings don't sort lex
-    // by date, so we just reverse insertion order — the SSH probe walks
+    // by date, so we just reverse insertion order — both probes walk
     // in name order, dates are typically a small set, and operators
     // care about the most recent ones at the top of the dropdown.
     std::reverse(dates_in_order.begin(), dates_in_order.end());
@@ -737,7 +816,30 @@ void UploadDialog::onProbeReady(bool ok, const QList<UploadTarget>& targets,
     refreshButtonStates();
 }
 
-void UploadDialog::onRefreshClicked() { startProbe(); }
+void UploadDialog::onRefreshClicked() {
+    if (isThumbDrive() && drive_watcher_) {
+        // Re-evaluate the mount first; the state-change slot re-probes
+        // if the root moved, otherwise fall through to a plain rescan.
+        drive_watcher_->poll();
+        if (probe_in_progress_) return;
+    }
+    startProbe();
+}
+
+void UploadDialog::onBrowseClicked() {
+    if (!drive_watcher_) return;
+    const QString start = drive_mount_.isEmpty()
+                              ? QStringLiteral("/media/%1").arg(qEnvironmentVariable("USER"))
+                              : drive_mount_;
+    const QString chosen = QFileDialog::getExistingDirectory(
+        this,
+        QStringLiteral("Choose the scan data folder (the drive root holding "
+                       "<date>/<building>/Section_… folders)"),
+        QDir(start).exists() ? start : QDir::homePath(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (chosen.isEmpty()) return;
+    drive_watcher_->setManualPath(chosen);   // triggers onDriveStateChanged
+}
 
 void UploadDialog::onDateChanged(int /*index*/) { repopulateTree(); }
 
@@ -764,8 +866,8 @@ void UploadDialog::repopulateTree() {
             lbl_tree_status_->setText(
                 last_probe_error_.isEmpty()
                     ? QStringLiteral("No sections to upload for this date.")
-                    : QStringLiteral("Could not reach the robot:\n%1")
-                          .arg(last_probe_error_));
+                    : QStringLiteral("Could not read the %1:\n%2")
+                          .arg(sourceNoun(), last_probe_error_));
             lbl_tree_status_->setVisible(true);
         }
         return;
@@ -934,21 +1036,26 @@ void UploadDialog::refreshButtonStates() {
     const bool busy = runner_ && runner_->isBusy();
     const bool any_selected = !selectedTargets().isEmpty();
     const bool any_targets = !all_targets_.isEmpty();
-    const bool has_remote = !remote_host_.isEmpty();
+    const bool has_source = isThumbDrive() ? drive_mounted_
+                                           : !remote_host_.isEmpty();
     const bool has_creds = !cloud_client_id_.isEmpty() &&
                            !cloud_device_token_.isEmpty();
     const bool online = isFullyOnline();
 
     if (btn_upload_) {
-        btn_upload_->setEnabled(!busy && any_selected && has_remote &&
+        btn_upload_->setEnabled(!busy && any_selected && has_source &&
                                 has_creds && online);
         btn_upload_->setVisible(!busy);
-        if (!online && any_selected && has_remote && has_creds) {
+        if (!online && any_selected && has_source && has_creds) {
             btn_upload_->setToolTip(
                 QStringLiteral("Upload disabled — see banner for connectivity status."));
         } else {
             btn_upload_->setToolTip(QString());
         }
+    }
+    if (btn_browse_) {
+        btn_browse_->setVisible(isThumbDrive());
+        btn_browse_->setEnabled(!busy);
     }
     if (btn_pause_) {
         btn_pause_->setVisible(busy);
@@ -992,14 +1099,32 @@ void UploadDialog::refreshButtonStates() {
 
 void UploadDialog::refreshHeaderSubtitle() {
     if (!lbl_subtitle_) return;
-    QString robot = robot_id_.isEmpty() ? QStringLiteral("(no robot)")
-                                        : robot_id_;
-    QString creds = cloud_client_id_.isEmpty()
-                        ? QStringLiteral("creds missing")
-                        : QStringLiteral("client %1")
-                              .arg(cloud_client_id_);
-    lbl_subtitle_->setText(QStringLiteral("Robot: %1 · %2")
-                               .arg(robot, creds));
+    const QString robot = robot_id_.isEmpty() ? QStringLiteral("(no robot)")
+                                              : robot_id_;
+    const QString creds = cloud_client_id_.isEmpty()
+                              ? QStringLiteral("creds missing")
+                              : QStringLiteral("client %1").arg(cloud_client_id_);
+    QString text = QStringLiteral("Robot: %1 · %2").arg(robot, creds);
+
+    if (isThumbDrive()) {
+        // Every upload from this dialog lands under `robot_id`'s S3 key,
+        // so the header names the drive AND the robot it is assumed to
+        // belong to. One stick per robot is the fleet rule.
+        const QString label = drive_watcher_ ? drive_watcher_->label()
+                                             : QString::fromLatin1(
+                                                   ThumbDriveWatcher::kDefaultLabel);
+        if (drive_mounted_) {
+            QString drive = QStringLiteral("Drive: %1 at %2").arg(label, drive_mount_);
+            const qint64 free = drive_watcher_ ? drive_watcher_->freeBytes() : -1;
+            if (free >= 0) {
+                drive += QStringLiteral(" · %1 free").arg(formatBytes(free));
+            }
+            text += QStringLiteral("\n") + drive;
+        } else {
+            text += QStringLiteral("\nDrive: %1 — not detected").arg(label);
+        }
+    }
+    lbl_subtitle_->setText(text);
 }
 
 void UploadDialog::resetProgress() {
@@ -1047,7 +1172,16 @@ void UploadDialog::onUploadClicked() {
         return;
     }
     if (!runner_) return;
+    if (isThumbDrive() && UploadRunner::resolveLocalScriptPath().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Upload Data"),
+                             QStringLiteral(
+                                 "uploader.py is missing from this laptop "
+                                 "(expected /usr/share/bdr-coverage-planner/). "
+                                 "Reinstall the OCU package."));
+        return;
+    }
 
+    runner_->setSource(source_);
     runner_->setQueue(sel);
     active_queue_index_ = -1;
     active_queue_total_ = sel.size();
@@ -1126,7 +1260,8 @@ void UploadDialog::onTargetStarted(int index, int total,
     }
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
-            QStringLiteral("Connecting to robot…"));
+            isThumbDrive() ? QStringLiteral("Starting uploader…")
+                           : QStringLiteral("Connecting to robot…"));
     }
     if (progress_bar_) {
         progress_bar_->setRange(0, qMax(1, active_files_total_));
@@ -1276,8 +1411,13 @@ void UploadDialog::onTargetRetryScheduled(const UploadTarget& target,
 // ---------------------------------------------------------------------------
 
 void UploadDialog::armConnectivityProbes() {
-    // Robot reachability probe — re-arm with the current SSH host.
-    if (reachability_probe_ && !remote_host_.isEmpty()) {
+    if (isThumbDrive()) {
+        // Drive presence stands in for robot reachability. `start()`
+        // evaluates immediately, so a stick already plugged in flips
+        // to Mounted (and kicks the probe) before the dialog paints.
+        if (drive_watcher_) drive_watcher_->start();
+    } else if (reachability_probe_ && !remote_host_.isEmpty()) {
+        // Robot reachability probe — re-arm with the current SSH host.
         reachability_probe_->arm(remote_host_);
     }
     // Cloud connectivity probe — start ticking now (first tick fires
@@ -1293,6 +1433,9 @@ void UploadDialog::armConnectivityProbes() {
 void UploadDialog::disarmConnectivityProbes() {
     if (reachability_probe_) {
         reachability_probe_->disarm();
+    }
+    if (drive_watcher_) {
+        drive_watcher_->stop();
     }
     if (cloud_probe_timer_) {
         cloud_probe_timer_->stop();
@@ -1310,6 +1453,9 @@ void UploadDialog::disarmConnectivityProbes() {
     cloud_probe_seen_response_ = false;
     cloud_reachable_ = false;
     robot_reachable_ = false;
+    // Drive state is left as the watcher last reported it: the mount
+    // does not go away because the dialog closed, and the next
+    // showEvent's `start()` re-evaluates and re-emits on change.
     offline_pause_active_ = false;
     last_offline_reason_.clear();
 }
@@ -1319,6 +1465,35 @@ void UploadDialog::onReachabilityChanged(
     RobotReachabilityProbe::State new_state) {
     robot_reachable_ = (new_state == RobotReachabilityProbe::State::Reachable);
     handleConnectivityTransition();
+}
+
+void UploadDialog::onDriveStateChanged(ThumbDriveWatcher::State state,
+                                       const QString& mount_path) {
+    const bool was_mounted = drive_mounted_;
+    const QString old_mount = drive_mount_;
+    drive_state_ = state;
+    drive_mounted_ = (state == ThumbDriveWatcher::State::Mounted);
+    drive_mount_ = drive_mounted_ ? mount_path : QString();
+
+    refreshHeaderSubtitle();
+    if (!isThumbDrive()) return;
+
+    // Pauses the runner if the stick vanished mid-upload; refreshes the
+    // banner and Upload gating either way.
+    handleConnectivityTransition();
+
+    if (drive_mounted_ && (!was_mounted || drive_mount_ != old_mount)) {
+        // Fresh stick (or a different one): list it.
+        startProbe();
+    } else if (!drive_mounted_ && was_mounted) {
+        // Stick pulled: the listing refers to paths that no longer
+        // exist, so drop it rather than let a click launch against them.
+        if (runner_ && !runner_->isBusy()) {
+            startProbe();   // renders the "Insert the drive" empty state
+        }
+    } else if (!drive_mounted_) {
+        startProbe();       // Absent ↔ PresentUnmounted message update
+    }
 }
 
 void UploadDialog::onCloudProbeTick() {
@@ -1403,7 +1578,9 @@ void UploadDialog::handleConnectivityTransition() {
             runner_->requestPause();
             if (lbl_progress_detail_) {
                 lbl_progress_detail_->setText(
-                    QStringLiteral("Connectivity lost — pausing safely…"));
+                    (isThumbDrive() && !drive_mounted_)
+                        ? QStringLiteral("Drive removed — pausing safely…")
+                        : QStringLiteral("Connectivity lost — pausing safely…"));
             }
         }
     } else {
@@ -1424,9 +1601,31 @@ void UploadDialog::refreshConnectivityBanner() {
         return;
     }
     QString msg;
-    if (!robot_reachable_ && !cloud_reachable_ && cloud_probe_seen_response_) {
+    const bool source_ready = isSourceReady();
+    if (isThumbDrive()) {
+        const QString label = drive_watcher_ ? drive_watcher_->label()
+                                             : QString::fromLatin1(
+                                                   ThumbDriveWatcher::kDefaultLabel);
+        if (!source_ready) {
+            msg = drive_state_ == ThumbDriveWatcher::State::PresentUnmounted
+                      ? QStringLiteral("%1 drive detected but not mounted — "
+                                       "mounting… If this persists, open it "
+                                       "in Files or use Browse….").arg(label)
+                      : QStringLiteral("Insert the %1 thumb drive from the "
+                                       "robot, or use Browse… to pick the "
+                                       "data folder.").arg(label);
+            if (!cloud_reachable_ && cloud_probe_seen_response_) {
+                msg += QStringLiteral(" Cloud is also unreachable.");
+            }
+        } else if (!cloud_probe_seen_response_) {
+            msg = QStringLiteral("Checking cloud connectivity…");
+        } else {
+            msg = QStringLiteral("Cloud unreachable — uploads paused until the "
+                                 "connection returns.");
+        }
+    } else if (!source_ready && !cloud_reachable_ && cloud_probe_seen_response_) {
         msg = QStringLiteral("Robot and cloud both unreachable — uploads paused.");
-    } else if (!robot_reachable_) {
+    } else if (!source_ready) {
         msg = QStringLiteral("Robot offline — uploads paused until the radio reconnects.");
     } else if (!cloud_probe_seen_response_) {
         msg = QStringLiteral("Checking cloud connectivity…");

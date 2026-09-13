@@ -39,9 +39,9 @@ struct RobotProfile {
     // x-client-id / x-device-token without an extra config dialog.
     // The backend differentiates customers by client_id and individual
     // robots by device_token; both headers are required on every
-    // /presign and /complete call. See cpp/CLAUDE.md "Upload pipeline"
-    // for the contract and `pilot_control/scripts/uploader.py` for the
-    // runtime consumer.
+    // /presign and /complete call. See AGENTS.md "Upload pipeline" for
+    // the contract and `cpp/scripts/uploader.py` for the runtime
+    // consumer (run on the laptop against the RDATA_EXT stick).
     QString cloud_client_id;        // e.g. "sig_roofing_ID"
     QString cloud_device_token;     // e.g. "roofus#0001"
 

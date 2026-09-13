@@ -64,7 +64,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $ARCH
-Depends: libqt5core5a (>= 5.9.5), libqt5widgets5 (>= 5.9.5), libqt5gui5 (>= 5.9.5), libc6 (>= 2.27), libstdc++6 (>= 6.0), libgcc-s1 (>= 3.0), libgdal30, libgeos-c1v5, libtinyxml2-9, ros-humble-rclcpp, ros-humble-std-msgs, ros-humble-std-srvs, ros-humble-geometry-msgs, ros-humble-sensor-msgs, ros-humble-nav-msgs, ros-humble-tf2, ros-humble-tf2-geometry-msgs, ros-humble-rmw-cyclonedds-cpp, ros-humble-ortools-vendor
+Depends: libqt5core5a (>= 5.9.5), libqt5widgets5 (>= 5.9.5), libqt5gui5 (>= 5.9.5), libc6 (>= 2.27), libstdc++6 (>= 6.0), libgcc-s1 (>= 3.0), libgdal30, libgeos-c1v5, libtinyxml2-9, python3, python3-requests, udisks2, ros-humble-rclcpp, ros-humble-std-msgs, ros-humble-std-srvs, ros-humble-geometry-msgs, ros-humble-sensor-msgs, ros-humble-nav-msgs, ros-humble-tf2, ros-humble-tf2-geometry-msgs, ros-humble-rmw-cyclonedds-cpp, ros-humble-ortools-vendor
 Maintainer: Andrew Dave <andrew.dave@bdx-robotics.com>
 Description: BDR Operator Control Unit (OCU) for autonomous roof scanning
  Operator GUI for "Roofus," an autonomous mobile robot that performs
@@ -177,6 +177,15 @@ fi
 mkdir -p "$DEB_DIR/usr/share/bdr-coverage-planner/sudoers"
 cp "${SCRIPTS_DIR}/bdr-coverage-planner.sudoers" \
    "$DEB_DIR/usr/share/bdr-coverage-planner/sudoers/bdr-coverage-planner"
+
+# Thumb-drive cloud uploader. The OCU runs this locally against the
+# RDATA_EXT stick (`UploadRunner::resolveLocalScriptPath()` looks here
+# first). Needs python3 + python3-requests, both declared in Depends.
+if [ ! -f "${SCRIPTS_DIR}/uploader.py" ]; then
+    echo "Error: uploader.py missing at ${SCRIPTS_DIR}/uploader.py"
+    exit 1
+fi
+cp "${SCRIPTS_DIR}/uploader.py" "$DEB_DIR/usr/share/bdr-coverage-planner/uploader.py"
 
 # Create launcher script
 echo "Creating launcher script..."

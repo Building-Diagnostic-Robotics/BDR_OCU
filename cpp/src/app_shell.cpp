@@ -1603,12 +1603,13 @@ void AppShellWindow::onStartNewScan() {
 }
 
 void AppShellWindow::onUploadDataRequested() {
-    // Hard-block uploads while any part of the launch tree is alive on
-    // the robot. Same composite check that closeEvent uses to gate the
-    // "Are you sure?" prompt — sharing the rule keeps the contract
-    // single-source. Operators must Complete Mission first; uploading
-    // mid-scan would race with `/R_DATA/...` writes from the
-    // unified_data_collector.
+    // Hard-block uploads while any part of the launch tree is alive.
+    // Same composite check that closeEvent uses to gate the "Are you
+    // sure?" prompt — sharing the rule keeps the contract single-source.
+    // The stick itself cannot race the robot's writes, but the operator
+    // has to be at the laptop for an upload and the mission must be
+    // finalized before its data is worth uploading: Complete Mission
+    // first (operator-locked; do not relax to a warning).
     const bool launch_active =
         exploration_launch_in_progress_ ||
         exploration_launch_ready_ ||
@@ -1620,18 +1621,6 @@ void AppShellWindow::onUploadDataRequested() {
             tr("Upload unavailable"),
             tr("A scan is currently active. Complete Mission first, then "
                "upload from the dashboard."));
-        return;
-    }
-
-    QString resolve_err;
-    ResolvedRobotSshTarget ssh_target{};
-    if (!resolveRobotSshTargetFromSettings(&ssh_target, &resolve_err)) {
-        BdrMessageBox::warning(
-            this,
-            tr("Upload unavailable"),
-            resolve_err.isEmpty()
-                ? tr("No robot is currently logged in.")
-                : resolve_err);
         return;
     }
 
@@ -1651,6 +1640,10 @@ void AppShellWindow::onUploadDataRequested() {
         return;
     }
 
+    // The stick carries no robot identity: one stick per robot is the
+    // fleet rule, and everything on it uploads under the robot the
+    // operator logged into at Setup. The dialog header names that robot
+    // next to the drive so a mismatch is visible before Upload.
     const QSettings settings(kSettingsOrgName, kSettingsAppName);
     const QString robot_id =
         settings.value(QStringLiteral("setup/robot_id"), QString())
@@ -1660,7 +1653,10 @@ void AppShellWindow::onUploadDataRequested() {
         BdrMessageBox::warning(
             this,
             tr("Upload unavailable"),
-            tr("No registry entry for the active robot."));
+            robot_id.isEmpty()
+                ? tr("No robot is currently logged in. Select the robot this "
+                     "drive came from in Setup first.")
+                : tr("No registry entry for the active robot."));
         return;
     }
     if (profile->cloud_client_id.isEmpty() ||
@@ -1677,14 +1673,14 @@ void AppShellWindow::onUploadDataRequested() {
         upload_dialog_ = new UploadDialog(this);
     }
     upload_dialog_->setDarkMode(dark_mode_);
-    upload_dialog_->setRemote(ssh_target.host, ssh_target.ssh_user);
+    // Production source is the RDATA_EXT stick in the laptop. The
+    // robot-SSH source (`UploadSource::RobotSsh` + `setRemote`) is kept
+    // compiled as a fallback but is deliberately not wired here.
+    upload_dialog_->setSource(UploadSource::ThumbDrive);
     upload_dialog_->setRobotId(profile->robot_id);
     upload_dialog_->setCloudAuth(registry.cloudApiBase(),
                                  profile->cloud_client_id,
                                  profile->cloud_device_token);
-    upload_dialog_->setDataRoot(profile->robot_data_path.isEmpty()
-                                    ? QStringLiteral("/R_DATA")
-                                    : profile->robot_data_path);
 
     // Same backdrop-blur pattern as the New Scan modal so the
     // dashboard underneath reads as inactive while the dialog is up.

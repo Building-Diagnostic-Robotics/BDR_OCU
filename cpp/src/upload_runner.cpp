@@ -5,14 +5,52 @@
 
 #include "upload_runner.hpp"
 
+#include <QCoreApplication>
 #include <QDebug>
+#include <QDir>
+#include <QDirIterator>
+#include <QFile>
+#include <QFileInfo>
+#include <QFutureWatcher>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QStringList>
 #include <QTimer>
+#include <QtConcurrent/QtConcurrentRun>
+
+#include <algorithm>
 
 namespace f2c_cpp {
 
 namespace {
+
+// Sentinel files `uploader.py` keeps next to the data. Excluded from
+// the "total files" count so progress reads N/N at completion.
+const char* const kStateFile = "upload_state.json";
+const char* const kPauseFile = "pause.flag";
+const char* const kManifestFile = "manifest.json";
+
+// Where create_deb.sh installs the canonical script.
+const char* const kInstalledLocalScript =
+    "/usr/share/bdr-coverage-planner/uploader.py";
+
+// Length of a JSON array field in a small sentinel file; 0 on any
+// problem. Used for `manifest.json:files` and `upload_state.json:completed`.
+int jsonArrayLength(const QString& path, const char* key) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return 0;
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    if (!doc.isObject()) return 0;
+    return doc.object().value(QLatin1String(key)).toArray().size();
+}
+
+bool isSectionFolderName(const QString& name) {
+    return name.startsWith(QLatin1String("Section_")) ||
+           name.startsWith(QLatin1String("Mission_"));
+}
 
 // Single quote a string for safe inclusion inside a `bash -lc '...'`
 // remote command. We never interpolate operator-controlled data into
@@ -102,6 +140,9 @@ UploadStateProbe::~UploadStateProbe() {
         proc_->kill();
         proc_->waitForFinished(500);
     }
+    // A local walk in flight holds no reference to `this` (its
+    // QFutureWatcher is parented here and dies with us), so nothing
+    // else to do.
 }
 
 void UploadStateProbe::setRemote(const QString& host, const QString& ssh_user) {
@@ -111,18 +152,132 @@ void UploadStateProbe::setRemote(const QString& host, const QString& ssh_user) {
 
 void UploadStateProbe::setDataRoot(const QString& data_root) {
     if (!data_root.trimmed().isEmpty()) {
-        data_root_ = data_root.trimmed();
+        data_root_ = QDir::cleanPath(data_root.trimmed());
     }
 }
 
 bool UploadStateProbe::isRunning() const {
-    return proc_ && proc_->state() != QProcess::NotRunning;
+    return local_running_ || (proc_ && proc_->state() != QProcess::NotRunning);
+}
+
+QList<UploadTarget> UploadStateProbe::scanLocalDataRoot(const QString& data_root) {
+    QList<UploadTarget> out;
+    const QDir root(data_root);
+    if (!root.exists()) return out;
+
+    const QDir::Filters dir_filters =
+        QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks;
+    const QStringList dates =
+        root.entryList(dir_filters, QDir::Name);
+    for (const QString& date : dates) {
+        // The robot's offload bookkeeping lives in `.offload/`; a hidden
+        // folder never holds mission data.
+        if (date.startsWith(QLatin1Char('.'))) continue;
+        const QDir date_dir(root.filePath(date));
+        const QStringList buildings = date_dir.entryList(dir_filters, QDir::Name);
+        for (const QString& building : buildings) {
+            const QDir building_dir(date_dir.filePath(building));
+            const QStringList sections =
+                building_dir.entryList(dir_filters, QDir::Name);
+            for (const QString& section : sections) {
+                if (!isSectionFolderName(section)) continue;
+
+                UploadTarget t;
+                t.date_folder = date;
+                t.building_slug = building;
+                t.section_name = section;
+                t.run_id = QStringLiteral("%1/%2/%3").arg(date, building, section);
+                t.data_path = building_dir.filePath(section);
+
+                const QString manifest =
+                    t.data_path + QLatin1Char('/') + QLatin1String(kManifestFile);
+                const QString state =
+                    t.data_path + QLatin1Char('/') + QLatin1String(kStateFile);
+                if (QFileInfo::exists(manifest)) {
+                    t.status = UploadStatus::Done;
+                    t.completed_files = jsonArrayLength(manifest, "files");
+                } else if (QFileInfo::exists(state)) {
+                    t.status = UploadStatus::Partial;
+                    t.completed_files = jsonArrayLength(state, "completed");
+                } else {
+                    t.status = UploadStatus::None;
+                    t.completed_files = 0;
+                }
+
+                // Same counting rule as the SSH probe: every regular file
+                // except the three sentinels; bytes over everything.
+                QDirIterator it(t.data_path,
+                                QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden,
+                                QDirIterator::Subdirectories);
+                while (it.hasNext()) {
+                    it.next();
+                    const QFileInfo fi = it.fileInfo();
+                    t.total_bytes += fi.size();
+                    const QString name = fi.fileName();
+                    if (name == QLatin1String(kStateFile) ||
+                        name == QLatin1String(kPauseFile) ||
+                        name == QLatin1String(kManifestFile)) {
+                        continue;
+                    }
+                    t.total_files += 1;
+                }
+                out.append(t);
+            }
+        }
+    }
+    return out;
 }
 
 void UploadStateProbe::start() {
+    if (source_ == UploadSource::ThumbDrive) {
+        // A local walk may be superseded: re-probing after the stick was
+        // swapped must not wait for (or report) the stale walk.
+        startLocal();
+        return;
+    }
     if (isRunning()) {
         return;
     }
+    startSsh();
+}
+
+void UploadStateProbe::startLocal() {
+    const QString root = data_root_;
+    if (root.isEmpty() || !QFileInfo(root).isDir()) {
+        emit targetsReady(false, {},
+                          QStringLiteral("Thumb drive is not mounted."));
+        return;
+    }
+
+    local_running_ = true;
+    const int generation = ++local_generation_;
+
+    auto* watcher = new QFutureWatcher<QList<UploadTarget>>(this);
+    connect(watcher, &QFutureWatcher<QList<UploadTarget>>::finished, this,
+            [this, watcher, generation, root]() {
+                const QList<UploadTarget> result = watcher->result();
+                watcher->deleteLater();
+                if (generation != local_generation_) {
+                    // Root changed underneath us (stick swapped, Browse…);
+                    // the newer walk owns the signal.
+                    return;
+                }
+                local_running_ = false;
+                if (!QFileInfo(root).isDir()) {
+                    emit targetsReady(false, {},
+                                      QStringLiteral("Thumb drive was removed "
+                                                     "during the scan."));
+                    return;
+                }
+                emit targetsReady(true, result, QString());
+            });
+    // The walk captures only the path — never `this` — so a probe
+    // deleted mid-scan just drops the result with its watcher.
+    watcher->setFuture(QtConcurrent::run(
+        [root]() { return UploadStateProbe::scanLocalDataRoot(root); }));
+}
+
+void UploadStateProbe::startSsh() {
     if (remote_host_.isEmpty() || ssh_user_.isEmpty()) {
         emit targetsReady(false, {},
                           QStringLiteral("No robot host/SSH user configured."));
@@ -205,8 +360,8 @@ void UploadStateProbe::onProcessFinished(int exit_code,
         t.total_bytes = fields.at(7).toLongLong();
         t.run_id = QStringLiteral("%1/%2/%3")
                        .arg(t.date_folder, t.building_slug, t.section_name);
-        t.remote_path = QStringLiteral("%1/%2")
-                            .arg(data_root_, t.run_id);
+        t.data_path = QStringLiteral("%1/%2")
+                          .arg(data_root_, t.run_id);
         if (!t.date_folder.isEmpty() && !t.building_slug.isEmpty() &&
             !t.section_name.isEmpty()) {
             out.append(t);
@@ -246,9 +401,44 @@ int UploadRunner::retryBackoffMs(int attempt) {
     }
 }
 
+void UploadRunner::setSource(UploadSource source) {
+    if (busy_) {
+        qWarning("[UploadRunner] setSource while busy: ignored. Cancel first.");
+        return;
+    }
+    source_ = source;
+}
+
 void UploadRunner::setRemote(const QString& host, const QString& ssh_user) {
     remote_host_ = host.trimmed();
     ssh_user_ = ssh_user.trimmed();
+}
+
+void UploadRunner::setLocalScriptPath(const QString& path) {
+    local_script_path_ = path.trimmed();
+}
+
+QString UploadRunner::resolveLocalScriptPath(const QString& override_path) {
+    QStringList candidates;
+    if (!override_path.trimmed().isEmpty()) {
+        candidates << override_path.trimmed();
+    }
+    candidates << QString::fromLatin1(kInstalledLocalScript);
+    // Dev builds: binary in cpp/build/, script in cpp/scripts/.
+    const QString app_dir = QCoreApplication::instance()
+                                ? QCoreApplication::applicationDirPath()
+                                : QString();
+    if (!app_dir.isEmpty()) {
+        candidates << QDir(app_dir).filePath(QStringLiteral("../scripts/uploader.py"))
+                   << QDir(app_dir).filePath(QStringLiteral("scripts/uploader.py"));
+    }
+    for (const QString& c : candidates) {
+        const QFileInfo fi(c);
+        if (fi.isFile() && fi.isReadable()) {
+            return fi.canonicalFilePath();
+        }
+    }
+    return QString();
 }
 
 void UploadRunner::setCloudAuth(const QString& api_base,
@@ -314,9 +504,18 @@ void UploadRunner::start() {
         emit queueFinished(false);
         return;
     }
-    if (remote_host_.isEmpty() || ssh_user_.isEmpty()) {
+    if (source_ == UploadSource::RobotSsh) {
+        if (remote_host_.isEmpty() || ssh_user_.isEmpty()) {
+            emit targetFailed(activeTarget(),
+                              QStringLiteral("No robot host/SSH user configured."));
+            emit queueFinished(false);
+            return;
+        }
+    } else if (resolveLocalScriptPath(local_script_path_).isEmpty()) {
         emit targetFailed(activeTarget(),
-                          QStringLiteral("No robot host/SSH user configured."));
+                          QStringLiteral("uploader.py not found on this laptop "
+                                         "(expected %1). Reinstall the OCU package.")
+                              .arg(QLatin1String(kInstalledLocalScript)));
         emit queueFinished(false);
         return;
     }
@@ -374,6 +573,10 @@ void UploadRunner::launchActiveTarget() {
     const UploadTarget& target = queue_.at(current_index_);
     emit targetStarted(current_index_, queue_total_, target);
 
+    // The script only ever *reads* pause.flag; a flag left by the last
+    // Pause would stop this run at its first file boundary.
+    clearPauseFlag(target);
+
     proc_ = new QProcess(this);
     proc_->setProcessChannelMode(QProcess::SeparateChannels);
     connect(proc_, &QProcess::readyReadStandardOutput,
@@ -385,14 +588,38 @@ void UploadRunner::launchActiveTarget() {
     connect(proc_, &QProcess::errorOccurred,
             this, &UploadRunner::onProcessError);
 
+    if (source_ == UploadSource::ThumbDrive) {
+        configureLocalProcess(proc_, target);
+    } else {
+        configureSshProcess(proc_, target);
+    }
+    proc_->start();
+}
+
+void UploadRunner::configureLocalProcess(QProcess* proc, const UploadTarget& target) {
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("BDR_CLOUD_API_BASE"), cloud_api_base_);
+    env.insert(QStringLiteral("BDR_CLOUD_CLIENT_ID"), cloud_client_id_);
+    env.insert(QStringLiteral("BDR_CLOUD_DEVICE_TOKEN"), cloud_device_token_);
+    env.insert(QStringLiteral("BDR_UPLOAD_WORKERS"), QStringLiteral("12"));
+    // Belt and braces with `-u`: never let a libc buffer hide a line.
+    env.insert(QStringLiteral("PYTHONUNBUFFERED"), QStringLiteral("1"));
+    proc->setProcessEnvironment(env);
+    proc->setProgram(QStringLiteral("python3"));
+    proc->setArguments({QStringLiteral("-u"),
+                        resolveLocalScriptPath(local_script_path_),
+                        target.data_path,
+                        robot_id_,
+                        target.run_id});
+}
+
+void UploadRunner::configureSshProcess(QProcess* proc, const UploadTarget& target) {
     QStringList args = sshBaseArgs();
     args << QStringLiteral("%1@%2").arg(ssh_user_, remote_host_);
     args << QStringLiteral("bash -lc %1")
                 .arg(shellSingleQuote(buildRemoteCommand(target)));
-
-    proc_->setProgram(QStringLiteral("ssh"));
-    proc_->setArguments(args);
-    proc_->start();
+    proc->setProgram(QStringLiteral("ssh"));
+    proc->setArguments(args);
 }
 
 QStringList UploadRunner::sshBaseArgs() const {
@@ -407,7 +634,12 @@ QString UploadRunner::buildRemoteCommand(const UploadTarget& target) const {
     // Compose the env(1) prefix manually so we control quoting; QProcess'
     // default arg-list path won't help us because everything past the
     // ssh user@host arg is a single shell command on the remote side.
+    // The leading `rm -f` clears a pause.flag left by the previous
+    // Pause, in the same shell so it is ordered before the launch.
+    const QString flag = target.data_path + QLatin1Char('/') +
+                         QLatin1String(kPauseFile);
     return QStringLiteral(
+               "rm -f %8; "
                "env "
                "BDR_CLOUD_API_BASE=%1 "
                "BDR_CLOUD_CLIENT_ID=%2 "
@@ -418,9 +650,18 @@ QString UploadRunner::buildRemoteCommand(const UploadTarget& target) const {
              shellSingleQuote(cloud_client_id_),
              shellSingleQuote(cloud_device_token_),
              shellSingleQuote(script),
-             shellSingleQuote(target.remote_path),
+             shellSingleQuote(target.data_path),
              shellSingleQuote(robot_id_),
-             shellSingleQuote(target.run_id));
+             shellSingleQuote(target.run_id),
+             shellSingleQuote(flag));
+}
+
+void UploadRunner::clearPauseFlag(const UploadTarget& target) {
+    // RobotSsh clears the flag inside the remote command (see
+    // buildRemoteCommand) so it is ordered before the launch.
+    if (source_ != UploadSource::ThumbDrive) return;
+    QFile::remove(target.data_path + QLatin1Char('/') +
+                  QLatin1String(kPauseFile));
 }
 
 void UploadRunner::requestPause() {
@@ -434,13 +675,25 @@ void UploadRunner::requestPause() {
         pause_reason_ = QStringLiteral("Operator paused");
     }
 
-    // SSH a tiny `touch <pause.flag>` in a separate process; the active
-    // upload script polls for it and exits at the next file boundary.
+    const QString flag = target.data_path + QLatin1Char('/') +
+                         QLatin1String(kPauseFile);
+
+    if (source_ == UploadSource::ThumbDrive) {
+        // Touch the flag on the stick; the active script polls for it
+        // and exits at the next file boundary.
+        QFile f(flag);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+            // Stick yanked or read-only: fall back to a SIGTERM. The
+            // script's per-file state write keeps the run resumable.
+            proc_->terminate();
+        }
+        return;
+    }
+
+    // RobotSsh: a tiny `touch <pause.flag>` in a separate process.
     QStringList args = sshOptions();
     args << QStringLiteral("%1@%2").arg(ssh_user_, remote_host_);
-    args << QStringLiteral("touch %1")
-                .arg(shellSingleQuote(target.remote_path +
-                                      QStringLiteral("/pause.flag")));
+    args << QStringLiteral("touch %1").arg(shellSingleQuote(flag));
 
     auto* tap = new QProcess(this);
     connect(tap,
@@ -500,9 +753,8 @@ void UploadRunner::onStderrReady() {
     const QString err = QString::fromUtf8(proc_->readAllStandardError())
                             .trimmed();
     if (!err.isEmpty()) {
-        // ssh + python3 stderr is mostly noise (Pseudo-terminal,
-        // BatchMode hints) but useful in the log strip when a real
-        // error fires.
+        // python3 (and, over SSH, the ssh client's) stderr is mostly
+        // noise but useful in the log strip when a real error fires.
         emit logLine(QStringLiteral("[stderr] ") + err);
     }
 }
@@ -565,9 +817,20 @@ void UploadRunner::processStdoutLine(const QString& line) {
 }
 
 void UploadRunner::onProcessError(QProcess::ProcessError error) {
-    Q_UNUSED(error);
     if (!proc_) return;
     fatal_error_ = proc_->errorString();
+    if (error == QProcess::FailedToStart) {
+        // No `finished` follows a failed start; route through the same
+        // completion path so the queue never sticks in busy_.
+        if (source_ == UploadSource::ThumbDrive) {
+            fatal_error_ = QStringLiteral("python3 could not be started (%1). "
+                                          "Install python3 + python3-requests.")
+                               .arg(proc_->errorString());
+        }
+        QTimer::singleShot(0, this, [this]() {
+            onProcessFinished(-1, QProcess::NormalExit);
+        });
+    }
 }
 
 void UploadRunner::onProcessFinished(int exit_code,
@@ -611,7 +874,7 @@ void UploadRunner::onProcessFinished(int exit_code,
 
     if (status == QProcess::CrashExit) {
         emit targetFailed(current,
-                          QStringLiteral("ssh / uploader crashed (signalled exit)"));
+                          QStringLiteral("uploader crashed (signalled exit)"));
         resetQueueState();
         queue_.clear();
         current_index_ = -1;

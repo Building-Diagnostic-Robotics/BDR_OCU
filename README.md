@@ -94,14 +94,18 @@ and ship the resulting data to the cloud.
 
 ### Cloud upload
 
-- **Robot → S3 direct** via short-lived presigned URLs minted by the BDR
-  backend API. The laptop holds **zero** AWS credentials.
+- **Thumb drive → S3** via short-lived presigned URLs minted by the BDR
+  backend API. The robot offloads each finalized mission to the
+  `RDATA_EXT` stick; the operator plugs it into the laptop and the OCU runs
+  `cpp/scripts/uploader.py` locally. The laptop holds **zero** AWS
+  credentials.
 - Per-section atomic `run_id = <date>/<building>/<section>`; sentinel files
-  on the robot (`upload_state.json`, `manifest.json`) make resume,
+  on the stick (`upload_state.json`, `manifest.json`) make resume,
   pause, and re-derivation of state idempotent and laptop-reimage-safe.
 - Driven from the Dashboard *Upload Data* card via `UploadDialog` /
-  `UploadRunner` / `UploadStateProbe` over SSH; hard-blocked while a scan
-  is alive.
+  `ThumbDriveWatcher` / `UploadStateProbe` / `UploadRunner`; hard-blocked
+  while a scan is alive. The original robot-SSH source is kept compiled
+  as an inactive fallback.
 
 ### OTA update pipeline
 

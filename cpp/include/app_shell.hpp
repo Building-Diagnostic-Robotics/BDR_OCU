@@ -106,11 +106,12 @@ private slots:
 
     void onStartNewScan();
     /// Stage 3 quick-action: "Upload Data" button. Opens the modal
-    /// `UploadDialog` which SSH-probes the robot's `/R_DATA/` and
-    /// streams `pilot_control/scripts/uploader.py` over SSH for any
-    /// section/mission the operator selects. Hard-blocks while a
-    /// scan/launch tree is alive (same `launch_active` rule the close
-    /// guard uses) — operators must finish the mission first.
+    /// `UploadDialog` which waits for the RDATA_EXT thumb drive (the
+    /// robot's offload copy of `/R_DATA/`) in the laptop, walks it, and
+    /// runs `cpp/scripts/uploader.py` locally for any section/mission
+    /// the operator selects. Hard-blocks while a scan/launch tree is
+    /// alive (same `launch_active` rule the close guard uses) —
+    /// operators must finish the mission first.
     void onUploadDataRequested();
     void onExplorationStartScanRequested();
     void onExplorationFinishSaveMapRequested();
