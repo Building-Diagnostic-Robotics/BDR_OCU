@@ -148,6 +148,15 @@ public:
      * in-memory entries stay; new fetches write under `root`.
      */
     void setCacheRoot(const QString& root);
+    /** The shared (non-job) cache root the service started with. */
+    QString sharedCacheRoot() const { return shared_cache_root_; }
+    /**
+     * Undo a per-job redirect: shared cache root, no zoom cap, World layer,
+     * no Wayback pin. Called when the canvas moves to a plan that does not
+     * carry its own imagery pyramid — otherwise the previous plan's asset
+     * folder keeps receiving tiles and its zoom ceiling keeps applying.
+     */
+    void resetToSharedCache();
 
     enum class ImageryLayer { World, Clarity };
     void setLayer(ImageryLayer layer);
@@ -252,6 +261,7 @@ private:
     QNetworkAccessManager* nam_ = nullptr;
     QNetworkReply* suggest_reply_ = nullptr;  // latest suggest() in flight
     QString cache_root_;
+    QString shared_cache_root_;
     ImageryLayer layer_ = ImageryLayer::World;
     QString wayback_release_;
     int max_zoom_cap_ = 0;

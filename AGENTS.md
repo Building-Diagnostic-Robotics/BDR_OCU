@@ -818,7 +818,11 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  fail the step-1 gate. **Send persists the sent geometry** (polygon, edge
  flags, anchor) straight into the job (`job_store_.save`, no `loadJob`):
  the field rail has no Save Plan, so this is the only path by which the
- roof-drawn ROI reaches disk.
+ roof-drawn ROI reaches disk. **Per-job tile redirects are undone**
+ by `TileService::resetToSharedCache()` (shared root, cap 0, World layer,
+ no Wayback) from `newJob()` and the uncached branch of `loadJob()` —
+ without it a new plan keeps writing tiles into the previous plan's
+ assets folder and inherits its zoom ceiling.
  **The field satellite rail is per step** (`applyStepVisibility`,
  `frame_rail = !planning_only_ && Satellite`; rail is 288 px =
  `kLeftRailWidth`, frames 238:4289 / 222:1155): **step 1 has no rail**

@@ -95,7 +95,15 @@ TileService::TileService(QObject* parent) : QObject(parent) {
     cache_root_ =
         QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
         QStringLiteral("/satellite_tiles");
+    shared_cache_root_ = cache_root_;
     QDir().mkpath(cache_root_);
+}
+
+void TileService::resetToSharedCache() {
+    setCacheRoot(shared_cache_root_);
+    setMaxZoomCap(0);
+    setLayer(ImageryLayer::World);
+    setWaybackRelease(QString());
 }
 
 bool TileService::hasApiKey() const {

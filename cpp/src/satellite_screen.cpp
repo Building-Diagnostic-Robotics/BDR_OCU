@@ -3416,6 +3416,10 @@ void SatelliteScreen::loadJob(const Job& job) {
         site_manifest = TileService::readSiteManifest(
             job_store_.assetsDir(job.id) + QStringLiteral("/imagery.json"));
         applyImageryManifest(site_manifest, job_store_.assetsDir(job.id));
+    } else {
+        // This plan has no pyramid of its own: stop writing into (and
+        // zoom-capping against) whichever plan was on the canvas before.
+        tiles_->resetToSharedCache();
     }
 
     const int geo_zoom = job.imagery_cache.cached && job.imagery_cache.max_zoom > 0
@@ -3459,6 +3463,7 @@ void SatelliteScreen::loadJob(const Job& job) {
 
 void SatelliteScreen::newJob() {
     resetAlignmentSession();
+    tiles_->resetToSharedCache();
     current_job_id_.clear();
     jobs_combo_->setCurrentIndex(0);
     job_name_->clear();
@@ -3654,7 +3659,6 @@ bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view) {
         request.clarity = job.imagery_cache.layer == QLatin1String("clarity");
         request.wayback_release = job.imagery_cache.wayback_release;
     }
-    const QString shared_cache = tiles_->cacheRoot();
 
     auto* blur = new QGraphicsBlurEffect(this);
     blur->setBlurRadius(8.0);
@@ -3669,8 +3673,7 @@ bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view) {
             // The prefetch may have redirected the cache root before the
             // operator stopped it; put the canvas back on the shared cache.
             if (!job.imagery_cache.cached) {
-                tiles_->setCacheRoot(shared_cache);
-                tiles_->setMaxZoomCap(0);
+                tiles_->resetToSharedCache();
             }
             if (current_job_id_.isEmpty()) {
                 // Never-saved plan: a stopped download must not leave an
@@ -3695,8 +3698,7 @@ bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view) {
             return false;
         case SatellitePlanConfirmDialog::Outcome::SavedWithoutImagery:
             if (!job.imagery_cache.cached) {
-                tiles_->setCacheRoot(shared_cache);
-                tiles_->setMaxZoomCap(0);
+                tiles_->resetToSharedCache();
             }
             if (persistJob(job)) {
                 appendLog(QStringLiteral(
