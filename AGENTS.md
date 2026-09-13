@@ -804,7 +804,14 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  3 s HEAD): online → the same `SatellitePlanConfirmDialog` + prefetch as
  the office; offline → geometry-only save plus a `BdrMessageBox::warning`
  that 3D Alignment needs the site cached once. Connectivity, not trim,
- decides whether a save fetches.
+ decides whether a save fetches. **Step-1 Next is the field's save**
+ (`onNextClicked` → `cacheSiteThenAdvance`): a satellite plan with no
+ `imagery_cache` probes connectivity, then runs
+ `saveSatelliteWithImagery(job, site_from_view=true)` — no ROI exists yet,
+ so the disc is centred on the map centre (the located address) at
+ `PrefetchRequest::kMinRadiusM`; the step only advances on
+ `SavedWithImagery`. Offline → warning, stays on step 1 (alignment cannot
+ run without `site.jpg`). Plans already cached skip straight through.
  **The field satellite rail is per step** (`applyStepVisibility`,
  `frame_rail = !planning_only_ && Satellite`; rail is 288 px =
  `kLeftRailWidth`, frames 238:4289 / 222:1155): **step 1 has no rail**
