@@ -1569,6 +1569,7 @@ void AppShellWindow::onStartNewScan() {
     if (rc != QDialog::Accepted) {
         return;
     }
+    const QString building_name = dialog->buildingName().trimmed();
 
     // ---- 3. Planning screen, configured for the selection ----
     ensureStage6();
@@ -1581,9 +1582,14 @@ void AppShellWindow::onStartNewScan() {
             break;
         case ScanSetupDialog::Choice::NewMeasuredPlan:
             stage6_->configureForScan(SatelliteScreen::PlanMode::Measured);
+            stage6_->setJobName(building_name);
             break;
         case ScanSetupDialog::Choice::NewSatellitePlan:
+            // The field rail has no name field (frame 238:4289): the plan
+            // takes the building name the operator just entered, otherwise
+            // step 1 can never complete.
             stage6_->configureForScan(SatelliteScreen::PlanMode::Satellite);
+            stage6_->setJobName(building_name);
             break;
         case ScanSetupDialog::Choice::Cancelled:
             return;

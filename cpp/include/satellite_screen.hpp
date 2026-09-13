@@ -78,6 +78,9 @@ public:
     void configureForScan(const Job& job);
     /** Onsite execution starting from an empty plan of the given mode. */
     void configureForScan(PlanMode mode);
+    /** Names a fresh (unsaved) plan — the field rail carries no name field,
+        so the metadata modal's building name is the plan name. */
+    void setJobName(const QString& name);
     /** Office preplanning trim: mission/teleop hidden, Send unavailable. */
     void configureForPlanning();
 

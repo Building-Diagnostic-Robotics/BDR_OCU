@@ -764,6 +764,10 @@ void SatelliteScreen::configureForScan(PlanMode mode) {
     }
 }
 
+void SatelliteScreen::setJobName(const QString& name) {
+    job_name_->setText(name);  // textChanged -> refreshStepUi + refreshTitle
+}
+
 void SatelliteScreen::devSelectMarker() { map_->setMarkerSelected(true); }
 
 void SatelliteScreen::devFitRoi() { map_->fitToRoi(); }
@@ -2452,6 +2456,11 @@ void SatelliteScreen::goToAddress(const QString& raw, const QString& magic_key) 
                         // notch wider and let the operator pick the building.
                         map_->setView(lat, lon, rooftop ? 19 : 18);
                         canvas_aimed_ = true;
+                        // Field rail has no address field: the search that
+                        // aimed the canvas is the plan's reference address.
+                        if (job_address_->text().trimmed().isEmpty()) {
+                            job_address_->setText(label.section(QStringLiteral("  ["), 0, 0));
+                        }
                         refreshStepUi();
                     });
 }
