@@ -37,6 +37,7 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFile>
+#include <QtConcurrent/QtConcurrent>
 #include <QGraphicsBlurEffect>
 #include <QGraphicsDropShadowEffect>
 #include <QGridLayout>
@@ -66,6 +67,7 @@
 #include <QVBoxLayout>
 
 #include <cmath>
+#include <limits>
 
 namespace f2c_cpp {
 
@@ -363,13 +365,23 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     content_layout->setSpacing(0);
     rail_scroll_ = buildLeftRail();
     content_layout->addWidget(rail_scroll_);
+    // Step 5 (Autonomous Scan) reproduces the shipped Stage 5 Scan page 1:1:
+    // a 384 px left rail (Overall Progress, Telemetry), the map with the
+    // control bar under it, a 380 px right rail (Manual Override, Scan
+    // Statistics). Both rails are siblings of the plan rail and only one
+    // set is visible at a time (applyStepVisibility).
+    scan_left_rail_ = buildScanLeftRail(content);
+    scan_left_rail_->hide();
+    content_layout->addWidget(scan_left_rail_);
     // One canvas area, two pages: the plan map and the step-2 correspondence
     // picker (which hides the rail — see applyStepVisibility).
     auto* canvas_column = new QWidget(content);
+    canvas_column_ = canvas_column;
     auto* canvas_column_layout = new QVBoxLayout(canvas_column);
     canvas_column_layout->setContentsMargins(0, 0, 0, 0);
     canvas_column_layout->setSpacing(0);
     canvas_stack_ = new QStackedWidget(canvas_column);
+    canvas_stack_->setObjectName("SatCanvasStack");
     // Map page: the map fills the cell and the tool stack shares it,
     // aligned to the right edge, so the layout keeps the tools glued to the
     // canvas through every resize without manual geometry.
@@ -380,7 +392,20 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     map_->setParent(map_page_);
     map_page_layout->addWidget(map_, 0, 0);
     canvas_tools_ = buildCanvasTools(map_page_);
-    map_page_layout->addWidget(canvas_tools_, 0, 0,
+    // Top-right column: the Stage 5 scan status pill above the tool stack
+    // (pill only on step 5), so both share the corner without overlapping.
+    auto* top_right_column = new QWidget(map_page_);
+    top_right_column->setAttribute(Qt::WA_TranslucentBackground, true);
+    auto* top_right_layout = new QVBoxLayout(top_right_column);
+    top_right_layout->setContentsMargins(0, 12, 12, 0);
+    top_right_layout->setSpacing(8);
+    top_right_layout->setAlignment(Qt::AlignRight | Qt::AlignTop);
+    scan_status_pill_ = buildScanStatusPill(top_right_column);
+    scan_status_pill_->hide();
+    top_right_layout->addWidget(scan_status_pill_, 0, Qt::AlignRight);
+    canvas_tools_->layout()->setContentsMargins(0, 0, 0, 0);
+    top_right_layout->addWidget(canvas_tools_, 0, Qt::AlignRight);
+    map_page_layout->addWidget(top_right_column, 0, 0,
                                Qt::AlignRight | Qt::AlignTop);
     // Step-3 status tag (222:1391), top-left over the map.
     canvas_tag_ = new QLabel(map_page_);
@@ -422,6 +447,11 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     correspond_page_ = buildCorrespondPage();
     canvas_stack_->addWidget(correspond_page_);
     canvas_column_layout->addWidget(canvas_stack_, 1);
+    // Stage 5 control bar (Start/Pause · summary · Cancel Scan · E-Stop)
+    // sits under the map card on step 5 only.
+    scan_control_bar_ = buildScanControlBar(canvas_column);
+    scan_control_bar_->hide();
+    canvas_column_layout->addWidget(scan_control_bar_);
     // The frame floats the footer over the canvas's bottom 65px. It goes in
     // as a real row instead: the bar is all but opaque anyway, and the map's
     // own scale bar and Esri attribution live in exactly that strip, so
@@ -429,7 +459,16 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // to show.
     canvas_column_layout->addWidget(buildFooterBar());
     content_layout->addWidget(canvas_column, 1);
+    scan_right_rail_ = buildScanRightRail(content);
+    scan_right_rail_->hide();
+    content_layout->addWidget(scan_right_rail_);
+    content_ = content;
     root->addWidget(content, 1);
+    // Stage 5 footer (69 px, full width): back link · "Step 5 of 5" ·
+    // Complete Mission. Step 5 only; the other steps keep footer_bar_.
+    scan_footer_ = buildScanFooter();
+    scan_footer_->hide();
+    root->addWidget(scan_footer_);
 
     // ---- Step acknowledgements ----
     connect(roi_confirm_check_, &QCheckBox::toggled, this, [this](bool on) {
@@ -534,6 +573,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::Odom);
         noteRobotTopic();
         map_->setOdom(ros_->odomSnapshot());
+        updateScanTelemetry();
     });
     connect(ros_, &RosLink::statusUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
@@ -564,8 +604,10 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     });
     connect(ros_, &RosLink::segmentStatusUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
-        segment_label_->setText(
-            QStringLiteral("Segment: %1").arg(ros_->lastSegmentStatus()));
+        if (segment_label_) {
+            segment_label_->setText(
+                QStringLiteral("Segment: %1").arg(ros_->lastSegmentStatus()));
+        }
     });
     connect(ros_, &RosLink::axisResult, this,
             [this](bool ok, const QString& detail) {
@@ -624,6 +666,12 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     resume_after_override_ = false;
                     scan_started_wall_ms_ = 0;
                     scan_elapsed_ms_ = 0;
+                    scan_distance_m_ = 0.0;
+                    scan_speed_mps_ = 0.0;
+                    scan_quality_pct_ = 0.0;
+                    scan_quality_sum_ = 0.0;
+                    scan_quality_samples_ = 0;
+                    have_last_odom_ = false;
                     map_->clearMissionAnchor();
                     map_->clearTelemetry();
                     setStatePill(QStringLiteral("NO MISSION"),
@@ -631,12 +679,26 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     if (reason_label_) {
                         reason_label_->clear();
                     }
-                    if (coverage_bar_) {
-                        coverage_bar_->setVisible(false);
-                    }
+                } else {
+                    scan_distance_m_ = 0.0;
+                    scan_quality_sum_ = 0.0;
+                    scan_quality_samples_ = 0;
+                    have_last_odom_ = false;
                 }
                 refreshScanRunUi();
                 emit missionActiveChanged(active);
+            });
+
+    scan_quality_watcher_ = new QFutureWatcher<double>(this);
+    connect(scan_quality_watcher_, &QFutureWatcher<double>::finished, this,
+            [this] {
+                scan_quality_pct_ =
+                    qBound(0.0, scan_quality_watcher_->result(), 100.0);
+                if (scan_run_state_ == ScanRunState::Running) {
+                    scan_quality_sum_ += scan_quality_pct_;
+                    ++scan_quality_samples_;
+                }
+                refreshScanRunUi();
             });
     connect(mission_, &MissionController::robotLaunchDied, this,
             &SatelliteScreen::handleDirectorDeath);
@@ -995,6 +1057,22 @@ void SatelliteScreen::devSeedDemoRoiStep() {
     devSeedDemoAlignment(true);
     setSelectedStep(Step::RoiDefinition);
     // Deferred: the canvas has no size until the shot's first layout pass.
+    QTimer::singleShot(400, this, [this] { map_->fitToRoi(); });
+}
+
+void SatelliteScreen::devSeedDemoScanStep() {
+    // Step 5 as the Stage 5 frame shows it, without a robot: aligned plan,
+    // ROI + edges confirmed, the scan rails and control bar up. The map
+    // shows the demo ROI; no mission is active so the buttons render in
+    // their disabled state (the reference shot has the same look pre-run).
+    devSeedDemoAlignment(true);
+    confirmed_vertices_ = map_->polygon().vertices;
+    edges_reviewed_ = true;
+    setSelectedStep(Step::AutonomousScan);
+    refreshStepUi();
+    scan_elapsed_ms_ = 6000;
+    scan_quality_pct_ = 62.0;
+    refreshScanRunUi();
     QTimer::singleShot(400, this, [this] { map_->fitToRoi(); });
 }
 
@@ -1466,36 +1544,568 @@ QWidget* SatelliteScreen::buildFooterBar() {
     connect(next_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onNextClicked);
     layout->addWidget(next_button_, 0, Qt::AlignVCenter);
+    return footer_bar_;
+}
 
-    scan_start_pause_button_ =
-        new QPushButton(QStringLiteral("Start Scan"), footer_bar_);
-    scan_start_pause_button_->setObjectName("SatNextButton");
-    scan_start_pause_button_->setCursor(Qt::PointingHandCursor);
-    scan_start_pause_button_->setFixedHeight(kFooterButtonHeight);
-    scan_start_pause_button_->hide();
+// ---- Step 5: Stage 5 Scan page, 1:1 ----------------------------------------
+//
+// Geometry and styling are lifted verbatim from PlannerScreen's scan stage
+// (the shipped build on origin/main): rails 384 / 380 px on #18181B with a
+// 1 px #27272A divider, cards #27272A radius 10 with 16 px padding, Arimo
+// 16/700 white card titles behind a 16 px #00D492 icon, Arimo 16/400 #9F9FA9
+// keys over Liberation Mono 16/400 white values, 8 px pill progress bars,
+// the 81 px transparent control bar with 48 px pill buttons, and the 69 px
+// footer. Nothing above the native FPV surface changes height at runtime —
+// the video widget does not repaint the region it vacates.
+
+namespace {
+
+constexpr int kScanLeftRailWidth = 384;
+constexpr int kScanRightRailWidth = 380;
+constexpr int kScanFooterCtaWidth = 278;
+constexpr int kScanActionChrome = 16 + 8 + 20 + 8 + 8 + 16;
+constexpr int kScanActionSafetyPad = 8;
+
+QLabel* scanText(QWidget* parent, const QString& text, const QString& style,
+                 Qt::Alignment align = Qt::AlignLeft | Qt::AlignVCenter) {
+    auto* label = new QLabel(text, parent);
+    label->setAlignment(align);
+    label->setAttribute(Qt::WA_TranslucentBackground, true);
+    label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    label->setStyleSheet(style + QStringLiteral(" background: transparent;"));
+    return label;
+}
+
+QLabel* scanIcon(QWidget* parent, const QString& path, int size,
+                 const QString& color) {
+    auto* label = new QLabel(parent);
+    label->setFixedSize(size, size);
+    label->setAlignment(Qt::AlignCenter);
+    label->setAttribute(Qt::WA_TranslucentBackground, true);
+    label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    label->setStyleSheet(QStringLiteral("background: transparent;"));
+    label->setPixmap(loadTintedSvg(path, size, size, color));
+    return label;
+}
+
+const char* kScanKeyStyle =
+    "font-family: 'Arimo'; font-size: 16px; font-weight: 400; color: #9F9FA9;";
+const char* kScanValueStyle =
+    "font-family: 'Liberation Mono'; font-size: 16px; font-weight: 400; "
+    "color: #FFFFFF;";
+const char* kScanRowKeyStyle =
+    "font-family: 'Arimo'; font-size: 14px; font-weight: 400; color: #9F9FA9;";
+const char* kScanRowValueStyle =
+    "font-family: 'Liberation Mono'; font-size: 14px; font-weight: 400; "
+    "color: #D4D4D8;";
+
+QWidget* scanCardShell(QWidget* parent) {
+    auto* card = new QWidget(parent);
+    card->setAttribute(Qt::WA_StyledBackground, true);
+    card->setStyleSheet(QStringLiteral(
+        "background: #27272A; border: none; border-radius: 10px;"));
+    return card;
+}
+
+QWidget* scanCardHeader(QWidget* parent, const QString& icon,
+                        const QString& title) {
+    auto* row = new QWidget(parent);
+    row->setFixedHeight(24);
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+    layout->addWidget(scanIcon(row, icon, 16, QStringLiteral("#00D492")), 0,
+                      Qt::AlignVCenter);
+    layout->addWidget(
+        scanText(row, title,
+                 QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
+                                "font-weight: 700; color: #FFFFFF;")),
+        0, Qt::AlignVCenter);
+    layout->addStretch(1);
+    return row;
+}
+
+QProgressBar* scanProgressBar(QWidget* parent, const QString& chunk) {
+    auto* bar = new QProgressBar(parent);
+    bar->setRange(0, 1000);
+    bar->setValue(0);
+    bar->setTextVisible(false);
+    bar->setFixedHeight(8);
+    bar->setStyleSheet(
+        QStringLiteral(
+            "QProgressBar { background: #3F3F47; border: none; "
+            "border-radius: 999px; }"
+            "QProgressBar::chunk { background: %1; border-radius: 999px; }")
+            .arg(chunk));
+    return bar;
+}
+
+/** Key on top, value under it — the Stage 5 "section" (48 px). */
+QWidget* scanKeyValueSection(QWidget* parent, const QString& key,
+                             const QString& value, QLabel** out_value,
+                             int height = 48) {
+    auto* section = new QWidget(parent);
+    section->setFixedHeight(height);
+    auto* layout = new QVBoxLayout(section);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addWidget(scanText(section, key, QLatin1String(kScanKeyStyle)));
+    auto* value_label =
+        scanText(section, value, QLatin1String(kScanValueStyle));
+    layout->addWidget(value_label);
+    if (out_value) {
+        *out_value = value_label;
+    }
+    return section;
+}
+
+/** Key left, value right on one 24 px row — Scan Statistics. */
+QWidget* scanKeyValueRow(QWidget* parent, const QString& key,
+                         const QString& value, QLabel** out_value) {
+    auto* row = new QWidget(parent);
+    row->setFixedHeight(24);
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+    layout->addWidget(scanText(row, key, QLatin1String(kScanRowKeyStyle)), 0,
+                      Qt::AlignVCenter);
+    layout->addStretch(1);
+    auto* value_label = scanText(row, value, QLatin1String(kScanRowValueStyle),
+                                 Qt::AlignRight | Qt::AlignVCenter);
+    layout->addWidget(value_label, 0, Qt::AlignVCenter);
+    if (out_value) {
+        *out_value = value_label;
+    }
+    return row;
+}
+
+/** 48 px pill action button with icon + bold label (control bar). */
+QPushButton* scanActionButton(QWidget* parent, const QString& icon,
+                              const QString& text, const QString& fill,
+                              const QString& hover, QLabel** out_icon,
+                              QLabel** out_text) {
+    auto* button = new QPushButton(parent);
+    button->setCursor(Qt::PointingHandCursor);
+    button->setFlat(true);
+    button->setFixedHeight(48);
+    button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    button->setStyleSheet(
+        QStringLiteral(
+            "QPushButton { background: %1; border: none; border-radius: 10px; }"
+            "QPushButton:hover { background: %2; }"
+            "QPushButton:disabled { background: rgba(82,82,91,0.4); }")
+            .arg(fill, hover));
+    auto* layout = new QHBoxLayout(button);
+    layout->setContentsMargins(16, 0, 16, 0);
+    layout->setSpacing(8);
+    layout->addStretch(1);
+    auto* icon_label = scanIcon(button, icon, 20, QStringLiteral("#FFFFFF"));
+    layout->addWidget(icon_label);
+    auto* text_label = scanText(
+        button, text,
+        QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
+                       "font-weight: 700; color: #FFFFFF;"));
+    layout->addWidget(text_label);
+    layout->addStretch(1);
+    if (out_icon) *out_icon = icon_label;
+    if (out_text) *out_text = text_label;
+    return button;
+}
+
+void setScanActionText(QPushButton* button, QLabel* label,
+                       const QString& text) {
+    label->setText(text);
+    QFont font(QStringLiteral("Arimo"));
+    font.setBold(true);
+    font.setPixelSize(16);
+    button->setFixedWidth(kScanActionChrome +
+                          QFontMetrics(font).horizontalAdvance(text) +
+                          kScanActionSafetyPad);
+}
+
+}  // namespace
+
+QWidget* SatelliteScreen::buildScanLeftRail(QWidget* parent) {
+    auto* rail = new QWidget(parent);
+    rail->setFixedWidth(kScanLeftRailWidth);
+    rail->setAttribute(Qt::WA_StyledBackground, true);
+    rail->setStyleSheet(QStringLiteral(
+        "background: #18181B; border-right: 1px solid #27272A;"));
+    auto* layout = new QVBoxLayout(rail);
+    layout->setContentsMargins(16, 16, 17, 16);
+    layout->setSpacing(16);
+
+    // Overall Progress (236 px).
+    auto* progress = scanCardShell(rail);
+    progress->setFixedHeight(236);
+    auto* progress_layout = new QVBoxLayout(progress);
+    progress_layout->setContentsMargins(16, 16, 16, 16);
+    progress_layout->setSpacing(12);
+    progress_layout->addWidget(scanCardHeader(
+        progress, QStringLiteral(":/assets/missionplanner/scan_card_progress.svg"),
+        QStringLiteral("Overall Progress")));
+    const auto add_bar = [&](const QString& key, QProgressBar*& out_bar,
+                             QLabel*& out_value, const QString& chunk) {
+        auto* section = new QWidget(progress);
+        section->setFixedHeight(48);
+        auto* section_layout = new QVBoxLayout(section);
+        section_layout->setContentsMargins(0, 0, 0, 0);
+        section_layout->setSpacing(4);
+        section_layout->addWidget(
+            scanText(section, key, QLatin1String(kScanKeyStyle)));
+        auto* row = new QWidget(section);
+        row->setFixedHeight(20);
+        auto* row_layout = new QHBoxLayout(row);
+        row_layout->setContentsMargins(0, 0, 0, 0);
+        row_layout->setSpacing(8);
+        out_bar = scanProgressBar(row, chunk);
+        row_layout->addWidget(out_bar, 1);
+        out_value = scanText(
+            row, QStringLiteral("0.0%"),
+            QStringLiteral("font-family: 'Liberation Mono'; font-size: 14px; "
+                           "font-weight: 400; color: #FFFFFF;"));
+        row_layout->addWidget(out_value, 0, Qt::AlignVCenter);
+        section_layout->addWidget(row);
+        progress_layout->addWidget(section);
+    };
+    add_bar(QStringLiteral("Total Coverage"), coverage_bar_,
+            scan_coverage_label_, QStringLiteral("#00BC7D"));
+    add_bar(QStringLiteral("Scan Quality"), scan_quality_bar_,
+            scan_quality_label_, QStringLiteral("#3B82F6"));
+    progress_layout->addWidget(scanKeyValueSection(
+        progress, QStringLiteral("Scan Time"), QStringLiteral("00:00"),
+        &scan_elapsed_label_));
+    layout->addWidget(progress);
+
+    // Telemetry (252 px).
+    auto* telemetry = scanCardShell(rail);
+    telemetry->setFixedHeight(252);
+    auto* telemetry_layout = new QVBoxLayout(telemetry);
+    telemetry_layout->setContentsMargins(16, 16, 16, 16);
+    telemetry_layout->setSpacing(12);
+    telemetry_layout->addWidget(scanCardHeader(
+        telemetry,
+        QStringLiteral(":/assets/missionplanner/scan_card_telemetry.svg"),
+        QStringLiteral("Telemetry")));
+    telemetry_layout->addWidget(scanKeyValueSection(
+        telemetry, QStringLiteral("Speed"), units::formatSpeed(0.0, 2),
+        &scan_speed_label_));
+    {
+        auto* pos = new QWidget(telemetry);
+        pos->setFixedHeight(64);
+        auto* pos_layout = new QVBoxLayout(pos);
+        pos_layout->setContentsMargins(0, 0, 0, 0);
+        pos_layout->setSpacing(0);
+        pos_layout->addWidget(scanText(pos, QStringLiteral("Position"),
+                                       QLatin1String(kScanKeyStyle)));
+        const auto axis_row = [&](const QString& axis, QLabel*& out) {
+            auto* row = new QWidget(pos);
+            auto* row_layout = new QHBoxLayout(row);
+            row_layout->setContentsMargins(0, 0, 0, 0);
+            row_layout->setSpacing(6);
+            row_layout->addWidget(scanText(
+                row, axis,
+                QStringLiteral("font-family: 'Liberation Mono'; font-size: "
+                               "16px; font-weight: 400; color: #A1A1AA;")));
+            out = scanText(row, units::formatLength(0.0, 2),
+                           QLatin1String(kScanValueStyle));
+            row_layout->addWidget(out, 1, Qt::AlignLeft | Qt::AlignVCenter);
+            pos_layout->addWidget(row);
+        };
+        axis_row(QStringLiteral("X:"), scan_pos_x_label_);
+        axis_row(QStringLiteral("Y:"), scan_pos_y_label_);
+        telemetry_layout->addWidget(pos);
+    }
+    telemetry_layout->addWidget(scanKeyValueSection(
+        telemetry, QStringLiteral("Heading"), QStringLiteral("0.0°"),
+        &scan_heading_label_));
+    layout->addWidget(telemetry);
+    layout->addStretch(1);
+    return rail;
+}
+
+QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
+    auto* rail = new QWidget(parent);
+    rail->setFixedWidth(kScanRightRailWidth);
+    rail->setAttribute(Qt::WA_StyledBackground, true);
+    rail->setStyleSheet(QStringLiteral(
+        "background: #18181B; border-left: 1px solid #27272A;"));
+    auto* layout = new QVBoxLayout(rail);
+    layout->setContentsMargins(17, 16, 16, 16);
+    layout->setSpacing(16);
+
+    // Manual Override (320 px). Header 24 + FPV 196 + state + hint; every
+    // element above the video has a fixed height.
+    auto* override = scanCardShell(rail);
+    override->setFixedHeight(320);
+    auto* override_layout = new QVBoxLayout(override);
+    override_layout->setContentsMargins(16, 16, 16, 16);
+    override_layout->setSpacing(12);
+    override_layout->addWidget(scanCardHeader(
+        override,
+        QStringLiteral(":/assets/missionplanner/scan_card_telemetry.svg"),
+        QStringLiteral("Manual Override")));
+    auto* override_content = new QWidget(override);
+    auto* override_content_layout = new QVBoxLayout(override_content);
+    override_content_layout->setContentsMargins(0, 0, 0, 0);
+    override_content_layout->setSpacing(10);
+    scan_camera_view_ = new FPVCameraView(override_content);
+    scan_camera_view_->setObjectName("SatScanFpv");
+    scan_camera_view_->setCursor(Qt::PointingHandCursor);
+    scan_camera_view_->setFixedHeight(196);
+    scan_camera_view_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    scan_camera_view_->setPlaceholderText(
+        QStringLiteral("Camera View"),
+        QStringLiteral("Click to enter manual teleop"));
+    if (auto* stream = scan_camera_view_->streamWidget()) {
+        stream->setMinimumSize(280, 157);
+    }
+    scan_camera_view_->installEventFilter(this);
+    override_content_layout->addWidget(scan_camera_view_);
+    scan_override_label_ = scanText(
+        override_content, QStringLiteral("Manual Override: Inactive"),
+        QStringLiteral("font-family: 'Arimo'; font-size: 12px; "
+                       "font-weight: 600; color: #9F9FA9;"));
+    override_content_layout->addWidget(scan_override_label_);
+    auto* hint = scanText(
+        override_content,
+        QStringLiteral("Click camera for manual teleop (W/A/S/D). "
+                       "Click map to return to autonomy."),
+        QStringLiteral("font-family: 'Arimo'; font-size: 12px; "
+                       "font-weight: 400; color: #71717B;"));
+    hint->setWordWrap(true);
+    override_content_layout->addWidget(hint);
+    override_layout->addWidget(override_content);
+    layout->addWidget(override);
+
+    // Scan Statistics (134 px + one row for the thumb-drive copy state).
+    auto* stats = scanCardShell(rail);
+    stats->setFixedHeight(170);
+    auto* stats_layout = new QVBoxLayout(stats);
+    stats_layout->setContentsMargins(16, 16, 16, 16);
+    stats_layout->setSpacing(12);
+    stats_layout->addWidget(scanCardHeader(
+        stats, QStringLiteral(":/assets/missionplanner/scan_card_stats.svg"),
+        QStringLiteral("Scan Statistics")));
+    stats_layout->addWidget(scanKeyValueRow(
+        stats, QStringLiteral("Distance"), units::formatLength(0.0, 1),
+        &scan_distance_label_));
+    stats_layout->addWidget(scanKeyValueRow(
+        stats, QStringLiteral("Avg Quality"), QStringLiteral("0.0%"),
+        &scan_avg_quality_label_));
+    stats_layout->addWidget(scanKeyValueRow(
+        stats, QStringLiteral("Est. Time Left"), QStringLiteral("--:--"),
+        &scan_eta_label_));
+    stats_layout->addWidget(scanKeyValueRow(
+        stats, QStringLiteral("Data Copy"), QStringLiteral("—"),
+        &scan_copy_label_));
+    layout->addWidget(stats);
+
+    // Motors: Disarm kept by operator request (Arm is folded into Start
+    // Scan). Same card language, one row.
+    auto* motors = scanCardShell(rail);
+    motors->setFixedHeight(96);
+    auto* motors_layout = new QVBoxLayout(motors);
+    motors_layout->setContentsMargins(16, 16, 16, 16);
+    motors_layout->setSpacing(12);
+    motors_layout->addWidget(scanCardHeader(
+        motors, QStringLiteral(":/assets/exploration/telemetry.svg"),
+        QStringLiteral("Motors")));
+    disarm_button_ = new QPushButton(QStringLiteral("Disarm Motors"), motors);
+    disarm_button_->setCursor(Qt::PointingHandCursor);
+    disarm_button_->setFixedHeight(32);
+    disarm_button_->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #3F3F47; border: none; border-radius: 8px;"
+        " font-family: 'Arimo'; font-size: 14px; font-weight: 500;"
+        " color: #E4E4E7; }"
+        "QPushButton:hover { background: #52525C; }"
+        "QPushButton:disabled { background: rgba(63,63,71,0.4);"
+        " color: rgba(228,228,231,0.4); }"));
+    connect(disarm_button_, &QPushButton::clicked, this, [this] {
+        setAutonomyEnabled(false);
+        ros_->requestAxisState(RosLink::kAxisIdle);
+        if (scan_run_state_ == ScanRunState::Running) {
+            scan_run_state_ = ScanRunState::Paused;
+        }
+        appendLog(QStringLiteral("[cmd] disarm (IDLE)"));
+        refreshScanRunUi();
+    });
+    motors_layout->addWidget(disarm_button_);
+    layout->addWidget(motors);
+    layout->addStretch(1);
+    return rail;
+}
+
+QWidget* SatelliteScreen::buildScanControlBar(QWidget* parent) {
+    auto* bar = new QWidget(parent);
+    bar->setFixedHeight(81);
+    bar->setAttribute(Qt::WA_StyledBackground, true);
+    bar->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* layout = new QHBoxLayout(bar);
+    layout->setContentsMargins(0, 17, 0, 16);
+    layout->setSpacing(12);
+
+    scan_start_pause_button_ = scanActionButton(
+        bar, QStringLiteral(":/assets/missionplanner/scan_play.svg"),
+        QStringLiteral("Start Scan"), QStringLiteral("#00BC7D"),
+        QStringLiteral("#0ACB8B"), &scan_start_pause_icon_,
+        &scan_start_pause_text_);
+    {
+        auto* shadow = new QGraphicsDropShadowEffect(scan_start_pause_button_);
+        shadow->setBlurRadius(16);
+        shadow->setOffset(0, 4);
+        shadow->setColor(QColor(0, 188, 125, 64));
+        scan_start_pause_button_->setGraphicsEffect(shadow);
+    }
     connect(scan_start_pause_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onScanStartPauseClicked);
-    layout->addWidget(scan_start_pause_button_, 0, Qt::AlignVCenter);
+    setScanActionText(scan_start_pause_button_, scan_start_pause_text_,
+                      QStringLiteral("Start Scan"));
+    layout->addWidget(scan_start_pause_button_);
 
-    scan_cancel_button_ =
-        new QPushButton(QStringLiteral("Cancel Mission"), footer_bar_);
-    scan_cancel_button_->setObjectName("SatGhostButtonMuted");
-    scan_cancel_button_->setCursor(Qt::PointingHandCursor);
-    scan_cancel_button_->setFixedHeight(kFooterGhostButtonHeight);
-    scan_cancel_button_->hide();
+    scan_run_summary_label_ = scanText(
+        bar, QStringLiteral("00:00 \u2022 0/0 intervals"),
+        QStringLiteral("font-family: 'Liberation Mono'; font-size: 14px; "
+                       "font-weight: 400; color: #9F9FA9;"));
+    // The summary is the only flexible item in the bar: at narrow widths it
+    // gives way before the three action pills do.
+    scan_run_summary_label_->setSizePolicy(QSizePolicy::Ignored,
+                                           QSizePolicy::Fixed);
+    scan_run_summary_label_->setMinimumWidth(0);
+    layout->addWidget(scan_run_summary_label_, 1, Qt::AlignVCenter);
+
+    scan_cancel_button_ = scanActionButton(
+        bar, QStringLiteral(":/assets/missionplanner/scan_cancel.svg"),
+        QStringLiteral("Cancel Scan"), QStringLiteral("#FE9A00"),
+        QStringLiteral("#FFAA22"), nullptr, &scan_cancel_text_);
     connect(scan_cancel_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onScanCancelClicked);
-    layout->addWidget(scan_cancel_button_, 0, Qt::AlignVCenter);
+    setScanActionText(scan_cancel_button_, scan_cancel_text_,
+                      QStringLiteral("Cancel Scan"));
+    layout->addWidget(scan_cancel_button_);
 
-    end_button_ = new QPushButton(QStringLiteral("Complete Mission"), footer_bar_);
-    end_button_->setObjectName("SatGhostButton");
+    QLabel* estop_text = nullptr;
+    estop_button_ = scanActionButton(
+        bar, QStringLiteral(":/assets/missionplanner/scan_emergency_stop.svg"),
+        QStringLiteral("Emergency Stop"), QStringLiteral("#DC2626"),
+        QStringLiteral("#EF4444"), nullptr, &estop_text);
+    connect(estop_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onEstop);
+    setScanActionText(estop_button_, estop_text,
+                      QStringLiteral("Emergency Stop"));
+    layout->addWidget(estop_button_);
+    return bar;
+}
+
+QWidget* SatelliteScreen::buildScanStatusPill(QWidget* parent) {
+    // Stage 5 status pill (Figma 139:823): zinc-900 fill, 10 px radius,
+    // 40 px tall, dot + bold label. Painted, not QSS, so the corners
+    // anti-alias over the map.
+    auto* pill = new QWidget(parent);
+    pill->setObjectName("SatScanStatusPill");
+    pill->setAttribute(Qt::WA_StyledBackground, true);
+    pill->setFixedHeight(40);
+    pill->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    pill->setStyleSheet(QStringLiteral(
+        "QWidget#SatScanStatusPill { background: #27272A; border: none; "
+        "border-radius: 10px; }"));
+    auto* layout = new QHBoxLayout(pill);
+    layout->setContentsMargins(16, 8, 16, 8);
+    layout->setSpacing(8);
+    scan_status_dot_ = scanIcon(
+        pill, QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8,
+        QStringLiteral("#71717B"));
+    layout->addWidget(scan_status_dot_, 0, Qt::AlignVCenter);
+    scan_status_text_ = scanText(
+        pill, QStringLiteral("Ready"),
+        QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
+                       "font-weight: 700; color: #D4D4D8;"));
+    layout->addWidget(scan_status_text_, 0, Qt::AlignVCenter);
+    return pill;
+}
+
+QWidget* SatelliteScreen::buildScanFooter() {
+    auto* footer = new QWidget(this);
+    footer->setFixedHeight(69);
+    footer->setAttribute(Qt::WA_StyledBackground, true);
+    footer->setStyleSheet(QStringLiteral("background: #18181B;"));
+    auto* layout = new QHBoxLayout(footer);
+    layout->setContentsMargins(24, 0, 24, 0);
+    layout->setSpacing(0);
+
+    scan_footer_back_ = new QPushButton(footer);
+    scan_footer_back_->setCursor(Qt::PointingHandCursor);
+    scan_footer_back_->setFlat(true);
+    scan_footer_back_->setFixedHeight(44);
+    scan_footer_back_->setFixedWidth(kScanFooterCtaWidth);
+    scan_footer_back_->setStyleSheet(QStringLiteral(
+        "QPushButton { background: transparent; border: none; "
+        "border-radius: 10px; }"
+        "QPushButton:hover { background: rgba(39,39,42,0.55); }"));
+    auto* back_layout = new QHBoxLayout(scan_footer_back_);
+    back_layout->setContentsMargins(16, 0, 16, 0);
+    back_layout->setSpacing(10);
+    back_layout->addWidget(scanIcon(
+        scan_footer_back_, QStringLiteral(":/assets/missionplanner/back.svg"),
+        16, QStringLiteral("#9F9FA9")));
+    back_layout->addWidget(scanText(
+        scan_footer_back_, QStringLiteral("Edge Review"),
+        QStringLiteral("font-family: 'Arimo'; font-size: 14px; "
+                       "font-weight: 500; color: #D4D4D8;")));
+    back_layout->addStretch(1);
+    connect(scan_footer_back_, &QPushButton::clicked, this,
+            &SatelliteScreen::onFooterBackClicked);
+    layout->addWidget(scan_footer_back_);
+
+    auto* centre = new QWidget(footer);
+    centre->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auto* centre_layout = new QHBoxLayout(centre);
+    centre_layout->setContentsMargins(0, 0, 0, 0);
+    centre_layout->setSpacing(0);
+    centre_layout->addStretch(1);
+    scan_footer_step_label_ = scanText(
+        centre, QStringLiteral("Step 5 of 5"),
+        QStringLiteral("font-family: 'Liberation Mono'; font-size: 14px; "
+                       "font-weight: 400; color: #71717B;"));
+    centre_layout->addWidget(scan_footer_step_label_);
+    centre_layout->addStretch(1);
+    layout->addWidget(centre, 1);
+
+    end_button_ = new QPushButton(footer);
     end_button_->setCursor(Qt::PointingHandCursor);
-    end_button_->setFixedHeight(kFooterGhostButtonHeight);
-    end_button_->hide();
+    end_button_->setFlat(true);
+    end_button_->setFixedHeight(44);
+    end_button_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    end_button_->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #00BC7D; border: none; border-radius: 10px; }"
+        "QPushButton:hover { background: #0ACB8B; }"
+        "QPushButton:disabled { background: #1F2937; }"));
+    auto* end_layout = new QHBoxLayout(end_button_);
+    end_layout->setContentsMargins(16, 0, 16, 0);
+    end_layout->setSpacing(10);
+    end_layout->addStretch(1);
+    end_button_text_ = scanText(
+        end_button_, QStringLiteral("Complete Mission"),
+        QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
+                       "font-weight: 700; color: #FFFFFF;"));
+    end_layout->addWidget(end_button_text_);
+    end_layout->addWidget(scanIcon(
+        end_button_, QStringLiteral(":/assets/missionplanner/next_arrow.svg"),
+        16, QStringLiteral("#FFFFFF")));
+    {
+        QFont font(QStringLiteral("Arimo"));
+        font.setBold(true);
+        font.setPixelSize(16);
+        end_button_->setFixedWidth(
+            16 + QFontMetrics(font).horizontalAdvance(
+                     QStringLiteral("Complete Mission")) +
+            10 + 16 + 16 + 8);
+    }
     connect(end_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onCompleteMission);
     layout->addWidget(end_button_, 0, Qt::AlignVCenter);
-    return footer_bar_;
+    return footer;
 }
 
 void SatelliteScreen::onNextClicked() {
@@ -1842,17 +2452,12 @@ void SatelliteScreen::refreshStepUi() {
             has_prev = stepAvailable(Step(i));
         }
         has_prev = has_prev && !planning_only_;
-        footer_bar_->setVisible(has_next || has_prev || scan_step);
+        // Step 5 swaps the frame footer for the Stage 5 footer + control bar.
+        footer_bar_->setVisible((has_next || has_prev) && !scan_step);
         back_button_->setVisible(has_prev);
         next_button_->setVisible(has_next);
-        if (scan_start_pause_button_) {
-            scan_start_pause_button_->setVisible(scan_step);
-        }
-        if (scan_cancel_button_) {
-            scan_cancel_button_->setVisible(scan_step);
-        }
-        if (end_button_) {
-            end_button_->setVisible(scan_step);
+        if (scan_footer_) {
+            scan_footer_->setVisible(scan_step);
         }
         // Clear pairs / Align belong to the satellite picker, and only once
         // there is a cloud to pick against (frames 219:291 vs 234:1954).
@@ -1958,8 +2563,33 @@ void SatelliteScreen::applyStepVisibility() {
     // canvas stays the grid and the point cloud lands straight on it.
     const bool picker_step = !planning_only_ && step == Step::Alignment &&
                              plan_mode_ == PlanMode::Satellite;
+    const bool scan_step = !planning_only_ && step == Step::AutonomousScan;
     if (rail_scroll_) {
-        rail_scroll_->setVisible(!picker_step && !locate_step);
+        rail_scroll_->setVisible(!picker_step && !locate_step && !scan_step);
+    }
+    // Step 5 is the Stage 5 page: its own two rails, the control bar under
+    // the map, the map framed as a card, and the Stage 5 footer.
+    if (scan_left_rail_) {
+        scan_left_rail_->setVisible(scan_step);
+    }
+    if (scan_right_rail_) {
+        scan_right_rail_->setVisible(scan_step);
+    }
+    if (scan_control_bar_) {
+        scan_control_bar_->setVisible(scan_step);
+    }
+    if (scan_status_pill_) {
+        scan_status_pill_->setVisible(scan_step);
+    }
+    if (canvas_stack_) {
+        canvas_stack_->setProperty("scan", scan_step);
+        canvas_stack_->setContentsMargins(scan_step ? QMargins(1, 1, 1, 1)
+                                                    : QMargins());
+        canvas_stack_->style()->unpolish(canvas_stack_);
+        canvas_stack_->style()->polish(canvas_stack_);
+    }
+    if (canvas_tag_ && scan_step) {
+        canvas_tag_->hide();
     }
     if (align_card_) {
         align_card_->setVisible(!planning_only_ && step == Step::Alignment &&
@@ -1971,22 +2601,20 @@ void SatelliteScreen::applyStepVisibility() {
     if (edge_review_card_) {
         edge_review_card_->setVisible(false);
     }
-    if (mission_card_) {
-        mission_card_->setVisible(!planning_only_ &&
-                                  step == Step::AutonomousScan);
-    }
     if (teleop_card_) {
         teleop_card_->setVisible(false);
     }
-    if (step == Step::AutonomousScan && mission_->missionActive()) {
+    if (scan_step && mission_->missionActive()) {
         startScanFpv();
     } else {
         stopScanFpv();
     }
     if (log_card_) {
-        // The frame rails carry no log; it stays on the scan step where the
-        // mission events actually land.
-        log_card_->setVisible(!frame_rail || step == Step::AutonomousScan);
+        // Stage 5 carries no log card; the frame rails do not either.
+        log_card_->setVisible(!frame_rail);
+    }
+    if (scan_step) {
+        refreshScanRunUi();
     }
 }
 
@@ -2022,8 +2650,6 @@ QWidget* SatelliteScreen::buildLeftRail() {
                        "that you have looked."),
         QStringLiteral("Edges reviewed"), &edge_review_check_);
     layout->addWidget(edge_review_card_);
-    mission_card_ = buildMissionCard(rail_content);
-    layout->addWidget(mission_card_);
     teleop_card_ = buildTeleopCard(rail_content);
     layout->addWidget(teleop_card_);
     log_card_ = buildLogCard(rail_content);
@@ -3010,93 +3636,6 @@ void SatelliteScreen::refreshDrawButton() {
                               : QStringLiteral("Draw ROI"));
 }
 
-QWidget* SatelliteScreen::buildMissionCard(QWidget* parent) {
-    auto* card = new QWidget(parent);
-    card->setObjectName("SatCard");
-    card->setAttribute(Qt::WA_StyledBackground, true);
-    auto* layout = new QVBoxLayout(card);
-    layout->setContentsMargins(16, 14, 16, 16);
-    layout->setSpacing(8);
-    layout->addWidget(makeCardHeader(
-        QStringLiteral(":/assets/exploration/start_scan.svg"),
-        QStringLiteral("Scan Progress"), card));
-
-    scan_elapsed_label_ = new QLabel(QStringLiteral("Elapsed  00:00"), card);
-    scan_elapsed_label_->setObjectName("SatFieldLabel");
-    layout->addWidget(scan_elapsed_label_);
-
-    scan_coverage_label_ = new QLabel(QStringLiteral("Coverage  —"), card);
-    scan_coverage_label_->setObjectName("SatFieldLabel");
-    layout->addWidget(scan_coverage_label_);
-
-    reason_label_ = new QLabel(card);
-    reason_label_->setObjectName("SatFieldLabel");
-    reason_label_->setWordWrap(true);
-    layout->addWidget(reason_label_);
-
-    coverage_bar_ = new QProgressBar(card);
-    coverage_bar_->setObjectName("SatCoverage");
-    coverage_bar_->setRange(0, 1000);
-    coverage_bar_->setFormat(QStringLiteral("coverage %p%"));
-    coverage_bar_->setFixedHeight(18);
-    coverage_bar_->setVisible(false);
-    layout->addWidget(coverage_bar_);
-
-    scan_copy_label_ = new QLabel(card);
-    scan_copy_label_->setObjectName("SatFieldLabel");
-    scan_copy_label_->setWordWrap(true);
-    scan_copy_label_->hide();
-    layout->addWidget(scan_copy_label_);
-
-    segment_label_ = new QLabel(card);
-    segment_label_->setObjectName("SatFieldLabel");
-    layout->addWidget(segment_label_);
-
-    layout->addWidget(makeCardHeader(
-        QStringLiteral(":/assets/missionplanner/scan_card_telemetry.svg"),
-        QStringLiteral("Manual Override"), card));
-
-    scan_camera_view_ = new FPVCameraView(card);
-    scan_camera_view_->setObjectName("SatScanFpv");
-    scan_camera_view_->setCursor(Qt::PointingHandCursor);
-    scan_camera_view_->setFixedHeight(196);
-    scan_camera_view_->setPlaceholderText(
-        QStringLiteral("Camera View"),
-        QStringLiteral("Click to enter manual teleop"));
-    if (auto* stream = scan_camera_view_->streamWidget()) {
-        stream->setMinimumSize(240, 140);
-    }
-    scan_camera_view_->installEventFilter(this);
-    layout->addWidget(scan_camera_view_);
-
-    scan_override_label_ =
-        new QLabel(QStringLiteral("Manual Override: Inactive"), card);
-    scan_override_label_->setObjectName("SatFieldLabel");
-    layout->addWidget(scan_override_label_);
-
-    disarm_button_ = new QPushButton(QStringLiteral("Disarm"), card);
-    disarm_button_->setObjectName("SatButton");
-    disarm_button_->setFixedHeight(36);
-    disarm_button_->setCursor(Qt::PointingHandCursor);
-    connect(disarm_button_, &QPushButton::clicked, this, [this] {
-        setAutonomyEnabled(false);
-        ros_->requestAxisState(RosLink::kAxisIdle);
-        scan_run_state_ = ScanRunState::Paused;
-        appendLog(QStringLiteral("[cmd] disarm (IDLE)"));
-        refreshScanRunUi();
-    });
-    layout->addWidget(disarm_button_);
-
-    estop_button_ = new QPushButton(QStringLiteral("Emergency Stop"), card);
-    estop_button_->setObjectName("SatEstopButton");
-    estop_button_->setFixedHeight(kEstopButtonHeight);
-    estop_button_->setCursor(Qt::PointingHandCursor);
-    connect(estop_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::onEstop);
-    layout->addWidget(estop_button_);
-    return card;
-}
-
 QWidget* SatelliteScreen::buildTeleopCard(QWidget* parent) {
     auto* card = new QWidget(parent);
     card->setObjectName("SatCard");
@@ -3223,6 +3762,12 @@ QPushButton#SatNextButton:disabled {
     background-color: rgba(0, 153, 102, 0.40); color: rgba(255, 255, 255, 0.40);
 }
 #SatRailScroll { background-color: @PAGE@; border: none; border-right: 1px solid @SURFACE_BORDER@; }
+/* Step 5: the map reads as a peer card to the Stage 5 rails (#18181B
+   surface, 1 px #27272A ring, 12 px radius) — PlannerScreen's Scan variant
+   of plannerPreviewContainer. */
+QStackedWidget#SatCanvasStack[scan="true"] {
+    background-color: #18181B; border: 1px solid #27272A; border-radius: 12px;
+}
 #SatRail { background-color: @PAGE@; }
 #SatCard {
     background-color: @SURFACE@; border: 1px solid @CARD_BORDER@; border-radius: 10px;
@@ -5099,6 +5644,9 @@ void SatelliteScreen::refreshScanRunUi() {
     const bool active = mission_->missionActive();
     const bool ready = active && metadata_pushed_ && directorReady() &&
                        !director_failed_;
+    const CoverageStatus status = ros_->coverageStatus();
+    const bool status_live = active && status.fresh(10000);
+
     if (disarm_button_) {
         disarm_button_->setEnabled(active);
     }
@@ -5109,14 +5657,17 @@ void SatelliteScreen::refreshScanRunUi() {
         end_button_->setEnabled(active);
     }
     if (scan_cancel_button_) {
-        scan_cancel_button_->setEnabled(active);
+        scan_cancel_button_->setEnabled(active &&
+                                        scan_run_state_ != ScanRunState::Completed);
     }
-    if (scan_start_pause_button_) {
+    if (scan_start_pause_button_ && scan_start_pause_text_) {
         QString label = QStringLiteral("Start Scan");
+        QString icon = QStringLiteral(":/assets/missionplanner/scan_play.svg");
         bool enable = ready && scan_run_state_ == ScanRunState::Idle &&
                       !manual_override_;
         if (scan_run_state_ == ScanRunState::Running) {
             label = QStringLiteral("Pause");
+            icon = QStringLiteral(":/assets/missionplanner/scan_pause.svg");
             enable = !manual_override_;
         } else if (scan_run_state_ == ScanRunState::Paused) {
             label = QStringLiteral("Resume");
@@ -5125,7 +5676,12 @@ void SatelliteScreen::refreshScanRunUi() {
             label = QStringLiteral("Scan Complete");
             enable = false;
         }
-        scan_start_pause_button_->setText(label);
+        setScanActionText(scan_start_pause_button_, scan_start_pause_text_,
+                          label);
+        if (scan_start_pause_icon_) {
+            scan_start_pause_icon_->setPixmap(
+                loadTintedSvg(icon, 20, 20, QStringLiteral("#FFFFFF")));
+        }
         scan_start_pause_button_->setEnabled(enable);
         if (manual_override_) {
             scan_start_pause_button_->setToolTip(QStringLiteral(
@@ -5139,61 +5695,215 @@ void SatelliteScreen::refreshScanRunUi() {
             scan_start_pause_button_->setToolTip(QString());
         }
     }
+
+    const int total_s = int(scan_elapsed_ms_ / 1000);
+    const QString elapsed = QStringLiteral("%1:%2")
+                                .arg(total_s / 60, 2, 10, QLatin1Char('0'))
+                                .arg(total_s % 60, 2, 10, QLatin1Char('0'));
     if (scan_elapsed_label_) {
-        const int total_s = int(scan_elapsed_ms_ / 1000);
-        scan_elapsed_label_->setText(
-            QStringLiteral("Elapsed  %1:%2")
-                .arg(total_s / 60, 2, 10, QLatin1Char('0'))
-                .arg(total_s % 60, 2, 10, QLatin1Char('0')));
+        scan_elapsed_label_->setText(elapsed);
+    }
+    const double frac = status_live ? status.coverageFraction() : -1.0;
+    if (coverage_bar_) {
+        coverage_bar_->setValue(frac >= 0.0 ? int(qBound(0.0, frac, 1.0) * 1000)
+                                            : 0);
     }
     if (scan_coverage_label_) {
-        // RosLink keeps the last status across missions; only a fresh one
-        // (or a mission still active) is worth showing as live coverage.
-        const CoverageStatus status = ros_->coverageStatus();
-        const double frac =
-            active && status.fresh(10000) ? status.coverageFraction() : -1.0;
         scan_coverage_label_->setText(
-            frac >= 0.0 ? QStringLiteral("Coverage  %1%")
-                              .arg(int(std::lround(frac * 100.0)))
-                        : QStringLiteral("Coverage  —"));
+            frac >= 0.0 ? QStringLiteral("%1%").arg(frac * 100.0, 0, 'f', 1)
+                        : QStringLiteral("0.0%"));
+    }
+    if (scan_quality_bar_) {
+        scan_quality_bar_->setValue(int(qBound(0.0, scan_quality_pct_, 100.0) * 10));
+    }
+    if (scan_quality_label_) {
+        scan_quality_label_->setText(
+            QStringLiteral("%1%").arg(scan_quality_pct_, 0, 'f', 1));
+    }
+    if (scan_run_summary_label_) {
+        const int swept = status_live ? int(qMax(0.0, status.swept)) : 0;
+        const int remaining = status_live ? int(qMax(0.0, status.remaining)) : 0;
+        const int deferred = status_live ? int(qMax(0.0, status.deferred)) : 0;
+        scan_run_summary_label_->setText(
+            QStringLiteral("%1 \u2022 %2/%3 intervals")
+                .arg(elapsed)
+                .arg(swept)
+                .arg(swept + remaining + deferred));
+    }
+    if (scan_distance_label_) {
+        scan_distance_label_->setText(units::formatLength(scan_distance_m_, 1));
+    }
+    if (scan_avg_quality_label_) {
+        const double avg = scan_quality_samples_ > 0
+                               ? scan_quality_sum_ / scan_quality_samples_
+                               : 0.0;
+        scan_avg_quality_label_->setText(
+            QStringLiteral("%1%").arg(avg, 0, 'f', 1));
+    }
+    if (scan_eta_label_) {
+        // Remaining intervals at the observed swept rate; only meaningful
+        // once something has actually been swept.
+        QString eta = QStringLiteral("--:--");
+        if (status_live && status.swept > 0.0 && scan_elapsed_ms_ > 0 &&
+            status.remaining >= 0.0) {
+            const double per_interval_s =
+                (scan_elapsed_ms_ / 1000.0) / status.swept;
+            const int left_s = int(std::lround(per_interval_s * status.remaining));
+            eta = QStringLiteral("%1:%2")
+                      .arg(left_s / 60, 2, 10, QLatin1Char('0'))
+                      .arg(left_s % 60, 2, 10, QLatin1Char('0'));
+        }
+        scan_eta_label_->setText(eta);
     }
     if (scan_copy_label_) {
-        const CoverageStatus status = ros_->coverageStatus();
         const QString copy = status.copy.toLower();
-        if (copy == QLatin1String("copying") ||
-            copy == QLatin1String("pending") ||
+        QString text = QStringLiteral("\u2014");
+        if (copy == QLatin1String("copying") || copy == QLatin1String("pending") ||
             copy == QLatin1String("queued")) {
-            scan_copy_label_->setVisible(true);
-            scan_copy_label_->setText(
-                QStringLiteral("Thumb-drive copy in progress…"));
+            text = QStringLiteral("in progress");
         } else if (copy == QLatin1String("waiting_for_drive")) {
-            scan_copy_label_->setVisible(true);
-            scan_copy_label_->setText(
-                QStringLiteral("Copy queued — waiting for the thumb drive"));
-        } else if (!status.copy_error.isEmpty()) {
-            scan_copy_label_->setVisible(true);
-            scan_copy_label_->setText(
-                QStringLiteral("Copy failed: %1").arg(status.copy_error));
-        } else {
-            scan_copy_label_->hide();
+            text = QStringLiteral("waiting for drive");
+        } else if (copy == QLatin1String("done")) {
+            text = QStringLiteral("done");
+        } else if (copy == QLatin1String("skipped")) {
+            text = QStringLiteral("skipped");
+        } else if (!status.copy_error.isEmpty() ||
+                   copy == QLatin1String("failed")) {
+            text = QStringLiteral("failed");
         }
+        scan_copy_label_->setText(text);
+        scan_copy_label_->setToolTip(status.copy_error);
     }
     if (scan_override_label_) {
-        if (manual_override_) {
-            scan_override_label_->setText(
-                QStringLiteral("Manual Override: Active"));
-        } else {
-            scan_override_label_->setText(
-                QStringLiteral("Manual Override: Inactive"));
-        }
+        scan_override_label_->setText(
+            manual_override_
+                ? QStringLiteral("Manual Override: Active (%1 rad/s)")
+                      .arg(kTeleopAngularSpeed, 0, 'f', 1)
+                : QStringLiteral("Manual Override: Inactive"));
+        scan_override_label_->setStyleSheet(
+            manual_override_
+                ? QStringLiteral("font-family: 'Arimo'; font-size: 12px; "
+                                 "font-weight: 700; color: #10B981; "
+                                 "background: transparent;")
+                : QStringLiteral("font-family: 'Arimo'; font-size: 12px; "
+                                 "font-weight: 600; color: #9F9FA9; "
+                                 "background: transparent;"));
     }
-    if (back_button_ && selected_step_ == Step::AutonomousScan) {
-        back_button_->setEnabled(!scan_autonomy_ran_);
-        back_button_->setToolTip(
+    if (scan_footer_back_) {
+        scan_footer_back_->setEnabled(!scan_autonomy_ran_);
+        scan_footer_back_->setToolTip(
             scan_autonomy_ran_
                 ? QStringLiteral("Cancel or Complete Mission to leave")
                 : QString());
     }
+    if (back_button_ && selected_step_ == Step::AutonomousScan) {
+        back_button_->setEnabled(!scan_autonomy_ran_);
+    }
+}
+
+void SatelliteScreen::updateScanTelemetry() {
+    const OdomSnapshot odom = ros_->odomSnapshot();
+    if (!odom.valid) {
+        return;
+    }
+    if (have_last_odom_ && odom.wall_ms > last_odom_.wall_ms) {
+        const double dx = odom.x - last_odom_.x;
+        const double dy = odom.y - last_odom_.y;
+        const double step = std::hypot(dx, dy);
+        const double dt = (odom.wall_ms - last_odom_.wall_ms) / 1000.0;
+        // Ignore sub-centimetre jitter so a parked robot reads 0.00 m/s and
+        // the distance odometer does not creep.
+        if (step > 0.01 && dt > 0.0) {
+            scan_speed_mps_ = 0.7 * scan_speed_mps_ + 0.3 * (step / dt);
+            if (scan_run_state_ == ScanRunState::Running) {
+                scan_distance_m_ += step;
+            }
+        } else if (dt > 0.5) {
+            scan_speed_mps_ = 0.0;
+        }
+    }
+    last_odom_ = odom;
+    have_last_odom_ = true;
+    if (scan_speed_label_) {
+        scan_speed_label_->setText(units::formatSpeed(scan_speed_mps_, 2));
+    }
+    if (scan_pos_x_label_) {
+        scan_pos_x_label_->setText(units::formatLength(odom.x, 2));
+    }
+    if (scan_pos_y_label_) {
+        scan_pos_y_label_->setText(units::formatLength(odom.y, 2));
+    }
+    if (scan_heading_label_) {
+        const double deg = std::fmod(odom.yaw * 180.0 / M_PI + 360.0, 360.0);
+        scan_heading_label_->setText(QStringLiteral("%1\u00B0").arg(deg, 0, 'f', 1));
+    }
+    if (scan_distance_label_) {
+        scan_distance_label_->setText(units::formatLength(scan_distance_m_, 1));
+    }
+    maybeScheduleScanQualityUpdate();
+}
+
+void SatelliteScreen::maybeScheduleScanQualityUpdate() {
+    if (!scan_quality_watcher_ || scan_quality_watcher_->isRunning() ||
+        scan_run_state_ != ScanRunState::Running) {
+        return;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - last_quality_ms_ < 2000) {
+        return;
+    }
+    last_quality_ms_ = now;
+    const QVector<QVector<QPointF>> planned = ros_->swathsSnapshot().lines;
+    const QVector<QPointF> trail = map_->trail();
+    if (planned.isEmpty() || trail.size() < 2) {
+        return;
+    }
+    scan_quality_watcher_->setFuture(QtConcurrent::run(
+        [planned, trail]() {
+            return SatelliteScreen::computeReprojectionQualityPercent(planned,
+                                                                      trail);
+        }));
+}
+
+double SatelliteScreen::computeReprojectionQualityPercent(
+    const QVector<QVector<QPointF>>& planned, const QVector<QPointF>& trail) {
+    // Ported from PlannerScreen::computeReprojectionQualityPercent: mean
+    // perpendicular distance of the odom trail to the nearest planned
+    // segment, within a 1 m association window, mapped to 100 % at 0 m.
+    constexpr double kAssociationMeters = 1.0;
+    constexpr int kTrailStride = 6;
+    double total_error = 0.0;
+    int used = 0;
+    for (int t = 0; t < trail.size(); t += kTrailStride) {
+        const QPointF& p = trail[t];
+        double best = std::numeric_limits<double>::max();
+        for (const QVector<QPointF>& line : planned) {
+            for (int i = 0; i + 1 < line.size(); ++i) {
+                const QPointF& a = line[i];
+                const QPointF& b = line[i + 1];
+                const double dx = b.x() - a.x();
+                const double dy = b.y() - a.y();
+                const double len_sq = dx * dx + dy * dy;
+                if (len_sq < 1e-9) {
+                    continue;
+                }
+                const double tp = qBound(
+                    0.0, ((p.x() - a.x()) * dx + (p.y() - a.y()) * dy) / len_sq,
+                    1.0);
+                best = std::min(best, std::hypot(p.x() - (a.x() + tp * dx),
+                                                 p.y() - (a.y() + tp * dy)));
+            }
+        }
+        if (best <= kAssociationMeters) {
+            total_error += best;
+            ++used;
+        }
+    }
+    if (used == 0) {
+        return 0.0;
+    }
+    const double avg_error = total_error / double(used);
+    return qBound(0.0, 100.0 * (1.0 - avg_error / kAssociationMeters), 100.0);
 }
 
 void SatelliteScreen::startScanFpv() {
@@ -5742,6 +6452,40 @@ void SatelliteScreen::updateStatePill() {
         pill = QStringLiteral("%1 · %2").arg(state, status.phase);
     }
     setStatePill(pill, color);
+    // Stage 5 map-corner pill: same state, its own tint. Human wording for
+    // the operator-facing states; the raw token for the rest.
+    if (scan_status_dot_ && scan_status_text_) {
+        QString label = state;
+        if (state == QLatin1String("WAITING_READY")) {
+            label = QStringLiteral("Preparing");
+        } else if (state == QLatin1String("TRANSIT")) {
+            label = QStringLiteral("Transit");
+        } else if (state == QLatin1String("SWEEP") ||
+                   state == QLatin1String("SWEEP_ALIGN") ||
+                   state == QLatin1String("PIVOT")) {
+            label = QStringLiteral("Scanning");
+        } else if (state == QLatin1String("SWEEP_DONE")) {
+            label = QStringLiteral("Sweep Done");
+        } else if (state == QLatin1String("IDLE")) {
+            label = mission_->missionActive() ? QStringLiteral("Ready")
+                                              : QStringLiteral("Idle");
+        } else if (state == QLatin1String("COMPLETE")) {
+            label = QStringLiteral("Complete");
+        } else if (state == QLatin1String("MANUAL_TAKEOVER")) {
+            label = QStringLiteral("Manual");
+        } else if (state == QLatin1String("WAITING_REVISIT")) {
+            label = QStringLiteral("Revisit?");
+        } else if (state == QLatin1String("ERROR")) {
+            label = QStringLiteral("Error");
+        }
+        scan_status_text_->setText(label);
+        scan_status_dot_->setPixmap(loadTintedSvg(
+            QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8,
+            color.name()));
+        if (scan_status_pill_) {
+            scan_status_pill_->adjustSize();
+        }
+    }
 
     QString reason;
     if (!status.error.isEmpty()) {

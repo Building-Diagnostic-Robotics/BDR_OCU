@@ -859,9 +859,24 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  then, in the field, **launches** the director stack (marker-at-pose
  confirm) — there is no Send button. Ack checkboxes are gone. Measured
  field trim hides Satellite Map (Robot Map is step 1); chips renumber
- 1–4. Step 5 is the Stage 5 scan run: FPV click = teleop, footer is
- Start Scan / Pause / Cancel / Complete Mission. The log card only
- shows on step 5.
+ 1–4. **Step 5 is the shipped Stage 5 Scan page reproduced 1:1**
+ (`buildScanLeftRail` / `buildScanRightRail` / `buildScanControlBar` /
+ `buildScanFooter`, geometry lifted from `PlannerScreen`'s scan stage on
+ `origin/main`): 384 px left rail (Overall Progress: coverage + quality
+ bars, Scan Time; Telemetry: speed, X/Y, heading), the map framed as a
+ card (`#SatCanvasStack[scan="true"]`) with the status pill above the tool
+ stack and the 81 px control bar under it (Start Scan/Pause/Resume ·
+ `mm:ss • swept/total intervals` · Cancel Scan · Emergency Stop), 380 px
+ right rail (Manual Override with the FPV — click = teleop, map click
+ hands back; Scan Statistics: distance, avg quality, ETA, data copy;
+ Motors: Disarm), and the 69 px footer (Edge Review back · Step 5 of 5 ·
+ Complete Mission primary). The plan rail, log card and frame footer are
+ hidden on this step. Scan Quality is
+ `computeReprojectionQualityPercent` (odom trail vs `/coverage/
+ planned_swaths`, 1 m association, off-thread every 2 s) — the Stage 5
+ metric verbatim. Nothing above the FPV surface changes height at
+ runtime: the native video widget does not repaint the region it vacates
+ (the "double Manual Override header" ghost). `run` shot mode renders it.
 
 ### Alignment: robot map -> satellite imagery
 
@@ -1044,7 +1059,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  controller_status, not by the axis-state RPC's ack. The request being
  accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
- (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|plan|
+ (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|run|plan|
  plan_confirm`, `_STAGE=3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog
  to `<png>_dialog.png` / `_dialog_adv.png`. See docs/DEV_BYPASSES.md.

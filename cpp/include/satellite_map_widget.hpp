@@ -137,6 +137,8 @@ public:
     void setSwaths(const PolylineSet& swaths);
     void setOdom(const OdomSnapshot& odom);
     void clearTelemetry();
+    /** Body-frame odom breadcrumbs kept for the trail (scan quality input). */
+    const QVector<QPointF>& trail() const { return trail_; }
 
     /**
      * Backdrop for the measured canvas: a top-down raster of the collected

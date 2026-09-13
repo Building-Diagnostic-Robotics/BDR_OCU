@@ -831,6 +831,11 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                         SatelliteScreen::PlanMode::Satellite);
                     stage6_->devSeedDemoPlan();
                     stage6_->devSeedDemoRoiStep();
+                } else if (shot_mode == QStringLiteral("run")) {
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
+                    stage6_->devSeedDemoPlan();
+                    stage6_->devSeedDemoScanStep();
                 } else if (shot_mode == QStringLiteral("plan")) {
                     stage6_->configureForPlanning();
                     stage6_->devSeedDemoPlan();

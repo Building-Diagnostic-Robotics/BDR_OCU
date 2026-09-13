@@ -39,6 +39,39 @@ QStringList sshBaseArgs(const RobotTarget& target) {
            << QStringLiteral("%1@%2").arg(target.ssh_user, target.host);
 }
 
+/**
+ * Laptop-side sweep. `ros2 launch` reaps its ExecuteProcess children on
+ * SIGTERM, but a SIGKILLed launch (or one that died on its own) leaves
+ * `zenohd` and `host_teleop` running. Every orphaned zenohd is another
+ * bridge client on the robot's router routing the same topics again —
+ * three were found live on 2026-09-13 (duplicate readers, heartbeat
+ * bursts, "Closing transport!"). Sweep by exact process name so nothing
+ * unrelated is touched. `|| true`: nothing to kill is the normal case.
+ */
+const char* kLaptopSweep =
+    "pkill -f '[r]os2 launch pilot_control laptop_teleop.launch.py' "
+    ">/dev/null 2>&1 || true; "
+    "sleep 1; "
+    "pkill -x zenohd >/dev/null 2>&1 || true; "
+    "pkill -x host_teleop >/dev/null 2>&1 || true";
+
+/** Robot-side equivalent for the launch trees this screen owns. The
+    router zenohd is the launch's child too; a stale one holds port 7447
+    and the new launch's zenohd then fails to listen. */
+const char* kRobotSweep =
+    "pkill -f '[r]os2 launch pilot_control robot_autonomous_coverage' "
+    ">/dev/null 2>&1 || true; "
+    "pkill -f '[r]os2 launch pilot_control robot_map_collection' "
+    ">/dev/null 2>&1 || true; "
+    "sleep 2; "
+    "pkill -9 -f '[r]os2 launch pilot_control robot_autonomous_coverage' "
+    ">/dev/null 2>&1 || true; "
+    "pkill -f '[z]enohd -c .*zenohd_robot' >/dev/null 2>&1 || true";
+
+/** Give `ros2 launch` time to bring its whole tree down before SIGKILL —
+    the stack has ~25 processes and the 3 s used before left orphans. */
+constexpr int kLaunchTerminateGraceMs = 10000;
+
 }  // namespace
 
 MissionController::MissionController(QObject* parent) : QObject(parent) {
@@ -167,11 +200,8 @@ bool MissionController::startMission(const RoiPolygon& poly,
     // + host_teleop heartbeat). Same launch + args as the main OCU.
     {
         QProcess cleanup;
-        cleanup.start("bash",
-                      {"-lc",
-                       "pkill -f '[r]os2 launch pilot_control laptop_teleop.launch.py' "
-                       ">/dev/null 2>&1 || true"});
-        cleanup.waitForFinished(4000);
+        cleanup.start("bash", {"-lc", QString::fromLatin1(kLaptopSweep)});
+        cleanup.waitForFinished(6000);
     }
     QString laptop_cmd = QString::fromLatin1(kEnvPreamble) +
         QStringLiteral(
@@ -195,12 +225,9 @@ bool MissionController::startMission(const RoiPolygon& poly,
         QStringList args = sshBaseArgs(target_);
         // A lingering step-2 map-collection tree must not coexist with the
         // director: both own the LiDAR / FAST-LIO / ODrive nodes.
-        args << "pkill -f '[r]os2 launch pilot_control "
-                "robot_autonomous_coverage' >/dev/null 2>&1 || true; "
-                "pkill -f '[r]os2 launch pilot_control "
-                "robot_map_collection' >/dev/null 2>&1 || true";
+        args << QString::fromLatin1(kRobotSweep);
         cleanup.start("ssh", args);
-        cleanup.waitForFinished(8000);
+        cleanup.waitForFinished(12000);
     }
     // Pass the YAML list as a bare launch arg. Do NOT wrap it in
     // `$BDR_ROI_VERTICES`: the ssh remote is `bash -c` of a double-quoted
@@ -364,35 +391,31 @@ void MissionController::teardownMission() {
     if (target_.valid) {
         QProcess killer;
         QStringList args = sshBaseArgs(target_);
-        args << "pkill -f '[r]os2 launch pilot_control "
-                "robot_autonomous_coverage' >/dev/null 2>&1 || true; "
-                "sleep 2; "
-                "pkill -9 -f '[r]os2 launch pilot_control "
-                "robot_autonomous_coverage' >/dev/null 2>&1 || true";
+        args << QString::fromLatin1(kRobotSweep);
         killer.start("ssh", args);
-        killer.waitForFinished(12000);
+        killer.waitForFinished(15000);
     }
     if (robot_proc_->state() != QProcess::NotRunning) {
         robot_proc_->terminate();
-        if (!robot_proc_->waitForFinished(3000)) {
+        if (!robot_proc_->waitForFinished(kLaunchTerminateGraceMs)) {
             robot_proc_->kill();
             robot_proc_->waitForFinished(1000);
         }
     }
     if (laptop_proc_->state() != QProcess::NotRunning) {
+        // SIGTERM reaches `ros2 launch`, which shuts its children down in
+        // order; only escalate once it has had a real chance.
         laptop_proc_->terminate();
-        if (!laptop_proc_->waitForFinished(3000)) {
+        if (!laptop_proc_->waitForFinished(kLaunchTerminateGraceMs)) {
             laptop_proc_->kill();
             laptop_proc_->waitForFinished(1000);
         }
     }
     {
+        // Whatever the launch did not reap.
         QProcess cleanup;
-        cleanup.start("bash",
-                      {"-lc",
-                       "pkill -f '[r]os2 launch pilot_control laptop_teleop.launch.py' "
-                       ">/dev/null 2>&1 || true"});
-        cleanup.waitForFinished(4000);
+        cleanup.start("bash", {"-lc", QString::fromLatin1(kLaptopSweep)});
+        cleanup.waitForFinished(6000);
     }
 
     mission_active_ = false;

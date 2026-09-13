@@ -33,7 +33,10 @@
 #include "satellite_tile_service.hpp"
 #include "similarity_2d.hpp"
 
+#include "satellite_ros_link.hpp"
+
 #include <QDate>
+#include <QFutureWatcher>
 #include <QImage>
 #include <QRectF>
 #include <QSet>
@@ -101,6 +104,8 @@ public:
     void devSeedDemoAlignmentEmpty();
     /** Dev shot only: aligned, then step 3 with the demo polygon closed. */
     void devSeedDemoRoiStep();
+    /** Dev shot only: step 5 (Stage 5 scan page) with no mission active. */
+    void devSeedDemoScanStep();
 
     /** Mirrors the Dashboard MQTT battery sample onto the top-bar pill
         (same contract as ExplorationScreen/PlannerScreen). */
@@ -183,8 +188,19 @@ private:
     /** Top-bar title: trim name plus the plan name (frame: "Satellite ROI
         Setup — <plan>"). */
     void refreshTitle();
-    QWidget* buildMissionCard(QWidget* parent);
     QWidget* buildTeleopCard(QWidget* parent);
+    // Step 5 — the shipped Stage 5 Scan page, reproduced 1:1.
+    QWidget* buildScanLeftRail(QWidget* parent);
+    QWidget* buildScanRightRail(QWidget* parent);
+    QWidget* buildScanControlBar(QWidget* parent);
+    QWidget* buildScanStatusPill(QWidget* parent);
+    QWidget* buildScanFooter();
+    /** Odom-driven telemetry: speed, position, heading, distance. */
+    void updateScanTelemetry();
+    /** Off-thread reprojection quality: odom trail vs planned swaths. */
+    void maybeScheduleScanQualityUpdate();
+    static double computeReprojectionQualityPercent(
+        const QVector<QVector<QPointF>>& planned, const QVector<QPointF>& trail);
     QWidget* buildLogCard(QWidget* parent);
     /** Card carrying a step's acknowledgement checkbox — the whole content
         of steps 3 and 4 until their Figma frames land. */
@@ -569,12 +585,47 @@ private:
     QPushButton* disarm_button_ = nullptr;
     QPushButton* estop_button_ = nullptr;
     QPushButton* scan_start_pause_button_ = nullptr;
+    QLabel* scan_start_pause_icon_ = nullptr;
+    QLabel* scan_start_pause_text_ = nullptr;
     QPushButton* scan_cancel_button_ = nullptr;
+    QLabel* scan_cancel_text_ = nullptr;
+    QLabel* scan_run_summary_label_ = nullptr;
     QLabel* scan_elapsed_label_ = nullptr;
     QLabel* scan_coverage_label_ = nullptr;
+    QProgressBar* scan_quality_bar_ = nullptr;
+    QLabel* scan_quality_label_ = nullptr;
+    QLabel* scan_speed_label_ = nullptr;
+    QLabel* scan_pos_x_label_ = nullptr;
+    QLabel* scan_pos_y_label_ = nullptr;
+    QLabel* scan_heading_label_ = nullptr;
+    QLabel* scan_distance_label_ = nullptr;
+    QLabel* scan_avg_quality_label_ = nullptr;
+    QLabel* scan_eta_label_ = nullptr;
     QLabel* scan_copy_label_ = nullptr;
     QLabel* scan_override_label_ = nullptr;
     FPVCameraView* scan_camera_view_ = nullptr;
+    QWidget* scan_left_rail_ = nullptr;
+    QWidget* scan_right_rail_ = nullptr;
+    QWidget* scan_control_bar_ = nullptr;
+    QWidget* scan_footer_ = nullptr;
+    QPushButton* scan_footer_back_ = nullptr;
+    QLabel* scan_footer_step_label_ = nullptr;
+    QLabel* end_button_text_ = nullptr;
+    QWidget* scan_status_pill_ = nullptr;
+    QLabel* scan_status_dot_ = nullptr;
+    QLabel* scan_status_text_ = nullptr;
+    QWidget* content_ = nullptr;
+    QWidget* canvas_column_ = nullptr;
+    // Odom-derived telemetry for the scan cards.
+    OdomSnapshot last_odom_;
+    bool have_last_odom_ = false;
+    double scan_distance_m_ = 0.0;
+    double scan_speed_mps_ = 0.0;
+    double scan_quality_pct_ = 0.0;
+    double scan_quality_sum_ = 0.0;
+    int scan_quality_samples_ = 0;
+    qint64 last_quality_ms_ = 0;
+    QFutureWatcher<double>* scan_quality_watcher_ = nullptr;
 
     enum class ScanRunState { Idle, Running, Paused, Completed };
     ScanRunState scan_run_state_ = ScanRunState::Idle;
