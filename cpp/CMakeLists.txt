@@ -164,6 +164,7 @@ set(HEADERS
     include/upload_runner.hpp
     include/upload_dialog.hpp
     include/thumb_drive_watcher.hpp
+    include/launch_env.hpp
     include/components/bdr_message_box.hpp
     include/components/bdr_input_dialog.hpp
     include/components/bdr_progress_dialog.hpp

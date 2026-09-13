@@ -43,6 +43,7 @@
 #endif
 
 #include "cloud_upload_manager.hpp"
+#include "launch_env.hpp"
 #include "components/bdr_message_box.hpp"
 #include "components/mission_metadata_dialog.hpp"
 #include "components/offline_finalize_dialog.hpp"
@@ -3000,12 +3001,7 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
     // Best-effort cleanup for local processes that may outlive launch wrappers.
     {
         QProcess cleanup_proc;
-        const QString cleanup_cmd = QString(
-            "pkill -f \"[r]os2 launch pilot_control laptop_teleop.launch.py\" >/dev/null 2>&1 || true; "
-            "pkill -f \"[z]enohd -c /tmp/zenohd_laptop_%1.json5\" >/dev/null 2>&1 || true; "
-            "pkill -f \"[/]pilot_control/host_teleop\" >/dev/null 2>&1 || true")
-                                        .arg(robot_host);
-        cleanup_proc.start("bash", QStringList() << "-lc" << cleanup_cmd);
+        cleanup_proc.start("bash", QStringList() << "-lc" << QString::fromLatin1(kLaptopLaunchSweep));
         if (!cleanup_proc.waitForFinished(5000)) {
             cleanup_proc.kill();
             cleanup_proc.waitForFinished(500);
@@ -3368,31 +3364,16 @@ void AppShellWindow::startLaptopTeleopLaunch(const QString& robot_host) {
 
     // Always start from a clean local teleop state to avoid duplicate Zenoh/DDS conflicts.
     QProcess cleanup_proc;
-    const QString cleanup_cmd = QString(
-        "pkill -f \"[r]os2 launch pilot_control laptop_teleop.launch.py\" >/dev/null 2>&1 || true; "
-        "pkill -f \"[z]enohd -c /tmp/zenohd_laptop_%1.json5\" >/dev/null 2>&1 || true; "
-        "pkill -f \"[/]pilot_control/host_teleop\" >/dev/null 2>&1 || true; "
-        "sleep 1")
-                                    .arg(robot_host);
-    cleanup_proc.start("bash", QStringList() << "-lc" << cleanup_cmd);
+    cleanup_proc.start("bash", QStringList() << "-lc" << QString::fromLatin1(kLaptopLaunchSweep));
     cleanup_proc.waitForFinished(5000);
 
-    QString local_cmd =
-        "set -e; "
-        "if [ -f \"$HOME/.bashrc\" ]; then source \"$HOME/.bashrc\"; fi; "
-        "if [ -f /opt/ros/humble/setup.bash ]; then source /opt/ros/humble/setup.bash; fi; "
-        "if [ -f \"$HOME/pilot_ws/install/setup.bash\" ]; then source \"$HOME/pilot_ws/install/setup.bash\"; fi; "
-        "case \"${CYCLONEDDS_URI:-}\" in *rf_cyclonedds.xml*) unset CYCLONEDDS_URI ;; esac; "
-        "if [ -z \"${CYCLONEDDS_URI:-}\" ] && [ -f \"$HOME/cyclone_loopback.xml\" ]; then "
-        "export CYCLONEDDS_URI=\"file://$HOME/cyclone_loopback.xml\"; "
-        "fi; "
-        "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; "
-        "export ROS_DOMAIN_ID=0; "
-        "echo \"[BDR app laptop launch env] CYCLONEDDS_URI=${CYCLONEDDS_URI:-<unset>} "
-        "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-<unset>} ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-<unset>}\"; "
-        "ros2 launch pilot_control laptop_teleop.launch.py "
-        "robot_ip:=%1 use_xterm:=false interactive_sdl:=false cmd_vel_enabled:=false";
-    local_cmd = local_cmd.arg(robot_host);
+    const QString local_cmd = QString::fromLatin1(kLaunchEnvPreamble) +
+        QString(
+            "echo \"[BDR app laptop launch env] CYCLONEDDS_URI=${CYCLONEDDS_URI:-<unset>} "
+            "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-<unset>} ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-<unset>}\"; "
+            "ros2 launch pilot_control laptop_teleop.launch.py "
+            "robot_ip:=%1 use_xterm:=false interactive_sdl:=false cmd_vel_enabled:=false")
+            .arg(robot_host);
 
     laptop_launch_proc_->start("bash", QStringList() << "-lc" << local_cmd);
     if (!laptop_launch_proc_->waitForStarted(3000)) {
@@ -3417,19 +3398,7 @@ void AppShellWindow::startRobotCompleteLaunch(const ResolvedRobotSshTarget& ssh_
         return;
     }
 
-    QString remote_script =
-        "set -e; "
-        "if [ -f \"$HOME/.bashrc\" ]; then source \"$HOME/.bashrc\"; fi; "
-        "if [ -f /opt/ros/humble/setup.bash ]; then source /opt/ros/humble/setup.bash; "
-        "elif [ -f /opt/ros/foxy/setup.bash ]; then source /opt/ros/foxy/setup.bash; "
-        "fi; "
-        "if [ -f \"$HOME/pilot_ws/install/setup.bash\" ]; then source \"$HOME/pilot_ws/install/setup.bash\"; fi; "
-        "case \"${CYCLONEDDS_URI:-}\" in *rf_cyclonedds.xml*) unset CYCLONEDDS_URI ;; esac; "
-        "if [ -z \"${CYCLONEDDS_URI:-}\" ] && [ -f \"$HOME/cyclone_loopback.xml\" ]; then "
-        "export CYCLONEDDS_URI=\"file://$HOME/cyclone_loopback.xml\"; "
-        "fi; "
-        "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; "
-        "export ROS_DOMAIN_ID=0; "
+    QString remote_script = QString::fromLatin1(kLaunchEnvPreamble) +
         "echo \"[BDR app robot launch env] CYCLONEDDS_URI=${CYCLONEDDS_URI:-<unset>} "
         "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-<unset>} ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-<unset>}\"; "
         "ros2 launch pilot_control robot_complete.launch.py";

@@ -644,7 +644,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 }
                 if (!active) {
                     stopMetadataPushLoop();
-                    stopAutonomyLatch();
                     stopScanFpv();
                     // /mpc_autonomy_enable is TRANSIENT_LOCAL: whatever was
                     // last published is what the NEXT stack's director reads
@@ -660,6 +659,8 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     launch_wall_ms_ = 0;
                     first_robot_topic_wall_ms_ = 0;
                     director_wait_prompted_ = false;
+                    start_scan_pending_ = false;
+                    metadata_pushed_ = false;
                     scan_run_state_ = ScanRunState::Idle;
                     scan_autonomy_ran_ = false;
                     manual_override_ = false;
@@ -700,19 +701,8 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 }
                 refreshScanRunUi();
             });
-    connect(mission_, &MissionController::robotLaunchDied, this,
-            &SatelliteScreen::handleDirectorDeath);
-    connect(mission_, &MissionController::laptopLaunchDied, this,
-            [this](int code) {
-                if (!mission_->missionActive() || director_failed_) {
-                    return;
-                }
-                appendLog(QStringLiteral(
-                              "[launch] laptop launch exited (rc=%1) — "
-                              "heartbeat lost, robot will halt")
-                              .arg(code));
-                handleDirectorDeath(code);
-            });
+    connect(mission_, &MissionController::launchDied, this,
+            &SatelliteScreen::handleLaunchDeath);
 
     teleop_timer_ = new QTimer(this);
     teleop_timer_->setInterval(100);
@@ -791,7 +781,9 @@ void SatelliteScreen::attachLinkHealthMonitor(LinkHealthMonitor* monitor) {
 }
 
 void SatelliteScreen::startMetadataPushLoop() {
-    metadata_pushed_ = false;
+    if (metadata_timer_->isActive()) {
+        return;
+    }
     metadata_attempts_ = 0;
     refreshScanRunUi();
     attemptMetadataPush();
@@ -800,6 +792,17 @@ void SatelliteScreen::startMetadataPushLoop() {
 
 void SatelliteScreen::stopMetadataPushLoop() {
     metadata_timer_->stop();
+}
+
+void SatelliteScreen::onMetadataPushed(const QString& via) {
+    metadata_pushed_ = true;
+    stopMetadataPushLoop();
+    appendLog(QStringLiteral("[send] session metadata accepted %1").arg(via));
+    refreshScanRunUi();
+    if (start_scan_pending_) {
+        start_scan_pending_ = false;
+        beginStartScan();
+    }
 }
 
 void SatelliteScreen::attemptMetadataPush() {
@@ -821,16 +824,10 @@ void SatelliteScreen::attemptMetadataPush() {
                 return;
             }
             if (ok) {
-                metadata_pushed_ = true;
-                stopMetadataPushLoop();
-                appendLog(QStringLiteral(
-                    "[send] session metadata accepted by coordinator"));
-                if (reason_label_) {
-                    reason_label_->setText(QStringLiteral(
-                        "Waiting for the coverage director…"));
-                }
-                refreshScanRunUi();
-            } else if (metadata_attempts_ % 5 == 1) {
+                onMetadataPushed(QStringLiteral("by coordinator"));
+                return;
+            }
+            if (metadata_attempts_ % 5 == 1) {
                 appendLog(QStringLiteral(
                               "[send] waiting for coordinator (metadata "
                               "push, attempt %1)…")
@@ -841,7 +838,7 @@ void SatelliteScreen::attemptMetadataPush() {
             // failing push is a lost zenoh query, not a slow boot: land the
             // same SetParameters over SSH, the legacy screen's path. Hard
             // gate preserved — autonomy stays locked until one succeeds.
-            if (!ok && metadata_attempts_ == 5 && !metadata_ssh_in_flight_) {
+            if (metadata_attempts_ == 5 && !metadata_ssh_in_flight_) {
                 metadata_ssh_in_flight_ = true;
                 appendLog(QStringLiteral(
                     "[send] metadata push via bridge not landing — trying "
@@ -878,11 +875,7 @@ void SatelliteScreen::attemptMetadataPush() {
                         // "successful=False" is acceptance.
                         if (ssh_ok && !detail.contains(
                                           QLatin1String("successful=False"))) {
-                            metadata_pushed_ = true;
-                            stopMetadataPushLoop();
-                            appendLog(QStringLiteral(
-                                "[send] session metadata accepted via SSH"));
-                            refreshScanRunUi();
+                            onMetadataPushed(QStringLiteral("via SSH"));
                         } else {
                             appendLog(QStringLiteral(
                                           "[send] SSH metadata push failed: %1")
@@ -2128,6 +2121,11 @@ void SatelliteScreen::onNextClicked() {
         refreshStepUi();
     }
     if (selected_step_ == Step::EdgeReview) {
+        if (!planning_only_) {
+            // Field: the launch confirm is the edge review confirm.
+            launchMissionFromEdgeReview();
+            return;
+        }
         if (!confirmDialog(QStringLiteral("Edges Reviewed"),
                            edgeReviewSummary(),
                            QStringLiteral("Confirm"))) {
@@ -2135,10 +2133,6 @@ void SatelliteScreen::onNextClicked() {
         }
         edges_reviewed_ = true;
         refreshStepUi();
-        if (!planning_only_) {
-            launchMissionFromEdgeReview();
-            return;
-        }
     }
     setSelectedStep(nextAvailableStep(selected_step_));
 }
@@ -5183,21 +5177,22 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
             "[send] draw the ROI and place the robot marker first"));
         return;
     }
-    const QString roi_arg =
-        MissionController::roiVerticesArgument(poly, marker);
+    // One confirmation covers the edge review and the launch.
     if (!confirmDialog(
             QStringLiteral("Launch coverage stack"),
             QStringLiteral(
-                "Confirm before launch:\n\n"
+                "%1\n\n"
+                "Confirm before launch:\n"
                 "• The robot is physically at the marker position.\n"
-                "• The robot is facing the marker's arrow direction (%1°).\n"
-                "• The ROI will be anchored to the robot exactly as drawn.\n\n"
-                "roi_vertices (robot frame): %2")
-                .arg(marker.heading_deg, 0, 'f', 1)
-                .arg(roi_arg),
+                "• The robot is facing the marker's arrow direction (%2°).\n"
+                "• The ROI will be anchored to the robot exactly as drawn.")
+                .arg(edgeReviewSummary())
+                .arg(marker.heading_deg, 0, 'f', 1),
             QStringLiteral("Launch"))) {
         return;
     }
+    edges_reviewed_ = true;
+    refreshStepUi();
     QString error;
     if (!mission_->startMission(poly, marker, &error)) {
         appendLog(QStringLiteral("[send] FAILED: %1").arg(error));
@@ -5221,19 +5216,15 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
             }
         }
     }
-    director_failed_ = false;
-    scan_run_state_ = ScanRunState::Idle;
+    // Run-state bookkeeping was reset by the previous teardown
+    // (missionActiveChanged(false)); only the launch clock is new.
     setStatePill(QStringLiteral("LAUNCHING"), QColor(kAmber));
     if (reason_label_) {
         reason_label_->setText(QStringLiteral(
             "Launching robot stack… Start Scan unlocks when the director "
-            "reports initialized."));
+            "reports in."));
     }
-    startMetadataPushLoop();
-    manager_occupancy_seen_ = false;
     launch_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
-    first_robot_topic_wall_ms_ = 0;
-    director_wait_prompted_ = false;
     manager_watch_timer_->start();
     setSelectedStep(Step::AutonomousScan);
 }
@@ -5432,16 +5423,19 @@ void SatelliteScreen::beginStartScan() {
     if (!mission_->missionActive() || director_failed_) {
         return;
     }
-    if (!metadata_pushed_) {
-        appendLog(QStringLiteral(
-            "[scan] waiting for coordinator metadata before Start Scan"));
-        startMetadataPushLoop();
-        return;
-    }
     if (!directorReady()) {
         appendLog(QStringLiteral(
             "[scan] director not reporting — Start Scan stays locked"));
         refreshScanRunUi();
+        return;
+    }
+    // Arming gate (legacy contract): the coordinator must hold the session
+    // metadata before autonomy is enabled. Pushed here, on demand, not
+    // during the boot window; the loop calls back into beginStartScan.
+    if (!metadata_pushed_) {
+        start_scan_pending_ = true;
+        appendLog(QStringLiteral("[scan] pushing session metadata…"));
+        startMetadataPushLoop();
         return;
     }
     if (ros_->motorsArmed()) {
@@ -5538,30 +5532,39 @@ void SatelliteScreen::onScanCancelClicked() {
     });
 }
 
-void SatelliteScreen::handleDirectorDeath(int exit_code) {
+void SatelliteScreen::handleLaunchDeath(const QString& side, int exit_code) {
     if (!mission_->missionActive() || director_failed_) {
         return;
     }
-    director_failed_ = true;
-    manager_watch_timer_->stop();
-    stopAutonomyLatch();
+    director_failed_ = true;   // re-entry guard until teardown resets state
     setAutonomyEnabled(false);
-    const QStringList tail = mission_->recentRobotOutput(8);
-    appendLog(QStringLiteral("[director] robot launch exited (rc=%1)")
-                  .arg(exit_code));
+    const bool robot = side == QLatin1String("robot");
+    const QStringList tail = robot ? mission_->recentRobotOutput(8) : QStringList();
+    appendLog(QStringLiteral("[launch] %1 launch exited (rc=%2)")
+                  .arg(side).arg(exit_code));
     for (const QString& line : tail) {
         appendLog(QStringLiteral("  %1").arg(line));
     }
     mission_->teardownMission();
-    QString body = QStringLiteral(
-        "A launch process exited (rc=%1) — see the log for which side. The "
-        "plan stays PLANNED — press Next on Edge Review to relaunch.\n")
-                       .arg(exit_code);
+    QString body =
+        robot ? QStringLiteral(
+                    "The robot launch exited (rc=%1). The plan stays PLANNED "
+                    "— press Next on Edge Review to relaunch.\n")
+                    .arg(exit_code)
+              : QStringLiteral(
+                    "The laptop launch (Zenoh bridge + heartbeat) exited "
+                    "(rc=%1); the robot halts without it. The plan stays "
+                    "PLANNED — press Next on Edge Review to relaunch.\n")
+                    .arg(exit_code);
     if (!tail.isEmpty()) {
         body += QStringLiteral("\nLast robot output:\n%1")
                     .arg(tail.join(QLatin1Char('\n')));
     }
-    BdrMessageBox::warning(this, QStringLiteral("Robot stack failed"), body);
+    BdrMessageBox::warning(
+        this,
+        robot ? QStringLiteral("Robot stack failed")
+              : QStringLiteral("Laptop launch failed"),
+        body);
     setSelectedStep(Step::EdgeReview);
 }
 
@@ -5642,8 +5645,7 @@ void SatelliteScreen::setManualOverride(bool active) {
 
 void SatelliteScreen::refreshScanRunUi() {
     const bool active = mission_->missionActive();
-    const bool ready = active && metadata_pushed_ && directorReady() &&
-                       !director_failed_;
+    const bool ready = active && directorReady();
     const CoverageStatus status = ros_->coverageStatus();
     const bool status_live = active && status.fresh(10000);
 
@@ -5664,7 +5666,10 @@ void SatelliteScreen::refreshScanRunUi() {
         QString label = QStringLiteral("Start Scan");
         QString icon = QStringLiteral(":/assets/missionplanner/scan_play.svg");
         bool enable = ready && scan_run_state_ == ScanRunState::Idle &&
-                      !manual_override_;
+                      !manual_override_ && !start_scan_pending_;
+        if (start_scan_pending_) {
+            label = QStringLiteral("Starting…");
+        }
         if (scan_run_state_ == ScanRunState::Running) {
             label = QStringLiteral("Pause");
             icon = QStringLiteral(":/assets/missionplanner/scan_pause.svg");
@@ -5686,11 +5691,13 @@ void SatelliteScreen::refreshScanRunUi() {
         if (manual_override_) {
             scan_start_pause_button_->setToolTip(QStringLiteral(
                 "Click the map view to hand control back to autonomy."));
+        } else if (start_scan_pending_) {
+            scan_start_pause_button_->setToolTip(
+                QStringLiteral("Waiting for the coordinator to accept the "
+                               "session metadata…"));
         } else if (!ready && active) {
             scan_start_pause_button_->setToolTip(
-                metadata_pushed_
-                    ? QStringLiteral("Waiting for the coverage director…")
-                    : QStringLiteral("Waiting for session metadata…"));
+                QStringLiteral("Waiting for the coverage director…"));
         } else {
             scan_start_pause_button_->setToolTip(QString());
         }
@@ -6252,10 +6259,6 @@ void SatelliteScreen::setAutonomyEnabled(bool enabled) {
                   .arg(autonomy_on_ ? QStringLiteral("true")
                                     : QStringLiteral("false")));
 }
-
-void SatelliteScreen::startAutonomyLatch() {}
-
-void SatelliteScreen::stopAutonomyLatch() {}
 
 void SatelliteScreen::publishTeleopTick() {
     if (!teleop_check_->isChecked() || !ros_->isRunning()) {

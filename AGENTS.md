@@ -882,9 +882,11 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  `armPolygonDraw()`s the canvas, Clear ROI re-arms it, and clicking near
  the first vertex closes the polygon (right-click still works). Step-3
  Next pops a **Confirm ROI modal** (closed polygon is readiness,
- `confirmed_vertices_` is completion). Step-4 Next pops **Edges Reviewed**
- then, in the field, **launches** the director stack (marker-at-pose
- confirm) — there is no Send button. Ack checkboxes are gone. Measured
+ `confirmed_vertices_` is completion). Step-4 Next pops **one** modal: in
+ the office it is **Edges Reviewed**; in the field it is **Launch coverage
+ stack** (edge summary + marker-at-pose checklist in the same dialog) and
+ confirming **launches** the director stack — there is no Send button and
+ no second confirm. Ack checkboxes are gone. Measured
  field trim hides Satellite Map (Robot Map is step 1); chips renumber
  1–4. **Step 5 is the shipped Stage 5 Scan page reproduced 1:1**
  (`buildScanLeftRail` / `buildScanRightRail` / `buildScanControlBar` /
@@ -1021,9 +1023,13 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  `ros2 service call` over SSH (`MissionController::remoteServiceCall` /
  `remoteDisarm`) — zenoh queries are the first thing to time out on a
  congested radio, SSH is not.
-- **Start Scan is the arming gate**: metadata push accepted (bridge,
- retried 3 s; SSH `set_parameters` fallback after 5 misses) AND
- `/coverage/status` fresh (< 3 s) and not `ERROR`. **Never gate on
+- **Start Scan is the arming gate**: `/coverage/status` fresh (< 3 s) and
+ not `ERROR` enables the button; pressing it pushes the session metadata
+ **on demand** (bridge, retried 3 s; SSH `set_parameters` fallback after
+ 5 misses — `start_scan_pending_` resumes `beginStartScan` when it lands)
+ and only then arms. Nothing is pushed during the boot window — the
+ legacy screen pushed at Start Scan too, and a query every 3 s over the
+ radio while the stack boots is load with no purpose. **Never gate on
  `initialized`**: the director only initializes once `ready.mpc` is true,
  and the MPC only raises `/mpc/execution_ready` after autonomy is enabled
  — which Start Scan sends. Gating on it deadlocked in the field
@@ -1032,7 +1038,8 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  and an unarmed MPC cannot move; the MOTORS chip shows the truth). On
  mission end the OCU latches `/mpc_autonomy_enable=false` so a relaunched
  director can never read a stale `true`. A laptop-launch exit is handled
- like a robot-launch exit (heartbeat gone = dead run).
+ like a robot-launch exit (heartbeat gone = dead run) — same
+ `launchDied` signal, the modal names the side.
 - The BOT pill runs the layered link model: AppShell arms
  `link_monitor_` + `reachability_probe_` on `missionActiveChanged(true)`
  (probe host = the Send SSH target) and every Stage 6 ROS callback stamps
@@ -1066,8 +1073,9 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  teardown. Do **not** wait for the thumb-drive copy; that surfaces later
  on the Dashboard. SSH-offline fallback is unchanged
  (`finalize_mission_local.py` via direct `python3`). **The only hard
- director-death signal is `MissionController::robotLaunchDied`** (the SSH
- launch process exiting) — that auto-teardowns, keeps the plan PLANNED,
+ death signal is `MissionController::launchDied(side, rc)`** (the SSH
+ session carrying the robot launch, or the laptop launch, exiting
+ unasked) — `handleLaunchDeath` auto-teardowns, keeps the plan PLANNED,
  and returns to Edge Review. The status watchdog (`onDirectorWatchTick`,
  1 Hz) is advisory: it drives a `LAUNCHING · robot link / director Xs`
  pill, starts its clock at the first robot topic (`noteRobotTopic`), and
@@ -1078,7 +1086,23 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 - **Launch is Edge Review Next**, not a Send button. Back from step 5
  while the stack is up (and Start Scan has never run) confirms teardown;
  once autonomy has run, Back is disabled — Cancel / Complete are the exits.
- `startMission` pkills `robot_map_collection` as well as the director tree.
+- **Launch/teardown primitives are shared and deliberately dumb.**
+ `cpp/include/launch_env.hpp` holds the one env preamble and the one
+ laptop sweep used by both the legacy Stage 4/5 path and Stage 6.
+ `MissionController::kRobotSweep` is the single robot sweep, run before
+ a launch (a lingering step-2 map-collection tree must not coexist with
+ the director) and at teardown: **`pkill -INT` the launch** (Ctrl-C —
+ launch shuts its ~25 children down in order), wait for it to exit, kill
+ by name what ignores shutdown (Fast-LIO, Livox, ODrive, director, MPC,
+ UDC, bag record, zenohd), wait for UDC to release the Seek SDK, `-9`
+ only the survivors. **Never SIGKILL `ros2 launch` first and never
+ `terminate()` the local `ssh -tt` before the remote launch has exited**
+ — both orphan every node (the stray `ros2 bag record` found on
+ 2026-09-13 was exactly that), and the next launch then fights orphans
+ for the LiDAR port, the CAN bus and `/coverage/status`. Teardown order
+ is robot sweep → reap `robot_proc_` → SIGTERM laptop launch → laptop
+ sweep. All run-state bookkeeping is reset in ONE place, the
+ `missionActiveChanged(false)` handler — do not add resets at launch.
 - `RosLink::motorsIdle()` requires **fresh** controller_status on both
  axes. Do not relax that to "state == IDLE" alone — a dead CAN bus would
  then read as disarmed while the axes are still in closed loop.

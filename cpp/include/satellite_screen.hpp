@@ -335,7 +335,9 @@ private:
     void onScanStartPauseClicked();
     void onScanCancelClicked();
     void beginStartScan();
-    void handleDirectorDeath(int exit_code);
+    /** A launch exited unasked (`side` = "robot" | "laptop"): tear down,
+        tell the operator, back to Edge Review. Plan stays PLANNED. */
+    void handleLaunchDeath(const QString& side, int exit_code);
     void maybePromptRevisit();
     void setManualOverride(bool active);
     void refreshScanRunUi();
@@ -364,11 +366,11 @@ private:
 
     void publishTeleopTick();
     void setAutonomyEnabled(bool enabled);
-    void startAutonomyLatch();
-    void stopAutonomyLatch();
     void startMetadataPushLoop();
     void stopMetadataPushLoop();
     void attemptMetadataPush();
+    /** Both push paths land here; resumes a pending Start Scan. */
+    void onMetadataPushed(const QString& via);
     void updateBotPill();
     void updateStatePill();
     void setBotPill(const QString& text, const QColor& color);
@@ -635,12 +637,16 @@ private:
     bool revisit_prompt_open_ = false;
     bool revisit_hold_ = false;  // WAITING_REVISIT latched (prompt edge)
     bool director_failed_ = false;
-    // Director-boot bookkeeping. The only hard "death" signal is the SSH
-    // launch process exiting (MissionController::robotLaunchDied); the
-    // status watchdog is advisory and never tears down on its own.
+    // Director-boot bookkeeping. The only hard "death" signal is a launch
+    // process exiting (MissionController::launchDied); the status watchdog
+    // is advisory and never tears down on its own. All of this is reset in
+    // one place: the missionActiveChanged(false) handler.
     qint64 launch_wall_ms_ = 0;
     qint64 first_robot_topic_wall_ms_ = 0;
     bool director_wait_prompted_ = false;
+    /** Start Scan was pressed before the coordinator accepted the session
+        metadata; the push loop resumes Start Scan when it lands. */
+    bool start_scan_pending_ = false;
     /** Stamps the first robot-originated topic since launch. */
     void noteRobotTopic();
     void onDirectorWatchTick();

@@ -65,7 +65,10 @@ public:
     bool startMission(const RoiPolygon& poly, const geo::GeoPose& robot,
                       QString* error = nullptr);
 
-    /** Kills both launch trees (remote pkill + local process kill). */
+    /** Stops both launch trees: Ctrl-C to the robot launch over SSH (so
+        it shuts its tree down in order) + name sweep of what ignores it,
+        then SIGTERM to the laptop launch. Synchronous; emits
+        missionStateChanged(false) before returning. */
     void teardownMission();
 
     /** Last lines of the robot launch's merged stdout/stderr — the
@@ -89,16 +92,20 @@ signals:
     void logLine(const QString& line);
     void missionStateChanged(bool active);
     /**
-     * The robot-side `ros2 launch` exited while the mission was active and
-     * nobody asked it to (not during teardownMission). rc=0 included: an
-     * SSH session that ends is a stack that is gone either way.
+     * A launch exited while the mission was active and nobody asked it to
+     * (not during teardownMission). `side` is "robot" (the SSH session
+     * carrying the director stack ended — rc=0 included, a session that
+     * ends is a stack that is gone) or "laptop" (zenoh client + heartbeat
+     * gone; the MPC's 1 s heartbeat timeout halts the robot and nothing
+     * the OCU publishes gets across). Both are fatal to the run.
      */
-    void robotLaunchDied(int exit_code);
-    /** The laptop-side launch (zenoh client + heartbeat) exited unasked. */
-    void laptopLaunchDied(int exit_code);
+    void launchDied(const QString& side, int exit_code);
 
 private:
     void hookProcessLogging(QProcess* proc, const QString& tag);
+    /** One SSH round trip that leaves the robot with no Stage 6 stack
+        running (see kRobotSweep). Blocking; ~1 s when already clean. */
+    void runRobotSweep();
 
     RobotTarget target_;
     QProcess* laptop_proc_ = nullptr;
