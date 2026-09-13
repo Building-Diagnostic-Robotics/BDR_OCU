@@ -4958,10 +4958,15 @@ void SatelliteScreen::refreshScanRunUi() {
         const CoverageStatus status = ros_->coverageStatus();
         const QString copy = status.copy.toLower();
         if (copy == QLatin1String("copying") ||
-            copy == QLatin1String("pending")) {
+            copy == QLatin1String("pending") ||
+            copy == QLatin1String("queued")) {
             scan_copy_label_->setVisible(true);
             scan_copy_label_->setText(
                 QStringLiteral("Thumb-drive copy in progress…"));
+        } else if (copy == QLatin1String("waiting_for_drive")) {
+            scan_copy_label_->setVisible(true);
+            scan_copy_label_->setText(
+                QStringLiteral("Copy queued — waiting for the thumb drive"));
         } else if (!status.copy_error.isEmpty()) {
             scan_copy_label_->setVisible(true);
             scan_copy_label_->setText(
@@ -5108,8 +5113,13 @@ void SatelliteScreen::executeCompleteMissionNormalPath() {
             ++conclude_wait_ticks_;
             const CoverageStatus status = ros_->coverageStatus();
             const QString copy = status.copy.toLower();
+            // Any copy state past "idle" means the section was saved and
+            // handed to the offload worker (queued / waiting_for_drive are
+            // the systemd-worker states on cliff-on-autonomy).
             const bool save_done =
                 status.complete || copy == QLatin1String("pending") ||
+                copy == QLatin1String("queued") ||
+                copy == QLatin1String("waiting_for_drive") ||
                 copy == QLatin1String("copying") ||
                 copy == QLatin1String("done") ||
                 copy == QLatin1String("skipped") ||
@@ -5122,10 +5132,12 @@ void SatelliteScreen::executeCompleteMissionNormalPath() {
                     markCurrentPlanCompleted();
                 }
                 if (copy == QLatin1String("pending") ||
+                    copy == QLatin1String("queued") ||
+                    copy == QLatin1String("waiting_for_drive") ||
                     copy == QLatin1String("copying")) {
                     appendLog(QStringLiteral(
-                        "[mission] thumb-drive copy still running — "
-                        "Dashboard will show progress"));
+                        "[mission] thumb-drive copy handed to the offload "
+                        "worker — Dashboard will show progress"));
                 }
                 beginMotorsIdleWait([this](bool timed_out) {
                     appendLog(timed_out
