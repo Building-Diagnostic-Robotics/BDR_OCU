@@ -996,8 +996,15 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  pending/copying/done/skipped, 30 s ceiling) → motors IDLE wait →
  teardown. Do **not** wait for the thumb-drive copy; that surfaces later
  on the Dashboard. SSH-offline fallback is unchanged
- (`finalize_mission_local.py` via direct `python3`). A director process
- death auto-teardowns, keeps the plan PLANNED, and returns to Edge Review.
+ (`finalize_mission_local.py` via direct `python3`). **The only hard
+ director-death signal is `MissionController::robotLaunchDied`** (the SSH
+ launch process exiting) — that auto-teardowns, keeps the plan PLANNED,
+ and returns to Edge Review. The status watchdog (`onDirectorWatchTick`,
+ 1 Hz) is advisory: it drives a `LAUNCHING · robot link / director Xs`
+ pill, starts its clock at the first robot topic (`noteRobotTopic`), and
+ after 120 s (180 s with no topic at all) asks Keep waiting / cancel. It
+ must never tear down by itself — the full stack + Zenoh session takes
+ 30-60 s and a 20 s auto-teardown killed a healthy launch in the field.
  Do not add a link gate to `end_button_`.
 - **Launch is Edge Review Next**, not a Send button. Back from step 5
  while the stack is up (and Start Scan has never run) confirms teardown;

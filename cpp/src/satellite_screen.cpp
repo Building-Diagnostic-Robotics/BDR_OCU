@@ -138,7 +138,13 @@ constexpr StepSpec kMeasuredStepSpecs[] = {
 
 constexpr int kScanFpvPort = 5600;
 constexpr qint64 kDirectorFreshMs = 3000;
-constexpr int kDirectorWatchdogMs = 20000;
+// Director boot is advisory-only: the full robot_complete stack plus the
+// Zenoh session takes 30-60 s before /coverage/status can reach the laptop.
+// The clock starts at the first robot topic; before that we are waiting on
+// the link, not the director. On expiry the operator is asked, never torn
+// down automatically.
+constexpr qint64 kDirectorWaitPromptMs = 120000;
+constexpr qint64 kRobotLinkWaitPromptMs = 180000;
 
 constexpr const char* kSatViewLatKey = "satellite/center_lat";
 constexpr const char* kSatViewLonKey = "satellite/center_lon";
@@ -517,6 +523,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // healthy session that only uses that topic).
     connect(ros_, &RosLink::gridUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+        noteRobotTopic();
         map_->setGrid(ros_->gridSnapshot());
         if (!manager_occupancy_seen_ && ros_->gridSnapshot().revision > 0) {
             manager_occupancy_seen_ = true;
@@ -534,10 +541,12 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     });
     connect(ros_, &RosLink::odomUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::Odom);
+        noteRobotTopic();
         map_->setOdom(ros_->odomSnapshot());
     });
     connect(ros_, &RosLink::statusUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+        noteRobotTopic();
         updateStatePill();
         const CoverageStatus status = ros_->coverageStatus();
         if (autonomy_on_ && status.autonomy) {
@@ -545,10 +554,15 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         }
         if (status.state == QLatin1String("ERROR") &&
             mission_->missionActive() && !director_failed_) {
-            appendLog(QStringLiteral("[director] ERROR: %1")
-                          .arg(status.error.isEmpty()
-                                   ? QStringLiteral("(no error string)")
-                                   : status.error));
+            // Status is 1 Hz; log each distinct error once, not every tick.
+            static QString last_logged_error;
+            const QString err = status.error.isEmpty()
+                                    ? QStringLiteral("(no error string)")
+                                    : status.error;
+            if (err != last_logged_error) {
+                last_logged_error = err;
+                appendLog(QStringLiteral("[director] ERROR: %1").arg(err));
+            }
         }
         maybePromptRevisit();
         refreshScanRunUi();
@@ -557,6 +571,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         if (link_monitor_) {
             link_monitor_->stamp(LinkHealthMonitor::Source::ControllerStatus);
         }
+        noteRobotTopic();
         updateMotorsChip();
     });
     connect(ros_, &RosLink::segmentStatusUpdated, this, [this] {
@@ -607,6 +622,9 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     autonomy_on_ = false;
                     manager_occupancy_seen_ = false;
                     director_failed_ = false;
+                    launch_wall_ms_ = 0;
+                    first_robot_topic_wall_ms_ = 0;
+                    director_wait_prompted_ = false;
                     scan_run_state_ = ScanRunState::Idle;
                     scan_autonomy_ran_ = false;
                     manual_override_ = false;
@@ -654,18 +672,9 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     });
 
     manager_watch_timer_ = new QTimer(this);
-    manager_watch_timer_->setSingleShot(true);
-    manager_watch_timer_->setInterval(20000);
-    connect(manager_watch_timer_, &QTimer::timeout, this, [this] {
-        if (!mission_->missionActive() || director_failed_) {
-            return;
-        }
-        const CoverageStatus status = ros_->coverageStatus();
-        if (status.fresh(kDirectorWatchdogMs)) {
-            return;
-        }
-        handleDirectorDeath(-1);
-    });
+    manager_watch_timer_->setInterval(1000);
+    connect(manager_watch_timer_, &QTimer::timeout, this,
+            &SatelliteScreen::onDirectorWatchTick);
 
     slow_timer_ = new QTimer(this);
     slow_timer_->setInterval(1000);
@@ -4631,8 +4640,101 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
     }
     startMetadataPushLoop();
     manager_occupancy_seen_ = false;
+    launch_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
+    first_robot_topic_wall_ms_ = 0;
+    director_wait_prompted_ = false;
     manager_watch_timer_->start();
     setSelectedStep(Step::AutonomousScan);
+}
+
+void SatelliteScreen::noteRobotTopic() {
+    if (mission_->missionActive() && first_robot_topic_wall_ms_ == 0) {
+        first_robot_topic_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
+        appendLog(QStringLiteral(
+            "[link] first robot topic received — waiting for director"));
+    }
+}
+
+void SatelliteScreen::onDirectorWatchTick() {
+    if (!mission_->missionActive() || director_failed_) {
+        manager_watch_timer_->stop();
+        return;
+    }
+    const CoverageStatus status = ros_->coverageStatus();
+    if (status.fresh(kDirectorFreshMs)) {
+        // Director is publishing: the boot wait is over. updateStatePill()
+        // owns the pill from here; refreshScanRunUi() picks up the gate.
+        manager_watch_timer_->stop();
+        refreshScanRunUi();
+        return;
+    }
+    if (scan_autonomy_ran_) {
+        // A mid-run status gap is a link matter (BOT pill), not a boot one.
+        return;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool have_link = first_robot_topic_wall_ms_ > 0;
+    const qint64 base = have_link ? first_robot_topic_wall_ms_ : launch_wall_ms_;
+    const qint64 waited_ms = base > 0 ? now - base : 0;
+    const qint64 waited_s = waited_ms / 1000;
+    setStatePill(have_link
+                     ? QStringLiteral("LAUNCHING · director %1s").arg(waited_s)
+                     : QStringLiteral("LAUNCHING · robot link %1s").arg(waited_s),
+                 QColor(kAmber));
+    if (reason_label_) {
+        reason_label_->setText(
+            have_link
+                ? QStringLiteral("Robot stack is up; waiting for the coverage "
+                                 "director to report initialized.")
+                : QStringLiteral("Waiting for the first topic from the robot "
+                                 "(Zenoh session + stack boot)."));
+    }
+    const qint64 limit = have_link ? kDirectorWaitPromptMs
+                                   : kRobotLinkWaitPromptMs;
+    if (director_wait_prompted_ || waited_ms < limit) {
+        return;
+    }
+    director_wait_prompted_ = true;
+    const QStringList tail = mission_->recentRobotOutput(6);
+    QString body =
+        have_link
+            ? QStringLiteral(
+                  "The robot is reachable but the coverage director has not "
+                  "reported in %1 s. It may still be booting, or it may have "
+                  "failed to start.\n")
+                  .arg(waited_s)
+            : QStringLiteral(
+                  "No topic has arrived from the robot in %1 s. Check the "
+                  "radio link and that the robot launch is running.\n")
+                  .arg(waited_s);
+    if (!tail.isEmpty()) {
+        body += QStringLiteral("\nLast robot output:\n%1")
+                    .arg(tail.join(QLatin1Char('\n')));
+    }
+    // confirmDialog is modal; the timer keeps ticking underneath, so a
+    // status that arrives while the operator reads this resolves on the
+    // next tick regardless of their answer.
+    const bool keep_waiting = confirmDialog(
+        QStringLiteral("Still waiting for the robot"), body,
+        QStringLiteral("Keep waiting"));
+    if (!mission_->missionActive()) {
+        return;
+    }
+    if (keep_waiting) {
+        // Re-arm the prompt for another full window rather than nagging.
+        director_wait_prompted_ = false;
+        if (have_link) {
+            first_robot_topic_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
+        } else {
+            launch_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
+        }
+        return;
+    }
+    appendLog(QStringLiteral("[nav] operator cancelled the launch wait"));
+    setAutonomyEnabled(false);
+    ros_->requestAxisState(RosLink::kAxisIdle);
+    mission_->teardownMission();
+    setSelectedStep(Step::EdgeReview);
 }
 
 bool SatelliteScreen::isRobotLinkUnreachable() const {
@@ -4815,18 +4917,20 @@ void SatelliteScreen::handleDirectorDeath(int exit_code) {
         return;
     }
     director_failed_ = true;
+    manager_watch_timer_->stop();
     stopAutonomyLatch();
     setAutonomyEnabled(false);
     const QStringList tail = mission_->recentRobotOutput(8);
-    appendLog(QStringLiteral("[director] stack died (rc=%1)")
+    appendLog(QStringLiteral("[director] robot launch exited (rc=%1)")
                   .arg(exit_code));
     for (const QString& line : tail) {
         appendLog(QStringLiteral("  %1").arg(line));
     }
     mission_->teardownMission();
     QString body = QStringLiteral(
-        "The coverage director exited before a scan could run. "
-        "The plan stays PLANNED — press Next on Edge Review to relaunch.\n");
+        "The robot launch process exited (rc=%1). The plan stays PLANNED — "
+        "press Next on Edge Review to relaunch.\n")
+                       .arg(exit_code);
     if (!tail.isEmpty()) {
         body += QStringLiteral("\nLast robot output:\n%1")
                     .arg(tail.join(QLatin1Char('\n')));
@@ -4948,7 +5052,11 @@ void SatelliteScreen::refreshScanRunUi() {
                 .arg(total_s % 60, 2, 10, QLatin1Char('0')));
     }
     if (scan_coverage_label_) {
-        const double frac = ros_->coverageStatus().coverageFraction();
+        // RosLink keeps the last status across missions; only a fresh one
+        // (or a mission still active) is worth showing as live coverage.
+        const CoverageStatus status = ros_->coverageStatus();
+        const double frac =
+            active && status.fresh(10000) ? status.coverageFraction() : -1.0;
         scan_coverage_label_->setText(
             frac >= 0.0 ? QStringLiteral("Coverage  %1%")
                               .arg(int(std::lround(frac * 100.0)))

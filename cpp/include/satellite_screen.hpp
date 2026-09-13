@@ -583,6 +583,15 @@ private:
     bool resume_after_override_ = false;
     bool revisit_prompt_open_ = false;
     bool director_failed_ = false;
+    // Director-boot bookkeeping. The only hard "death" signal is the SSH
+    // launch process exiting (MissionController::robotLaunchDied); the
+    // status watchdog is advisory and never tears down on its own.
+    qint64 launch_wall_ms_ = 0;
+    qint64 first_robot_topic_wall_ms_ = 0;
+    bool director_wait_prompted_ = false;
+    /** Stamps the first robot-originated topic since launch. */
+    void noteRobotTopic();
+    void onDirectorWatchTick();
     qint64 scan_started_wall_ms_ = 0;
     qint64 scan_elapsed_ms_ = 0;
     QTimer* arm_wait_timer_ = nullptr;
