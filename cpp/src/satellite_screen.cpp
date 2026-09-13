@@ -1061,7 +1061,11 @@ void SatelliteScreen::devSeedDemoScanStep() {
     devSeedDemoAlignment(true);
     confirmed_vertices_ = map_->polygon().vertices;
     edges_reviewed_ = true;
-    setSelectedStep(Step::AutonomousScan);
+    // Straight to the page: step 5 is unreachable without a mission, and
+    // the shot has none by design.
+    selected_step_ = Step::AutonomousScan;
+    canvas_stack_->setCurrentWidget(map_page_);
+    applyModeVisibility();
     refreshStepUi();
     scan_elapsed_ms_ = 6000;
     scan_quality_pct_ = 62.0;
@@ -2118,6 +2122,9 @@ void SatelliteScreen::onNextClicked() {
             return;
         }
         confirmed_vertices_ = map_->polygon().vertices;
+        // A (re)confirmed ROI has edges that have not been reviewed yet;
+        // otherwise Next would skip Edge Review as already done.
+        edges_reviewed_ = false;
         refreshStepUi();
     }
     if (selected_step_ == Step::EdgeReview) {
@@ -2250,6 +2257,11 @@ bool SatelliteScreen::stepReachable(Step step) const {
     if (!stepAvailable(step)) {
         return false;
     }
+    // The scan page only exists for a launched stack. The way onto it is
+    // Edge Review Next (which launches), never a chip or a skip-ahead.
+    if (step == Step::AutonomousScan && !mission_->missionActive()) {
+        return false;
+    }
     for (int i = 0; i < int(step); ++i) {
         const Step earlier = Step(i);
         if (stepAvailable(earlier) && !stepComplete(earlier)) {
@@ -2263,7 +2275,7 @@ SatelliteScreen::Step SatelliteScreen::computeStep() const {
     Step last_available = Step::SatelliteMap;
     for (int i = 0; i < kStepCount; ++i) {
         const Step step = Step(i);
-        if (!stepAvailable(step)) {
+        if (!stepReachable(step)) {
             continue;
         }
         last_available = step;
@@ -2280,12 +2292,12 @@ SatelliteScreen::Step SatelliteScreen::nextAvailableStep(Step step) const {
     // "Capture Point Cloud" would be promising work that is finished.
     // Revisiting a completed step is still possible, just via its chip.
     for (int i = int(step) + 1; i < kStepCount; ++i) {
-        if (stepAvailable(Step(i)) && !stepComplete(Step(i))) {
+        if (stepReachable(Step(i)) && !stepComplete(Step(i))) {
             return Step(i);
         }
     }
     for (int i = int(step) + 1; i < kStepCount; ++i) {
-        if (stepAvailable(Step(i))) {
+        if (stepReachable(Step(i))) {
             return Step(i);
         }
     }
@@ -5763,7 +5775,9 @@ void SatelliteScreen::refreshScanRunUi() {
         scan_eta_label_->setText(eta);
     }
     if (scan_copy_label_) {
-        const QString copy = status.copy.toLower();
+        // Stale status (no mission, or the director gone) reads as "—",
+        // not as the last state it happened to report.
+        const QString copy = status_live ? status.copy.toLower() : QString();
         QString text = QStringLiteral("\u2014");
         if (copy == QLatin1String("copying") || copy == QLatin1String("pending") ||
             copy == QLatin1String("queued")) {
@@ -5774,12 +5788,12 @@ void SatelliteScreen::refreshScanRunUi() {
             text = QStringLiteral("done");
         } else if (copy == QLatin1String("skipped")) {
             text = QStringLiteral("skipped");
-        } else if (!status.copy_error.isEmpty() ||
-                   copy == QLatin1String("failed")) {
+        } else if (status_live && (!status.copy_error.isEmpty() ||
+                                   copy == QLatin1String("failed"))) {
             text = QStringLiteral("failed");
         }
         scan_copy_label_->setText(text);
-        scan_copy_label_->setToolTip(status.copy_error);
+        scan_copy_label_->setToolTip(status_live ? status.copy_error : QString());
     }
     if (scan_override_label_) {
         scan_override_label_->setText(
