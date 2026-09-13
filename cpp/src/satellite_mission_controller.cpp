@@ -80,6 +80,12 @@ void MissionController::hookProcessLogging(QProcess* proc, const QString& tag) {
                 // teardown it is the expected outcome and stays quiet.
                 if (is_robot && mission_active_ && !tearing_down_) {
                     emit robotLaunchDied(code);
+                } else if (!is_robot && mission_active_ && !tearing_down_) {
+                    // The laptop launch carries the zenoh client and the
+                    // host_teleop heartbeat. Without it the MPC's 1 s
+                    // heartbeat timeout halts the robot and nothing the
+                    // OCU publishes gets across — a silent dead run.
+                    emit laptopLaunchDied(code);
                 }
             });
 }

@@ -616,6 +616,7 @@ private:
     QTimer* manager_watch_timer_ = nullptr;
     int metadata_attempts_ = 0;
     bool metadata_pushed_ = false;
+    bool metadata_ssh_in_flight_ = false;
     bool manager_occupancy_seen_ = false;
     LinkHealthMonitor* link_monitor_ = nullptr;
     QSet<int> pressed_keys_;

@@ -94,6 +94,8 @@ signals:
      * SSH session that ends is a stack that is gone either way.
      */
     void robotLaunchDied(int exit_code);
+    /** The laptop-side launch (zenoh client + heartbeat) exited unasked. */
+    void laptopLaunchDied(int exit_code);
 
 private:
     void hookProcessLogging(QProcess* proc, const QString& tag);

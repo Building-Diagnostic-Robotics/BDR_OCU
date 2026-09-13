@@ -979,11 +979,18 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  `ros2 service call` over SSH (`MissionController::remoteServiceCall` /
  `remoteDisarm`) — zenoh queries are the first thing to time out on a
  congested radio, SSH is not.
-- **Start Scan is the arming gate**: metadata push (retried 3 s) AND
- `/coverage/status` arriving `initialized` and not `ERROR` (fresh < 3 s).
- Start Scan then requests CLOSED_LOOP and only publishes
- `/mpc_autonomy_enable` once both axes report armed. Do not unlock on
- coordinator metadata alone — that is how a dead director looked ready.
+- **Start Scan is the arming gate**: metadata push accepted (bridge,
+ retried 3 s; SSH `set_parameters` fallback after 5 misses) AND
+ `/coverage/status` fresh (< 3 s) and not `ERROR`. **Never gate on
+ `initialized`**: the director only initializes once `ready.mpc` is true,
+ and the MPC only raises `/mpc/execution_ready` after autonomy is enabled
+ — which Start Scan sends. Gating on it deadlocked in the field
+ (2026-09-13). Start Scan requests CLOSED_LOOP and waits up to 6 s for
+ both axes; on timeout it enables anyway (the robot self-arms at launch
+ and an unarmed MPC cannot move; the MOTORS chip shows the truth). On
+ mission end the OCU latches `/mpc_autonomy_enable=false` so a relaunched
+ director can never read a stale `true`. A laptop-launch exit is handled
+ like a robot-launch exit (heartbeat gone = dead run).
 - The BOT pill runs the layered link model: AppShell arms
  `link_monitor_` + `reachability_probe_` on `missionActiveChanged(true)`
  (probe host = the Send SSH target) and every Stage 6 ROS callback stamps

@@ -604,6 +604,11 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     stopMetadataPushLoop();
                     stopAutonomyLatch();
                     stopScanFpv();
+                    // /mpc_autonomy_enable is TRANSIENT_LOCAL: whatever was
+                    // last published is what the NEXT stack's director reads
+                    // the moment it subscribes. Leave `false` latched so a
+                    // relaunch can never start driving without Start Scan.
+                    ros_->publishAutonomyEnable(false);
                     if (manager_watch_timer_) {
                         manager_watch_timer_->stop();
                     }
@@ -635,6 +640,17 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             });
     connect(mission_, &MissionController::robotLaunchDied, this,
             &SatelliteScreen::handleDirectorDeath);
+    connect(mission_, &MissionController::laptopLaunchDied, this,
+            [this](int code) {
+                if (!mission_->missionActive() || director_failed_) {
+                    return;
+                }
+                appendLog(QStringLiteral(
+                              "[launch] laptop launch exited (rc=%1) — "
+                              "heartbeat lost, robot will halt")
+                              .arg(code));
+                handleDirectorDeath(code);
+            });
 
     teleop_timer_ = new QTimer(this);
     teleop_timer_->setInterval(100);
@@ -757,6 +773,60 @@ void SatelliteScreen::attemptMetadataPush() {
                               "[send] waiting for coordinator (metadata "
                               "push, attempt %1)…")
                               .arg(metadata_attempts_));
+            }
+            // The bridge path has had ~15 s. The coordinator is almost
+            // certainly up by now (it starts with the stack), so a still-
+            // failing push is a lost zenoh query, not a slow boot: land the
+            // same SetParameters over SSH, the legacy screen's path. Hard
+            // gate preserved — autonomy stays locked until one succeeds.
+            if (!ok && metadata_attempts_ == 5 && !metadata_ssh_in_flight_) {
+                metadata_ssh_in_flight_ = true;
+                appendLog(QStringLiteral(
+                    "[send] metadata push via bridge not landing — trying "
+                    "over SSH"));
+                QSettings settings(kSettingsOrgName, kSettingsAppName);
+                const auto yaml_str = [](QString v) {
+                    v.replace(QLatin1Char('\\'), QLatin1String("\\\\"));
+                    v.replace(QLatin1Char('"'), QLatin1String("\\\""));
+                    return QStringLiteral("\"%1\"").arg(v);
+                };
+                const QString request =
+                    QStringLiteral(
+                        "{parameters: ["
+                        "{name: building_name, value: {type: 4, string_value: %1}},"
+                        "{name: operator_name, value: {type: 4, string_value: %2}},"
+                        "{name: units_preference, value: {type: 4, string_value: %3}}"
+                        "]}")
+                        .arg(yaml_str(settings.value(kSettingsBuildingNameKey)
+                                          .toString()),
+                             yaml_str(settings.value(kSettingsOperatorNameKey)
+                                          .toString()),
+                             yaml_str(units::toString(
+                                 UnitsProvider::instance()->units())));
+                mission_->remoteServiceCall(
+                    QStringLiteral("/data_collection_coordinator/set_parameters"),
+                    QStringLiteral("rcl_interfaces/srv/SetParameters"), request,
+                    [this](bool ssh_ok, const QString& detail) {
+                        metadata_ssh_in_flight_ = false;
+                        if (!mission_->missionActive() || metadata_pushed_) {
+                            return;
+                        }
+                        // SetParameters reports per-parameter results, not
+                        // a top-level success flag; rc=0 with no
+                        // "successful=False" is acceptance.
+                        if (ssh_ok && !detail.contains(
+                                          QLatin1String("successful=False"))) {
+                            metadata_pushed_ = true;
+                            stopMetadataPushLoop();
+                            appendLog(QStringLiteral(
+                                "[send] session metadata accepted via SSH"));
+                            refreshScanRunUi();
+                        } else {
+                            appendLog(QStringLiteral(
+                                          "[send] SSH metadata push failed: %1")
+                                          .arg(detail));
+                        }
+                    });
             }
         });
 }
@@ -4776,8 +4846,15 @@ QString SatelliteScreen::edgeReviewSummary() const {
 }
 
 bool SatelliteScreen::directorReady() const {
+    // "Alive and not faulted" — deliberately NOT `initialized`. The director
+    // only initializes once every readiness input is true, and `ready.mpc`
+    // mirrors /mpc/execution_ready, which the MPC only raises after autonomy
+    // is enabled. Gating Start Scan on `initialized` therefore deadlocks
+    // (2026-09-13 field run). Start Scan sends the enable; the director sits
+    // in WAITING_READY until its inputs settle — same contract the legacy
+    // autonomy screen ran.
     const CoverageStatus status = ros_->coverageStatus();
-    return status.fresh(kDirectorFreshMs) && status.initialized &&
+    return status.fresh(kDirectorFreshMs) &&
            status.state != QLatin1String("ERROR") && !director_failed_;
 }
 
@@ -4818,7 +4895,7 @@ void SatelliteScreen::beginStartScan() {
     }
     if (!directorReady()) {
         appendLog(QStringLiteral(
-            "[scan] director not ready — Start Scan stays locked"));
+            "[scan] director not reporting — Start Scan stays locked"));
         refreshScanRunUi();
         return;
     }
@@ -4856,8 +4933,21 @@ void SatelliteScreen::beginStartScan() {
         }
         if (arm_wait_ticks_ >= 60) {
             arm_wait_timer_->stop();
+            // Not a hard gate (legacy never had one): the robot self-arms
+            // at launch and the MPC cannot move unarmed axes, so an
+            // unconfirmed arm — usually a lost bridge RPC or stale
+            // controller_status — must not leave Start Scan dead. Enable,
+            // and let the MOTORS chip tell the truth.
             appendLog(QStringLiteral(
-                "[scan] motors did not reach CLOSED_LOOP within 6 s"));
+                "[scan] CLOSED_LOOP not confirmed within 6 s — enabling "
+                "autonomy anyway; check the MOTORS chip"));
+            setAutonomyEnabled(true);
+            if (scan_started_wall_ms_ == 0) {
+                scan_started_wall_ms_ =
+                    QDateTime::currentMSecsSinceEpoch();
+            }
+            scan_run_state_ = ScanRunState::Running;
+            scan_autonomy_ran_ = true;
             refreshScanRunUi();
         }
     });
@@ -4919,8 +5009,8 @@ void SatelliteScreen::handleDirectorDeath(int exit_code) {
     }
     mission_->teardownMission();
     QString body = QStringLiteral(
-        "The robot launch process exited (rc=%1). The plan stays PLANNED — "
-        "press Next on Edge Review to relaunch.\n")
+        "A launch process exited (rc=%1) — see the log for which side. The "
+        "plan stays PLANNED — press Next on Edge Review to relaunch.\n")
                        .arg(exit_code);
     if (!tail.isEmpty()) {
         body += QStringLiteral("\nLast robot output:\n%1")
