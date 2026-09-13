@@ -44,8 +44,9 @@
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
-#include <QMouseEvent>
 #include <QLineEdit>
+#include <QMessageBox>
+#include <QMouseEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -521,22 +522,12 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // Every handler stamps the app's LinkHealthMonitor (house rule: a new
     // subscriber that doesn't stamp makes the monitor go OFFLINE during a
     // healthy session that only uses that topic).
-    connect(ros_, &RosLink::gridUpdated, this, [this] {
-        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
-        noteRobotTopic();
-        map_->setGrid(ros_->gridSnapshot());
-        if (!manager_occupancy_seen_ && ros_->gridSnapshot().revision > 0) {
-            manager_occupancy_seen_ = true;
-            appendLog(QStringLiteral(
-                "[ros] coverage occupancy received — manager is live"));
-        }
-    });
-    connect(ros_, &RosLink::pathUpdated, this, [this] {
-        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
-        map_->setPath(ros_->pathSnapshot());
-    });
+    // Occupancy grid / planned path are intentionally not subscribed (see
+    // RosLink::start): the swaths are the coverage picture, as in the legacy
+    // autonomy screen.
     connect(ros_, &RosLink::swathsUpdated, this, [this] {
         if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+        noteRobotTopic();
         map_->setSwaths(ros_->swathsSnapshot());
     });
     connect(ros_, &RosLink::odomUpdated, this, [this] {
@@ -549,9 +540,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         noteRobotTopic();
         updateStatePill();
         const CoverageStatus status = ros_->coverageStatus();
-        if (autonomy_on_ && status.autonomy) {
-            stopAutonomyLatch();
-        }
         if (status.state == QLatin1String("ERROR") &&
             mission_->missionActive() && !director_failed_) {
             // Status is 1 Hz; log each distinct error once, not every tick.
@@ -658,18 +646,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     metadata_timer_->setInterval(3000);
     connect(metadata_timer_, &QTimer::timeout, this,
             &SatelliteScreen::attemptMetadataPush);
-
-    // autonomy's /mpc_autonomy_enable is VOLATILE keep_last(1). A single
-    // publish is lost if the coverage manager is still in its ctor when
-    // the operator clicks Start (coordinator comes up first and unlocks
-    // the button). Latch at 2 Hz so the false→true edge cannot be missed.
-    autonomy_latch_timer_ = new QTimer(this);
-    autonomy_latch_timer_->setInterval(500);
-    connect(autonomy_latch_timer_, &QTimer::timeout, this, [this] {
-        if (autonomy_on_ && ros_->isRunning()) {
-            ros_->publishAutonomyEnable(true);
-        }
-    });
 
     manager_watch_timer_ = new QTimer(this);
     manager_watch_timer_->setInterval(1000);
@@ -4901,14 +4877,29 @@ void SatelliteScreen::onScanCancelClicked() {
         return;
     }
     setAutonomyEnabled(false);
-    ros_->abortCoverage(true, [this](bool ok, const QString& detail) {
+    const auto finish = [this](bool ok, const QString& detail) {
         appendLog(ok ? QStringLiteral("[scan] abort accepted: %1").arg(detail)
-                     : QStringLiteral("[scan] abort unavailable (%1) — "
-                                      "tearing down anyway")
+                     : QStringLiteral("[scan] abort failed (%1) — tearing "
+                                      "down anyway")
                            .arg(detail));
         ros_->requestAxisState(RosLink::kAxisIdle);
         mission_->teardownMission();
         setSelectedStep(Step::EdgeReview);
+    };
+    // Bridge first; on a congested radio zenoh queries time out, so fall
+    // back to `ros2 service call` over SSH — the legacy screen's path.
+    ros_->abortCoverage(true, [this, finish](bool ok, const QString& detail) {
+        if (ok) {
+            finish(true, detail);
+            return;
+        }
+        appendLog(QStringLiteral("[scan] abort via bridge failed (%1) — "
+                                 "retrying over SSH")
+                      .arg(detail));
+        mission_->remoteServiceCall(
+            QStringLiteral("/coverage/abort"),
+            QStringLiteral("std_srvs/srv/SetBool"),
+            QStringLiteral("{data: true}"), finish);
     });
 }
 
@@ -4941,27 +4932,41 @@ void SatelliteScreen::handleDirectorDeath(int exit_code) {
 
 void SatelliteScreen::maybePromptRevisit() {
     const CoverageStatus status = ros_->coverageStatus();
-    if (!status.waiting_revisit || revisit_prompt_open_ ||
-        !mission_->missionActive()) {
+    const bool waiting = status.state == QLatin1String("WAITING_REVISIT");
+    const bool edge = waiting && !revisit_hold_;
+    revisit_hold_ = waiting && !status.complete;
+    if (!edge || revisit_prompt_open_ || manual_override_ ||
+        !mission_->missionActive() || status.complete) {
         return;
     }
+    // Modeless on purpose (legacy contract): exec() would spin a nested
+    // loop in which the launch can die underneath the operator. Autonomy is
+    // left as-is — the director is already holding; the operator either
+    // finishes or takes the FPV to drive closer and resumes.
     revisit_prompt_open_ = true;
-    scan_run_state_ = ScanRunState::Paused;
-    setAutonomyEnabled(false);
-    const QString body =
-        QStringLiteral(
-            "Coverage paused: %1 deferred area(s) were skipped.\n\n"
-            "Retry them now, or finish the scan as-is.")
-            .arg(status.revisit > 0 ? status.revisit
-                                    : int(qMax(0.0, status.deferred)));
-    const bool retry = confirmDialog(QStringLiteral("Areas skipped"), body,
-                                     QStringLiteral("Retry skipped"));
-    revisit_prompt_open_ = false;
-    if (retry) {
-        beginStartScan();
-    } else {
-        onCompleteMission();
-    }
+    auto* box = new QMessageBox(this);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setIcon(QMessageBox::Question);
+    box->setWindowTitle(QStringLiteral("Unreachable coverage remaining"));
+    box->setText(QStringLiteral(
+        "The reachable area is covered, but %1 deferred section(s) look "
+        "unreachable from here.")
+                     .arg(status.revisit > 0
+                              ? status.revisit
+                              : int(qMax(0.0, status.deferred))));
+    box->setInformativeText(QStringLiteral(
+        "Finish the scan, or click the camera view to drive closer to the "
+        "skipped sections and press Resume."));
+    QPushButton* finish =
+        box->addButton(QStringLiteral("Finish scan"), QMessageBox::AcceptRole);
+    box->addButton(QStringLiteral("Drive closer"), QMessageBox::RejectRole);
+    connect(box, &QMessageBox::finished, this, [this, box, finish](int) {
+        revisit_prompt_open_ = false;
+        if (box->clickedButton() == finish && mission_->missionActive()) {
+            onCompleteMission();
+        }
+    });
+    box->show();
 }
 
 void SatelliteScreen::setManualOverride(bool active) {
@@ -5194,10 +5199,16 @@ void SatelliteScreen::beginMotorsIdleWait(
         }
         // 100 ms x 60 = 6 s ceiling. Killing the launch tree does not by
         // itself disarm the axes, so it is worth waiting — but never at the
-        // cost of stranding the operator on this screen.
+        // cost of stranding the operator on this screen. On timeout the
+        // bridge RPC is presumed lost: repeat the disarm over SSH (legacy
+        // path) so the axes are not left in closed loop.
         if (motors_idle_ticks_ >= 60) {
             motors_idle_timer_->stop();
-            on_done(true);
+            appendLog(QStringLiteral(
+                "[mission] IDLE not confirmed via bridge — disarming over SSH"));
+            mission_->remoteDisarm([on_done](bool ok, const QString&) {
+                on_done(!ok);
+            });
         }
     });
     motors_idle_timer_->start();
@@ -5205,7 +5216,9 @@ void SatelliteScreen::beginMotorsIdleWait(
 
 void SatelliteScreen::executeCompleteMissionNormalPath() {
     appendLog(QStringLiteral("[mission] concluding coverage…"));
-    ros_->concludeCoverage([this](bool ok, const QString& detail) {
+    // Bridge first, SSH `ros2 service call` second (legacy path): on a
+    // congested radio zenoh queries time out while SSH still gets through.
+    const auto after_conclude = [this](bool ok, const QString& detail) {
         appendLog(ok ? QStringLiteral("[mission] conclude accepted: %1")
                            .arg(detail)
                      : QStringLiteral("[mission] conclude failed (%1) — "
@@ -5261,6 +5274,19 @@ void SatelliteScreen::executeCompleteMissionNormalPath() {
             }
         });
         conclude_wait_timer_->start();
+    };
+    ros_->concludeCoverage([this, after_conclude](bool ok,
+                                                  const QString& detail) {
+        if (ok) {
+            after_conclude(true, detail);
+            return;
+        }
+        appendLog(QStringLiteral("[mission] conclude via bridge failed (%1) "
+                                 "— retrying over SSH")
+                      .arg(detail));
+        mission_->remoteServiceCall(QStringLiteral("/coverage/conclude"),
+                                    QStringLiteral("std_srvs/srv/Trigger"),
+                                    QStringLiteral("{}"), after_conclude);
     });
 }
 
@@ -5415,37 +5441,21 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void SatelliteScreen::setAutonomyEnabled(bool enabled) {
-    const bool rising = enabled && !autonomy_on_;
     autonomy_on_ = enabled;
-    if (autonomy_on_) {
-        if (teleop_check_) {
-            teleop_check_->setChecked(false);
-        }
-        if (rising) {
-            ros_->publishAutonomyEnable(false);
-        }
-        ros_->publishAutonomyEnable(true);
-        startAutonomyLatch();
-    } else {
-        stopAutonomyLatch();
-        ros_->publishAutonomyEnable(false);
+    if (autonomy_on_ && teleop_check_) {
+        teleop_check_->setChecked(false);
     }
+    // One message per transition (RosLink dedupes; TRANSIENT_LOCAL holds the
+    // latest for late joiners). Same contract as the legacy autonomy screen.
+    ros_->publishAutonomyEnable(autonomy_on_);
     appendLog(QStringLiteral("[cmd] autonomy_enable=%1")
                   .arg(autonomy_on_ ? QStringLiteral("true")
                                     : QStringLiteral("false")));
 }
 
-void SatelliteScreen::startAutonomyLatch() {
-    if (autonomy_latch_timer_ && !autonomy_latch_timer_->isActive()) {
-        autonomy_latch_timer_->start();
-    }
-}
+void SatelliteScreen::startAutonomyLatch() {}
 
-void SatelliteScreen::stopAutonomyLatch() {
-    if (autonomy_latch_timer_) {
-        autonomy_latch_timer_->stop();
-    }
-}
+void SatelliteScreen::stopAutonomyLatch() {}
 
 void SatelliteScreen::publishTeleopTick() {
     if (!teleop_check_->isChecked() || !ros_->isRunning()) {
@@ -5470,7 +5480,14 @@ void SatelliteScreen::publishTeleopTick() {
         pressed_keys_.contains(Qt::Key_Right)) {
         angular -= kTeleopAngularSpeed;
     }
+    // Only put a twist on the radio while a key is down, plus one zero to
+    // stop — a 10 Hz stream of zeros competes with the heartbeat.
+    const bool moving = linear != 0.0 || angular != 0.0;
+    if (!moving && !teleop_last_nonzero_) {
+        return;
+    }
     ros_->publishTwist(linear, angular);
+    teleop_last_nonzero_ = moving;
 }
 
 // ---- Status surfaces ----------------------------------------------------------

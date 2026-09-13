@@ -959,6 +959,26 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 
 ### Rules for agents touching Stage 6
 
+- **Link budget is the constraint, not the OCU.** The Microhard link
+ measured ~0.5 Mbit/s of TCP headroom with the stack up (iperf3,
+ 2026-09-13). Zenoh maps DDS RELIABLE to *blocking* congestion control:
+ one heavy reliable topic stalls the transport for 5 s and it is closed,
+ dropping the heartbeat → MPC `execution_ready=false` → director
+ `mpc` not ready → no motion. `RosLink` therefore subscribes to what the
+ legacy autonomy screen did and nothing heavier: odom (SensorData),
+ `/coverage/planned_swaths` (SensorData keep_last 1 — the coverage
+ picture), `/coverage/status`, `controller_status`, `scan_segment_status`.
+ **Do not subscribe to `/coverage/global_occupancy` or
+ `/coverage/planned_path`** (RELIABLE + TRANSIENT_LOCAL at 5 Hz; the
+ grid alone is ~0.9 Mbit/s) until the director offers a BEST_EFFORT
+ ≤ 1 Hz copy. `/mpc_autonomy_enable` is RELIABLE + TRANSIENT_LOCAL,
+ published **once per transition** (`RosLink::publishAutonomyEnable`
+ dedupes) — no periodic latch. Teleop twists go out only while a key is
+ down plus one zero. Director services (`conclude`, `abort`) and the
+ end-of-mission disarm try the bridge first and fall back to
+ `ros2 service call` over SSH (`MissionController::remoteServiceCall` /
+ `remoteDisarm`) — zenoh queries are the first thing to time out on a
+ congested radio, SSH is not.
 - **Start Scan is the arming gate**: metadata push (retried 3 s) AND
  `/coverage/status` arriving `initialized` and not `ERROR` (fresh < 3 s).
  Start Scan then requests CLOSED_LOOP and only publishes

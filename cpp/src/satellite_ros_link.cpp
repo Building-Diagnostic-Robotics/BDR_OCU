@@ -102,77 +102,30 @@ bool RosLink::start(QString* error) {
         impl_->cmd_vel_pub =
             impl_->node->create_publisher<geometry_msgs::msg::Twist>(
                 "/cmd_vel", 10);
-        // Match the robot's state_qos (RELIABLE, VOLATILE, depth 1). A
-        // one-shot default-QoS publish is easy for the coverage manager
-        // to miss while it is still constructing; the screen latches.
+        // Same shape as the legacy autonomy screen: RELIABLE + TRANSIENT_LOCAL
+        // keep_last(1), published once per transition. The latched sample is
+        // what a late-joining MPC / director reads, so no periodic re-send is
+        // needed — every consumer is edge-triggered and the old 2 Hz hold only
+        // spent link budget the heartbeat needed.
         auto enable_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
+        enable_qos.durability(rclcpp::DurabilityPolicy::TransientLocal);
         impl_->autonomy_pub =
             impl_->node->create_publisher<std_msgs::msg::Bool>(
                 "/mpc_autonomy_enable", enable_qos);
 
-        // Matches the manager's map_qos (BEST_EFFORT, VOLATILE, depth 1).
-        auto grid_qos = rclcpp::QoS(1).best_effort().durability_volatile();
-        impl_->grid_sub =
-            impl_->node->create_subscription<nav_msgs::msg::OccupancyGrid>(
-                "/coverage/global_occupancy", grid_qos,
-                [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr msg) {
-                    const int w = int(msg->info.width);
-                    const int h = int(msg->info.height);
-                    if (w <= 0 || h <= 0) {
-                        return;
-                    }
-                    QImage img(w, h, QImage::Format_ARGB32);
-                    const QRgb occupied =
-                        qRgba(0xff, 0x6b, 0x6b, 190);         // danger red
-                    const QRgb free_cell = qRgba(0, 179, 90, 42);  // faint accent
-                    const QRgb unknown = qRgba(6, 8, 10, 96);
-                    for (int row = 0; row < h; ++row) {
-                        QRgb* line = reinterpret_cast<QRgb*>(img.scanLine(row));
-                        const int8_t* src = msg->data.data() + qint64(row) * w;
-                        for (int col = 0; col < w; ++col) {
-                            const int8_t v = src[col];
-                            line[col] = v < 0 ? unknown
-                                        : v >= 50 ? occupied
-                                                  : free_cell;
-                        }
-                    }
-                    {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        grid_.image = img;
-                        grid_.resolution = msg->info.resolution;
-                        grid_.origin_body =
-                            QPointF(msg->info.origin.position.x,
-                                    msg->info.origin.position.y);
-                        grid_.revision++;
-                    }
-                    emit gridUpdated();
-                });
-
-        // Matches visualization_qos (RELIABLE, TRANSIENT_LOCAL, depth 1).
-        auto vis_qos = rclcpp::QoS(1).reliable().transient_local();
-        impl_->path_sub =
-            impl_->node->create_subscription<nav_msgs::msg::Path>(
-                "/coverage/planned_path", vis_qos,
-                [this](nav_msgs::msg::Path::ConstSharedPtr msg) {
-                    QVector<QPointF> line;
-                    line.reserve(int(msg->poses.size()));
-                    for (const auto& pose : msg->poses) {
-                        line.append(QPointF(pose.pose.position.x,
-                                            pose.pose.position.y));
-                    }
-                    {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        path_.lines = {line};
-                        path_.colors = {satpal::info()};
-                        path_.revision++;
-                    }
-                    emit pathUpdated();
-                });
-
+        // Deliberately NOT subscribed: /coverage/global_occupancy and
+        // /coverage/planned_path. Both are RELIABLE + TRANSIENT_LOCAL at 5 Hz
+        // on the robot; the occupancy grid alone is ~0.9 Mbit/s of *blocking*
+        // traffic and closed the Zenoh transport on the Microhard link
+        // (2026-09-13 field run). The swaths carry the map + coverage the
+        // operator needs, exactly as the legacy autonomy screen shows them.
+        // Best-effort keep_last(1): a full-state message, so a dropped one
+        // costs nothing.
+        auto swath_qos = rclcpp::SensorDataQoS().keep_last(1);
         impl_->swaths_sub =
             impl_->node
                 ->create_subscription<visualization_msgs::msg::MarkerArray>(
-                    "/coverage/planned_swaths", vis_qos,
+                    "/coverage/planned_swaths", swath_qos,
                     [this](visualization_msgs::msg::MarkerArray::ConstSharedPtr
                                msg) {
                         QVector<QVector<QPointF>> lines;
@@ -385,9 +338,16 @@ void RosLink::publishAutonomyEnable(bool enabled) {
     if (!running_ || !impl_->autonomy_pub) {
         return;
     }
+    // One message per transition. TRANSIENT_LOCAL keeps the latest value for
+    // late joiners, so repeating an unchanged state is pure link cost.
+    if (autonomy_published_ && last_autonomy_enabled_ == enabled) {
+        return;
+    }
     std_msgs::msg::Bool msg;
     msg.data = enabled;
     impl_->autonomy_pub->publish(msg);
+    autonomy_published_ = true;
+    last_autonomy_enabled_ = enabled;
 }
 
 void RosLink::requestAxisState(int state) {

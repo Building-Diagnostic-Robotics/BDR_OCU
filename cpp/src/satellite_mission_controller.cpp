@@ -246,6 +246,107 @@ bool MissionController::startMission(const RoiPolygon& poly,
     return true;
 }
 
+void MissionController::remoteServiceCall(const QString& service,
+                                          const QString& type,
+                                          const QString& request,
+                                          RemoteCallback on_done) {
+    if (!target_.valid) {
+        QString error;
+        target_ = resolveRobotTarget(&error);
+        if (!target_.valid) {
+            if (on_done) {
+                on_done(false, error.isEmpty()
+                                   ? QStringLiteral("no robot host")
+                                   : error);
+            }
+            return;
+        }
+    }
+    // `timeout` bounds the call: `ros2 service call` waits forever for a
+    // service that is not there. Single-quote the YAML for the remote shell.
+    QString yaml = request;
+    yaml.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+    const QString script =
+        QString::fromLatin1(kEnvPreamble) +
+        QStringLiteral("timeout 10 ros2 service call %1 %2 '%3'")
+            .arg(service, type, yaml);
+    const QString remote_cmd =
+        QStringLiteral("bash -lc \"%1\"")
+            .arg(QString(script).replace(QLatin1Char('"'),
+                                         QLatin1String("\\\"")));
+    auto* proc = new QProcess(this);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    QStringList args = sshBaseArgs(target_);
+    args.removeAll(QStringLiteral("-tt"));
+    args << remote_cmd;
+    connect(proc,
+            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this,
+            [this, proc, service, on_done](int code, QProcess::ExitStatus) {
+                const QString out =
+                    QString::fromUtf8(proc->readAllStandardOutput()).trimmed();
+                proc->deleteLater();
+                // ros2 prints "response:\n<type>(success=True, ...)".
+                const bool ok = code == 0 &&
+                                !out.contains(QLatin1String("success=False"));
+                emit logLine(QStringLiteral("[ssh-svc] %1 rc=%2 %3")
+                                 .arg(service)
+                                 .arg(code)
+                                 .arg(out.section(QLatin1Char('\n'), -1)));
+                if (on_done) {
+                    on_done(ok, out.isEmpty() ? QStringLiteral("rc=%1").arg(code)
+                                              : out.section(QLatin1Char('\n'), -1));
+                }
+            });
+    proc->start("ssh", args);
+}
+
+void MissionController::remoteDisarm(RemoteCallback on_done) {
+    if (!target_.valid) {
+        QString error;
+        target_ = resolveRobotTarget(&error);
+        if (!target_.valid) {
+            if (on_done) {
+                on_done(false, error);
+            }
+            return;
+        }
+    }
+    // Join each axis by pid: a bare `wait` reports 0 even when both failed.
+    const QString script =
+        QString::fromLatin1(kEnvPreamble) +
+        QStringLiteral(
+            "timeout 4 ros2 service call /left/request_axis_state "
+            "odrive_can/srv/AxisState '{axis_requested_state: 1}' >/dev/null & "
+            "left=\\$!; "
+            "timeout 4 ros2 service call /right/request_axis_state "
+            "odrive_can/srv/AxisState '{axis_requested_state: 1}' >/dev/null & "
+            "right=\\$!; "
+            "wait \\$left; lrc=\\$?; wait \\$right; rrc=\\$?; "
+            "[ \\$lrc -eq 0 ] && [ \\$rrc -eq 0 ]");
+    const QString remote_cmd =
+        QStringLiteral("bash -lc \"%1\"")
+            .arg(QString(script).replace(QLatin1Char('"'),
+                                         QLatin1String("\\\"")));
+    auto* proc = new QProcess(this);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    QStringList args = sshBaseArgs(target_);
+    args.removeAll(QStringLiteral("-tt"));
+    args << remote_cmd;
+    connect(proc,
+            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, proc, on_done](int code, QProcess::ExitStatus) {
+                const QString out =
+                    QString::fromUtf8(proc->readAllStandardOutput()).trimmed();
+                proc->deleteLater();
+                emit logLine(QStringLiteral("[ssh-svc] disarm rc=%1").arg(code));
+                if (on_done) {
+                    on_done(code == 0, out);
+                }
+            });
+    proc->start("ssh", args);
+}
+
 void MissionController::teardownMission() {
     if (!mission_active_ && robot_proc_->state() == QProcess::NotRunning &&
         laptop_proc_->state() == QProcess::NotRunning) {

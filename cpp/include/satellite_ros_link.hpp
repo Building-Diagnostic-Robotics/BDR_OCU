@@ -124,6 +124,8 @@ public:
 
     // Commands (safe from GUI thread).
     void publishTwist(double linear, double angular);
+    /** Edge-triggered: publishes only when the value changes (TRANSIENT_LOCAL
+        keeps the latest for late joiners). */
     void publishAutonomyEnable(bool enabled);
     /** ODrive axis state: 1 = IDLE (disarm), 8 = CLOSED_LOOP_CONTROL (arm). */
     void requestAxisState(int state);
@@ -205,6 +207,8 @@ private:
     std::atomic<bool> running_{false};
 
     mutable std::mutex mutex_;
+    bool autonomy_published_ = false;
+    bool last_autonomy_enabled_ = false;
     GridSnapshot grid_;
     PolylineSet path_;
     PolylineSet swaths_;

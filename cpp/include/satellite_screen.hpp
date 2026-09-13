@@ -582,6 +582,7 @@ private:
     bool manual_override_ = false;
     bool resume_after_override_ = false;
     bool revisit_prompt_open_ = false;
+    bool revisit_hold_ = false;  // WAITING_REVISIT latched (prompt edge)
     bool director_failed_ = false;
     // Director-boot bookkeeping. The only hard "death" signal is the SSH
     // launch process exiting (MissionController::robotLaunchDied); the
@@ -618,6 +619,7 @@ private:
     bool manager_occupancy_seen_ = false;
     LinkHealthMonitor* link_monitor_ = nullptr;
     QSet<int> pressed_keys_;
+    bool teleop_last_nonzero_ = false;
     bool autonomy_on_ = false;
     bool dark_mode_ = false;
     bool view_initialized_ = false;

@@ -23,6 +23,8 @@
 #include <QStringList>
 #include <QVector>
 
+#include <functional>
+
 namespace f2c_cpp {
 
 struct RobotTarget {
@@ -69,6 +71,19 @@ public:
     /** Last lines of the robot launch's merged stdout/stderr — the
         director's traceback lives here when the stack dies at startup. */
     QStringList recentRobotOutput(int max_lines = 12) const;
+
+    using RemoteCallback = std::function<void(bool ok, QString detail)>;
+    /**
+     * `ros2 service call` on the robot over SSH — the legacy autonomy
+     * screen's path for director services. Bypasses the Zenoh bridge
+     * entirely, so it still lands when zenoh queries are timing out on a
+     * congested radio. `request` is the YAML body ("{}" for Trigger).
+     * Non-blocking; callback on the GUI thread with the reply text.
+     */
+    void remoteServiceCall(const QString& service, const QString& type,
+                           const QString& request, RemoteCallback on_done);
+    /** Both ODrive axes -> IDLE via SSH `ros2 service call`. */
+    void remoteDisarm(RemoteCallback on_done);
 
 signals:
     void logLine(const QString& line);
