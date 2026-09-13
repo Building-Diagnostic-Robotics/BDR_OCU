@@ -890,6 +890,10 @@ void SatelliteScreen::attemptMetadataPush() {
 void SatelliteScreen::configureForScan(const Job& job) {
     planning_only_ = false;
     plan_mode_ = job.isMeasured() ? PlanMode::Measured : PlanMode::Satellite;
+    // A new visit, even to the plan opened last time: the collected map is
+    // never reused across visits. loadJob() only resets on an id change
+    // (mid-alignment saves reload the same id and must keep the session).
+    resetAlignmentSession();
     refreshJobsCombo(job.id);  // selects + loads the plan
     selected_step_ = computeStep();
     applyModeVisibility();
@@ -4805,6 +4809,9 @@ void SatelliteScreen::resetAlignmentSession() {
     }
     pcd_image_ = QImage();
     pcd_bounds_m_ = QRectF();
+    if (map_) {
+        map_->clearMapRaster();   // the canvas paints its own copy
+    }
     capture_gps_ = GpsFix{};
     sat_image_ = QImage();
     site_manifest_ = TileService::SiteManifest{};
