@@ -812,6 +812,13 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  `PrefetchRequest::kMinRadiusM`; the step only advances on
  `SavedWithImagery`. Offline → warning, stays on step 1 (alignment cannot
  run without `site.jpg`). Plans already cached skip straight through.
+ The step-2 chip runs the same detour. `loadJob` treats a cached site as
+ aimed (`canvas_aimed_`) and lands the view on the manifest centre when the
+ plan has no geometry yet — the save's own `loadJob` round-trip must not
+ fail the step-1 gate. **Send persists the sent geometry** (polygon, edge
+ flags, anchor) straight into the job (`job_store_.save`, no `loadJob`):
+ the field rail has no Save Plan, so this is the only path by which the
+ roof-drawn ROI reaches disk.
  **The field satellite rail is per step** (`applyStepVisibility`,
  `frame_rail = !planning_only_ && Satellite`; rail is 288 px =
  `kLeftRailWidth`, frames 238:4289 / 222:1155): **step 1 has no rail**

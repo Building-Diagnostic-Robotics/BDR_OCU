@@ -1260,8 +1260,16 @@ QWidget* SatelliteScreen::buildStepHeader() {
         chip_layout->addWidget(chip.detail, 0, Qt::AlignVCenter);
 
         const Step step = Step(i);
-        connect(chip.button, &QPushButton::clicked, this,
-                [this, step] { setSelectedStep(step); });
+        connect(chip.button, &QPushButton::clicked, this, [this, step] {
+            if (step == Step::Alignment && !planning_only_ &&
+                plan_mode_ == PlanMode::Satellite &&
+                !currentJobImageryCached()) {
+                // Same gate as Next: alignment needs the cached site image.
+                cacheSiteThenAdvance();
+                return;
+            }
+            setSelectedStep(step);
+        });
         layout->addWidget(chip.button, 0, Qt::AlignVCenter);
 
         if (i + 1 < kStepCount) {
@@ -3403,11 +3411,11 @@ void SatelliteScreen::loadJob(const Job& job) {
 
     // Offline first: point the canvas at this job's prefetched pyramid before
     // choosing a view, so the very first paint comes off disk.
+    TileService::SiteManifest site_manifest;
     if (job.imagery_cache.cached && !job.isMeasured()) {
-        applyImageryManifest(
-            TileService::readSiteManifest(job_store_.assetsDir(job.id) +
-                                          QStringLiteral("/imagery.json")),
-            job_store_.assetsDir(job.id));
+        site_manifest = TileService::readSiteManifest(
+            job_store_.assetsDir(job.id) + QStringLiteral("/imagery.json"));
+        applyImageryManifest(site_manifest, job_store_.assetsDir(job.id));
     }
 
     const int geo_zoom = job.imagery_cache.cached && job.imagery_cache.max_zoom > 0
@@ -3424,6 +3432,10 @@ void SatelliteScreen::loadJob(const Job& job) {
         // No geometry yet, but the robot reported a fix during map collection
         // — that is the best seed we have for where the site actually is.
         map_->setView(job.gps.lat, job.gps.lon, geo_zoom);
+    } else if (site_manifest.cached) {
+        // Field-created plan: the step-1 prefetch cached the site around the
+        // located address before any ROI existed. Land on that disc.
+        map_->setView(site_manifest.lat, site_manifest.lon, geo_zoom);
     } else if (job.isMeasured()) {
         map_->setView(0.0, 0.0, kMeasuredDefaultZoom);
     }
@@ -3431,8 +3443,11 @@ void SatelliteScreen::loadJob(const Job& job) {
     // was authored; re-aiming it in the field would be busywork. The ROI
     // confirmation deliberately does NOT carry over — an office-drawn
     // outline is exactly what step 3 exists to check against the real roof.
+    // A cached site is aimed by construction — the prefetch disc was sized
+    // around the located address (the field step-1 save routes back through
+    // here and must still pass the step-1 gate afterwards).
     canvas_aimed_ = job.polygon.valid() || job.roi.valid || job.gps.valid ||
-                    job.robot.valid;
+                    job.robot.valid || site_manifest.cached;
     confirmed_vertices_.clear();
     edges_reviewed_ = false;
     // A saved plan's stored fit was solved against a map collected on a
@@ -3853,8 +3868,8 @@ QString SatelliteScreen::loadSiteImage() {
     if (site_manifest_.stitch_relpath.isEmpty()) {
         return QStringLiteral(
             "No cached site image for this plan.\nGo back to Satellite Map "
-            "and Save Plan while the laptop has a connection — the site "
-            "downloads as part of the save.");
+            "and press Next while the laptop has a connection — the site "
+            "downloads before alignment opens.");
     }
     if (!sat_image_.load(assets + QLatin1Char('/') +
                          site_manifest_.stitch_relpath)) {
@@ -4453,6 +4468,27 @@ void SatelliteScreen::onSendMission() {
         return;
     }
     map_->setMissionAnchor(marker);
+    // Persist what was actually sent: the field rail has no Save Plan, so
+    // the roof-drawn polygon, edge flags and surveyed anchor would otherwise
+    // never reach disk and the COMPLETED record would hold the office draft.
+    // Direct save (no loadJob round-trip): mid-mission state must not reset.
+    if (!current_job_id_.isEmpty()) {
+        for (Job& job : jobs_) {
+            if (job.id == current_job_id_) {
+                job.polygon = poly;
+                job.roi = map_->roi();
+                job.robot = marker;
+                job.updated = QDateTime::currentDateTime();
+                QString save_error;
+                if (!job_store_.save(job, &save_error)) {
+                    appendLog(
+                        QStringLiteral("[send] plan geometry not saved: %1")
+                            .arg(save_error));
+                }
+                break;
+            }
+        }
+    }
     setStatePill(QStringLiteral("LAUNCHING"), QColor(kAmber));
     reason_label_->setText(
         QStringLiteral("Launching robot stack… Start Autonomy unlocks once "
