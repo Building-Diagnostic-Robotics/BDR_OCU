@@ -218,7 +218,12 @@ private:
      * and the site prefetch runs as part of saving. Office always; field
      * only when probeImageryReachable() says the laptop is online.
      */
-    void saveSatelliteWithImagery(Job job);
+    bool saveSatelliteWithImagery(Job job, bool site_from_view = false);
+    /// Footer Next. Field satellite step 1 with no cached imagery detours
+    /// through cacheSiteThenAdvance() — alignment cannot run without it.
+    void onNextClicked();
+    bool currentJobImageryCached() const;
+    void cacheSiteThenAdvance();
     /** One-shot HEAD against TileService::connectivityProbeUrl(). */
     void probeImageryReachable(std::function<void(bool)> done);
     /** The Job as the rail currently describes it, id allocated if new,

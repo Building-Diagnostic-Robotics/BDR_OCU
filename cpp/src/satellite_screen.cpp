@@ -1347,11 +1347,65 @@ QWidget* SatelliteScreen::buildFooterBar() {
     next_button_->setIcon(QIcon(loadTintedSvg(
         QStringLiteral(":/assets/satellite/footer_next.svg"), 16, 16)));
     next_button_->setIconSize(QSize(16, 16));
-    connect(next_button_, &QPushButton::clicked, this, [this] {
-        setSelectedStep(nextAvailableStep(selected_step_));
-    });
+    connect(next_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onNextClicked);
     layout->addWidget(next_button_, 0, Qt::AlignVCenter);
     return footer_bar_;
+}
+
+void SatelliteScreen::onNextClicked() {
+    const bool field_satellite =
+        !planning_only_ && plan_mode_ == PlanMode::Satellite;
+    if (field_satellite && selected_step_ == Step::SatelliteMap &&
+        !currentJobImageryCached()) {
+        // Step 1 of a plan created on site: 3D Alignment needs the stitched
+        // site image, which only the save-with-prefetch produces. Cache it
+        // now, around the located address, before letting the operator on.
+        cacheSiteThenAdvance();
+        return;
+    }
+    setSelectedStep(nextAvailableStep(selected_step_));
+}
+
+bool SatelliteScreen::currentJobImageryCached() const {
+    if (current_job_id_.isEmpty()) {
+        return false;
+    }
+    for (const Job& job : jobs_) {
+        if (job.id == current_job_id_) {
+            return job.imagery_cache.cached;
+        }
+    }
+    return false;
+}
+
+void SatelliteScreen::cacheSiteThenAdvance() {
+    if (job_name_->text().trimmed().isEmpty()) {
+        job_name_->setText(job_address_->text().trimmed().isEmpty()
+                               ? QStringLiteral("Field plan")
+                               : job_address_->text().trimmed());
+    }
+    map_->cancelInteraction();
+    const Job job = jobFromRail();
+    next_button_->setEnabled(false);
+    next_button_->setText(QStringLiteral("Checking connection…"));
+    probeImageryReachable([this, job](bool online) {
+        next_button_->setEnabled(true);
+        refreshStepUi();
+        if (!online) {
+            BdrMessageBox::warning(
+                this, QStringLiteral("No connection"),
+                QStringLiteral(
+                    "3D Alignment needs this site's satellite imagery cached "
+                    "on the laptop, and there is no internet connection to "
+                    "download it.\n\nConnect (hotspot is fine) and press "
+                    "Next again, or use a plan saved in the office."));
+            return;
+        }
+        if (saveSatelliteWithImagery(job, /*site_from_view=*/true)) {
+            setSelectedStep(nextAvailableStep(selected_step_));
+        }
+    });
 }
 
 // ---- Step model -------------------------------------------------------------
@@ -3555,17 +3609,24 @@ void SatelliteScreen::probeImageryReachable(std::function<void(bool)> done) {
             });
 }
 
-void SatelliteScreen::saveSatelliteWithImagery(Job job) {
-    // Without an ROI there is nothing to size the download by.
+bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view) {
     geo::GeoPoint centroid;
     double roi_radius_m = 0.0;
     if (!map_->roiExtent(&centroid, &roi_radius_m)) {
-        appendLog(QStringLiteral(
-            "[plan] draw the ROI before saving — it decides which imagery "
-            "gets cached for the field"));
-        return;
+        if (!site_from_view) {
+            // Office: without an ROI there is nothing to size the download by.
+            appendLog(QStringLiteral(
+                "[plan] draw the ROI before saving — it decides which imagery "
+                "gets cached for the field"));
+            return false;
+        }
+        // Field step 1: the ROI is drawn on site (step 3), so the disc is
+        // centred on the located address at the prefetch's radius floor.
+        centroid = geo::GeoPoint{map_->centerLat(), map_->centerLon()};
+        roi_radius_m = 0.0;
+    } else {
+        map_->fitToRoi();
     }
-    map_->fitToRoi();
     map_->setMarkerSelected(false);
     const QPixmap thumbnail = map_->grab();
 
@@ -3602,7 +3663,7 @@ void SatelliteScreen::saveSatelliteWithImagery(Job job) {
                 QDir(assets).removeRecursively();
             }
             appendLog(QStringLiteral("[plan] save cancelled"));
-            return;
+            return false;
         case SatellitePlanConfirmDialog::Outcome::SavedWithImagery:
             adoptImageryManifest(job, dialog.manifest());
             if (persistJob(job)) {
@@ -3614,8 +3675,9 @@ void SatelliteScreen::saveSatelliteWithImagery(Job job) {
                                        ? job.imagery_cache.captured.toString(
                                              Qt::ISODate)
                                        : QStringLiteral("date unknown")));
+                return true;
             }
-            return;
+            return false;
         case SatellitePlanConfirmDialog::Outcome::SavedWithoutImagery:
             if (!job.imagery_cache.cached) {
                 tiles_->setCacheRoot(shared_cache);
@@ -3627,8 +3689,9 @@ void SatelliteScreen::saveSatelliteWithImagery(Job job) {
                               "field-ready until re-saved with a connection")
                               .arg(job.name));
             }
-            return;
+            return false;
     }
+    return false;
 }
 
 // ---- Navigation -------------------------------------------------------------

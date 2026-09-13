@@ -138,8 +138,9 @@ void SatellitePlanConfirmDialog::buildUi(const Job& job,
     const RoiPolygon& poly = job.polygon;
     const int n = poly.vertices.size();
     summary->addWidget(makeLabel(
-        QStringLiteral("ROI — %1 vertices").arg(n), "PlanConfirmSection",
-        this));
+        n == 0 ? QStringLiteral("ROI — drawn on site (step 3)")
+               : QStringLiteral("ROI — %1 vertices").arg(n),
+        "PlanConfirmSection", this));
     int marked = 0;
     for (int i = 0; i < n; ++i) {
         const QPointF enu =
