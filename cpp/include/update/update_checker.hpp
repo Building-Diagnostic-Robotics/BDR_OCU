@@ -115,6 +115,26 @@ public:
                                     const QString& tag,
                                     const QString& targetCommitish);
 
+    /**
+     * @brief Lift the fleet-targeting rules out of a release body.
+     *
+     * Looks for `kOtaTargetsMarker` followed by a JSON object and `-->`.
+     * A body without the marker yields `present=false` (offer to all).
+     * A marker with malformed JSON is treated as present with empty
+     * lists — i.e. also offer to all — and is logged; a typo in
+     * `ota_targets.json` must not silently brick the fleet's updates.
+     */
+    static OtaTargets parseTargets(const QString& releaseBody);
+
+    /**
+     * @brief Does a release targeted by `targets` apply to `robotId`?
+     *
+     * No marker → true. `exclude` match → false. Non-empty `include`
+     * without a match → false. An OCU with no robot set up yet has an
+     * empty id: it only passes when `include` is empty.
+     */
+    static bool targetsAllow(const OtaTargets& targets, const QString& robotId);
+
 signals:
     /// Fired when a poll finds a SHA different from the embedded one AND no
     /// snooze is active. Carries the parsed release details.

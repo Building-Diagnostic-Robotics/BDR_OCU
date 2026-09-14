@@ -9,8 +9,28 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 
 namespace f2c_cpp::update {
+
+/**
+ * @brief Fleet targeting carried inside the release body.
+ *
+ * CI appends `<!-- ota-targets: {"schema":1,"include":[…],"exclude":[…]} -->`
+ * from `cpp/config/ota_targets.json`. Riding in the body (not a separate
+ * asset) means no second fetch, and the persisted-release replay path
+ * sees the same rules the live poll did. The modal's bullet parser drops
+ * non-`-` lines, so the comment never reaches the operator.
+ *
+ * Semantics (`UpdateChecker::targetsAllow`): no marker → offer to every
+ * OCU (pre-gate behaviour). `exclude` wins over `include`. An empty
+ * `include` means "everyone not excluded".
+ */
+struct OtaTargets {
+    bool present = false;
+    QStringList include;
+    QStringList exclude;
+};
 
 /**
  * @brief Snapshot of a remote release as parsed from the GitHub Releases API.
@@ -50,7 +70,14 @@ struct VersionInfo {
     /// Release publish time in UTC (from GitHub `published_at`). Empty if
     /// the API didn't include it. Modal renders this as a localized date.
     QString publishedAtIso8601;
+
+    /// Fleet targeting lifted from the body marker (see OtaTargets).
+    OtaTargets targets;
 };
+
+/// Marker prefix CI writes into the release body; the JSON object follows
+/// until the closing `-->`.
+inline constexpr const char* kOtaTargetsMarker = "<!-- ota-targets:";
 
 /// How often to poll GitHub Releases when no in-flight check is running.
 constexpr int kPollIntervalMs = 5 * 60 * 1000;  // 5 minutes

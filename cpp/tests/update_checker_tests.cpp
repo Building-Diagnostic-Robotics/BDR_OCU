@@ -16,6 +16,7 @@
 
 #include "update/update_checker.hpp"
 
+using f2c_cpp::update::OtaTargets;
 using f2c_cpp::update::UpdateChecker;
 using f2c_cpp::update::VersionInfo;
 
@@ -142,4 +143,97 @@ TEST(ParseReleaseJson, NoUsableShaLeavesCommitShaEmpty) {
     EXPECT_TRUE(info.commitSha.isEmpty());
     // Empty remote SHA must never be treated as an upgrade.
     EXPECT_FALSE(UpdateChecker::isUpdateNewer("abc1234", info.commitSha));
+}
+
+TEST(ParseReleaseJson, BodyWithoutMarkerHasNoTargets) {
+    QString err;
+    const VersionInfo info =
+        UpdateChecker::parseReleaseJson(latestPayload("Latest (abc1234)", "main"), &err);
+    EXPECT_FALSE(info.targets.present);
+    EXPECT_TRUE(UpdateChecker::targetsAllow(info.targets, "Roofus#0001"));
+}
+
+// ---------------------------------------------------------------------------
+// parseTargets / targetsAllow — fleet targeting via the release body
+// ---------------------------------------------------------------------------
+
+TEST(OtaTargetsParse, NoMarkerIsNotPresent) {
+    const OtaTargets t = UpdateChecker::parseTargets("- fixed things\n- more");
+    EXPECT_FALSE(t.present);
+    EXPECT_TRUE(t.include.isEmpty());
+    EXPECT_TRUE(t.exclude.isEmpty());
+}
+
+TEST(OtaTargetsParse, ReadsIncludeAndExcludeAfterBullets) {
+    // Exactly what release.yml appends: bullets, blank line, HTML comment.
+    const OtaTargets t = UpdateChecker::parseTargets(
+        "- fixed things\n\n"
+        "<!-- ota-targets: {\"schema\":1,\"include\":[\"Roofus#0002\"],"
+        "\"exclude\":[\"Roofus#0001\"]} -->");
+    ASSERT_TRUE(t.present);
+    EXPECT_EQ(t.include, QStringList{QStringLiteral("Roofus#0002")});
+    EXPECT_EQ(t.exclude, QStringList{QStringLiteral("Roofus#0001")});
+}
+
+TEST(OtaTargetsParse, MalformedJsonIsPresentButEmpty) {
+    // A typo in ota_targets.json must fail open (offer to all), not brick OTA.
+    const OtaTargets t = UpdateChecker::parseTargets(
+        "<!-- ota-targets: {\"include\": [\"Roofus#0002\" -->");
+    EXPECT_TRUE(t.present);
+    EXPECT_TRUE(t.include.isEmpty());
+    EXPECT_TRUE(t.exclude.isEmpty());
+    EXPECT_TRUE(UpdateChecker::targetsAllow(t, "Roofus#0001"));
+}
+
+TEST(OtaTargetsParse, MissingClosingTagIsPresentButEmpty) {
+    const OtaTargets t = UpdateChecker::parseTargets("<!-- ota-targets: {}");
+    EXPECT_TRUE(t.present);
+    EXPECT_TRUE(UpdateChecker::targetsAllow(t, "Roofus#0001"));
+}
+
+TEST(OtaTargetsParse, DropsBlankIds) {
+    const OtaTargets t = UpdateChecker::parseTargets(
+        "<!-- ota-targets: {\"include\":[\" \",\"\",\"Roofus#0002 \"]} -->");
+    EXPECT_EQ(t.include, QStringList{QStringLiteral("Roofus#0002")});
+}
+
+TEST(OtaTargetsAllow, EmptyListsAllowEveryone) {
+    OtaTargets t;
+    t.present = true;
+    EXPECT_TRUE(UpdateChecker::targetsAllow(t, "Roofus#0001"));
+    EXPECT_TRUE(UpdateChecker::targetsAllow(t, ""));
+}
+
+TEST(OtaTargetsAllow, ExcludeBlocksOnlyThatRobot) {
+    OtaTargets t;
+    t.present = true;
+    t.exclude = QStringList{QStringLiteral("Roofus#0001")};
+    EXPECT_FALSE(UpdateChecker::targetsAllow(t, "Roofus#0001"));
+    EXPECT_TRUE(UpdateChecker::targetsAllow(t, "Roofus#0002"));
+    EXPECT_TRUE(UpdateChecker::targetsAllow(t, ""));  // no robot set up yet
+}
+
+TEST(OtaTargetsAllow, IncludeIsAnAllowlist) {
+    OtaTargets t;
+    t.present = true;
+    t.include = QStringList{QStringLiteral("Roofus#0002")};
+    EXPECT_TRUE(UpdateChecker::targetsAllow(t, "Roofus#0002"));
+    EXPECT_FALSE(UpdateChecker::targetsAllow(t, "Roofus#0001"));
+    EXPECT_FALSE(UpdateChecker::targetsAllow(t, ""));  // unknown → not included
+}
+
+TEST(OtaTargetsAllow, ExcludeWinsOverInclude) {
+    OtaTargets t;
+    t.present = true;
+    t.include = QStringList{QStringLiteral("Roofus#0001")};
+    t.exclude = QStringList{QStringLiteral("Roofus#0001")};
+    EXPECT_FALSE(UpdateChecker::targetsAllow(t, "Roofus#0001"));
+}
+
+TEST(OtaTargetsAllow, IdIsTrimmedButCaseSensitive) {
+    OtaTargets t;
+    t.present = true;
+    t.include = QStringList{QStringLiteral("Roofus#0002")};
+    EXPECT_TRUE(UpdateChecker::targetsAllow(t, "  Roofus#0002  "));
+    EXPECT_FALSE(UpdateChecker::targetsAllow(t, "roofus#0002"));
 }

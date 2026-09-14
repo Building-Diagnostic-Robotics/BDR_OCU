@@ -456,11 +456,24 @@ exactly one of seven states. The full state-transition diagram lives in
   `StartupAction::NormalWithProbe` branch. Do not add unconditional
   `done`-marker writes in `AppShellWindow` — that would mask real
   ctor-crash failures from triggering rollback.
+- **Fleet targeting rides in the release body**, not a separate asset:
+  `release.yml` appends `<!-- ota-targets: {…} -->` from
+  `cpp/config/ota_targets.json`; `UpdateChecker::parseTargets` /
+  `targetsAllow` gate on `setup/robot_id` in BOTH `handleSuccess` and
+  `replayPersistedRelease`. No second fetch, works through the ETag
+  304 path. `exclude` beats `include`; empty lists = everyone; malformed
+  JSON fails **open** (a typo must not freeze the fleet). Do not move
+  this to a downloaded asset without carrying the replay path with it.
+- `update/auto_check_enabled=false` is the per-laptop pin:
+  `UpdateChecker::start()` returns before scheduling anything. Both
+  controls only *offer*; neither installs. They cannot reach an OCU
+  still on a pre-gate build — those need `api.github.com` blocked on
+  the machine.
 
 ### Docs
 
 - `docs/OTA.md` — state-transition diagram, runner UX, wrapper exit
- codes, field-test recipe.
+ codes, fleet targeting / pinning, field-test recipe.
 
 ## Mission metadata + units (production-wired)
 

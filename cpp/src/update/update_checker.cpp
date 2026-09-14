@@ -63,6 +63,14 @@ void UpdateChecker::start() {
     if (started_) {
         return;
     }
+    if (!autoCheckEnabled()) {
+        // Operator-pinned OCU. No poll, no replay, no banner — the
+        // machine stays on its installed build until the key is flipped.
+        log::warn("checker",
+                  QStringLiteral("OTA disabled by %1=false; not polling")
+                      .arg(QString::fromLatin1(kKeyAutoCheckEnabled)));
+        return;
+    }
     started_ = true;
     current_backoff_ms_ = kPollIntervalMs;
     consecutive_failures_ = 0;
@@ -90,7 +98,7 @@ void UpdateChecker::stop() {
 }
 
 void UpdateChecker::checkNow() {
-    if (in_flight_) {
+    if (in_flight_ || !autoCheckEnabled()) {
         return;
     }
     performCheck();
@@ -146,6 +154,61 @@ QString UpdateChecker::extractRemoteSha(const QString& releaseName,
     return {};
 }
 
+OtaTargets UpdateChecker::parseTargets(const QString& releaseBody) {
+    OtaTargets out;
+    const QString marker = QString::fromLatin1(kOtaTargetsMarker);
+    const int start = releaseBody.indexOf(marker);
+    if (start < 0) {
+        return out;
+    }
+    out.present = true;
+    const int json_start = start + marker.size();
+    const int end = releaseBody.indexOf(QStringLiteral("-->"), json_start);
+    if (end < 0) {
+        log::warn("checker", QStringLiteral("ota-targets marker has no closing -->"));
+        return out;
+    }
+    const QByteArray json =
+        releaseBody.mid(json_start, end - json_start).trimmed().toUtf8();
+
+    QJsonParseError parse_err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(json, &parse_err);
+    if (parse_err.error != QJsonParseError::NoError || !doc.isObject()) {
+        log::warn("checker",
+                  QStringLiteral("ota-targets JSON malformed (%1); offering to all")
+                      .arg(parse_err.errorString()));
+        return out;
+    }
+    auto readList = [](const QJsonValue& v) {
+        QStringList list;
+        for (const QJsonValue& item : v.toArray()) {
+            const QString id = item.toString().trimmed();
+            if (!id.isEmpty()) {
+                list.append(id);
+            }
+        }
+        return list;
+    };
+    const QJsonObject obj = doc.object();
+    out.include = readList(obj.value(QStringLiteral("include")));
+    out.exclude = readList(obj.value(QStringLiteral("exclude")));
+    return out;
+}
+
+bool UpdateChecker::targetsAllow(const OtaTargets& targets, const QString& robotId) {
+    if (!targets.present) {
+        return true;
+    }
+    const QString id = robotId.trimmed();
+    if (!id.isEmpty() && targets.exclude.contains(id)) {
+        return false;
+    }
+    if (targets.include.isEmpty()) {
+        return true;
+    }
+    return !id.isEmpty() && targets.include.contains(id);
+}
+
 bool UpdateChecker::isUpdateNewer(const QString& embeddedShortSha,
                                   const QString& remoteFullOrShort) {
     if (embeddedShortSha.isEmpty() || remoteFullOrShort.isEmpty()) {
@@ -192,6 +255,7 @@ VersionInfo UpdateChecker::parseReleaseJson(const QByteArray& json,
     out.commitSha = extractRemoteSha(releaseName, out.tag, targetCommitish);
     out.releaseNotes = obj.value(QStringLiteral("body")).toString();
     out.publishedAtIso8601 = obj.value(QStringLiteral("published_at")).toString();
+    out.targets = parseTargets(out.releaseNotes);
 
     const QJsonArray assets = obj.value(QStringLiteral("assets")).toArray();
     QString sha256_for_deb;
@@ -399,6 +463,17 @@ void UpdateChecker::handleSuccess(const QByteArray& payload) {
         return;
     }
 
+    // Fleet targeting: the release body can name which robots' OCUs
+    // this build is for. Lets a build be withheld from a laptop that
+    // still runs an older robot configuration, without touching it.
+    if (!targetsAllow(info.targets, otaTargetId())) {
+        log::info("checker",
+                  QStringLiteral("release %1 not targeted at robot '%2'; staying quiet")
+                      .arg(info.commitSha.left(7), otaTargetId()));
+        emit noUpdateAvailable();
+        return;
+    }
+
     if (isSnoozed()) {
         // A new build exists but the operator told us to stay quiet. Treat as
         // "no update" from the UI's perspective; banner stays hidden.
@@ -441,6 +516,9 @@ void UpdateChecker::replayPersistedRelease() {
                   QStringLiteral("replay: persisted SHA %1 is denylisted, "
                                  "skipping").arg(info.commitSha.left(7)));
         return;
+    }
+    if (!targetsAllow(info.targets, otaTargetId())) {
+        return;  // Not for this robot's OCU. Same rule as the live poll.
     }
     if (isSnoozed()) {
         return;  // Stay quiet until snooze expires; persisted info still valid.

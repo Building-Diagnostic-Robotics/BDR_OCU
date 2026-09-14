@@ -248,6 +248,58 @@ failure UI.
 6. Revert the `std::abort()` and push again to leave the field laptop
    in a clean state.
 
+## Fleet targeting and pinning
+
+Every OCU polls the same rolling `latest` tag. Two controls decide
+whether a given laptop is *offered* a build; neither installs anything.
+
+### Remote: `cpp/config/ota_targets.json` (edit in the repo, push)
+
+```json
+{ "schema": 1, "include": [], "exclude": ["Roofus#0001"] }
+```
+
+`release.yml` appends the file to the release body as an HTML comment
+(`<!-- ota-targets: {…} -->`). `UpdateChecker::parseTargets` reads it
+back from the body on every poll — and from the persisted body on the
+replay path — and `targetsAllow` compares against the laptop's
+`setup/robot_id` (the robot chosen at Setup):
+
+| Marker                     | Effect                                             |
+|----------------------------|----------------------------------------------------|
+| absent                     | offered to every OCU (pre-gate behaviour)          |
+| `exclude` contains id      | never offered to that OCU                          |
+| `include` non-empty        | offered only to listed ids; unknown/empty id → no  |
+| both empty                 | offered to every OCU                               |
+
+`exclude` wins over `include`. Ids are trimmed, case-sensitive.
+Malformed JSON fails **open** (logged, offered to all) so a typo cannot
+freeze the fleet; `jq -c` in CI catches most typos before publish. The
+modal's bullet parser drops non-`-` lines, so the comment is invisible
+to operators and to GitHub's rendered release page.
+
+Use case: a laptop still paired with an older robot configuration. Put
+its robot id in `exclude`, push; the next `latest` is withheld from it
+while every other OCU updates. It keeps working on its installed build.
+
+This only protects OCUs that already run a build **with** this gate. A
+laptop on an older build cannot read the marker — freeze it locally
+(below) or block `api.github.com` on that machine.
+
+### Local: `update/auto_check_enabled=false`
+
+In `~/.config/PilotControl/BDRCoveragePlanner.conf`:
+
+```ini
+[update]
+auto_check_enabled=false
+```
+
+Restart the OCU. `UpdateChecker::start()` logs
+`OTA disabled by update/auto_check_enabled=false; not polling` and
+returns before scheduling anything — no poll, no replay, no banner.
+`checkNow()` is a no-op. Delete the key to re-enable.
+
 ## What we deliberately don't do
 
 - **No background install.** Phase 6 modal `Install Now` button is
@@ -320,7 +372,9 @@ cpp/scripts/
   bdr-apply-update                  # privileged dpkg wrapper
   bdr-coverage-planner.sudoers      # NOPASSWD drop-in source
 
+cpp/config/ota_targets.json # fleet include/exclude by robot_id (→ release body)
+
 cpp/CMakeLists.txt          # bdr_update_core, bdr-update-runner targets
 cpp/create_deb.sh           # packaging: postinst, prerm, sudoers stage+validate
-.github/workflows/release.yml  # CI: build .deb + .sha256, publish
+.github/workflows/release.yml  # CI: build .deb + .sha256, append ota-targets, publish
 ```

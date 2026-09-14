@@ -19,8 +19,11 @@ namespace f2c_cpp::update {
 /// Epoch-ms timestamp until which banner+modal must stay hidden. 0 = no snooze.
 inline constexpr const char* kKeySnoozeUntilMs = "update/snooze_until_ms";
 
-/// Master toggle for auto-checking. Default true. Reserved for a future
-/// Settings UI — no UI consumer in phase 3.
+/// Master toggle for OTA polling. Default true. Set to false on an OCU
+/// that must stay on its current build regardless of what `latest`
+/// says (UpdateChecker::start() then never polls, and checkNow() is a
+/// no-op). No UI — flip it in
+/// ~/.config/PilotControl/BDRCoveragePlanner.conf and restart the OCU.
 inline constexpr const char* kKeyAutoCheckEnabled = "update/auto_check_enabled";
 
 /// HTTP ETag from the most recent successful Releases API response. Sent
@@ -61,6 +64,16 @@ inline constexpr int kDenylistMaxEntries = 10;
 inline QSettings settings() {
     return QSettings(QString::fromLatin1(kSettingsOrgName),
                      QString::fromLatin1(kSettingsAppName));
+}
+
+/// True unless the operator pinned this OCU via kKeyAutoCheckEnabled=false.
+inline bool autoCheckEnabled() {
+    return settings().value(QString::fromLatin1(kKeyAutoCheckEnabled), true).toBool();
+}
+
+/// Robot this OCU is set up against — the id `ota_targets.json` matches.
+inline QString otaTargetId() {
+    return settings().value(QString::fromLatin1(kSettingsRobotIdKey)).toString().trimmed();
 }
 
 /**

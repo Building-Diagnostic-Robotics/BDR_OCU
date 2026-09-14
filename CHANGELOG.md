@@ -12,11 +12,11 @@ before pushing to `main` that triggers a release.
 
 ## Unreleased - 2026-09-13
 
-- Upload stays locked until the robot finishes the RDATA_EXT copy
-- Upload list shows building, operator, date; no date combo
+- Upload locks until the RDATA_EXT copy is done; list by building/operator
 - Preflight RGB uses the robot's single See3CAM (left_rgb)
 - Tilt-calibration modal uses the Stage 3 zinc chrome
 - Stage 6 Complete Mission shows finalize progress and skip-copy
+- OTA can be targeted per robot id, or pinned off on one laptop
 
 ## v1.0.0 - 2026-05-09
 

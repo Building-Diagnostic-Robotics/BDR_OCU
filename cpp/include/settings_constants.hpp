@@ -16,6 +16,9 @@ constexpr const char* kSettingsAppName = "BDRCoveragePlanner";
 /** QApplication dynamic property: qint64 epoch ms when the OCU process started (`main`). */
 constexpr const char* kOcuStartEpochMsProperty = "bdr_ocu_start_epoch_ms";
 
+/** QSettings key: robot chosen at Setup (e.g. "Roofus#0002"). Also the OTA targeting id. */
+constexpr const char* kSettingsRobotIdKey = "setup/robot_id";
+
 // ---------------------------------------------------------------------------
 // Per-mission session metadata (collected via MissionMetadataDialog before
 // every Stage 3 → Stage 4 transition). Values persist across runs so a

@@ -198,6 +198,16 @@ jobs:
           if [ -z "$NOTES" ]; then
             NOTES="No release notes provided."
           fi
+          # Fleet targeting. The OCU's UpdateChecker reads this HTML
+          # comment from the release body (UpdateChecker::parseTargets)
+          # and stays quiet on OCUs whose `setup/robot_id` is excluded
+          # or not included. The modal's bullet parser drops non-`-`
+          # lines, so operators never see it. `jq -c` fails the job on
+          # malformed JSON rather than shipping a broken marker.
+          if [ -f cpp/config/ota_targets.json ]; then
+            TARGETS="$(jq -c . cpp/config/ota_targets.json)"
+            NOTES="${NOTES}"$'\n\n'"<!-- ota-targets: ${TARGETS} -->"
+          fi
           {
             echo 'body<<EOF'
             echo "$NOTES"
