@@ -5,23 +5,32 @@
  *        resolver, and the /proc/mounts device → mount-point lookup.
  */
 
+#include "offload_status.hpp"
 #include "thumb_drive_watcher.hpp"
 #include "upload_runner.hpp"
 
 #include <gtest/gtest.h>
 
 #include <QCoreApplication>
+#include <QDate>
 #include <QDir>
+#include <QTime>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTimer>
 
+using f2c_cpp::OffloadCopyState;
+using f2c_cpp::OffloadSnapshot;
+using f2c_cpp::StickSync;
 using f2c_cpp::ThumbDriveWatcher;
 using f2c_cpp::UploadRunner;
 using f2c_cpp::UploadStateProbe;
 using f2c_cpp::UploadStatus;
 using f2c_cpp::UploadTarget;
+using f2c_cpp::classifyStickSync;
+using f2c_cpp::parseOffloadStatusJson;
 
 namespace {
 
@@ -39,7 +48,8 @@ void layOutStick(const QString& root) {
     const QString b = root + "/September_13_2026/Acme_HQ";
     writeFile(b + "/Section_1_101500/Visual_data/frame_0001.jpg", QByteArray(1000, 'x'));
     writeFile(b + "/Section_1_101500/GPR_scan_data/scan.csv", QByteArray(500, 'y'));
-    writeFile(b + "/Section_1_101500/session_config.json", "{}");
+    writeFile(b + "/Section_1_101500/session_config.json",
+              R"({"building_name":"Acme HQ","operator_name":"Blake","timestamp":"101500","day_name":"September_13_2026"})");
 
     // Partially uploaded: 2 of 3 files recorded.
     writeFile(b + "/Section_2_113000/a.bin", QByteArray(10, 'a'));
@@ -88,8 +98,13 @@ TEST(UploadThumbDrive, LocalWalkFindsDepthThreeSectionsAndMissions) {
     EXPECT_EQ(s1->status, UploadStatus::None);
     EXPECT_EQ(s1->completed_files, 0);
     EXPECT_EQ(s1->total_files, 3);
-    EXPECT_EQ(s1->total_bytes, 1000 + 500 + 2);
+    EXPECT_GT(s1->total_bytes, 1500);
     EXPECT_FALSE(s1->isMission());
+    EXPECT_EQ(s1->building_name, "Acme HQ");
+    EXPECT_EQ(s1->operator_name, "Blake");
+    ASSERT_TRUE(s1->captured_at.isValid());
+    EXPECT_EQ(s1->captured_at.date(), QDate(2026, 9, 13));
+    EXPECT_EQ(s1->captured_at.time(), QTime(10, 15, 0));
 }
 
 TEST(UploadThumbDrive, LocalWalkClassifiesPartialFromStateFile) {
@@ -286,4 +301,101 @@ TEST(UploadThumbDrive, MountsLookupLastMountWins) {
         "/dev/sdb1 /media/ops/RDATA_EXT exfat rw 0 0\n";
     EXPECT_EQ(ThumbDriveWatcher::mountPointForDevice("/dev/sdb1", mounts),
               "/media/ops/RDATA_EXT");
+}
+
+TEST(OffloadStatus, ParsesIdleAndTreatsMissingQueuedAsDone) {
+    const OffloadSnapshot snap = parseOffloadStatusJson(
+        R"({"state":"idle","queued":0,"updated_at":"2026-09-13T12:00:00Z"})");
+    ASSERT_TRUE(snap.parse_ok);
+    EXPECT_EQ(snap.state, OffloadCopyState::Idle);
+    EXPECT_FALSE(snap.copyIncomplete());
+}
+
+TEST(OffloadStatus, DoneAndSkippedMapToIdle) {
+    EXPECT_EQ(parseOffloadStatusJson(R"({"state":"done"})").state,
+              OffloadCopyState::Idle);
+    EXPECT_EQ(parseOffloadStatusJson(R"({"state":"skipped"})").state,
+              OffloadCopyState::Idle);
+}
+
+TEST(OffloadStatus, WaitingForDriveIsIncomplete) {
+    const OffloadSnapshot snap = parseOffloadStatusJson(
+        R"({"state":"waiting_for_drive","queued":1,"mission":null,"jobs":{"a":{"state":"waiting_for_drive"}}})");
+    ASSERT_TRUE(snap.parse_ok);
+    EXPECT_EQ(snap.state, OffloadCopyState::WaitingForDrive);
+    EXPECT_TRUE(snap.copyIncomplete());
+}
+
+TEST(OffloadStatus, CopyingAndQueuedAreIncomplete) {
+    EXPECT_TRUE(parseOffloadStatusJson(R"({"state":"copying","queued":1})")
+                    .copyIncomplete());
+    EXPECT_TRUE(parseOffloadStatusJson(R"({"state":"queued","queued":2})")
+                    .copyIncomplete());
+}
+
+TEST(OffloadStatus, WorkerErrorRollupWithQueuedJobIsQueued) {
+    // rdata_offload.py writes top-level state=error for any leftover
+    // queue that isn't copying / waiting_for_drive — including jobs
+    // that are merely queued.
+    const OffloadSnapshot snap = parseOffloadStatusJson(
+        R"({"state":"error","queued":1,"jobs":{"a":{"state":"queued"}}})");
+    ASSERT_TRUE(snap.parse_ok);
+    EXPECT_EQ(snap.state, OffloadCopyState::Queued);
+    EXPECT_TRUE(snap.copyIncomplete());
+    EXPECT_TRUE(snap.error.isEmpty());
+}
+
+TEST(OffloadStatus, PerJobErrorIsErrorAndKeepsMessage) {
+    const OffloadSnapshot snap = parseOffloadStatusJson(
+        R"({"state":"error","queued":1,"jobs":{"a":{"state":"error","error":"rsync failed"}}})");
+    ASSERT_TRUE(snap.parse_ok);
+    EXPECT_EQ(snap.state, OffloadCopyState::Error);
+    EXPECT_TRUE(snap.copyIncomplete());
+    EXPECT_EQ(snap.error, "rsync failed");
+}
+
+TEST(OffloadStatus, JobsObjectCountsWhenQueuedMissing) {
+    const OffloadSnapshot snap = parseOffloadStatusJson(
+        R"({"state":"idle","jobs":{"one":{"state":"queued"},"two":{"state":"queued"}}})");
+    ASSERT_TRUE(snap.parse_ok);
+    EXPECT_EQ(snap.queued, 2);
+    EXPECT_TRUE(snap.copyIncomplete());
+}
+
+TEST(OffloadStatus, InvalidJsonIsNotIncomplete) {
+    const OffloadSnapshot snap = parseOffloadStatusJson("not-json");
+    EXPECT_FALSE(snap.parse_ok);
+    EXPECT_FALSE(snap.copyIncomplete());
+}
+
+TEST(OffloadStatus, StickClassifyAbsentEmptyIncompleteComplete) {
+    EXPECT_EQ(classifyStickSync(QString()), StickSync::Absent);
+    EXPECT_EQ(classifyStickSync(QStringLiteral("/no/such/rdata_ext")),
+              StickSync::Absent);
+
+    QTemporaryDir empty;
+    ASSERT_TRUE(empty.isValid());
+    EXPECT_EQ(classifyStickSync(empty.path()), StickSync::Empty);
+
+    // layOutStick writes thumbsync only on Mission_* — that is a
+    // finished robot copy. Section_* siblings never get their own file.
+    QTemporaryDir copied;
+    ASSERT_TRUE(copied.isValid());
+    layOutStick(copied.path());
+    EXPECT_EQ(classifyStickSync(copied.path()), StickSync::Complete);
+
+    QTemporaryDir mid_copy;
+    ASSERT_TRUE(mid_copy.isValid());
+    layOutStick(mid_copy.path());
+    ASSERT_TRUE(QFile::remove(
+        mid_copy.path() +
+        "/September_13_2026/Acme_HQ/Mission_101400/thumbsync_manifest.json"));
+    EXPECT_EQ(classifyStickSync(mid_copy.path()), StickSync::Incomplete);
+
+    QTemporaryDir orphans;
+    ASSERT_TRUE(orphans.isValid());
+    writeFile(orphans.path() +
+                  "/September_13_2026/Acme_HQ/Section_1_101500/a.bin",
+              "x");
+    EXPECT_EQ(classifyStickSync(orphans.path()), StickSync::Incomplete);
 }

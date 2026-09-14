@@ -165,6 +165,7 @@ set(HEADERS
     include/upload_dialog.hpp
     include/thumb_drive_watcher.hpp
     include/launch_env.hpp
+    include/offload_status.hpp
     include/components/bdr_message_box.hpp
     include/components/bdr_input_dialog.hpp
     include/components/bdr_progress_dialog.hpp
@@ -173,6 +174,7 @@ set(HEADERS
     include/components/pre_scan_checklist_dialog.hpp
     include/components/mission_metadata_dialog.hpp
     include/components/offline_finalize_dialog.hpp
+    include/components/mission_finalize_dialog.hpp
     include/components/fpv_camera_view.hpp
     include/components/auto_hide_scroll_bar.hpp
     include/components/svg_icon_button.hpp
@@ -247,6 +249,7 @@ set(GUI_SOURCES
     src/upload_runner.cpp
     src/upload_dialog.cpp
     src/thumb_drive_watcher.cpp
+    src/offload_status.cpp
     src/video_stream_widget.cpp
     src/robot_registry.cpp
     src/robot_login.cpp
@@ -259,6 +262,7 @@ set(GUI_SOURCES
     src/components/mission_metadata_dialog.cpp
     src/components/scan_setup_dialog.cpp
     src/components/offline_finalize_dialog.cpp
+    src/components/mission_finalize_dialog.cpp
     src/components/fpv_camera_view.cpp
     src/components/auto_hide_scroll_bar.cpp
     src/components/svg_icon_button.cpp
@@ -530,8 +534,10 @@ if(BDR_BUILD_TESTS)
             tests/upload_thumb_drive_tests.cpp
             src/upload_runner.cpp
             src/thumb_drive_watcher.cpp
+            src/offload_status.cpp
             include/upload_runner.hpp
             include/thumb_drive_watcher.hpp
+            include/offload_status.hpp
         )
         target_include_directories(upload_thumb_drive_tests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include

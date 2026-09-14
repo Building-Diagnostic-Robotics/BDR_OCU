@@ -20,9 +20,9 @@
  *     `AppShellWindow::onUploadDataRequested()` (called whenever the
  *     dashboard "Upload Data" quick-action fires).
  *  2. `showEvent` arms `ThumbDriveWatcher`. Once the stick is mounted,
- *     `UploadStateProbe` walks it and the dialog populates a
- *     date → building → section/mission tree, classifying each section
- *     as None/Partial/Done from the sentinel files beside the data.
+ *     `UploadStateProbe` walks it and the dialog lists every section
+ *     as a flat row (building, operator, date/time, size, status),
+ *     classified None/Partial/Done from the sentinel files beside the data.
  *     Browse… lets the operator point at an unlabelled stick or a
  *     local copy.
  *  3. Operator selects sections, presses **Upload Data**. The dialog
@@ -57,7 +57,6 @@
 #include "upload_runner.hpp"
 
 class QCheckBox;
-class QComboBox;
 class QFrame;
 class QHBoxLayout;
 class QLabel;
@@ -113,7 +112,6 @@ private slots:
                       const QString& error);
     void onRefreshClicked();
     void onBrowseClicked();
-    void onDateChanged(int index);
     void onSelectAllClicked();
     void onTreeItemChanged(QTreeWidgetItem* item, int column);
     void onUploadClicked();
@@ -144,8 +142,8 @@ private slots:
 private:
     void buildUi();
     void applyStyle();
-    void rebuildDateCombo();
     void repopulateTree();
+    QString formatWhen(const UploadTarget& target) const;
     void refreshSelectionSummary();
     void refreshButtonStates();
     void refreshHeaderSubtitle();
@@ -184,7 +182,6 @@ private:
 
     // All section/mission rows discovered by the probe, keyed by run_id.
     QHash<QString, UploadTarget> all_targets_;
-    QStringList ordered_dates_;
     bool probe_in_progress_ = false;
     QString last_probe_error_;
 
@@ -230,7 +227,6 @@ private:
     QLabel* offline_banner_label_ = nullptr;
 
     // Filter row.
-    QComboBox* combo_date_ = nullptr;
     QPushButton* btn_refresh_ = nullptr;
     QPushButton* btn_browse_ = nullptr;   // ThumbDrive only
     QLabel* lbl_probe_status_ = nullptr;

@@ -55,7 +55,7 @@ private:
     void setLiveResultsActive(bool active);
     void scrollToLiveResults();
     void updateStatusFromLogLine(const QString& line);
-    void updateCombinedRgbStatus();
+    void updateRgbStatus();
 
     QString robot_id_;
     bool preflight_running_ = false;
@@ -71,7 +71,6 @@ private:
     QLabel* lbl_rgb_status_ = nullptr;
     QLabel* lbl_rgb_subtitle_ = nullptr;
     QString left_rgb_status_;
-    QString right_rgb_status_;
 
     QLabel* lbl_thermal_icon_ = nullptr;
     QLabel* lbl_thermal_status_ = nullptr;
@@ -116,7 +115,6 @@ private:
     void resetResultsUi();
     void applyStatusBadge(QLabel* icon, QLabel* text, const QString& status,
                          QLabel* subtitle = nullptr, const QString& subtitleText = QString()) const;
-    QString combineStatus(const QString& a, const QString& b) const;
     void fetchLatestReport();
 
     bool live_results_active_ = false;

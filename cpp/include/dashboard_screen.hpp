@@ -1,5 +1,8 @@
 #pragma once
 
+#include "offload_status.hpp"
+#include "thumb_drive_watcher.hpp"
+
 #include <QByteArray>
 #include <QDateTime>
 #include <QString>
@@ -29,6 +32,13 @@ public:
 
     void setRobotId(const QString& robotId);
     void setDarkMode(bool dark_mode);
+    /** Re-read robot `/R_DATA/.offload/status.json` and the laptop stick. */
+    void refreshThumbCopyStatus();
+    /** True when robot offload is idle and the laptop stick is not a
+     *  partial copy. Last probe is cached so a powered-off robot cannot
+     *  look "ready" if the last check said otherwise. */
+    bool thumbCopyReady() const;
+    QString thumbCopyBlockReason() const;
 
     // Latest Stage 2 preflight rollup: "READY" / "WARN" / "FAIL" / "".
     // Folded into the Stage 3 System Status card alongside live battery
@@ -76,6 +86,10 @@ private slots:
     void onCalibrationProbeFinished();
     void onCalibrationRefreshTimerTick();
     void onStatusCardRefreshTimerTick();
+    void onOffloadProbeFinished();
+    void onOffloadRefreshTimerTick();
+    void onStickStateChanged();
+    void onUploadBlinkTick();
 
 private:
     void applyStyle();
@@ -122,6 +136,15 @@ private:
     // <scans_since_cal>. Saves an extra round-trip.
     void setScansAndCalibrationDisplays(int totalScans, int scansSinceCal);
     void setCalibrationDueBlink(bool blink);
+    void startOffloadProbe();
+    void stopOffloadProbe();
+    void applyCachedOffload();
+    void persistOffloadCache();
+    void refreshUploadAction();
+    void setUploadSyncBlink(bool blink);
+    void applyUploadBlinkFrame();
+    bool robotCopyIncomplete() const;
+    bool stickCopyIncomplete() const;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
     void refreshUptimeDisplay();
@@ -193,6 +216,23 @@ private:
     QGraphicsOpacityEffect* calibration_blink_effect_ = nullptr;
     QPropertyAnimation* calibration_blink_anim_ = nullptr;
     bool calibration_blink_active_ = false;
+
+    // Robot → RDATA_EXT offload. SSH-reads status.json; the laptop
+    // stick walk is the second signal. Cache survives robot power-off.
+    QProcess* offload_proc_ = nullptr;
+    QTimer* offload_refresh_timer_ = nullptr;
+    ThumbDriveWatcher* stick_watcher_ = nullptr;
+    OffloadSnapshot offload_;
+    bool offload_probe_ok_ = false;
+    bool offload_cached_incomplete_ = false;
+    QString offload_cached_state_;
+    StickSync stick_sync_ = StickSync::Absent;
+    // Stylesheet pulse — a QGraphicsOpacityEffect on this button sits
+    // under the actions-card drop shadow and Qt cannot nest those
+    // (the card paints at a wrong offset or vanishes).
+    QTimer* upload_blink_timer_ = nullptr;
+    bool upload_blink_active_ = false;
+    bool upload_blink_dimmed_ = false;
 };
 
 }  // namespace f2c_cpp

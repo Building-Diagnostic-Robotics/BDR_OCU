@@ -15,6 +15,7 @@
 #include "link_health_monitor.hpp"
 #include "components/bdr_message_box.hpp"
 #include "components/fpv_camera_view.hpp"
+#include "components/mission_finalize_dialog.hpp"
 #include "components/offline_finalize_dialog.hpp"
 #include "components/satellite_plan_confirm_dialog.hpp"
 #include "video_stream_widget.hpp"
@@ -46,7 +47,6 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QMouseEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -2130,6 +2130,12 @@ void SatelliteScreen::onNextClicked() {
         // A (re)confirmed ROI has edges that have not been reviewed yet;
         // otherwise Next would skip Edge Review as already done.
         edges_reviewed_ = false;
+        // New measured plans have a name but no id until something writes
+        // them. Persist here so leaving before launch does not lose the
+        // outline. No reload: loadJob would clear confirmed_vertices_.
+        if (!job_name_->text().trimmed().isEmpty()) {
+            persistJob(jobFromRail(), /*reload=*/false);
+        }
         refreshStepUi();
     }
     if (selected_step_ == Step::EdgeReview) {
@@ -2296,13 +2302,19 @@ SatelliteScreen::Step SatelliteScreen::nextAvailableStep(Step step) const {
     // step 2 already satisfied by a collected map, and a footer offering to
     // "Capture Point Cloud" would be promising work that is finished.
     // Revisiting a completed step is still possible, just via its chip.
+    // Availability, not reachability: Next is what completes this step
+    // (Confirm ROI / launch). Requiring the destination to already be
+    // reachable hid the button — Edge Review is unreachable until the
+    // modal has run, and step 5 is unreachable until that launch.
+    // Chips and setSelectedStep still go through stepReachable, so Cancel
+    // cannot skip onto a dead scan page.
     for (int i = int(step) + 1; i < kStepCount; ++i) {
-        if (stepReachable(Step(i)) && !stepComplete(Step(i))) {
+        if (stepAvailable(Step(i)) && !stepComplete(Step(i))) {
             return Step(i);
         }
     }
     for (int i = int(step) + 1; i < kStepCount; ++i) {
-        if (stepReachable(Step(i))) {
+        if (stepAvailable(Step(i))) {
             return Step(i);
         }
     }
@@ -4263,14 +4275,18 @@ Job SatelliteScreen::jobFromRail() const {
     return job;
 }
 
-bool SatelliteScreen::persistJob(const Job& job) {
+bool SatelliteScreen::persistJob(const Job& job, bool reload) {
     QString error;
     if (!job_store_.save(job, &error)) {
         appendLog(QStringLiteral("[plan] save failed: %1").arg(error));
         return false;
     }
     current_job_id_ = job.id;
-    refreshJobsCombo(job.id);
+    if (reload) {
+        refreshJobsCombo(job.id);
+    } else {
+        populateJobsCombo(job.id);
+    }
     return true;
 }
 
@@ -4706,20 +4722,15 @@ void SatelliteScreen::onMapCaptured(const MapCapture& capture) {
         map_->setView(0.0, 0.0, map_->zoom());
     }
 
-    if (!current_job_id_.isEmpty()) {
-        for (Job& job : jobs_) {
-            if (job.id != current_job_id_) {
-                continue;
-            }
-            if (capture_gps_.valid) {
-                job.gps = capture_gps_;
-            }
-            if (measured) {
-                job.robot = marker;
-            }
-            job_store_.save(job);
-            break;
+    if (!job_name_->text().trimmed().isEmpty()) {
+        Job job = jobFromRail();
+        if (capture_gps_.valid) {
+            job.gps = capture_gps_;
         }
+        if (measured) {
+            job.robot = marker;
+        }
+        persistJob(job, /*reload=*/false);
     }
     appendLog(QStringLiteral("[align] map collected: %1 (%2)")
                   .arg(capture.label,
@@ -5131,37 +5142,44 @@ void SatelliteScreen::updateAlignCardUi() {
 
 // ---- Mission ----------------------------------------------------------------
 
-bool SatelliteScreen::confirmDialog(const QString& title, const QString& body,
-                                    const QString& accept_label) {
-    QDialog dialog(this);
-    dialog.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-    dialog.setModal(true);
-    dialog.setMinimumWidth(430);
-    dialog.setObjectName("SatConfirmDialog");
-    // Modals are dark-only across the app (see MissionMetadataDialog).
-    dialog.setStyleSheet(QStringLiteral(
+namespace {
+
+// Same zinc chrome as Confirm ROI / Launch / Complete Mission. Heap so
+// the stop + revisit notices can show modeless (exec() nests a loop
+// under a live launch).
+QDialog* makeSatPrompt(QWidget* parent, const QString& title,
+                       const QString& body, const QString& accept_label,
+                       const QString& reject_label) {
+    auto* dialog = new QDialog(parent);
+    dialog->setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+    dialog->setMinimumWidth(430);
+    dialog->setMaximumWidth(560);
+    dialog->setObjectName("SatConfirmDialog");
+    dialog->setAttribute(Qt::WA_StyledBackground, true);
+    dialog->setStyleSheet(QStringLiteral(
         "#SatConfirmDialog { background-color: #18181b; "
         "border: 1px solid #27272a; border-radius: 10px; }"
         "QLabel { color: #FAFAFA; font-family: 'Arimo'; "
         "background: transparent; }"
         "QPushButton { background-color: #3f3f47; border: none; "
-        "border-radius: 10px; padding: 10px 20px; color: #FAFAFA; "
-        "font-family: 'Arimo'; font-weight: 600; font-size: 14px; }"
+        "border-radius: 18px; padding: 8px 18px; color: #FAFAFA; "
+        "font-family: 'Arimo'; font-weight: 600; font-size: 14px; "
+        "min-height: 36px; }"
         "QPushButton:hover { background-color: #4a4a52; }"
         "QPushButton#Accept { background-color: #00BC7D; color: #FFFFFF; "
         "font-weight: 700; }"
         "QPushButton#Accept:hover { background-color: #00A86D; }"));
-    auto* layout = new QVBoxLayout(&dialog);
+    auto* layout = new QVBoxLayout(dialog);
     layout->setContentsMargins(24, 20, 24, 20);
     layout->setSpacing(12);
 
-    auto* title_label = new QLabel(title, &dialog);
+    auto* title_label = new QLabel(title, dialog);
     title_label->setStyleSheet(QStringLiteral(
         "font-family: 'Arimo'; font-weight: 700; font-size: 20px; "
         "color: #FAFAFA; background: transparent;"));
     layout->addWidget(title_label);
 
-    auto* body_label = new QLabel(body, &dialog);
+    auto* body_label = new QLabel(body, dialog);
     body_label->setWordWrap(true);
     body_label->setStyleSheet(QStringLiteral(
         "font-family: 'Arimo'; font-size: 14px; color: #D4D4D8; "
@@ -5170,15 +5188,34 @@ bool SatelliteScreen::confirmDialog(const QString& title, const QString& body,
 
     auto* buttons = new QHBoxLayout;
     buttons->addStretch(1);
-    auto* cancel = new QPushButton(QStringLiteral("Cancel"), &dialog);
-    auto* accept = new QPushButton(accept_label, &dialog);
+    auto* reject = new QPushButton(reject_label, dialog);
+    auto* accept = new QPushButton(accept_label, dialog);
     accept->setObjectName("Accept");
-    QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
-    QObject::connect(accept, &QPushButton::clicked, &dialog, &QDialog::accept);
-    buttons->addWidget(cancel);
+    QObject::connect(reject, &QPushButton::clicked, dialog, &QDialog::reject);
+    QObject::connect(accept, &QPushButton::clicked, dialog, &QDialog::accept);
+    buttons->addWidget(reject);
     buttons->addWidget(accept);
     layout->addLayout(buttons);
-    return dialog.exec() == QDialog::Accepted;
+    return dialog;
+}
+
+void centerSatPrompt(QDialog* dialog, QWidget* parent) {
+    dialog->adjustSize();
+    const QPoint c = parent->mapToGlobal(parent->rect().center());
+    dialog->move(c.x() - dialog->width() / 2,
+                 c.y() - dialog->height() / 2);
+}
+
+}  // namespace
+
+bool SatelliteScreen::confirmDialog(const QString& title, const QString& body,
+                                    const QString& accept_label) {
+    QDialog* dialog = makeSatPrompt(this, title, body, accept_label,
+                                    QStringLiteral("Cancel"));
+    dialog->setModal(true);
+    const int rc = dialog->exec();
+    delete dialog;
+    return rc == QDialog::Accepted;
 }
 
 void SatelliteScreen::onSendMission() { launchMissionFromEdgeReview(); }
@@ -5193,8 +5230,10 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
                                 : RoiPolygon::fromRect(map_->roi());
     const geo::GeoPose marker = map_->marker();
     if (!poly.valid() || !marker.valid) {
-        appendLog(QStringLiteral(
-            "[send] draw the ROI and place the robot marker first"));
+        BdrMessageBox::warning(
+            this, QStringLiteral("Cannot launch"),
+            QStringLiteral(
+                "Draw a closed ROI and place the robot marker before launch."));
         return;
     }
     // One confirmation covers the edge review and the launch.
@@ -5219,23 +5258,16 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
         return;
     }
     map_->setMissionAnchor(marker);
-    if (!current_job_id_.isEmpty()) {
-        for (Job& job : jobs_) {
-            if (job.id == current_job_id_) {
-                job.polygon = poly;
-                job.roi = map_->roi();
-                job.robot = marker;
-                job.updated = QDateTime::currentDateTime();
-                QString save_error;
-                if (!job_store_.save(job, &save_error)) {
-                    appendLog(
-                        QStringLiteral("[send] plan geometry not saved: %1")
-                            .arg(save_error));
-                }
-                break;
-            }
-        }
-    }
+    // Always write (new measured plans had a name but no id, so the old
+    // "if we already have an id" guard dropped the roof-drawn ROI).
+    // No reload — loadJob would revoke the confirm that made step 5
+    // reachable.
+    Job job = jobFromRail();
+    job.polygon = poly;
+    job.roi = map_->roi();
+    job.robot = marker;
+    job.updated = QDateTime::currentDateTime();
+    persistJob(job, /*reload=*/false);
     // Run-state bookkeeping was reset by the previous teardown
     // (missionActiveChanged(false)); only the launch clock is new.
     setStatePill(QStringLiteral("LAUNCHING"), QColor(kAmber));
@@ -5363,7 +5395,7 @@ void SatelliteScreen::onFooterBackClicked() {
         mission_->teardownMission();
     }
     for (int i = int(selected_step_) - 1; i >= 0; --i) {
-        if (stepAvailable(Step(i))) {
+        if (stepReachable(Step(i))) {
             setSelectedStep(Step(i));
             return;
         }
@@ -5602,28 +5634,25 @@ void SatelliteScreen::maybePromptRevisit() {
     // left as-is — the director is already holding; the operator either
     // finishes or takes the FPV to drive closer and resumes.
     revisit_prompt_open_ = true;
-    auto* box = new QMessageBox(this);
+    const int n = status.revisit > 0 ? status.revisit
+                                     : int(qMax(0.0, status.deferred));
+    auto* box = makeSatPrompt(
+        this, QStringLiteral("Unreachable coverage remaining"),
+        QStringLiteral(
+            "The reachable area is covered, but %1 deferred section(s) look "
+            "unreachable from here.\n\nFinish the scan, or click the camera "
+            "view to drive closer to the skipped sections and press Resume.")
+            .arg(n),
+        QStringLiteral("Finish scan"), QStringLiteral("Drive closer"));
     box->setAttribute(Qt::WA_DeleteOnClose);
-    box->setIcon(QMessageBox::Question);
-    box->setWindowTitle(QStringLiteral("Unreachable coverage remaining"));
-    box->setText(QStringLiteral(
-        "The reachable area is covered, but %1 deferred section(s) look "
-        "unreachable from here.")
-                     .arg(status.revisit > 0
-                              ? status.revisit
-                              : int(qMax(0.0, status.deferred))));
-    box->setInformativeText(QStringLiteral(
-        "Finish the scan, or click the camera view to drive closer to the "
-        "skipped sections and press Resume."));
-    QPushButton* finish =
-        box->addButton(QStringLiteral("Finish scan"), QMessageBox::AcceptRole);
-    box->addButton(QStringLiteral("Drive closer"), QMessageBox::RejectRole);
-    connect(box, &QMessageBox::finished, this, [this, box, finish](int) {
+    box->setModal(false);
+    connect(box, &QDialog::finished, this, [this](int result) {
         revisit_prompt_open_ = false;
-        if (box->clickedButton() == finish && mission_->missionActive()) {
+        if (result == QDialog::Accepted && mission_->missionActive()) {
             onCompleteMission();
         }
     });
+    centerSatPrompt(box, this);
     box->show();
 }
 
@@ -6043,83 +6072,123 @@ void SatelliteScreen::beginMotorsIdleWait(
     motors_idle_timer_->start();
 }
 
+void SatelliteScreen::showFinalizeProgress(const QString& phase) {
+    if (!finalize_dialog_) {
+        finalize_dialog_ = new MissionFinalizeDialog(this);
+    }
+    finalize_dialog_->setPhase(phase);
+    finalize_dialog_->setDetail(QString());
+    finalize_dialog_->setSkipCopyAvailable(false);
+    finalize_dialog_->setAbortAvailable(false);
+    if (!finalize_dialog_->isVisible()) {
+        finalize_dialog_->show();
+        const QPoint c = mapToGlobal(rect().center());
+        finalize_dialog_->move(c.x() - finalize_dialog_->width() / 2,
+                               c.y() - finalize_dialog_->height() / 2);
+    }
+}
+
+void SatelliteScreen::finishCompleteMissionAndLeave() {
+    if (conclude_wait_timer_) {
+        conclude_wait_timer_->stop();
+    }
+    if (motors_idle_timer_) {
+        motors_idle_timer_->stop();
+    }
+    if (finalize_dialog_) {
+        finalize_dialog_->hide();
+        finalize_dialog_->deleteLater();
+        finalize_dialog_ = nullptr;
+    }
+    complete_mission_in_flight_ = false;
+    resetAlignmentSession();
+    emit backRequested();
+}
+
+void SatelliteScreen::startCompleteMissionSettle() {
+    if (!conclude_wait_timer_) {
+        conclude_wait_timer_ = new QTimer(this);
+        conclude_wait_timer_->setInterval(250);
+    }
+    conclude_wait_ticks_ = 0;
+    disconnect(conclude_wait_timer_, &QTimer::timeout, nullptr, nullptr);
+    connect(conclude_wait_timer_, &QTimer::timeout, this, [this] {
+        if (!complete_mission_in_flight_) {
+            conclude_wait_timer_->stop();
+            return;
+        }
+        ++conclude_wait_ticks_;
+        const CoverageStatus status = ros_->coverageStatus();
+        const QString copy = status.copy.toLower();
+        const bool save_done =
+            status.complete || copy == QLatin1String("pending") ||
+            copy == QLatin1String("queued") ||
+            copy == QLatin1String("waiting_for_drive") ||
+            copy == QLatin1String("copying") ||
+            copy == QLatin1String("done") ||
+            copy == QLatin1String("skipped") ||
+            copy == QLatin1String("failed");
+        // 250 ms × 120 = 30 s ceiling. Do not wait on the thumb-drive
+        // copy — Dashboard surfaces that. A hung conclude RPC must not
+        // strand the operator on this page.
+        if (!save_done && conclude_wait_ticks_ < 120) {
+            return;
+        }
+        conclude_wait_timer_->stop();
+        if (save_done || status.complete) {
+            markCurrentPlanCompleted();
+        }
+        if (copy == QLatin1String("pending") ||
+            copy == QLatin1String("queued") ||
+            copy == QLatin1String("waiting_for_drive") ||
+            copy == QLatin1String("copying")) {
+            appendLog(QStringLiteral(
+                "[mission] thumb-drive copy handed to the offload "
+                "worker — Dashboard will show progress"));
+        }
+        showFinalizeProgress(QStringLiteral("Disarming motors…"));
+        beginMotorsIdleWait([this](bool timed_out) {
+            appendLog(timed_out
+                          ? QStringLiteral(
+                                "[mission] motors did not confirm "
+                                "IDLE within 6 s — continuing")
+                          : QStringLiteral("[mission] motors IDLE"));
+            showFinalizeProgress(QStringLiteral("Stopping the robot stack…"));
+            QCoreApplication::processEvents();
+            mission_->teardownMission();
+            finishCompleteMissionAndLeave();
+        });
+    });
+    conclude_wait_timer_->start();
+}
+
 void SatelliteScreen::executeCompleteMissionNormalPath() {
     appendLog(QStringLiteral("[mission] concluding coverage…"));
-    // Bridge first, SSH `ros2 service call` second (legacy path): on a
-    // congested radio zenoh queries time out while SSH still gets through.
-    const auto after_conclude = [this](bool ok, const QString& detail) {
+    showFinalizeProgress(QStringLiteral("Concluding coverage…"));
+    // Settle timer starts now so a hung zenoh query cannot pin the
+    // operator on the scan page. Conclude is best-effort in parallel.
+    startCompleteMissionSettle();
+    ros_->concludeCoverage([this](bool ok, const QString& detail) {
+        if (!complete_mission_in_flight_) {
+            return;
+        }
         appendLog(ok ? QStringLiteral("[mission] conclude accepted: %1")
                            .arg(detail)
                      : QStringLiteral("[mission] conclude failed (%1) — "
-                                      "waiting briefly for director status")
+                                      "retrying over SSH")
                            .arg(detail));
-        if (!conclude_wait_timer_) {
-            conclude_wait_timer_ = new QTimer(this);
-            conclude_wait_timer_->setInterval(250);
-        }
-        conclude_wait_ticks_ = 0;
-        disconnect(conclude_wait_timer_, &QTimer::timeout, nullptr, nullptr);
-        connect(conclude_wait_timer_, &QTimer::timeout, this, [this] {
-            ++conclude_wait_ticks_;
-            const CoverageStatus status = ros_->coverageStatus();
-            const QString copy = status.copy.toLower();
-            // Any copy state past "idle" means the section was saved and
-            // handed to the offload worker (queued / waiting_for_drive are
-            // the systemd-worker states on cliff-on-autonomy).
-            const bool save_done =
-                status.complete || copy == QLatin1String("pending") ||
-                copy == QLatin1String("queued") ||
-                copy == QLatin1String("waiting_for_drive") ||
-                copy == QLatin1String("copying") ||
-                copy == QLatin1String("done") ||
-                copy == QLatin1String("skipped") ||
-                copy == QLatin1String("failed");
-            // 250 ms × 120 = 30 s. Copy itself is not waited on — the
-            // Dashboard surfaces that later.
-            if (save_done || conclude_wait_ticks_ >= 120) {
-                conclude_wait_timer_->stop();
-                if (save_done || status.complete) {
-                    markCurrentPlanCompleted();
-                }
-                if (copy == QLatin1String("pending") ||
-                    copy == QLatin1String("queued") ||
-                    copy == QLatin1String("waiting_for_drive") ||
-                    copy == QLatin1String("copying")) {
-                    appendLog(QStringLiteral(
-                        "[mission] thumb-drive copy handed to the offload "
-                        "worker — Dashboard will show progress"));
-                }
-                beginMotorsIdleWait([this](bool timed_out) {
-                    appendLog(timed_out
-                                  ? QStringLiteral(
-                                        "[mission] motors did not confirm "
-                                        "IDLE within 6 s — continuing")
-                                  : QStringLiteral("[mission] motors IDLE"));
-                    mission_->teardownMission();
-                    complete_mission_in_flight_ = false;
-                    scan_run_state_ = ScanRunState::Completed;
-                    refreshScanRunUi();
-                });
-            }
-        });
-        conclude_wait_timer_->start();
-    };
-    ros_->concludeCoverage([this, after_conclude](bool ok,
-                                                  const QString& detail) {
         if (ok) {
-            after_conclude(true, detail);
             return;
         }
-        appendLog(QStringLiteral("[mission] conclude via bridge failed (%1) "
-                                 "— retrying over SSH")
-                      .arg(detail));
         mission_->remoteServiceCall(QStringLiteral("/coverage/conclude"),
                                     QStringLiteral("std_srvs/srv/Trigger"),
-                                    QStringLiteral("{}"), after_conclude);
+                                    QStringLiteral("{}"),
+                                    [](bool, const QString&) {});
     });
 }
 
 void SatelliteScreen::executeCompleteMissionSshFallback() {
+    showFinalizeProgress(QStringLiteral("Finalizing via SSH…"));
     QString error;
     const RobotTarget target = MissionController::resolveRobotTarget(&error);
     if (target.valid) {
@@ -6165,8 +6234,10 @@ void SatelliteScreen::executeCompleteMissionSshFallback() {
     // Skip the disarm wait and the finalize RPC; both would just time out on
     // a dead link. Killing the launch tree disarms via the controller's exit
     // handlers.
+    showFinalizeProgress(QStringLiteral("Stopping the robot stack…"));
+    QCoreApplication::processEvents();
     mission_->teardownMission();
-    complete_mission_in_flight_ = false;
+    finishCompleteMissionAndLeave();
 }
 
 void SatelliteScreen::onEstop() {
@@ -6637,20 +6708,20 @@ void SatelliteScreen::maybePromptStop(const CoverageStatus& status) {
 
     // Modeless, like the revisit prompt: exec() would spin a nested loop in
     // which the launch can die underneath the operator.
-    auto* box = new QMessageBox(this);
+    auto* box = makeSatPrompt(
+        this, QStringLiteral("Robot stopped"),
+        QStringLiteral("%1\n\n%2")
+            .arg(stopHeadline(status), stopGuidance(status)),
+        QStringLiteral("Take manual control"), QStringLiteral("Dismiss"));
     box->setAttribute(Qt::WA_DeleteOnClose);
-    box->setIcon(QMessageBox::Warning);
-    box->setWindowTitle(QStringLiteral("Robot stopped — %1").arg(stopHeadline(status)));
-    box->setText(stopGuidance(status));
-    QPushButton* manual = box->addButton(QStringLiteral("Take manual control"),
-                                         QMessageBox::AcceptRole);
-    box->addButton(QStringLiteral("Dismiss"), QMessageBox::RejectRole);
-    connect(box, &QMessageBox::finished, this, [this, box, manual](int) {
+    box->setModal(false);
+    connect(box, &QDialog::finished, this, [this](int result) {
         stop_prompt_open_ = false;
-        if (box->clickedButton() == manual && mission_->missionActive()) {
+        if (result == QDialog::Accepted && mission_->missionActive()) {
             setManualOverride(true);
         }
     });
+    centerSatPrompt(box, this);
     box->show();
 }
 

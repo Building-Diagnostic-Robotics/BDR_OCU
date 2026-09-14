@@ -63,6 +63,7 @@ namespace f2c_cpp {
 class FPVCameraView;
 class LinkHealthMonitor;
 class MissionController;
+class MissionFinalizeDialog;
 class PanZoomImageWidget;
 class RosLink;
 class SatelliteMapWidget;
@@ -252,8 +253,10 @@ private:
     /** The Job as the rail currently describes it, id allocated if new,
         with the fields the rail does not own carried forward. */
     Job jobFromRail() const;
-    /** Writes `job` and re-selects it. False (and a log line) on failure. */
-    bool persistJob(const Job& job);
+    /** Writes `job`. `reload` re-selects via loadJob (office / step-1
+     *  save). Field mid-flow must pass false — loadJob clears the ROI
+     *  confirm snapshot and would hide Next again. */
+    bool persistJob(const Job& job, bool reload = true);
     /** Adopts a fresh imagery manifest into the job record and the canvas. */
     void adoptImageryManifest(Job& job,
                               const TileService::SiteManifest& manifest);
@@ -366,6 +369,9 @@ private:
     void executeCompleteMissionSshFallback();
     /** Requests IDLE and polls motorsIdle() up to a ceiling, then continues. */
     void beginMotorsIdleWait(std::function<void(bool timed_out)> on_done);
+    void showFinalizeProgress(const QString& phase);
+    void startCompleteMissionSettle();
+    void finishCompleteMissionAndLeave();
     /** True only in genuine Disconnected — Reconnecting does not count. */
     bool isRobotLinkUnreachable() const;
     void onEstop();
@@ -554,6 +560,7 @@ private:
     QTimer* motors_idle_timer_ = nullptr;
     int motors_idle_ticks_ = 0;
     bool complete_mission_in_flight_ = false;
+    MissionFinalizeDialog* finalize_dialog_ = nullptr;
 
     MapCaptureRunner* map_capture_ = nullptr;
     QNetworkAccessManager* probe_nam_ = nullptr;  // lazily, for field saves

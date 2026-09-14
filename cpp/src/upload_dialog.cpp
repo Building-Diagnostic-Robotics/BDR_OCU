@@ -5,9 +5,11 @@
 
 #include "upload_dialog.hpp"
 
+#include <algorithm>
+
+#include <QAbstractItemView>
 #include <QCheckBox>
 #include <QCloseEvent>
-#include <QComboBox>
 #include <QDebug>
 #include <QDir>
 #include <QFileDialog>
@@ -38,7 +40,6 @@ namespace f2c_cpp {
 namespace {
 
 constexpr int kRunIdRole = Qt::UserRole + 1;
-constexpr int kIsBuildingRole = Qt::UserRole + 2;
 
 QString statusBadgeText(UploadStatus s) {
     switch (s) {
@@ -59,7 +60,7 @@ UploadDialog::UploadDialog(QWidget* parent) : QDialog(parent) {
     setWindowFlags(Qt::FramelessWindowHint | Qt::Dialog);
     setAttribute(Qt::WA_TranslucentBackground);
     setModal(true);
-    setMinimumSize(880, 620);
+    setMinimumSize(980, 620);
 
     probe_ = new UploadStateProbe(this);
     runner_ = new UploadRunner(this);
@@ -243,19 +244,6 @@ void UploadDialog::buildUi() {
     filter_row->setContentsMargins(0, 0, 0, 0);
     filter_row->setSpacing(10);
 
-    auto* lbl_date = new QLabel(QStringLiteral("Date"), card);
-    lbl_date->setObjectName("UploadDialogFieldLabel");
-    filter_row->addWidget(lbl_date, 0);
-
-    combo_date_ = new QComboBox(card);
-    combo_date_->setObjectName("UploadDialogDateCombo");
-    combo_date_->setMinimumWidth(220);
-    combo_date_->setMinimumHeight(34);
-    connect(combo_date_,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &UploadDialog::onDateChanged);
-    filter_row->addWidget(combo_date_, 0);
-
     btn_refresh_ = new QPushButton(QStringLiteral("Refresh"), card);
     btn_refresh_->setObjectName("UploadDialogSecondary");
     btn_refresh_->setCursor(Qt::PointingHandCursor);
@@ -289,19 +277,23 @@ void UploadDialog::buildUi() {
     // Tree + select-all row.
     tree_ = new QTreeWidget(card);
     tree_->setObjectName("UploadDialogTree");
-    tree_->setColumnCount(4);
-    tree_->setHeaderLabels({QStringLiteral("Section"),
+    tree_->setColumnCount(5);
+    tree_->setHeaderLabels({QStringLiteral("Building"),
+                            QStringLiteral("Operator"),
+                            QStringLiteral("Date"),
                             QStringLiteral("Size"),
-                            QStringLiteral("Files"),
                             QStringLiteral("Status")});
-    tree_->setRootIsDecorated(true);
-    tree_->setUniformRowHeights(false);
+    tree_->setRootIsDecorated(false);
+    tree_->setItemsExpandable(false);
+    tree_->setIndentation(12);
+    tree_->setUniformRowHeights(true);
     tree_->setSelectionMode(QAbstractItemView::NoSelection);
     tree_->setFocusPolicy(Qt::NoFocus);
     tree_->header()->setStretchLastSection(true);
-    tree_->setColumnWidth(0, 320);
-    tree_->setColumnWidth(1, 110);
-    tree_->setColumnWidth(2, 80);
+    tree_->setColumnWidth(0, 240);
+    tree_->setColumnWidth(1, 160);
+    tree_->setColumnWidth(2, 180);
+    tree_->setColumnWidth(3, 90);
     connect(tree_, &QTreeWidget::itemChanged,
             this, &UploadDialog::onTreeItemChanged);
     root->addWidget(tree_, 1);
@@ -446,19 +438,6 @@ void UploadDialog::applyStyle() {
             font-weight: 600;
             background: transparent;
         }
-        QComboBox#UploadDialogDateCombo {
-            background: %6;
-            border: 1px solid %2;
-            border-radius: 8px;
-            color: %3;
-            font-family: 'Arimo';
-            font-size: 13px;
-            padding: 4px 10px;
-        }
-        QComboBox#UploadDialogDateCombo::drop-down {
-            border: none;
-            width: 22px;
-        }
         QPushButton#UploadDialogSecondary {
             background: %6;
             border: 1px solid %2;
@@ -493,11 +472,31 @@ void UploadDialog::applyStyle() {
             padding: 4px;
         }
         QTreeWidget#UploadDialogTree::item {
-            padding: 6px 4px;
+            padding: 8px 4px;
+            min-height: 28px;
             border: none;
         }
         QTreeWidget#UploadDialogTree::item:hover { background: %7; }
         QTreeWidget#UploadDialogTree::item:disabled { color: %4; }
+        QTreeWidget#UploadDialogTree::indicator {
+            width: 18px;
+            height: 18px;
+        }
+        QTreeWidget#UploadDialogTree::indicator:unchecked {
+            border: 2px solid %11;
+            border-radius: 4px;
+            background: %6;
+        }
+        QTreeWidget#UploadDialogTree::indicator:checked {
+            border: 2px solid %8;
+            border-radius: 4px;
+            background: %8;
+        }
+        QTreeWidget#UploadDialogTree::indicator:disabled {
+            border: 2px solid %2;
+            border-radius: 4px;
+            background: transparent;
+        }
         QHeaderView::section {
             background: %6;
             border: none;
@@ -618,8 +617,10 @@ void UploadDialog::applyStyle() {
         }
     )CSS")
                   .arg(dialog_bg, border, text, muted, t.danger,
-                       control_bg, row_hover, t.accent, t.accent_hover,
-                       t.warning));
+                       control_bg, row_hover, t.accent, t.accent_hover)
+                  .arg(t.warning)
+                  .arg(dark_mode_ ? QStringLiteral("#E4E4E7")
+                                  : QStringLiteral("#3F3F46")));
 
     Q_UNUSED(row_alt);
 
@@ -719,8 +720,6 @@ void UploadDialog::startProbe() {
             }
             if (tree_) tree_->clear();
             all_targets_.clear();
-            ordered_dates_.clear();
-            rebuildDateCombo();
             refreshSelectionSummary();
             refreshButtonStates();
             return;
@@ -775,30 +774,17 @@ void UploadDialog::onProbeReady(bool ok, const QList<UploadTarget>& targets,
         }
         if (tree_) tree_->clear();
         all_targets_.clear();
-        ordered_dates_.clear();
-        rebuildDateCombo();
         refreshSelectionSummary();
         refreshButtonStates();
         return;
     }
 
     all_targets_.clear();
-    QStringList dates_in_order;
     for (const UploadTarget& t : targets) {
         if (!all_targets_.contains(t.run_id)) {
             all_targets_.insert(t.run_id, t);
         }
-        if (!dates_in_order.contains(t.date_folder)) {
-            dates_in_order.append(t.date_folder);
-        }
     }
-    // Show newest dates first. `Month_DD_YYYY` strings don't sort lex
-    // by date, so we just reverse insertion order — both probes walk
-    // in name order, dates are typically a small set, and operators
-    // care about the most recent ones at the top of the dropdown.
-    std::reverse(dates_in_order.begin(), dates_in_order.end());
-    ordered_dates_ = dates_in_order;
-    rebuildDateCombo();
     repopulateTree();
     refreshSelectionSummary();
 
@@ -808,9 +794,10 @@ void UploadDialog::onProbeReady(bool ok, const QList<UploadTarget>& targets,
                 QStringLiteral("No scans recorded yet."));
         } else {
             lbl_probe_status_->setText(
-                QStringLiteral("Found %1 sections across %2 dates.")
+                QStringLiteral("Found %1 scan%2.")
                     .arg(all_targets_.size())
-                    .arg(ordered_dates_.size()));
+                    .arg(all_targets_.size() == 1 ? QString()
+                                                  : QStringLiteral("s")));
         }
     }
     refreshButtonStates();
@@ -841,18 +828,12 @@ void UploadDialog::onBrowseClicked() {
     drive_watcher_->setManualPath(chosen);   // triggers onDriveStateChanged
 }
 
-void UploadDialog::onDateChanged(int /*index*/) { repopulateTree(); }
-
-void UploadDialog::rebuildDateCombo() {
-    if (!combo_date_) return;
-    QSignalBlocker blocker(combo_date_);
-    combo_date_->clear();
-    for (const QString& d : ordered_dates_) {
-        combo_date_->addItem(d);
+QString UploadDialog::formatWhen(const UploadTarget& target) const {
+    if (target.captured_at.isValid()) {
+        return QLocale().toString(target.captured_at, QStringLiteral("MMM d, yyyy  h:mm AP"));
     }
-    if (!ordered_dates_.isEmpty()) {
-        combo_date_->setCurrentIndex(0);
-    }
+    return target.date_folder.isEmpty() ? QStringLiteral("—")
+                                        : target.date_folder;
 }
 
 void UploadDialog::repopulateTree() {
@@ -860,77 +841,48 @@ void UploadDialog::repopulateTree() {
     QSignalBlocker blocker(tree_);
     tree_->clear();
 
-    const QString date = combo_date_ ? combo_date_->currentText() : QString();
-    if (date.isEmpty() || all_targets_.isEmpty()) {
+    if (all_targets_.isEmpty()) {
         if (lbl_tree_status_) {
             lbl_tree_status_->setText(
                 last_probe_error_.isEmpty()
-                    ? QStringLiteral("No sections to upload for this date.")
+                    ? QStringLiteral("No scans to upload.")
                     : QStringLiteral("Could not read the %1:\n%2")
                           .arg(sourceNoun(), last_probe_error_));
             lbl_tree_status_->setVisible(true);
         }
         return;
     }
-
-    // Group by building.
-    QMap<QString, QList<UploadTarget>> by_building;
-    for (const UploadTarget& t : all_targets_) {
-        if (t.date_folder == date) {
-            by_building[t.building_slug].append(t);
-        }
-    }
-    if (by_building.isEmpty()) {
-        if (lbl_tree_status_) {
-            lbl_tree_status_->setText(
-                QStringLiteral("No sections to upload for this date."));
-            lbl_tree_status_->setVisible(true);
-        }
-        return;
-    }
     if (lbl_tree_status_) lbl_tree_status_->setVisible(false);
 
-    auto building_keys = by_building.keys();
-    std::sort(building_keys.begin(), building_keys.end());
-    for (const QString& building : building_keys) {
-        auto* parent_item = new QTreeWidgetItem(tree_);
-        parent_item->setText(0, building);
-        parent_item->setData(0, kIsBuildingRole, true);
-        parent_item->setFlags(parent_item->flags() | Qt::ItemIsAutoTristate |
-                              Qt::ItemIsUserCheckable);
-        parent_item->setCheckState(0, Qt::Unchecked);
+    QList<UploadTarget> rows = all_targets_.values();
+    std::sort(rows.begin(), rows.end(),
+              [](const UploadTarget& a, const UploadTarget& b) {
+                  if (a.captured_at.isValid() && b.captured_at.isValid() &&
+                      a.captured_at != b.captured_at) {
+                      return a.captured_at > b.captured_at;
+                  }
+                  return a.run_id > b.run_id;
+              });
 
-        QList<UploadTarget> children = by_building.value(building);
-        std::sort(children.begin(), children.end(),
-                  [](const UploadTarget& a, const UploadTarget& b) {
-                      return a.section_name < b.section_name;
-                  });
-
-        qint64 total_size = 0;
-        int total_files = 0;
-        for (const UploadTarget& t : children) {
-            auto* row = new QTreeWidgetItem(parent_item);
-            row->setText(0, t.section_name);
-            row->setData(0, kRunIdRole, t.run_id);
-            row->setData(0, kIsBuildingRole, false);
-            row->setText(1, formatBytes(t.total_bytes));
-            row->setText(2, QString::number(t.total_files));
-            setSectionRowStatus(row, t);
-            row->setFlags(row->flags() | Qt::ItemIsUserCheckable);
-            if (t.status == UploadStatus::Done) {
-                // Re-uploads are a script no-op, so we disable the
-                // checkbox to discourage accidental redundant traffic.
-                row->setFlags(row->flags() & ~Qt::ItemIsEnabled);
-                row->setCheckState(0, Qt::Unchecked);
-            } else {
-                row->setCheckState(0, Qt::Unchecked);
-            }
-            total_size += t.total_bytes;
-            total_files += t.total_files;
+    for (const UploadTarget& t : rows) {
+        auto* row = new QTreeWidgetItem(tree_);
+        const QString building =
+            t.building_name.isEmpty() ? t.building_slug : t.building_name;
+        row->setText(0, building);
+        row->setToolTip(0, t.section_name);
+        row->setData(0, kRunIdRole, t.run_id);
+        row->setText(1, t.operator_name.isEmpty() ? QStringLiteral("—")
+                                                  : t.operator_name);
+        row->setText(2, formatWhen(t));
+        row->setText(3, formatBytes(t.total_bytes));
+        setSectionRowStatus(row, t);
+        row->setFlags(row->flags() | Qt::ItemIsUserCheckable);
+        if (t.status == UploadStatus::Done) {
+            row->setFlags(row->flags() & ~Qt::ItemIsEnabled);
+            row->setCheckState(0, Qt::Unchecked);
+        } else {
+            row->setCheckState(0, Qt::Unchecked);
         }
-        parent_item->setText(1, formatBytes(total_size));
-        parent_item->setText(2, QString::number(total_files));
-        parent_item->setExpanded(true);
     }
 }
 
@@ -942,7 +894,7 @@ void UploadDialog::setSectionRowStatus(QTreeWidgetItem* row,
         const int pct = qBound(0, target.completed_files * 100 / qMax(1, target.total_files), 100);
         status_text = QStringLiteral("Partial · %1%").arg(pct);
     }
-    row->setText(3, status_text);
+    row->setText(4, status_text);
     QColor color;
     switch (target.status) {
         case UploadStatus::Done:    color = QColor("#10B981"); break;
@@ -950,18 +902,15 @@ void UploadDialog::setSectionRowStatus(QTreeWidgetItem* row,
         case UploadStatus::None:    color = dark_mode_ ? QColor("#A1A1AA")
                                                        : QColor("#52525B"); break;
     }
-    row->setForeground(3, color);
+    row->setForeground(4, color);
 }
 
 QTreeWidgetItem* UploadDialog::findSectionRow(const UploadTarget& target) const {
     if (!tree_) return nullptr;
     for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
-        QTreeWidgetItem* parent = tree_->topLevelItem(i);
-        for (int j = 0; j < parent->childCount(); ++j) {
-            QTreeWidgetItem* row = parent->child(j);
-            if (row->data(0, kRunIdRole).toString() == target.run_id) {
-                return row;
-            }
+        QTreeWidgetItem* row = tree_->topLevelItem(i);
+        if (row && row->data(0, kRunIdRole).toString() == target.run_id) {
+            return row;
         }
     }
     return nullptr;
@@ -976,14 +925,10 @@ void UploadDialog::onSelectAllClicked() {
     if (!tree_) return;
     QSignalBlocker blocker(tree_);
     for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
-        QTreeWidgetItem* parent = tree_->topLevelItem(i);
-        for (int j = 0; j < parent->childCount(); ++j) {
-            QTreeWidgetItem* row = parent->child(j);
-            if (row->flags() & Qt::ItemIsEnabled) {
-                row->setCheckState(0, Qt::Checked);
-            }
+        QTreeWidgetItem* row = tree_->topLevelItem(i);
+        if (row && (row->flags() & Qt::ItemIsEnabled)) {
+            row->setCheckState(0, Qt::Checked);
         }
-        parent->setCheckState(0, Qt::Checked);
     }
     refreshSelectionSummary();
     refreshButtonStates();
@@ -993,19 +938,13 @@ QList<UploadTarget> UploadDialog::selectedTargets() const {
     QList<UploadTarget> out;
     if (!tree_) return out;
     for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
-        QTreeWidgetItem* parent = tree_->topLevelItem(i);
-        for (int j = 0; j < parent->childCount(); ++j) {
-            QTreeWidgetItem* row = parent->child(j);
-            if (row->checkState(0) != Qt::Checked) continue;
-            const QString run_id = row->data(0, kRunIdRole).toString();
-            if (!all_targets_.contains(run_id)) continue;
-            const UploadTarget& t = all_targets_.value(run_id);
-            // Done items are disabled in the tree, so this branch only
-            // hits None/Partial — but keep the guard so a future change
-            // to the disable rule doesn't accidentally re-PUT.
-            if (t.status == UploadStatus::Done) continue;
-            out.append(t);
-        }
+        QTreeWidgetItem* row = tree_->topLevelItem(i);
+        if (!row || row->checkState(0) != Qt::Checked) continue;
+        const QString run_id = row->data(0, kRunIdRole).toString();
+        if (!all_targets_.contains(run_id)) continue;
+        const UploadTarget& t = all_targets_.value(run_id);
+        if (t.status == UploadStatus::Done) continue;
+        out.append(t);
     }
     return out;
 }
@@ -1076,9 +1015,6 @@ void UploadDialog::refreshButtonStates() {
     if (btn_refresh_) {
         btn_refresh_->setEnabled(!busy && !probe_in_progress_);
     }
-    if (combo_date_) {
-        combo_date_->setEnabled(!busy && !probe_in_progress_);
-    }
     if (tree_) {
         tree_->setEnabled(!busy);
     }
@@ -1090,9 +1026,10 @@ void UploadDialog::refreshButtonStates() {
         if (lbl_probe_status_ && !probe_in_progress_ &&
             !all_targets_.isEmpty()) {
             lbl_probe_status_->setText(
-                QStringLiteral("Found %1 sections across %2 dates.")
+                QStringLiteral("Found %1 scan%2.")
                     .arg(all_targets_.size())
-                    .arg(ordered_dates_.size()));
+                    .arg(all_targets_.size() == 1 ? QString()
+                                                  : QStringLiteral("s")));
         }
     }
 }

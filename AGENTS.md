@@ -27,7 +27,9 @@ release. The full, tickable checklist lives in `docs/DEV_BYPASSES.md`.
 Quick inventory of current bypass sites:
 
 - `cpp/src/startup_screen.cpp` — `kEnableLaunchDashboardPassthrough = true`
- forces Stage 2 Continue always-enabled regardless of preflight result.
+  forces Stage 2 Continue always-enabled regardless of preflight result.
+  RGB row is **`left_rgb` only** (label "RGB Camera"); the robot preflight
+  checks one See3CAM. Do not fold `right_rgb` back into the rollup.
 - `cpp/src/planner_screen.cpp` — `kBypassPlannerStageGates = true` lets
   the operator click into Scan Splitting / Scan stages without a saved
   map, completed plan, or published waypoints. Intentionally open during
@@ -45,7 +47,13 @@ Quick inventory of current bypass sites:
   `<cal_mtime> <total_scans> <scans_since_cal>`; the calibration
   card blinks (`QGraphicsOpacityEffect`) and becomes clickable once
   `kCalibrationDueAfterScans = 3` scans have passed since the last
-  tilt calibration.   The lower System Information row is fully wired,
+  tilt calibration. `TiltCalibrationDialog::setDarkMode` is called
+  from the Dashboard; only `#TiltCalibrationContainer` gets
+  `WA_StyledBackground` (opaque stack pages cover the 14px corners).
+  The Upload Data card stays disabled and
+  stylesheet-pulses until the robot→`RDATA_EXT` copy is complete
+  (`OffloadStatus` + per-`robot_id` QSettings cache); Complete
+  Mission does not wait on that copy. The lower System Information row is fully wired,
   including Uptime (elapsed since `main()` stamped
   `kOcuStartEpochMsProperty` on `QApplication`, refreshed
   every second while Stage 3 is visible).
@@ -466,8 +474,8 @@ autonomy arms.
 ### Key entry points
 
 - `cpp/include/components/mission_metadata_dialog.{hpp,cpp}` — the
- frameless modal (slugifies building name, persists to `QSettings`,
- styled to match `TiltCalibrationDialog`).
+  frameless modal (slugifies building name, persists to `QSettings`,
+  zinc family with `UploadDialog` / `TiltCalibrationDialog`).
 - `cpp/src/app_shell.cpp` — `onStartNewScan` (intercept point,
  applies `QGraphicsBlurEffect` to Stage 3) and
  `sendDataCollectorSessionMetadata` (the `SetParameters` push).
@@ -597,13 +605,24 @@ kept in sync by hand.
   `^Connection error:`, `^Unexpected error:` …) is unchanged and shared
   with the SSH mode.
 - **`UploadDialog`**: frameless modal from the Stage 3 "Upload Data"
-  card. Header names the robot the upload is attributed to **and** the
+  card. Flat list (Building, Operator, Date, Size, Status) — metadata
+  from `session_config.json` / `mission_config.json`, no date combo.
+  Header names the robot the upload is attributed to **and** the
   drive (`Drive: RDATA_EXT at /media/… · N GB free`). Banner + Upload
   gating = drive mounted AND cloud reachable (2 s `curl` HEAD, 2-miss
   debounce). Pulling the stick mid-upload pauses the runner.
+- **`OffloadStatus`** (`cpp/include/offload_status.hpp`): parses
+  `/R_DATA/.offload/status.json` (SSH, 5 s while Stage 3 is visible)
+  and classifies the laptop stick. Copy-complete is per `Mission_*`
+  — the robot writes `thumbsync_manifest.json` only there. Orphan
+  `Section_*` folders with no missions are Incomplete. Worker
+  top-level `state: "error"` is remapped from per-job state (queued
+  jobs look like errors). Cache keys are per `robot_id`
+  (`dashboard/offload_incomplete/<id>`, `dashboard/offload_state/<id>`).
 - **`AppShellWindow::onUploadDataRequested`**: hard launch-active block,
-  `robots.json` lookup by `setup/robot_id`, `setSource(ThumbDrive)`. No
-  SSH target is resolved any more.
+  `robots.json` lookup by `setup/robot_id`, `setSource(ThumbDrive)`,
+  plus `thumbCopyReady()`. `goToStage3` seeds `refreshThumbCopyStatus()`.
+  No SSH target is resolved any more.
 
 ### Decisions baked into the design
 
@@ -632,6 +651,9 @@ kept in sync by hand.
 - **Hard-blocked while a scan is alive.** `onUploadDataRequested`
   reuses the `launch_active` composite the close-event guard uses.
   Operator-locked: Complete Mission first.
+- **Hard-blocked until the robot→stick copy is done.** The Upload
+  card stays disabled (and blinks) while `OffloadStatus` says the
+  copy is incomplete. Complete Mission must not wait on that copy.
 
 ### Configuration
 
@@ -656,10 +678,11 @@ kept in sync by hand.
 
 ### Tests
 
-`tests/upload_thumb_drive_tests.cpp` — local walk classification,
-script resolver, `/proc/mounts` escape decoding, and an end-to-end
-runner launch against a stub script (env, argv, stdout contract,
-pause-flag clearing, `FailedToStart` handling).
+`tests/upload_thumb_drive_tests.cpp` — local walk classification
+(including `classifyStickSync` / `parseOffloadStatusJson`), script
+resolver, `/proc/mounts` escape decoding, and an end-to-end runner
+launch against a stub script (env, argv, stdout contract, pause-flag
+clearing, `FailedToStart` handling).
 
 ### Rules for agents touching this path
 
@@ -677,6 +700,16 @@ pause-flag clearing, `FailedToStart` handling).
     — inactive, but the fallback the operator asked to keep.
   - `RobotRegistry::cloudApiBase()` and its three-tier resolution.
 - **Do NOT downgrade the launch-active gate** in `onUploadDataRequested`.
+- **Do NOT wait on the thumb-drive copy inside Complete Mission.**
+  That gate is the Dashboard Upload card (`thumbCopyReady()`).
+- **Do NOT require `thumbsync_manifest.json` on `Section_*`.** The
+  robot writes it only on `Mission_*` after the mission and its
+  sections land. Requiring it on every section makes a finished
+  stick look incomplete after upload.
+- **Do NOT nest `QGraphicsOpacityEffect` on the Upload card** — Qt
+  cannot nest it under the Quick Actions drop shadow. Blink is a
+  450 ms stylesheet pulse on title/icon/subtitle. Calibration still
+  uses an opacity effect because it *replaces* its own shadow.
 - **Do NOT add IAM credentials to the OCU.**
 - **Do NOT make the dialog write anything to the stick except through
   `uploader.py`** (`upload_state.json`, `manifest.json`, `pause.flag`).
@@ -1062,16 +1095,22 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  job. Those are produced by the prefetch / map-collection / alignment
  steps, not by the plan card, and re-saving from the rail would otherwise
  wipe them.
+- `persistJob(job, reload)` — office / step-1 save reloads (`true`).
+ Field mid-flow (Confirm ROI, map capture) must pass `false`:
+ `loadJob` clears `confirmed_vertices_` and would hide Next.
 - `TileService::imageryInfoAt` coalesces concurrent queries for the same
  cell and notifies **every** waiting callback. Do not go back to dropping
  coalesced callers: the download dialog gates its whole prefetch on that
  callback, so a dropped one hangs the download forever.
 - **Complete Mission** is reachable on mission-active alone (offline
- dialog on true Disconnected). Reachable path: `concludeCoverage()` →
- wait until `/coverage/status` shows save done (`complete` or `copy` in
- pending/copying/done/skipped, 30 s ceiling) → motors IDLE wait →
- teardown. Do **not** wait for the thumb-drive copy; that surfaces later
- on the Dashboard. SSH-offline fallback is unchanged
+ dialog on true Disconnected). Reachable path: `MissionFinalizeDialog`
+ (shown, not `exec()` — async callbacks must keep flowing) →
+ `concludeCoverage()` → wait until `/coverage/status` shows save done
+ (`complete` or `copy` in pending/copying/done/skipped) → motors IDLE
+ wait → teardown. Skip-copy (`/coverage/skip_copy`) and abort-and-save
+ are CTAs on that modal so a dead USB cannot strand the robot. Do
+ **not** wait for the thumb-drive copy; that surfaces later on the
+ Dashboard Upload card. SSH-offline fallback is unchanged
  (`finalize_mission_local.py` via direct `python3`). **The only hard
  death signal is `MissionController::launchDied(side, rc)`** (the SSH
  session carrying the robot launch, or the laptop launch, exiting

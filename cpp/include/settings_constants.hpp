@@ -56,4 +56,9 @@ constexpr const char* kSettingsUnitsKey = "session/units";
  */
 constexpr const char* kSettingsStreamingCameraKey = "session/streaming_camera";
 
+/** Per-robot offload cache. Append `robot_id` — do not share across the fleet. */
+constexpr const char* kSettingsOffloadIncompletePrefix =
+    "dashboard/offload_incomplete/";
+constexpr const char* kSettingsOffloadStatePrefix = "dashboard/offload_state/";
+
 }  // namespace f2c_cpp

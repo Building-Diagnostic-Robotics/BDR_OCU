@@ -1,4 +1,5 @@
 #include "dashboard_screen.hpp"
+#include "offload_status.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
 #include "update/update_log.hpp"
@@ -6,6 +7,7 @@
 
 #include <cmath>
 
+#include <QAbstractAnimation>
 #include <QApplication>
 #include <QColor>
 #include <QDateTime>
@@ -63,6 +65,13 @@ constexpr int kCalibrationProbeTimeoutMs = 8000;
 // calibration. Soft reminder, not a hard requirement. Three matches the
 // current field-deployment guidance — bump in one place if it changes.
 constexpr int kCalibrationDueAfterScans = 3;
+
+// Offload probe: the worker heartbeat is 5 s. Poll while Stage 3 is
+// visible so Complete Mission → Dashboard shows "Syncing…" immediately.
+constexpr int kOffloadRefreshMs = 5000;
+constexpr int kOffloadProbeTimeoutMs = 8000;
+constexpr const char* kUploadDefaultDesc =
+    "Push completed scans to the cloud";
 
 
 QPixmap loadSvgPixmap(const QString& resourcePath, int w, int h,
@@ -446,6 +455,19 @@ DashboardScreen::DashboardScreen(QWidget* parent)
 
     // System Status card refresh — 1 Hz is enough for a rollup that only
     // changes when MQTT freshness flips or preflight is re-run. Cheap.
+    offload_refresh_timer_ = new QTimer(this);
+    offload_refresh_timer_->setInterval(kOffloadRefreshMs);
+    connect(offload_refresh_timer_, &QTimer::timeout, this,
+            &DashboardScreen::onOffloadRefreshTimerTick);
+    stick_watcher_ = new ThumbDriveWatcher(this);
+    connect(stick_watcher_, &ThumbDriveWatcher::stateChanged, this,
+            &DashboardScreen::onStickStateChanged);
+    upload_blink_timer_ = new QTimer(this);
+    upload_blink_timer_->setInterval(450);
+    connect(upload_blink_timer_, &QTimer::timeout, this,
+            &DashboardScreen::onUploadBlinkTick);
+    refreshUploadAction();
+
     status_refresh_timer_ = new QTimer(this);
     status_refresh_timer_->setInterval(1000);
     connect(status_refresh_timer_, &QTimer::timeout, this,
@@ -470,11 +492,20 @@ DashboardScreen::DashboardScreen(QWidget* parent)
 }
 
 void DashboardScreen::setRobotId(const QString& robotId) {
-    robot_id_ = robotId.trimmed();
+    const QString next = robotId.trimmed();
+    const bool changed = next != robot_id_;
+    robot_id_ = next;
     if (lbl_robot_id_value_) {
         lbl_robot_id_value_->setText(robot_id_.isEmpty() ? "—" : robot_id_.toUpper());
     }
     loadRobotProfileFromRegistry();
+    if (changed) {
+        // Live snapshot belongs to the previous robot.
+        offload_probe_ok_ = false;
+        offload_ = OffloadSnapshot{};
+        applyCachedOffload();
+        refreshUploadAction();
+    }
 }
 
 void DashboardScreen::setDarkMode(bool dark_mode) {
@@ -498,6 +529,11 @@ void DashboardScreen::onRunDiagnosticsClicked() {
 }
 
 void DashboardScreen::onViewRecordingsClicked() {
+    if (!thumbCopyReady()) {
+        BdrMessageBox::warning(this, QStringLiteral("Upload unavailable"),
+                               thumbCopyBlockReason());
+        return;
+    }
     emit viewRecordingsRequested();
 }
 
@@ -512,6 +548,7 @@ void DashboardScreen::onCalibrateTiltRequested() {
         return;
     }
     TiltCalibrationDialog dlg(target.host, target.ssh_user, this);
+    dlg.setDarkMode(dark_mode_);
     dlg.exec();
 }
 
@@ -536,6 +573,7 @@ void DashboardScreen::loadRobotProfileFromRegistry() {
 DashboardScreen::~DashboardScreen() {
     stopBatteryMonitor();
     stopCalibrationProbe();
+    stopOffloadProbe();
 }
 
 void DashboardScreen::showEvent(QShowEvent* event) {
@@ -560,6 +598,13 @@ void DashboardScreen::showEvent(QShowEvent* event) {
     if (status_refresh_timer_) {
         status_refresh_timer_->start();
     }
+    if (stick_watcher_) {
+        stick_watcher_->start();
+    }
+    refreshThumbCopyStatus();
+    if (offload_refresh_timer_) {
+        offload_refresh_timer_->start();
+    }
     refreshSystemStatusCard();
     refreshUptimeDisplay();
 }
@@ -575,6 +620,13 @@ void DashboardScreen::hideEvent(QHideEvent* event) {
         calibration_refresh_timer_->stop();
     }
     stopCalibrationProbe();
+    stopOffloadProbe();
+    if (offload_refresh_timer_) {
+        offload_refresh_timer_->stop();
+    }
+    if (stick_watcher_) {
+        stick_watcher_->stop();
+    }
     if (status_refresh_timer_) {
         status_refresh_timer_->stop();
     }
@@ -585,6 +637,14 @@ void DashboardScreen::hideEvent(QHideEvent* event) {
     if (calibration_blink_anim_) {
         calibration_blink_anim_->stop();
     }
+    if (calibration_blink_effect_) {
+        calibration_blink_effect_->setOpacity(1.0);
+    }
+    if (upload_blink_timer_) {
+        upload_blink_timer_->stop();
+    }
+    upload_blink_dimmed_ = false;
+    applyUploadBlinkFrame();
 }
 
 // =============================================================================
@@ -1308,11 +1368,6 @@ void DashboardScreen::setCalibrationDueBlink(bool blink) {
     if (!card_calibration_) {
         return;
     }
-    if (blink == calibration_blink_active_ && calibration_blink_anim_) {
-        return;  // already in the requested state
-    }
-    calibration_blink_active_ = blink;
-
     if (!blink) {
         if (calibration_blink_anim_) {
             calibration_blink_anim_->stop();
@@ -1320,8 +1375,19 @@ void DashboardScreen::setCalibrationDueBlink(bool blink) {
         if (calibration_blink_effect_) {
             calibration_blink_effect_->setOpacity(1.0);
         }
+        calibration_blink_active_ = false;
         return;
     }
+    // hideEvent stops the animation without clearing the flag, so an
+    // "already blinking" card can be paused. Restart rather than
+    // short-circuit, or it never resumes after a stage round-trip.
+    if (calibration_blink_active_ && calibration_blink_anim_) {
+        if (calibration_blink_anim_->state() != QAbstractAnimation::Running) {
+            calibration_blink_anim_->start();
+        }
+        return;
+    }
+    calibration_blink_active_ = true;
 
     // Lazy-init the effect + animation. We attach a single
     // QGraphicsOpacityEffect to the card and pulse its opacity in a loop
@@ -1342,6 +1408,343 @@ void DashboardScreen::setCalibrationDueBlink(bool blink) {
         calibration_blink_anim_->setLoopCount(-1);  // forever until stopped
     }
     calibration_blink_anim_->start();
+}
+
+bool DashboardScreen::robotCopyIncomplete() const {
+    if (offload_probe_ok_) {
+        return offload_.copyIncomplete();
+    }
+    return offload_cached_incomplete_;
+}
+
+bool DashboardScreen::stickCopyIncomplete() const {
+    return stick_sync_ == StickSync::Incomplete;
+}
+
+bool DashboardScreen::thumbCopyReady() const {
+    return !robotCopyIncomplete() && !stickCopyIncomplete();
+}
+
+QString DashboardScreen::thumbCopyBlockReason() const {
+    const bool waiting =
+        (offload_probe_ok_ &&
+         offload_.state == OffloadCopyState::WaitingForDrive) ||
+        (!offload_probe_ok_ &&
+         offload_cached_state_ == QLatin1String("waiting_for_drive"));
+    if (waiting) {
+        return QStringLiteral(
+            "Plug RDATA_EXT into the robot and wait for the copy to finish.");
+    }
+    if (offload_probe_ok_ && offload_.state == OffloadCopyState::Error) {
+        if (!offload_.error.isEmpty()) {
+            return QStringLiteral("Thumb-drive copy failed on the robot: %1")
+                .arg(offload_.error);
+        }
+        return QStringLiteral(
+            "Thumb-drive copy failed on the robot. Check the offload worker.");
+    }
+    if (offload_probe_ok_ && offload_.copyIncomplete()) {
+        return QStringLiteral(
+            "The robot is still copying this mission to the thumb drive.");
+    }
+    if (!offload_probe_ok_ && offload_cached_incomplete_) {
+        return QStringLiteral(
+            "Sync incomplete — turn the robot on and wait for the copy "
+            "to finish.");
+    }
+    if (stickCopyIncomplete()) {
+        return QStringLiteral(
+            "This thumb drive is missing a completed copy. Plug it into "
+            "the robot and wait.");
+    }
+    return QStringLiteral("Wait for the robot to finish copying to RDATA_EXT.");
+}
+
+void DashboardScreen::applyCachedOffload() {
+    offload_cached_incomplete_ = false;
+    offload_cached_state_.clear();
+    if (robot_id_.isEmpty()) {
+        return;
+    }
+    const QSettings settings(kSettingsOrgName, kSettingsAppName);
+    offload_cached_incomplete_ =
+        settings
+            .value(QLatin1String(kSettingsOffloadIncompletePrefix) + robot_id_,
+                   false)
+            .toBool();
+    offload_cached_state_ =
+        settings
+            .value(QLatin1String(kSettingsOffloadStatePrefix) + robot_id_,
+                   QString())
+            .toString();
+}
+
+void DashboardScreen::persistOffloadCache() {
+    if (robot_id_.isEmpty()) {
+        return;
+    }
+    QSettings settings(kSettingsOrgName, kSettingsAppName);
+    settings.setValue(QLatin1String(kSettingsOffloadIncompletePrefix) + robot_id_,
+                      offload_cached_incomplete_);
+    settings.setValue(QLatin1String(kSettingsOffloadStatePrefix) + robot_id_,
+                      offload_cached_state_);
+}
+
+void DashboardScreen::refreshThumbCopyStatus() {
+    if (stick_watcher_ &&
+        stick_watcher_->state() == ThumbDriveWatcher::State::Mounted) {
+        stick_sync_ = classifyStickSync(stick_watcher_->mountPath());
+    } else {
+        stick_sync_ = StickSync::Absent;
+    }
+    refreshUploadAction();
+    startOffloadProbe();
+}
+
+void DashboardScreen::onStickStateChanged() {
+    if (stick_watcher_ &&
+        stick_watcher_->state() == ThumbDriveWatcher::State::Mounted) {
+        stick_sync_ = classifyStickSync(stick_watcher_->mountPath());
+    } else {
+        stick_sync_ = StickSync::Absent;
+    }
+    refreshUploadAction();
+}
+
+void DashboardScreen::onOffloadRefreshTimerTick() {
+    startOffloadProbe();
+}
+
+void DashboardScreen::startOffloadProbe() {
+    if (offload_proc_ && offload_proc_->state() != QProcess::NotRunning) {
+        return;
+    }
+    stopOffloadProbe();
+
+    if (robot_host_.isEmpty() || robot_ssh_user_.isEmpty()) {
+        offload_probe_ok_ = false;
+        refreshUploadAction();
+        return;
+    }
+
+    offload_proc_ = new QProcess(this);
+    offload_proc_->setProcessChannelMode(QProcess::SeparateChannels);
+    connect(offload_proc_,
+            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            &DashboardScreen::onOffloadProbeFinished);
+
+    QStringList args;
+    args << QStringLiteral("-o") << QStringLiteral("BatchMode=yes")
+         << QStringLiteral("-o") << QStringLiteral("ConnectTimeout=5")
+         << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=accept-new")
+         << QStringLiteral("%1@%2").arg(robot_ssh_user_).arg(robot_host_)
+         << QStringLiteral(
+                "if [ -f /R_DATA/.offload/status.json ]; then "
+                "  cat /R_DATA/.offload/status.json; "
+                "else "
+                "  echo '{\"state\":\"idle\",\"queued\":0}'; "
+                "fi");
+    offload_proc_->start(QStringLiteral("ssh"), args);
+
+    QProcess* proc = offload_proc_;
+    QTimer::singleShot(kOffloadProbeTimeoutMs, proc, [this, proc]() {
+        if (offload_proc_ == proc &&
+            offload_proc_->state() != QProcess::NotRunning) {
+            offload_proc_->kill();
+        }
+    });
+
+    if (!offload_proc_->waitForStarted(1500)) {
+        update::log::warn(
+            "dashboard",
+            QStringLiteral("offload probe: ssh failed to start: %1")
+                .arg(offload_proc_->errorString()));
+        stopOffloadProbe();
+        offload_probe_ok_ = false;
+        refreshUploadAction();
+    }
+}
+
+void DashboardScreen::stopOffloadProbe() {
+    if (!offload_proc_) {
+        return;
+    }
+    offload_proc_->blockSignals(true);
+    if (offload_proc_->state() != QProcess::NotRunning) {
+        offload_proc_->kill();
+        offload_proc_->waitForFinished(750);
+    }
+    offload_proc_->deleteLater();
+    offload_proc_ = nullptr;
+}
+
+void DashboardScreen::onOffloadProbeFinished() {
+    if (!offload_proc_) {
+        return;
+    }
+    const int exit_code = offload_proc_->exitCode();
+    const QByteArray stdout_text = offload_proc_->readAllStandardOutput();
+    const QByteArray stderr_text = offload_proc_->readAllStandardError();
+    const bool was_ok = offload_probe_ok_;
+    stopOffloadProbe();
+
+    if (exit_code != 0) {
+        if (was_ok) {
+            update::log::warn(
+                "dashboard",
+                QStringLiteral("offload probe: ssh exit=%1 stderr=%2")
+                    .arg(exit_code)
+                    .arg(QString::fromUtf8(stderr_text).trimmed()));
+        }
+        offload_probe_ok_ = false;
+        refreshUploadAction();
+        return;
+    }
+
+    const OffloadSnapshot snap = parseOffloadStatusJson(stdout_text);
+    if (!snap.parse_ok) {
+        if (was_ok) {
+            update::log::warn(
+                "dashboard",
+                QStringLiteral("offload probe: bad status.json: %1")
+                    .arg(QString::fromUtf8(stdout_text.trimmed())));
+        }
+        offload_probe_ok_ = false;
+        refreshUploadAction();
+        return;
+    }
+
+    offload_ = snap;
+    offload_probe_ok_ = true;
+    offload_cached_incomplete_ = snap.copyIncomplete();
+    switch (snap.state) {
+        case OffloadCopyState::Idle:
+            offload_cached_state_ = QStringLiteral("idle");
+            break;
+        case OffloadCopyState::Queued:
+            offload_cached_state_ = QStringLiteral("queued");
+            break;
+        case OffloadCopyState::Copying:
+            offload_cached_state_ = QStringLiteral("copying");
+            break;
+        case OffloadCopyState::WaitingForDrive:
+            offload_cached_state_ = QStringLiteral("waiting_for_drive");
+            break;
+        case OffloadCopyState::Error:
+            offload_cached_state_ = QStringLiteral("error");
+            break;
+        case OffloadCopyState::Unknown:
+            offload_cached_state_.clear();
+            break;
+    }
+    persistOffloadCache();
+    refreshUploadAction();
+}
+
+void DashboardScreen::refreshUploadAction() {
+    if (!btn_view_recordings_) {
+        return;
+    }
+    const bool blocked = !thumbCopyReady();
+    btn_view_recordings_->setEnabled(!blocked);
+    btn_view_recordings_->setToolTip(
+        blocked ? thumbCopyBlockReason() : QString());
+
+    QString desc = QLatin1String(kUploadDefaultDesc);
+    const bool waiting =
+        (offload_probe_ok_ &&
+         offload_.state == OffloadCopyState::WaitingForDrive) ||
+        (!offload_probe_ok_ &&
+         offload_cached_state_ == QLatin1String("waiting_for_drive"));
+    if (waiting) {
+        desc = QStringLiteral("Plug RDATA_EXT into the robot");
+    } else if (offload_probe_ok_ && offload_.copyIncomplete() &&
+               offload_.state != OffloadCopyState::Error) {
+        desc = QStringLiteral("Syncing to thumb drive…");
+    } else if (robotCopyIncomplete()) {
+        desc = !offload_probe_ok_
+                   ? QStringLiteral("Sync incomplete — turn the robot on")
+                   : QStringLiteral("Thumb-drive copy incomplete");
+    } else if (stickCopyIncomplete()) {
+        desc = QStringLiteral("Thumb drive copy incomplete");
+    }
+
+    if (auto* label = findChild<QLabel*>(QStringLiteral("DashboardBtnRecordingsDesc"))) {
+        label->setText(desc);
+    }
+    setUploadSyncBlink(blocked);
+}
+
+void DashboardScreen::setUploadSyncBlink(bool blink) {
+    if (!btn_view_recordings_) {
+        return;
+    }
+    // Detach any leftover opacity effect from earlier builds — nested
+    // under the actions-card drop shadow it paints the card off-slot.
+    if (btn_view_recordings_->graphicsEffect()) {
+        btn_view_recordings_->setGraphicsEffect(nullptr);
+    }
+    if (!blink) {
+        if (upload_blink_timer_) {
+            upload_blink_timer_->stop();
+        }
+        upload_blink_active_ = false;
+        upload_blink_dimmed_ = false;
+        applyUploadBlinkFrame();
+        return;
+    }
+    if (upload_blink_active_ && upload_blink_timer_ &&
+        upload_blink_timer_->isActive()) {
+        return;
+    }
+    upload_blink_active_ = true;
+    upload_blink_dimmed_ = false;
+    applyUploadBlinkFrame();
+    if (upload_blink_timer_) {
+        upload_blink_timer_->start();
+    }
+}
+
+void DashboardScreen::onUploadBlinkTick() {
+    if (!upload_blink_active_) {
+        return;
+    }
+    upload_blink_dimmed_ = !upload_blink_dimmed_;
+    applyUploadBlinkFrame();
+}
+
+void DashboardScreen::applyUploadBlinkFrame() {
+    if (!btn_view_recordings_) {
+        return;
+    }
+    const bool dim = upload_blink_active_ && upload_blink_dimmed_;
+    const QString title_color =
+        dim ? QStringLiteral("#71717B")
+            : (dark_mode_ ? QStringLiteral("#FFFFFF") : QStringLiteral("#18181B"));
+    const QString desc_color =
+        dim ? QStringLiteral("#52525B") : QStringLiteral("#71717B");
+    const QString icon_color =
+        dim ? QStringLiteral("#71717B") : QStringLiteral("#00BC7D");
+    if (auto* title = findChild<QLabel*>(QStringLiteral("DashboardBtnRecordingsTitle"))) {
+        title->setStyleSheet(
+            QStringLiteral("font-family: 'Arimo'; font-weight: 700; font-size: 18px; "
+                           "line-height: 28px; color: %1;")
+                .arg(title_color));
+    }
+    if (auto* desc = findChild<QLabel*>(QStringLiteral("DashboardBtnRecordingsDesc"))) {
+        desc->setStyleSheet(
+            QStringLiteral("font-family: 'Arimo'; font-size: 14px; line-height: 20px; "
+                           "color: %1;")
+                .arg(desc_color));
+    }
+    if (auto* icon = findChild<QLabel*>(QStringLiteral("DashboardBtnRecordingsIcon"))) {
+        const QPixmap pix =
+            loadSvgPixmap(QStringLiteral(":/assets/dashboard/camera.svg"), 40, 40,
+                          icon_color);
+        if (!pix.isNull()) {
+            icon->setPixmap(pix);
+        }
+    }
 }
 
 bool DashboardScreen::eventFilter(QObject* watched, QEvent* event) {
@@ -1639,6 +2042,7 @@ void DashboardScreen::applyStyle() {
             "  text-align: left;"
             "}"
             "%1:hover:enabled { background: %5; }"
+            "%1:disabled { background: %2; border: %3px solid %4; }"
             "%1:focus { outline: none; }")
             .arg(selector, action_bg, QString::number(action_border_width),
                  action_border, action_hover));
@@ -1663,6 +2067,7 @@ void DashboardScreen::applyStyle() {
     updateActionIcon("DashboardBtnDiagnostics", ":/assets/dashboard/heartbeat.svg", accent);
     updateActionIcon("DashboardBtnRecordings", ":/assets/dashboard/camera.svg", accent);
     updateActionIcon("DashboardBtnCalibrateTilt", ":/assets/dashboard/settings.svg", "#E17100");
+    applyUploadBlinkFrame();
 }
 
 }  // namespace f2c_cpp

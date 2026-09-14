@@ -1043,6 +1043,9 @@ void AppShellWindow::goToStage3() {
     if (stage2_) {
         stage3_->setPreflightResult(stage2_->preflightResult());
     }
+    // Seed the Upload Data gate from robot status.json + the laptop
+    // stick. Complete Mission does not wait on the copy; Dashboard does.
+    stage3_->refreshThumbCopyStatus();
     stack_->setCurrentWidget(stage3_);
 }
 
@@ -1622,6 +1625,13 @@ void AppShellWindow::onUploadDataRequested() {
             tr("Upload unavailable"),
             tr("A scan is currently active. Complete Mission first, then "
                "upload from the dashboard."));
+        return;
+    }
+    if (stage3_ && !stage3_->thumbCopyReady()) {
+        BdrMessageBox::warning(
+            this,
+            tr("Upload unavailable"),
+            stage3_->thumbCopyBlockReason());
         return;
     }
 

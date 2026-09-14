@@ -24,6 +24,8 @@ public:
                                    const QString& sshUser = QString(),
                                    QWidget* parent = nullptr);
 
+    void setDarkMode(bool dark);
+
 private slots:
     void onStartCalibrationClicked();
     void onSkipClicked();
@@ -45,6 +47,7 @@ private:
 
     QString robot_host_;
     QString ssh_user_;
+    bool dark_mode_ = true;
     QStackedWidget* stack_ = nullptr;
 
     QProcess* proc_ = nullptr;

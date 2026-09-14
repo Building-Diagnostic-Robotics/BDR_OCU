@@ -12,11 +12,13 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFutureWatcher>
+#include <QDate>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QTime>
 #include <QStringList>
 #include <QTimer>
 #include <QtConcurrent/QtConcurrentRun>
@@ -50,6 +52,67 @@ int jsonArrayLength(const QString& path, const char* key) {
 bool isSectionFolderName(const QString& name) {
     return name.startsWith(QLatin1String("Section_")) ||
            name.startsWith(QLatin1String("Mission_"));
+}
+
+QDateTime parseFolderStamp(const QString& date_folder, const QString& section,
+                           const QString& hms_override = QString()) {
+    QDate day = QDate::fromString(date_folder, QStringLiteral("MMMM_d_yyyy"));
+    if (!day.isValid()) {
+        day = QDate::fromString(date_folder, QStringLiteral("MMMM_dd_yyyy"));
+    }
+    QString hms = hms_override;
+    if (hms.isEmpty()) {
+        static const QRegularExpression kHmsRx(QStringLiteral("_(\\d{6})$"));
+        const auto m = kHmsRx.match(section);
+        if (m.hasMatch()) {
+            hms = m.captured(1);
+        }
+    }
+    const QTime clock = QTime::fromString(hms, QStringLiteral("HHmmss"));
+    if (!day.isValid()) {
+        return {};
+    }
+    return QDateTime(day, clock.isValid() ? clock : QTime(0, 0));
+}
+
+void fillTargetMetadata(UploadTarget& t) {
+    const QString cfg_name = t.isMission()
+                                 ? QStringLiteral("mission_config.json")
+                                 : QStringLiteral("session_config.json");
+    QFile f(t.data_path + QLatin1Char('/') + cfg_name);
+    QJsonObject obj;
+    if (f.open(QIODevice::ReadOnly)) {
+        const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+        if (doc.isObject()) {
+            obj = doc.object();
+        }
+    }
+    t.building_name = obj.value(QStringLiteral("building_name")).toString();
+    if (t.building_name.isEmpty()) {
+        t.building_name = t.building_slug;
+    }
+    t.operator_name = obj.value(QStringLiteral("operator_name")).toString();
+
+    const QString iso = obj.value(QStringLiteral("mission_started_at")).toString();
+    if (!iso.isEmpty()) {
+        QDateTime dt = QDateTime::fromString(iso, Qt::ISODate);
+        if (!dt.isValid()) {
+            dt = QDateTime::fromString(iso, Qt::ISODateWithMs);
+        }
+        if (dt.isValid()) {
+            t.captured_at = dt;
+            return;
+        }
+    }
+    QString day = obj.value(QStringLiteral("day_name")).toString();
+    if (day.isEmpty()) {
+        day = t.date_folder;
+    }
+    QString hms = obj.value(QStringLiteral("timestamp")).toString();
+    if (hms.isEmpty()) {
+        hms = obj.value(QStringLiteral("mission_timestamp")).toString();
+    }
+    t.captured_at = parseFolderStamp(day, t.section_name, hms);
 }
 
 // Single quote a string for safe inclusion inside a `bash -lc '...'`
@@ -115,7 +178,21 @@ QString buildProbeRemoteCommand(const QString& data_root) {
                "    ! -name upload_state.json ! -name pause.flag ! -name manifest.json "
                "    | wc -l); "
                "  size=$(du -sb \"$p\" 2>/dev/null | awk '{print $1}'); "
-               "  echo \"SECTION|$date|$building|$section|$state|$completed|$total|$size\"; "
+               "  cfg=\"$p/session_config.json\"; "
+               "  case \"$section\" in Mission_*) cfg=\"$p/mission_config.json\";; esac; "
+               "  meta=$(python3 -c \""
+               "import json,sys\n"
+               "b=o=t=''\n"
+               "try:\n"
+               " d=json.load(open(sys.argv[1]))\n"
+               " b=str(d.get('building_name') or '')\n"
+               " o=str(d.get('operator_name') or '')\n"
+               " t=str(d.get('mission_started_at') or d.get('timestamp') or d.get('mission_timestamp') or '')\n"
+               "except Exception:\n"
+               " pass\n"
+               "print(b.replace('|',' ')+'|'+o.replace('|',' ')+'|'+t.replace('|',' '))\n"
+               "\" \"$cfg\" 2>/dev/null || echo '||'); "
+               "  echo \"SECTION|$date|$building|$section|$state|$completed|$total|$size|$meta\"; "
                "done")
         .arg(quoted_root);
 }
@@ -221,6 +298,7 @@ QList<UploadTarget> UploadStateProbe::scanLocalDataRoot(const QString& data_root
                     }
                     t.total_files += 1;
                 }
+                fillTargetMetadata(t);
                 out.append(t);
             }
         }
@@ -362,6 +440,22 @@ void UploadStateProbe::onProcessFinished(int exit_code,
                        .arg(t.date_folder, t.building_slug, t.section_name);
         t.data_path = QStringLiteral("%1/%2")
                           .arg(data_root_, t.run_id);
+        if (fields.size() >= 11) {
+            t.building_name = fields.at(8);
+            t.operator_name = fields.at(9);
+            const QString raw_when = fields.at(10);
+            QDateTime iso = QDateTime::fromString(raw_when, Qt::ISODate);
+            if (!iso.isValid()) {
+                iso = QDateTime::fromString(raw_when, Qt::ISODateWithMs);
+            }
+            t.captured_at = iso.isValid()
+                                ? iso
+                                : parseFolderStamp(t.date_folder, t.section_name,
+                                                   raw_when);
+        }
+        if (t.building_name.isEmpty()) {
+            t.building_name = t.building_slug;
+        }
         if (!t.date_folder.isEmpty() && !t.building_slug.isEmpty() &&
             !t.section_name.isEmpty()) {
             out.append(t);

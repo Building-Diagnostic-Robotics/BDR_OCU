@@ -5,7 +5,9 @@
 
 #include "components/tilt_calibration_dialog.hpp"
 #include "components/bdr_message_box.hpp"
+#include "ui_theme_constants.hpp"
 
+#include <QColor>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -13,8 +15,6 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
-#include <QScrollArea>
-#include <QSettings>
 #include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -38,14 +38,23 @@ TiltCalibrationDialog::TiltCalibrationDialog(const QString& robotHost,
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground);
     setWindowModality(Qt::ApplicationModal);
-    setMinimumWidth(420);
+    setMinimumWidth(440);
     buildUi();
+    applyStyle();
+}
+
+void TiltCalibrationDialog::setDarkMode(bool dark) {
+    if (dark_mode_ == dark) {
+        return;
+    }
+    dark_mode_ = dark;
     applyStyle();
 }
 
 void TiltCalibrationDialog::buildUi() {
     auto* container = new QWidget(this);
     container->setObjectName("TiltCalibrationContainer");
+    container->setAttribute(Qt::WA_StyledBackground, true);
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -79,6 +88,7 @@ void TiltCalibrationDialog::buildUi() {
 
     frame_instructions_ = new QFrame(page1);
     frame_instructions_->setObjectName("instructionsFrame");
+    frame_instructions_->setAttribute(Qt::WA_StyledBackground, true);
     auto* instrLayout = new QVBoxLayout(frame_instructions_);
     instrLayout->setContentsMargins(16, 16, 16, 16);
     instrLayout->setSpacing(8);
@@ -100,13 +110,14 @@ void TiltCalibrationDialog::buildUi() {
     btn_start_ = new QPushButton(tr("Start Calibration"), page1);
     btn_start_->setObjectName("primaryButton");
     btn_start_->setCursor(Qt::PointingHandCursor);
+    btn_start_->setMinimumHeight(40);
     connect(btn_start_, &QPushButton::clicked, this, &TiltCalibrationDialog::onStartCalibrationClicked);
     btnRow->addWidget(btn_start_);
 
     btn_skip_ = new QPushButton(tr("Skip for Now"), page1);
     btn_skip_->setObjectName("secondaryButton");
-    btn_skip_->setFlat(true);
     btn_skip_->setCursor(Qt::PointingHandCursor);
+    btn_skip_->setMinimumHeight(40);
     connect(btn_skip_, &QPushButton::clicked, this, &TiltCalibrationDialog::onSkipClicked);
     btnRow->addWidget(btn_skip_);
 
@@ -144,6 +155,7 @@ void TiltCalibrationDialog::buildUi() {
 
     frame_warning_ = new QFrame(page2);
     frame_warning_->setObjectName("warningFrame");
+    frame_warning_->setAttribute(Qt::WA_StyledBackground, true);
     auto* warnLayout = new QVBoxLayout(frame_warning_);
     warnLayout->setContentsMargins(12, 12, 12, 12);
     auto* warnLbl = new QLabel(tr("Calibrating... Do not move robot"), frame_warning_);
@@ -176,6 +188,7 @@ void TiltCalibrationDialog::buildUi() {
 
     frame_result_ = new QFrame(page3);
     frame_result_->setObjectName("resultFrame");
+    frame_result_->setAttribute(Qt::WA_StyledBackground, true);
     auto* resultLayout = new QVBoxLayout(frame_result_);
     resultLayout->setContentsMargins(16, 16, 16, 16);
     lbl_pitch_angle_ = new QLabel(tr("Pitch Angle: —"), frame_result_);
@@ -193,97 +206,140 @@ void TiltCalibrationDialog::buildUi() {
 }
 
 void TiltCalibrationDialog::applyStyle() {
-    setStyleSheet(R"(
-        #TiltCalibrationContainer {
-            background-color: #121212;
-            border: 1px solid #333333;
-            border-radius: 8px;
+    const auto t = uiThemeTokens(dark_mode_);
+    const QString dialog_bg = dark_mode_ ? QStringLiteral("#18181B")
+                                         : QStringLiteral("#FFFFFF");
+    const QString border = dark_mode_ ? QStringLiteral("#3F3F46")
+                                      : QStringLiteral("#E5E7EB");
+    const QString text = dark_mode_ ? QStringLiteral("#F4F4F5")
+                                    : QStringLiteral("#111827");
+    const QString muted = dark_mode_ ? QStringLiteral("#A1A1AA")
+                                     : QStringLiteral("#52525B");
+    const QString control_bg = dark_mode_ ? QStringLiteral("#27272A")
+                                          : QStringLiteral("#F9FAFB");
+    const QString control_hover = dark_mode_ ? QStringLiteral("#3F3F46")
+                                             : QStringLiteral("#F3F4F6");
+    const QString badge_fg = dark_mode_ ? QStringLiteral("#FBBF24")
+                                        : QStringLiteral("#92400E");
+    const QColor accent(t.accent);
+    const QString result_fill = QStringLiteral("rgba(%1, %2, %3, 0.12)")
+                                    .arg(accent.red())
+                                    .arg(accent.green())
+                                    .arg(accent.blue());
+
+    setStyleSheet(QStringLiteral(R"CSS(
+        QWidget#TiltCalibrationContainer {
+            background-color: %1;
+            border: 1px solid %2;
+            border-radius: 14px;
         }
         QLabel#titleText {
+            font-family: 'Arimo';
             font-size: 22px;
-            font-weight: bold;
-            color: #f8fafc;
+            font-weight: 700;
+            color: %3;
+            background: transparent;
         }
         QLabel#subText {
+            font-family: 'Arimo';
             font-size: 14px;
-            color: #94a3b8;
+            font-weight: 500;
+            color: %4;
+            background: transparent;
         }
         QLabel#logText {
-            font-family: monospace;
-            font-size: 12px;
-            color: #cbd5e1;
+            font-family: 'Arimo';
+            font-size: 13px;
+            font-weight: 500;
+            color: %3;
+            background: transparent;
         }
         QLabel#setupBadge {
+            font-family: 'Arimo';
             font-size: 11px;
-            font-weight: bold;
-            color: #92400e;
-            background-color: #fef3c7;
+            font-weight: 700;
+            color: %5;
+            background-color: rgba(245, 158, 11, 0.18);
             padding: 4px 10px;
-            border-radius: 4px;
+            border-radius: 6px;
         }
-        #instructionsFrame {
-            background-color: #1e1e1e;
-            border-radius: 8px;
-            border: 1px solid #333333;
+        QFrame#instructionsFrame {
+            background-color: %6;
+            border-radius: 10px;
+            border: 1px solid %2;
         }
         QPushButton#primaryButton {
-            background-color: #059669;
-            color: white;
+            background-color: %7;
+            color: #FFFFFF;
             border: none;
-            border-radius: 6px;
+            border-radius: 8px;
             padding: 10px 20px;
+            font-family: 'Arimo';
             font-size: 14px;
             font-weight: 600;
         }
         QPushButton#primaryButton:hover {
-            background-color: #047857;
+            background-color: %8;
         }
         QPushButton#secondaryButton {
-            background: transparent;
-            color: #94a3b8;
-            border: 1px solid #444444;
-            border-radius: 6px;
+            background-color: %6;
+            color: %3;
+            border: 1px solid %2;
+            border-radius: 8px;
             padding: 10px 20px;
+            font-family: 'Arimo';
             font-size: 14px;
+            font-weight: 600;
         }
         QPushButton#secondaryButton:hover {
-            background-color: #1e1e1e;
+            background-color: %9;
         }
-        #progressBar {
-            background-color: #1e1e1e;
-            border: none;
+        QProgressBar#progressBar {
+            background-color: %6;
+            border: 1px solid %2;
+            border-radius: 4px;
+            min-height: 8px;
+            max-height: 8px;
+        }
+        QProgressBar#progressBar::chunk {
+            background-color: %7;
             border-radius: 3px;
-            height: 6px;
         }
-        #progressBar::chunk {
-            background-color: #059669;
-            border-radius: 3px;
-        }
-        #warningFrame {
-            background-color: rgba(245, 158, 11, 0.1);
-            border: 1px solid #f59e0b;
+        QFrame#warningFrame {
+            background-color: rgba(245, 158, 11, 0.18);
+            border: 1px solid rgba(245, 158, 11, 0.55);
             border-radius: 8px;
         }
         QLabel#successIcon {
+            font-family: 'Arimo';
             font-size: 48px;
-            color: #10b981;
-            font-weight: bold;
+            color: %7;
+            font-weight: 700;
+            background: transparent;
         }
-        #resultFrame {
-            background-color: rgba(16, 185, 129, 0.08);
-            border: 1px solid #10b981;
+        QFrame#resultFrame {
+            background-color: %10;
+            border: 1px solid %7;
             border-radius: 8px;
         }
         QLabel#resultText {
+            font-family: 'Arimo';
             font-size: 18px;
-            font-weight: bold;
-            color: #10b981;
+            font-weight: 700;
+            color: %7;
+            background: transparent;
         }
         QLabel#redirectText {
+            font-family: 'Arimo';
             font-size: 12px;
-            color: #64748b;
+            font-weight: 500;
+            color: %4;
+            background: transparent;
         }
-    )");
+    )CSS")
+                      .arg(dialog_bg, border, text, muted, badge_fg,
+                           control_bg, t.accent, t.accent_hover, control_hover)
+                      .arg(result_fill));
 }
 
 void TiltCalibrationDialog::switchToPage(int index) {

@@ -183,7 +183,7 @@ StartupScreen::StartupScreen(QWidget* parent)
         components_grid->addWidget(row_w, row, col);
     };
 
-    addComponent(0, 0, "RGB Cameras (Left + Right)", "C");
+    addComponent(0, 0, "RGB Camera", "C");
     addComponent(0, 1, "Thermal Camera", "T");
     addComponent(1, 0, "LiDAR Sensor", "L");
     addComponent(1, 1, "RF Link", "R");
@@ -356,7 +356,7 @@ StartupScreen::StartupScreen(QWidget* parent)
         return card;
     };
 
-    live_left_layout->addWidget(makeRow("RGB Cameras (Left + Right)", "C", lbl_rgb_icon_, lbl_rgb_status_, lbl_rgb_subtitle_));
+    live_left_layout->addWidget(makeRow("RGB Camera", "C", lbl_rgb_icon_, lbl_rgb_status_, lbl_rgb_subtitle_));
     live_left_layout->addWidget(makeRow("Thermal Camera", "T", lbl_thermal_icon_, lbl_thermal_status_, lbl_thermal_subtitle_));
     live_left_layout->addWidget(makeRow("LiDAR Sensor", "L", lbl_lidar_icon_, lbl_lidar_status_, lbl_lidar_subtitle_));
     live_left_layout->addWidget(makeRow("RF Link", "R", lbl_rf_icon_, lbl_rf_status_, lbl_rf_subtitle_));
@@ -1367,10 +1367,9 @@ void StartupScreen::onReportFetchFinished(int exitCode, QProcess::ExitStatus exi
 
     // RGB, LiDAR, Motors: use status from JSON (no threshold logic)
     left_rgb_status_ = statusOf("left_rgb");
-    right_rgb_status_ = statusOf("right_rgb");
-    updateCombinedRgbStatus();
-    if (left_rgb_status_ == "FAIL" || right_rgb_status_ == "FAIL") has_any_fail = true;
-    if (left_rgb_status_ == "WARN" || right_rgb_status_ == "WARN") has_any_warn = true;
+    updateRgbStatus();
+    if (left_rgb_status_ == "FAIL") has_any_fail = true;
+    if (left_rgb_status_ == "WARN") has_any_warn = true;
     const QString lidar_s = statusOf("lidar");
     applyStatusBadge(lbl_lidar_icon_, lbl_lidar_status_, lidar_s);
     if (lidar_s == "FAIL") has_any_fail = true;
@@ -1428,14 +1427,10 @@ void StartupScreen::appendLog(const QString& text) {
     }
 }
 
-void StartupScreen::updateCombinedRgbStatus() {
-    QString combined;
-    if (left_rgb_status_.isEmpty() || right_rgb_status_.isEmpty()) {
-        combined = "PENDING";
-    } else {
-        combined = combineStatus(left_rgb_status_, right_rgb_status_);
-    }
-    applyStatusBadge(lbl_rgb_icon_, lbl_rgb_status_, combined);
+void StartupScreen::updateRgbStatus() {
+    applyStatusBadge(lbl_rgb_icon_, lbl_rgb_status_,
+                     left_rgb_status_.isEmpty() ? QStringLiteral("PENDING")
+                                                : left_rgb_status_);
 }
 
 void StartupScreen::updateStatusFromLogLine(const QString& line) {
@@ -1447,7 +1442,7 @@ void StartupScreen::updateStatusFromLogLine(const QString& line) {
     }
 
     static const QRegularExpression status_re(
-        R"(\[(left_rgb|right_rgb|thermal|lidar|rf|gps|motors)\]\s+(PASS|WARN|FAIL|SKIP))");
+        R"(\[(left_rgb|thermal|lidar|rf|gps|motors)\]\s+(PASS|WARN|FAIL|SKIP))");
 
     const QRegularExpressionMatch match = status_re.match(line);
     if (!match.hasMatch()) {
@@ -1459,12 +1454,7 @@ void StartupScreen::updateStatusFromLogLine(const QString& line) {
 
     if (key == "left_rgb") {
         left_rgb_status_ = status;
-        updateCombinedRgbStatus();
-        return;
-    }
-    if (key == "right_rgb") {
-        right_rgb_status_ = status;
-        updateCombinedRgbStatus();
+        updateRgbStatus();
         return;
     }
     if (key == "thermal") {
@@ -1494,7 +1484,6 @@ void StartupScreen::updateStatusFromLogLine(const QString& line) {
 void StartupScreen::resetResultsUi() {
     overall_status_.clear();
     left_rgb_status_.clear();
-    right_rgb_status_.clear();
     applyStatusBadge(lbl_rgb_icon_, lbl_rgb_status_, "PENDING", lbl_rgb_subtitle_, QString());
     applyStatusBadge(lbl_thermal_icon_, lbl_thermal_status_, "PENDING", lbl_thermal_subtitle_, QString());
     applyStatusBadge(lbl_lidar_icon_, lbl_lidar_status_, "PENDING", lbl_lidar_subtitle_, QString());
@@ -1503,22 +1492,6 @@ void StartupScreen::resetResultsUi() {
     applyStatusBadge(lbl_motors_icon_, lbl_motors_status_, "PENDING", lbl_motors_subtitle_, QString());
     applyStatusBadge(lbl_overall_icon_, lbl_overall_status_, "INITIALIZING");
     if (gps_card_) gps_card_->setVisible(true);
-}
-
-QString StartupScreen::combineStatus(const QString& a, const QString& b) const {
-    const QString sa = trimmed(a).toUpper();
-    const QString sb = trimmed(b).toUpper();
-
-    if (sa.isEmpty()) return sb;
-    if (sb.isEmpty()) return sa;
-
-    auto has = [&](const QString& v) -> bool { return sa == v || sb == v; };
-    if (has("FAIL")) return "FAIL";
-    if (has("WARN")) return "WARN";
-    if (has("PASS")) return "PASS";
-    if (has("SKIP")) return "SKIP";
-    if (has("NOT_RUN")) return "NOT_RUN";
-    return sa;
 }
 
 void StartupScreen::applyStatusBadge(QLabel* icon, QLabel* text, const QString& status,

@@ -38,6 +38,7 @@
 
 #pragma once
 
+#include <QDateTime>
 #include <QList>
 #include <QObject>
 #include <QPointer>
@@ -89,6 +90,9 @@ struct UploadTarget {
     QString data_path;       // absolute folder path on the source: the stick
                              // mount ("/media/u/RDATA_EXT/January_27_2026/...")
                              // or the robot ("/R_DATA/January_27_2026/...")
+    QString building_name;   // operator-typed site name from session/mission json
+    QString operator_name;
+    QDateTime captured_at;
     UploadStatus status = UploadStatus::None;
     int completed_files = 0;
     int total_files = 0;
