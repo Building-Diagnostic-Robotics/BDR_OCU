@@ -59,6 +59,13 @@ constexpr const char* kSettingsUnitsKey = "session/units";
  */
 constexpr const char* kSettingsStreamingCameraKey = "session/streaming_camera";
 
+/** Branch the OCU syncs onto laptop + robot `~/pilot_ws`. Changing this
+ *  ships in the next OCU build — there is no in-app selector in production. */
+constexpr const char* kRobotDeployBranch = "cliff-on-autonomy";
+
+/** Epoch-ms until the robot-software banner stays hidden. 0 = none. */
+constexpr const char* kSettingsRobotSyncSnoozeKey = "robot_sync/snooze_until_ms";
+
 /** Per-robot offload cache. Append `robot_id` — do not share across the fleet. */
 constexpr const char* kSettingsOffloadIncompletePrefix =
     "dashboard/offload_incomplete/";

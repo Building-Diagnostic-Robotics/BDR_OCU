@@ -475,6 +475,59 @@ exactly one of seven states. The full state-transition diagram lives in
 - `docs/OTA.md` — state-transition diagram, runner UX, wrapper exit
  codes, fleet targeting / pinning, field-test recipe.
 
+## Robot workspace sync (production-wired)
+
+Operator-driven laptop ↔ robot `~/pilot_ws` updater. After
+`goToStage3` the OCU waits 30 s, then checks every 5 min. Failures
+on that timer stay silent. An actionable mismatch (laptop not on
+`kRobotDeployBranch`, origin ahead, robot SHA/branch mismatch, or
+helpers / `updateInstead` missing) raises a banner **below** the OTA
+banner. Laptop current + robot merely offline is `robot_pending` —
+no banner. Later snoozes 4 h.
+
+Sync targets compiled-in `kRobotDeployBranch` (`cliff-on-autonomy`).
+A clean laptop on another branch switches; a dirty or diverged tree
+hard-fails. Prepare robot is offered only when Check says helpers
+are missing. Modal is `show()`, not `exec()`.
+
+### Key entry points
+
+- `cpp/src/repo_sync_manager.cpp` — laptop git/colcon/ssh orchestrator.
+- `cpp/src/components/{robot_sync_banner,robot_sync_dialog}.cpp`
+  — banner + frameless modal.
+- `cpp/src/app_shell.cpp` — `armRobotSync` from `goToStage3`, banner
+  host stacks OTA then robot, `launch_active` + battery < 20% gates.
+- `cpp/include/settings_constants.hpp` — `kRobotDeployBranch`,
+  `kSettingsRobotSyncSnoozeKey`.
+- Robot helpers (already on `cliff-on-autonomy`, outside git once
+  installed): `scripts/deploy/{install_deploy_helpers,rebuild_affected,robot_switch_branch}.sh`
+  → `~/pilot_deploy/`.
+
+### Rules for agents touching this path
+
+- **Do NOT add** `reset --hard`, `checkout -f`, `clean`, or
+  `push --force`. Dirty / diverged = hard fail.
+- **Do NOT systemd-restart `rdata-offload`.** Mention it in the
+  result detail only.
+- **Do NOT add a production branch selector.** Changing the target
+  means changing `kRobotDeployBranch` and shipping an OCU.
+- **Do NOT treat** `pilot_control/scripts/F2C/cpp/` as source of
+  truth — this binary is the only copy.
+- **Do NOT call `workspacePackageNames()`** from the static
+  `packagesForChangedFiles`. The static map must stay lock-step with
+  `rebuild_affected.sh`; the instance method filters to present pkgs.
+- Check-only queries `origin/<deploy>`, not the laptop's current
+  branch, and must not overwrite `branch_` with laptop HEAD.
+- Arm after login / `goToStage3` when the SSH target is known — not
+  at ctor before `setup/robot_id`.
+- Banner stays hidden while `isScanLaunchActive()` (no roof nag).
+- Paths are `~/pilot_ws` on both sides. No auto-clone.
+- `prepareRobot()` skips `LaptopState` and starts at `Stage::Prepare`.
+
+### Docs
+
+- `docs/ROBOT_SYNC.md` — flow, gates, safety contract, file index.
+
 ## Mission metadata + units (production-wired)
 
 Operator-driven session metadata captured via the **New Scan
@@ -1220,6 +1273,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 - `cpp/CLAUDE.md` — authoritative architecture overview and build notes.
 - `docs/DEV_BYPASSES.md` — the re-wiring checklist (see above).
 - `docs/OTA.md` — OTA state machine, runner UX, field-test recipe.
+- `docs/ROBOT_SYNC.md` — laptop↔robot `~/pilot_ws` sync, gates, safety.
 - `docs/TILT_CALIBRATION_PLAN.md` — tilt calibration design + TODO list.
 - `docs/SATELLITE_WORKFLOW.md` — Stage 6 operator narrative: office
   prefetch, ROI drawing, map collection, correspondence alignment, Send.

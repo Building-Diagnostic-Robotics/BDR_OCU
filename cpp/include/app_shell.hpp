@@ -49,6 +49,10 @@ class StartupScreen;
 class UpdateBanner;
 class RollbackBanner;
 class UploadDialog;
+class RepoSyncManager;
+class RobotSyncBanner;
+class RobotSyncDialog;
+struct RepoSyncSnapshot;
 
 namespace update {
 class UpdateChecker;
@@ -155,6 +159,14 @@ private:
     /// app-modal but parented to `this` so it tracks dark-mode at open
     /// time. Phase 6 = signal-only Install Now (Q3=A).
     void showUpdateModal(const update::VersionInfo& info);
+    bool armRobotSync();
+    void onRobotSyncCheckTick();
+    void onRobotSyncSnapshot(const RepoSyncSnapshot& snap);
+    void showRobotSyncDialog();
+    void refreshBannerHostVisibility();
+    void refreshRobotSyncBanner();
+    bool isScanLaunchActive() const;
+    void applyRobotSyncSnooze();
 
     /// Phase 7 OCU→runner handoff (locked Q1=A CLI args, Q3=B lockfile-
     /// gated wait, concerns #2 + #3). Spawns bdr-update-runner detached
@@ -413,6 +425,10 @@ private:
     /// toggles instead of leaving an unthemed white band at the top.
     QWidget* rollback_banner_host_ = nullptr;
     update::UpdateChecker* update_checker_ = nullptr;
+    RepoSyncManager* repo_sync_ = nullptr;
+    RobotSyncBanner* robot_sync_banner_ = nullptr;
+    RobotSyncDialog* robot_sync_dialog_ = nullptr;
+    QTimer* robot_sync_poll_ = nullptr;
 
     QWidget* central_root_ = nullptr;
     QWidget* window_controls_ = nullptr;

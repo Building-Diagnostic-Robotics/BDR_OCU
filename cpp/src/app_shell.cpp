@@ -49,7 +49,10 @@
 #include "components/offline_finalize_dialog.hpp"
 #include "components/rollback_banner.hpp"
 #include "components/update_banner.hpp"
+#include "components/robot_sync_banner.hpp"
+#include "components/robot_sync_dialog.hpp"
 #include "components/update_modal.hpp"
+#include "repo_sync_manager.hpp"
 #include "dashboard_screen.hpp"
 #include "dev_flags.hpp"
 #include "exploration_screen.hpp"
@@ -345,6 +348,9 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                 const bool reachable =
                     (next == RobotReachabilityProbe::State::Reachable);
                 link_monitor_->setReachability(reachable, /*known=*/true);
+                if (repo_sync_) {
+                    repo_sync_->setRobotReachable(reachable);
+                }
             });
 
     central_root_ = new QWidget(this);
@@ -366,10 +372,14 @@ AppShellWindow::AppShellWindow(QWidget* parent)
         update_banner_host_ = new QWidget(central_root_);
         update_banner_host_->setObjectName(QStringLiteral("UpdateBannerHost"));
         applyBannerHostTheme(update_banner_host_);
-        auto* banner_lay = new QHBoxLayout(update_banner_host_);
+        auto* banner_lay = new QVBoxLayout(update_banner_host_);
         banner_lay->setContentsMargins(12, kTitleBarHeight, 12, 0);
-        banner_lay->setSpacing(0);
+        banner_lay->setSpacing(8);
         banner_lay->addWidget(update_banner_);
+        robot_sync_banner_ = new RobotSyncBanner(update_banner_host_);
+        robot_sync_banner_->setDarkMode(dark_mode_);
+        robot_sync_banner_->hide();
+        banner_lay->addWidget(robot_sync_banner_);
         update_banner_host_->hide();
         root_layout->addWidget(update_banner_host_);
     }
@@ -393,7 +403,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     connect(update_checker_, &update::UpdateChecker::noUpdateAvailable,
             this, [this]() {
                 update_banner_->hide();
-                if (update_banner_host_) update_banner_host_->hide();
+                refreshBannerHostVisibility();
             });
     connect(update_checker_, &update::UpdateChecker::checkFailed,
             this, [](const QString& reason) {
@@ -409,6 +419,28 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                 showUpdateModal(info);
             });
     update_checker_->start();
+
+    repo_sync_ = new RepoSyncManager(this);
+    robot_sync_poll_ = new QTimer(this);
+    robot_sync_poll_->setInterval(5 * 60 * 1000);
+    connect(robot_sync_poll_, &QTimer::timeout,
+            this, &AppShellWindow::onRobotSyncCheckTick);
+    connect(repo_sync_, &RepoSyncManager::snapshotReady,
+            this, &AppShellWindow::onRobotSyncSnapshot);
+    connect(repo_sync_, &RepoSyncManager::syncStarted, this,
+            [this](const QString& stage) {
+                if (robot_sync_dialog_ && robot_sync_dialog_->isVisible()) {
+                    robot_sync_dialog_->setBusy(true, stage);
+                }
+            });
+    connect(repo_sync_, &RepoSyncManager::syncFinished, this,
+            [this](int level, const QString& headline, const QString& detail) {
+                if (robot_sync_dialog_ && robot_sync_dialog_->isVisible()) {
+                    robot_sync_dialog_->setFinished(level, headline, detail);
+                }
+            });
+    connect(robot_sync_banner_, &RobotSyncBanner::viewDetailsRequested,
+            this, &AppShellWindow::showRobotSyncDialog);
 
     stage1_ = new SetupScreen(this);
     stack_->addWidget(stage1_);
@@ -1046,6 +1078,8 @@ void AppShellWindow::goToStage3() {
     // Seed the Upload Data gate from robot status.json + the laptop
     // stick. Complete Mission does not wait on the copy; Dashboard does.
     stage3_->refreshThumbCopyStatus();
+    armRobotSync();
+    refreshRobotSyncBanner();
     stack_->setCurrentWidget(stage3_);
 }
 
@@ -1141,6 +1175,7 @@ void AppShellWindow::ensureStage6() {
                         resolveRobotSshTargetFromSettings(&target)) {
                         reachability_probe_->arm(target.host);
                     }
+                    refreshRobotSyncBanner();
                     return;
                 }
                 // Don't tear down link tracking that an exploration launch
@@ -1156,7 +1191,11 @@ void AppShellWindow::ensureStage6() {
                     if (reachability_probe_) {
                         reachability_probe_->disarm();
                     }
+                    if (repo_sync_) {
+                        repo_sync_->clearRobotReachable();
+                    }
                 }
+                refreshRobotSyncBanner();
             });
     stage6_->setDarkMode(dark_mode_);
 }
@@ -1185,6 +1224,12 @@ void AppShellWindow::setDarkMode(bool dark_mode) {
     dark_mode_ = dark_mode;
     if (update_banner_) {
         update_banner_->setDarkMode(dark_mode_);
+    }
+    if (robot_sync_banner_) {
+        robot_sync_banner_->setDarkMode(dark_mode_);
+    }
+    if (robot_sync_dialog_) {
+        robot_sync_dialog_->setDarkMode(dark_mode_);
     }
     if (update_banner_host_) {
         applyBannerHostTheme(update_banner_host_);
@@ -1254,9 +1299,7 @@ void AppShellWindow::showUpdateModal(const update::VersionInfo& info) {
                 if (update_banner_) {
                     update_banner_->hide();
                 }
-                if (update_banner_host_) {
-                    update_banner_host_->hide();
-                }
+                refreshBannerHostVisibility();
             });
 
     // Phase 7: spawn the external bdr-update-runner, wait for it to
@@ -1277,6 +1320,137 @@ void AppShellWindow::showUpdateModal(const update::VersionInfo& info) {
     modal->show();
     modal->raise();
     modal->activateWindow();
+}
+
+bool AppShellWindow::isScanLaunchActive() const {
+    const bool satellite_mission_active = stage6_ && stage6_->missionActive();
+    return exploration_launch_in_progress_ ||
+           exploration_launch_ready_ ||
+           laptop_launch_started_ ||
+           robot_launch_started_ ||
+           satellite_mission_active;
+}
+
+void AppShellWindow::refreshBannerHostVisibility() {
+    if (!update_banner_host_) {
+        return;
+    }
+    const bool ota = update_banner_ && update_banner_->isVisible();
+    const bool robot = robot_sync_banner_ && robot_sync_banner_->isVisible();
+    update_banner_host_->setVisible(ota || robot);
+}
+
+bool AppShellWindow::armRobotSync() {
+    if (!repo_sync_) {
+        return false;
+    }
+    ResolvedRobotSshTarget target;
+    QString err;
+    if (!resolveRobotSshTargetFromSettings(&target, &err) ||
+        !RepoSyncManager::isSafeHost(target.host)) {
+        return false;
+    }
+    repo_sync_->setRobotHost(target.host);
+    repo_sync_->setRobotUser(target.ssh_user);
+    repo_sync_->setBranch(QString::fromLatin1(kRobotDeployBranch));
+    if (reachability_probe_ && reachability_probe_->isArmed() &&
+        reachability_probe_->state() != RobotReachabilityProbe::State::Idle) {
+        repo_sync_->setRobotReachable(
+            reachability_probe_->state() == RobotReachabilityProbe::State::Reachable);
+    } else {
+        repo_sync_->clearRobotReachable();
+    }
+    if (robot_sync_poll_ && !robot_sync_poll_->isActive()) {
+        QTimer::singleShot(30 * 1000, this, &AppShellWindow::onRobotSyncCheckTick);
+        robot_sync_poll_->start();
+    }
+    return true;
+}
+
+void AppShellWindow::onRobotSyncCheckTick() {
+    if (!repo_sync_ || repo_sync_->isBusy()) {
+        return;
+    }
+    if (!armRobotSync()) {
+        return;
+    }
+    repo_sync_->checkOnly();
+}
+
+void AppShellWindow::refreshRobotSyncBanner() {
+    if (!robot_sync_banner_) {
+        return;
+    }
+    const RepoSyncSnapshot snap =
+        repo_sync_ ? repo_sync_->lastSnapshot() : RepoSyncSnapshot{};
+    const qint64 snooze = QSettings(kSettingsOrgName, kSettingsAppName)
+                              .value(kSettingsRobotSyncSnoozeKey, 0)
+                              .toLongLong();
+    const bool snoozed =
+        snooze > 0 && QDateTime::currentMSecsSinceEpoch() < snooze;
+    const bool show =
+        snap.offer_update && !snoozed && !isScanLaunchActive();
+    robot_sync_banner_->setSnapshot(snap);
+    robot_sync_banner_->setVisible(show);
+    refreshBannerHostVisibility();
+}
+
+void AppShellWindow::onRobotSyncSnapshot(const RepoSyncSnapshot& snap) {
+    if (robot_sync_dialog_ && robot_sync_dialog_->isVisible()) {
+        robot_sync_dialog_->setSnapshot(snap);
+    }
+    refreshRobotSyncBanner();
+}
+
+void AppShellWindow::applyRobotSyncSnooze() {
+    QSettings s(kSettingsOrgName, kSettingsAppName);
+    s.setValue(kSettingsRobotSyncSnoozeKey,
+               QDateTime::currentMSecsSinceEpoch() + update::kSnoozeDurationMs);
+    if (robot_sync_banner_) {
+        robot_sync_banner_->hide();
+    }
+    refreshBannerHostVisibility();
+}
+
+void AppShellWindow::showRobotSyncDialog() {
+    if (!repo_sync_) {
+        return;
+    }
+    if (!robot_sync_dialog_) {
+        robot_sync_dialog_ = new RobotSyncDialog(this);
+        robot_sync_dialog_->setDarkMode(dark_mode_);
+        connect(robot_sync_dialog_, &RobotSyncDialog::laterRequested,
+                this, &AppShellWindow::applyRobotSyncSnooze);
+        connect(robot_sync_dialog_, &RobotSyncDialog::syncRequested, this, [this]() {
+            if (isScanLaunchActive() || !repo_sync_ || repo_sync_->isBusy()) {
+                return;
+            }
+            const int battery = UpdateModal::readBatteryPercent();
+            if (battery >= 0 && battery < 20) {
+                return;
+            }
+            repo_sync_->syncNow();
+        });
+        connect(robot_sync_dialog_, &RobotSyncDialog::prepareRequested, this, [this]() {
+            if (isScanLaunchActive() || !repo_sync_ || repo_sync_->isBusy()) {
+                return;
+            }
+            const int battery = UpdateModal::readBatteryPercent();
+            if (battery >= 0 && battery < 20) {
+                return;
+            }
+            repo_sync_->prepareRobot();
+        });
+    }
+    RobotSyncDialog::GateState gate;
+    gate.launch_active = isScanLaunchActive();
+    gate.battery_pct = UpdateModal::readBatteryPercent();
+    robot_sync_dialog_->setBusy(false);
+    robot_sync_dialog_->setGateState(gate);
+    robot_sync_dialog_->setSnapshot(repo_sync_->lastSnapshot());
+    robot_sync_dialog_->show();
+    robot_sync_dialog_->raise();
+    robot_sync_dialog_->activateWindow();
 }
 
 void AppShellWindow::handoffToUpdateRunner(const update::VersionInfo& info,
@@ -2044,6 +2218,7 @@ void AppShellWindow::onExplorationStartScanRequested() {
     stage4_->resetNavigationMap();
 
     exploration_launch_in_progress_ = true;
+    refreshRobotSyncBanner();
     exploration_launch_ready_ = false;
     exploration_launch_failed_ = false;
     laptop_launch_started_ = false;
@@ -3096,6 +3271,10 @@ void AppShellWindow::explorationStopPipelineTeardownKillProcessesAndResetUi() {
     if (reachability_probe_) {
         reachability_probe_->disarm();
     }
+    if (repo_sync_) {
+        repo_sync_->clearRobotReachable();
+    }
+    refreshRobotSyncBanner();
     link_disconnect_started_at_ms_ = 0;
     link_recovery_resync_pending_ = false;
     if (stage4_) {

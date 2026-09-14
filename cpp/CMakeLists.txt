@@ -166,6 +166,7 @@ set(HEADERS
     include/thumb_drive_watcher.hpp
     include/launch_env.hpp
     include/offload_status.hpp
+    include/repo_sync_manager.hpp
     include/components/bdr_message_box.hpp
     include/components/bdr_input_dialog.hpp
     include/components/bdr_progress_dialog.hpp
@@ -182,6 +183,8 @@ set(HEADERS
     include/components/rollback_banner.hpp
     include/components/update_banner.hpp
     include/components/update_modal.hpp
+    include/components/robot_sync_banner.hpp
+    include/components/robot_sync_dialog.hpp
     include/units_system.hpp
     include/link_health_monitor.hpp
     include/robot_reachability_probe.hpp
@@ -250,6 +253,7 @@ set(GUI_SOURCES
     src/upload_dialog.cpp
     src/thumb_drive_watcher.cpp
     src/offload_status.cpp
+    src/repo_sync_manager.cpp
     src/video_stream_widget.cpp
     src/robot_registry.cpp
     src/robot_login.cpp
@@ -270,6 +274,8 @@ set(GUI_SOURCES
     src/components/rollback_banner.cpp
     src/components/update_banner.cpp
     src/components/update_modal.cpp
+    src/components/robot_sync_banner.cpp
+    src/components/robot_sync_dialog.cpp
     src/update/update_checker.cpp
     src/units_system.cpp
     src/link_health_monitor.cpp
@@ -549,7 +555,24 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME upload_thumb_drive_tests COMMAND upload_thumb_drive_tests)
-        message(STATUS "Unit tests: enabled (obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests)")
+
+        # Laptop↔robot ~/pilot_ws sanitizers + package map. Header listed
+        # so AUTOMOC generates RepoSyncManager's moc (Q_OBJECT).
+        add_executable(repo_sync_tests
+            tests/repo_sync_tests.cpp
+            src/repo_sync_manager.cpp
+            include/repo_sync_manager.hpp
+        )
+        target_include_directories(repo_sync_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(repo_sync_tests PRIVATE
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME repo_sync_tests COMMAND repo_sync_tests)
+        message(STATUS "Unit tests: enabled (obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

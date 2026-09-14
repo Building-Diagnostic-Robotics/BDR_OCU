@@ -12,6 +12,10 @@ before pushing to `main` that triggers a release.
 
 ## Unreleased - 2026-09-13
 
+- Sync laptop and robot ~/pilot_ws to cliff-on-autonomy via banner
+
+## 2026-09-13 — OTA 082cde0
+
 - Upload locks until the RDATA_EXT copy is done; list by building/operator
 - Preflight RGB uses the robot's single See3CAM (left_rgb)
 - Tilt-calibration modal uses the Stage 3 zinc chrome
