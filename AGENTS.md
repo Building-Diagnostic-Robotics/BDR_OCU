@@ -1251,6 +1251,43 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  is robot sweep → reap `robot_proc_` → SIGTERM laptop launch → laptop
  sweep. All run-state bookkeeping is reset in ONE place, the
  `missionActiveChanged(false)` handler — do not add resets at launch.
+- **Launch and teardown are asynchronous, and must stay that way. The UI
+ is never allowed to freeze.** Both are timer-driven chains over
+ `cpp/include/async_process.hpp` (`async_proc::run` spawns with a
+ deadline and SIGTERM → SIGKILL escalation; `async_proc::reap` waits on
+ an already-running process; both call back exactly once, always). No
+ `waitForFinished` / `waitForStarted` / `processEvents` may come back:
+ those sweeps are 20 s + 11 s + 7 s of remote work and the operator read
+ the motionless window as a crashed app.
+ - `startMission` returns false only for input errors. It marks the
+ mission active **before** spawning, so the operator lands on step 5
+ and Cancel works during the sweeps, and narrates itself through
+ `launchPhase` into `scanBlockReason()`'s corner pill. A spawn failure
+ arrives as `launchDied`, same as any other death.
+ - `teardownMission` reports `teardownPhase` → `missionStateChanged
+ (false)` → `teardownFinished`, in that order. Callers that used to
+ navigate on the next line go through `SatelliteScreen::teardownThen`.
+ The `MissionFinalizeDialog` it raises is the operator's proof that
+ something is happening, and it also blocks a second Cancel / Back.
+ `forceStopTeardown` (offered after `kForceStopOfferMs`) is the escape
+ hatch for a robot that stopped answering: it SIGKILLs locally only,
+ and the next launch's sweep clears whatever it left on the robot.
+ - `mission_seq_` is what stops a Cancel during the sweeps from being
+ followed by `spawnLaunches()`. Keep it on any new chain step.
+ - `SatelliteScreen::shutdownMission` (OCU quitting) is the ONE place
+ that waits, with a bounded local `QEventLoop` — `closeEvent` cannot
+ return before the robot's UDC releases the Seek SDK. Do not copy that
+ pattern anywhere else.
+ - `MapCaptureRunner` rasterises off-thread (`QFutureWatcher<MapCapture>`,
+ failures ride back in `capture.error`). A roof cloud is millions of
+ points; PCL on the GUI thread froze the alignment step for seconds.
+- **Re-stamp `confirmed_vertices_` at launch**
+ (`launchMissionFromEdgeReview`). Any nudge after Confirm ROI — a vertex
+ drag, a marker move, which re-anchors every vertex — otherwise leaves
+ `roiMatchesConfirmed()` false, step 5 unreachable, and `setSelectedStep`
+ silently refusing: the stack launches and the operator sits on Edge
+ Review pressing a button that looks dead. The fallback log line naming
+ the blocking step is the tripwire if a future gate regresses.
 - `RosLink::motorsIdle()` requires **fresh** controller_status on both
  axes. Do not relax that to "state == IDLE" alone — a dead CAN bus would
  then read as disarmed while the axes are still in closed loop.

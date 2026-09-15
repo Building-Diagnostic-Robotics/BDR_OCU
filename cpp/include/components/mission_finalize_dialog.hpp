@@ -34,6 +34,9 @@ class MissionFinalizeDialog : public QDialog {
 public:
     explicit MissionFinalizeDialog(QWidget* parent = nullptr);
 
+    /** Header line — the modal also carries plain teardowns, not just
+        Complete Mission. */
+    void setTitle(const QString& text);
     /** Current phase line, e.g. "Concluding coverage…". */
     void setPhase(const QString& text);
     /** Secondary detail (copy progress, error text). Empty hides it. */
@@ -42,19 +45,28 @@ public:
     void setSkipCopyAvailable(bool available);
     /** Shows / hides the Abort-and-save CTA. */
     void setAbortAvailable(bool available);
+    /**
+     * Shows / hides the Force-stop CTA — the escape hatch when teardown is
+     * waiting on a robot that has stopped answering. The screen only offers
+     * it once the wait has gone long enough to be worth cutting short.
+     */
+    void setForceStopAvailable(bool available);
     /** Terminal: swaps the CTAs for Close and stops the busy bar. */
     void finish(bool ok, const QString& summary);
 
 signals:
     void skipCopyRequested();
     void abortAndSaveRequested();
+    void forceStopRequested();
 
 private:
+    QLabel* lbl_header_ = nullptr;
     QLabel* lbl_phase_ = nullptr;
     QLabel* lbl_detail_ = nullptr;
     QProgressBar* busy_ = nullptr;
     QPushButton* btn_skip_copy_ = nullptr;
     QPushButton* btn_abort_ = nullptr;
+    QPushButton* btn_force_ = nullptr;
     QPushButton* btn_close_ = nullptr;
 };
 

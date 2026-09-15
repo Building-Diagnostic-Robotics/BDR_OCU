@@ -19,6 +19,7 @@
 
 #include <QFile>
 #include <QObject>
+#include <QPointer>
 #include <QProcess>
 #include <QString>
 #include <QStringList>
@@ -62,17 +63,42 @@ public:
     bool missionActive() const { return mission_active_; }
     RobotTarget target() const { return target_; }
 
-    /** Starts laptop launch + SSH robot launch. Emits log/state signals.
-        `scan` rides along as director launch args (ScanParams::launchArgs);
-        the robot must be on `cliff-on-autonomy`, which declares them. */
+    /** True from the moment teardownMission() starts until it finishes. */
+    bool tearingDown() const { return tearing_down_; }
+
+    /**
+     * Starts laptop launch + SSH robot launch. `scan` rides along as
+     * director launch args (ScanParams::launchArgs); the robot must be on
+     * `cliff-on-autonomy`, which declares them.
+     *
+     * Returns false only for input / config errors, with nothing started.
+     * Everything after that is asynchronous: the mission counts as active
+     * immediately (so the operator lands on the scan page and can cancel),
+     * progress arrives as `launchPhase`, and a launch that dies on spawn
+     * arrives as `launchDied` like any other death.
+     */
     bool startMission(const RoiPolygon& poly, const geo::GeoPose& robot,
                       const ScanParams& scan, QString* error = nullptr);
 
-    /** Stops both launch trees: Ctrl-C to the robot launch over SSH (so
-        it shuts its tree down in order) + name sweep of what ignores it,
-        then SIGTERM to the laptop launch. Synchronous; emits
-        missionStateChanged(false) before returning. */
+    /**
+     * Stops both launch trees: Ctrl-C to the robot launch over SSH (so it
+     * shuts its tree down in order) + name sweep of what ignores it, then
+     * SIGTERM to the laptop launch.
+     *
+     * Asynchronous — returns at once and reports through `teardownPhase`,
+     * then `missionStateChanged(false)` and `teardownFinished()` in that
+     * order. Callers that must navigate afterwards hang off the latter.
+     * Calling it twice is a no-op; so is calling it with nothing running.
+     */
     void teardownMission();
+
+    /**
+     * Operator gave up waiting: SIGKILL the local launches and skip to the
+     * laptop sweep. Leaves whatever ignored the robot sweep alive on the
+     * robot — the next launch's sweep is what clears that — so it is a last
+     * resort, not the normal path. No-op unless a teardown is running.
+     */
+    void forceStopTeardown();
 
     /** Last lines of the robot launch's merged stdout/stderr — the
         director's traceback lives here when the stack dies at startup.
@@ -116,6 +142,12 @@ public:
 signals:
     void logLine(const QString& line);
     void missionStateChanged(bool active);
+    /** Operator-facing launch progress; empty once the launches are up. */
+    void launchPhase(const QString& text);
+    /** Operator-facing teardown progress; empty when it is done. */
+    void teardownPhase(const QString& text);
+    /** Teardown chain finished, after missionStateChanged(false). */
+    void teardownFinished();
     /**
      * A launch exited while the mission was active and nobody asked it to
      * (not during teardownMission). `side` is "robot" (the SSH session
@@ -127,10 +159,17 @@ signals:
     void launchDied(const QString& side, int exit_code);
 
 private:
+    /** Teardown chain; each step continues the next from its callback. */
+    enum TeardownStep { RobotSweep, ReapRobot, StopLaptop, LaptopSweep, Done };
+
     void hookProcessLogging(QProcess* proc, const QString& tag);
     /** One SSH round trip that leaves the robot with no Stage 6 stack
-        running (see kRobotSweep). Blocking; ~1 s when already clean. */
-    void runRobotSweep();
+        running (see kRobotSweep). ~1 s when already clean. */
+    void runRobotSweep(std::function<void()> on_done);
+    void runLaptopSweep(std::function<void()> on_done);
+    /** Second half of startMission, once both sweeps are clear. */
+    void spawnLaunches();
+    void teardownStep(TeardownStep step);
     /** Opens a fresh mission log and prunes older ones. */
     void openMissionLog();
     void closeMissionLog();
@@ -138,8 +177,17 @@ private:
     RobotTarget target_;
     QProcess* laptop_proc_ = nullptr;
     QProcess* robot_proc_ = nullptr;
+    /** Sweep currently in flight, so Force stop can cut it short. QPointer:
+        the sweep deletes itself when it finishes, and an abandoned launch
+        chain's sweep must not leave a dangling handle behind. */
+    QPointer<QProcess> active_sweep_;
     bool mission_active_ = false;
     bool tearing_down_ = false;
+    bool force_stop_ = false;
+    /** Bumped by every start / teardown; async chains abandon a stale one. */
+    int mission_seq_ = 0;
+    QString pending_laptop_cmd_;
+    QStringList pending_robot_args_;
     QStringList robot_output_tail_;
     QFile* mission_log_ = nullptr;
     QString mission_log_path_;

@@ -258,6 +258,7 @@ set(GUI_SOURCES
     src/video_stream_widget.cpp
     src/robot_registry.cpp
     src/robot_login.cpp
+    src/async_process.cpp
     src/components/bdr_message_box.cpp
     src/components/bdr_input_dialog.cpp
     src/components/bdr_progress_dialog.cpp
@@ -574,7 +575,22 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME repo_sync_tests COMMAND repo_sync_tests)
-        message(STATUS "Unit tests: enabled (obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests)")
+
+        add_executable(async_process_tests
+            tests/async_process_tests.cpp
+            src/async_process.cpp
+            include/async_process.hpp
+        )
+        target_include_directories(async_process_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        # Own main(): one QCoreApplication has to outlive every test here.
+        target_link_libraries(async_process_tests PRIVATE
+            ${QT_CORE_LIBS}
+            GTest::gtest
+        )
+        add_test(NAME async_process_tests COMMAND async_process_tests)
+        message(STATUS "Unit tests: enabled (obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

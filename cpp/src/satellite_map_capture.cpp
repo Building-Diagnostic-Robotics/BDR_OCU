@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QtConcurrent/QtConcurrent>
 #include <QProcess>
 #include <QTimer>
 
@@ -305,6 +306,9 @@ MapCaptureRunner::MapCaptureRunner(QObject* parent) : QObject(parent) {
             this, [this](int code, QProcess::ExitStatus) {
                 onProcessFinished(code);
             });
+    render_watcher_ = new QFutureWatcher<MapCapture>(this);
+    connect(render_watcher_, &QFutureWatcher<MapCapture>::finished, this,
+            &MapCaptureRunner::onRenderFinished);
 }
 
 MapCaptureRunner::~MapCaptureRunner() {
@@ -550,32 +554,61 @@ void MapCaptureRunner::startRendering() {
         capture.gps = pose_gps;
     }
 
-    // Everything downstream — correspondences, the ROI export, the director's
-    // roi_vertices — is expressed in robot_init, so the cloud is re-origined
-    // on the robot's final pose before anything looks at it.
-    PointCloudPtr raw = loadPointCloudFile(local_pcd_.toStdString());
-    if (!raw || raw->empty()) {
-        fail(QStringLiteral("Downloaded map is empty:\n") + local_pcd_);
-        return;
-    }
-    PointCloudPtr origined(new PointCloud);
-    pcl::transformPointCloud(*raw, *origined,
-                             T_map_final.inverse().matrix().cast<float>());
-    if (pcl::io::savePCDFileBinary(origin_pcd_.toStdString(), *origined) < 0) {
-        fail(QStringLiteral("Could not write the re-origined map:\n") +
-             origin_pcd_);
-        return;
-    }
+    // PCL load + transform + save + raster is seconds of work on a roof-sized
+    // cloud, so it runs off the GUI thread. Everything the worker needs is
+    // copied in; it touches no member state and reports back through
+    // `capture.error`.
+    const QString local_pcd = local_pcd_;
+    const QString origin_pcd = origin_pcd_;
+    auto future = QtConcurrent::run([capture, local_pcd, origin_pcd,
+                                     T_map_final]() -> MapCapture {
+        MapCapture out = capture;
+        // Everything downstream — correspondences, the ROI export, the
+        // director's roi_vertices — is expressed in robot_init, so the cloud
+        // is re-origined on the robot's final pose before anything looks at
+        // it.
+        PointCloudPtr raw = loadPointCloudFile(local_pcd.toStdString());
+        if (!raw || raw->empty()) {
+            out.error = QStringLiteral("Downloaded map is empty:\n") + local_pcd;
+            return out;
+        }
+        PointCloudPtr origined(new PointCloud);
+        pcl::transformPointCloud(*raw, *origined,
+                                 T_map_final.inverse().matrix().cast<float>());
+        if (pcl::io::savePCDFileBinary(origin_pcd.toStdString(), *origined) <
+            0) {
+            out.error =
+                QStringLiteral("Could not write the re-origined map:\n") +
+                origin_pcd;
+            return out;
+        }
+        QString render_error;
+        out.image = renderTopDownAlphaDensity(origin_pcd, &out.bounds_m,
+                                              &render_error);
+        if (out.image.isNull()) {
+            out.error = render_error.isEmpty()
+                            ? QStringLiteral("Could not render the map.")
+                            : render_error;
+            return out;
+        }
+        out.label = QFileInfo(origin_pcd).fileName();
+        return out;
+    });
+    render_watcher_->setFuture(future);
+}
 
-    capture.image =
-        renderTopDownAlphaDensity(origin_pcd_, &capture.bounds_m, &error);
-    if (capture.image.isNull()) {
-        fail(error.isEmpty() ? QStringLiteral("Could not render the map.")
-                             : error);
+void MapCaptureRunner::onRenderFinished() {
+    if (stage_ != Stage::Rendering || cancelling_) {
+        // Cancelled while the worker was running: cancel() already reported
+        // the outcome, and a second `finished` would re-enter the screen's
+        // capture handler with a stale cloud.
         return;
     }
-    capture.label = QFileInfo(origin_pcd_).fileName();
-
+    MapCapture capture = render_watcher_->result();
+    if (!capture.error.isEmpty()) {
+        fail(capture.error);
+        return;
+    }
     stage_ = Stage::Idle;
     emit finished(capture);
 }

@@ -235,11 +235,27 @@ Once the ROI is closed, a **Scan Parameters** block appears in the rail
 0.05 m steps and **Robot Speed** 0.4-0.6 m/s in 0.1 steps. Drag the slider
 or click the value and type; typed input is converted from the display
 unit, clamped, and snapped. Both are saved on the plan and travel at Send as
-`coverage_width:=W swath_overlap:=0 desired_linear_speed:=V`. Overlap is
+`coverage_width:=W swath_overlap:=0.0 desired_linear_speed:=V`. Overlap is
 pinned to 0 so the width you set is the lane pitch the planner uses. Speed
 also feeds the MPC cruise/cap through `mpc_desired_linear_speed`. Plans
 saved before this block existed load with the director defaults
 (0.50 m / 0.40 m/s).
+
+### While it launches and while it stops
+
+Neither is instant and neither blocks the window. Launching sweeps both
+machines first, so the scan page opens straight away and the corner pill
+reads **Preparing** with what it is doing; the pill then counts the boot
+wait (Connecting, Starting up) until the director reports in.
+
+Stopping — Cancel Scan, Back, Complete Mission, or a launch that died —
+raises a progress modal naming each step: stopping the robot software,
+closing the session, stopping the laptop link, cleaning up. A clean stop is
+5-10 s. If the robot has stopped answering, a **Force stop** button appears
+after about 12 s; it ends the launch on the laptop only, and the next launch
+sweeps whatever it left behind on the robot. Nothing navigates until the
+stack is actually down, so pressing Launch again can never reach a
+half-stopped stack.
 
 Vertices and flags travel in **raw corner order**. The robot resolves flags to
 segments before `Polygon.buffer(0)`, which may reorder rings — resolving after

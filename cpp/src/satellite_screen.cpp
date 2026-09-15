@@ -12,6 +12,7 @@
 
 #include "satellite_screen.hpp"
 
+#include "async_process.hpp"
 #include "link_health_monitor.hpp"
 #include "components/bdr_message_box.hpp"
 #include "components/fpv_camera_view.hpp"
@@ -39,6 +40,7 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QDoubleValidator>
+#include <QEventLoop>
 #include <QFile>
 #include <QtConcurrent/QtConcurrent>
 #include <QGraphicsBlurEffect>
@@ -150,6 +152,18 @@ constexpr qint64 kDirectorFreshMs = 3000;
 // down automatically.
 constexpr qint64 kDirectorWaitPromptMs = 120000;
 constexpr qint64 kRobotLinkWaitPromptMs = 180000;
+
+// A clean teardown is ~5-10 s; past this the robot has most likely stopped
+// answering, so the operator is offered the local-only kill instead of
+// being made to watch a modal that may never resolve.
+constexpr int kForceStopOfferMs = 12000;
+
+/** Offline finalize runs on a link we already know is dead. */
+constexpr int kOfflineFinalizeTimeoutMs = 8000;
+
+// Ceiling on the quit-time teardown wait: robot sweep (20 s) + session
+// reap (3 s) + laptop launch (11 s) + laptop sweep (7 s), plus slack.
+constexpr int kShutdownWaitCeilingMs = 45000;
 
 constexpr const char* kSatViewLatKey = "satellite/center_lat";
 constexpr const char* kSatViewLonKey = "satellite/center_lon";
@@ -659,6 +673,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     autonomy_on_ = false;
                     manager_occupancy_seen_ = false;
                     director_failed_ = false;
+                    launch_phase_.clear();
                     launch_wall_ms_ = 0;
                     first_robot_topic_wall_ms_ = 0;
                     director_wait_prompted_ = false;
@@ -707,6 +722,50 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             });
     connect(mission_, &MissionController::launchDied, this,
             &SatelliteScreen::handleLaunchDeath);
+    connect(mission_, &MissionController::launchPhase, this,
+            [this](const QString& phase) {
+                launch_phase_ = phase;
+                refreshScanRunUi();
+            });
+    // Teardown runs for up to ~40 s of remote sweeping. The modal is what
+    // stops the operator reading a motionless page as a frozen app, and it
+    // also blocks a second Cancel / Back while the stack is coming down.
+    connect(mission_, &MissionController::teardownPhase, this,
+            [this](const QString& phase) {
+                teardown_phase_ = phase;
+                if (!phase.isEmpty()) {
+                    showFinalizeProgress(phase);
+                    if (force_stop_offered_) {
+                        // showFinalizeProgress clears the CTAs per phase, so
+                        // an offer already made has to be re-made.
+                        offerForceStop();
+                    } else if (!force_stop_timer_->isActive()) {
+                        force_stop_timer_->start();
+                    }
+                }
+                refreshScanRunUi();
+            });
+    connect(mission_, &MissionController::teardownFinished, this, [this] {
+        force_stop_timer_->stop();
+        force_stop_offered_ = false;
+        // The modal goes before whatever the caller does next — that is
+        // usually a message box or a step change, and neither should appear
+        // underneath a progress dialog.
+        if (finalize_dialog_) {
+            finalize_dialog_->hide();
+        }
+        auto after = after_teardown_;
+        after_teardown_ = nullptr;
+        if (after) {
+            after();
+        }
+    });
+
+    force_stop_timer_ = new QTimer(this);
+    force_stop_timer_->setSingleShot(true);
+    force_stop_timer_->setInterval(kForceStopOfferMs);
+    connect(force_stop_timer_, &QTimer::timeout, this,
+            &SatelliteScreen::offerForceStop);
 
     teleop_timer_ = new QTimer(this);
     teleop_timer_->setInterval(100);
@@ -777,7 +836,19 @@ void SatelliteScreen::shutdownMission() {
     }
     setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
+    // The one place that waits: the OCU is quitting, and closeEvent cannot
+    // return before the robot's UDC has released the Seek SDK or the next
+    // session wedges on a dead handle. A local event loop keeps the window
+    // painting (and the teardown modal ticking) instead of freezing it.
+    QEventLoop loop;
+    connect(mission_, &MissionController::teardownFinished, &loop,
+            &QEventLoop::quit);
+    QTimer::singleShot(kShutdownWaitCeilingMs, &loop, &QEventLoop::quit);
+    after_teardown_ = nullptr;
     mission_->teardownMission();
+    if (mission_->tearingDown()) {
+        loop.exec();
+    }
 }
 
 void SatelliteScreen::attachLinkHealthMonitor(LinkHealthMonitor* monitor) {
@@ -1452,7 +1523,10 @@ QWidget* SatelliteScreen::buildStepHeader() {
                         QStringLiteral("Stop & Go Back"))) {
                     return;
                 }
-                mission_->teardownMission();
+                // Teardown is async and the chip target is never the scan
+                // step here, so the jump waits for the stack to be down.
+                teardownThen([this, step] { setSelectedStep(step); });
+                return;
             }
             if (step == Step::Alignment && !planning_only_ &&
                 plan_mode_ == PlanMode::Satellite &&
@@ -5426,6 +5500,12 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
         return;
     }
     map_->setMissionAnchor(marker);
+    // Re-stamp the confirmation against the geometry that actually went to
+    // the robot. Anything that nudged a vertex after Confirm ROI (or a
+    // marker move, which re-anchors every vertex) would otherwise leave
+    // roiMatchesConfirmed() false, step 5 unreachable, and the operator
+    // pressing Launch on a page that never advances while the stack runs.
+    confirmed_vertices_ = poly.vertices;
     // Always write (new measured plans had a name but no id, so the old
     // "if we already have an id" guard dropped the roof-drawn ROI).
     // No reload — loadJob would revoke the confirm that made step 5
@@ -5447,6 +5527,20 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
     launch_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
     manager_watch_timer_->start();
     setSelectedStep(Step::AutonomousScan);
+    if (selected_step_ != Step::AutonomousScan) {
+        // Should be unreachable: launching implies every earlier gate. If a
+        // future gate regresses, say which one rather than leaving the
+        // operator on a page whose Launch button appears to do nothing.
+        for (int i = 0; i < int(Step::AutonomousScan); ++i) {
+            if (stepAvailable(Step(i)) && !stepComplete(Step(i))) {
+                appendLog(QStringLiteral(
+                              "[nav] scan page blocked by step %1 — "
+                              "stack is running, use Cancel to stop it")
+                              .arg(i + 1));
+                break;
+            }
+        }
+    }
 }
 
 void SatelliteScreen::noteRobotTopic() {
@@ -5543,8 +5637,7 @@ void SatelliteScreen::onDirectorWatchTick() {
     appendLog(QStringLiteral("[nav] operator cancelled the launch wait"));
     setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
-    mission_->teardownMission();
-    setSelectedStep(Step::EdgeReview);
+    teardownThen([this] { setSelectedStep(Step::EdgeReview); });
 }
 
 bool SatelliteScreen::isRobotLinkUnreachable() const {
@@ -5568,8 +5661,13 @@ void SatelliteScreen::onFooterBackClicked() {
                 QStringLiteral("Stop & Go Back"))) {
             return;
         }
-        mission_->teardownMission();
+        teardownThen([this] { stepBackToReachable(); });
+        return;
     }
+    stepBackToReachable();
+}
+
+void SatelliteScreen::stepBackToReachable() {
     for (int i = int(selected_step_) - 1; i >= 0; --i) {
         if (stepReachable(Step(i))) {
             setSelectedStep(Step(i));
@@ -5734,14 +5832,16 @@ void SatelliteScreen::onScanCancelClicked() {
         return;
     }
     setAutonomyEnabled(false);
+    // The abort RPC alone can take ~10 s (bridge, then SSH), so the modal
+    // goes up on the click rather than when the teardown chain starts.
+    showFinalizeProgress(QStringLiteral("Stopping autonomy…"));
     const auto finish = [this](bool ok, const QString& detail) {
         appendLog(ok ? QStringLiteral("[scan] abort accepted: %1").arg(detail)
                      : QStringLiteral("[scan] abort failed (%1) — tearing "
                                       "down anyway")
                            .arg(detail));
         ros_->requestAxisState(RosLink::kAxisIdle);
-        mission_->teardownMission();
-        setSelectedStep(Step::EdgeReview);
+        teardownThen([this] { setSelectedStep(Step::EdgeReview); });
     };
     // Bridge first; on a congested radio zenoh queries time out, so fall
     // back to `ros2 service call` over SSH — the legacy screen's path.
@@ -5772,10 +5872,9 @@ void SatelliteScreen::handleLaunchDeath(const QString& side, int exit_code) {
     // here would only duplicate them in the file.
     appendLog(QStringLiteral("[launch] %1 launch exited (rc=%2)")
                   .arg(side).arg(exit_code));
-    // Path read before teardownMission() closes the log; the file itself
-    // stays on disk for support.
+    // Path read before the teardown closes the log; the file itself stays on
+    // disk for support.
     const QString log_path = mission_->missionLogPath();
-    mission_->teardownMission();
     QString body =
         robot ? QStringLiteral(
                     "The software on the robot stopped (code %1). Your plan is "
@@ -5789,12 +5888,15 @@ void SatelliteScreen::handleLaunchDeath(const QString& side, int exit_code) {
     if (!log_path.isEmpty()) {
         body += QStringLiteral("\n\nDetails for support: %1").arg(log_path);
     }
-    BdrMessageBox::warning(
-        this,
-        robot ? QStringLiteral("Robot stack failed")
-              : QStringLiteral("Laptop launch failed"),
-        body);
-    setSelectedStep(Step::EdgeReview);
+    // Explain after the stack is down, not over the teardown modal: the
+    // operator watches it stop, reads why, and lands on Edge Review.
+    teardownThen([this, robot, body] {
+        BdrMessageBox::warning(this,
+                               robot ? QStringLiteral("Robot stack failed")
+                                     : QStringLiteral("Laptop launch failed"),
+                               body);
+        setSelectedStep(Step::EdgeReview);
+    });
 }
 
 void SatelliteScreen::maybePromptRevisit() {
@@ -5875,24 +5977,29 @@ void SatelliteScreen::refreshScanRunUi() {
     const CoverageStatus status = ros_->coverageStatus();
     const bool status_live = active && status.fresh(10000);
     const ScanBlock block = scanBlockReason();
+    // The stack is coming down: every command would race the sweep that is
+    // already killing its target. Telemetry is left alone — it resets a
+    // moment later when the mission goes inactive.
+    const bool commandable = active && !mission_->tearingDown();
 
     if (disarm_button_) {
-        disarm_button_->setEnabled(active);
+        disarm_button_->setEnabled(commandable);
     }
     if (estop_button_) {
-        estop_button_->setEnabled(active);
+        estop_button_->setEnabled(commandable);
     }
     if (end_button_) {
-        end_button_->setEnabled(active);
+        end_button_->setEnabled(commandable);
     }
     if (scan_cancel_button_) {
-        scan_cancel_button_->setEnabled(active &&
-                                        scan_run_state_ != ScanRunState::Completed);
+        scan_cancel_button_->setEnabled(
+            commandable && scan_run_state_ != ScanRunState::Completed);
     }
     if (scan_start_pause_button_ && scan_start_pause_text_) {
         QString label = QStringLiteral("Start Scan");
         QString icon = QStringLiteral(":/assets/missionplanner/scan_play.svg");
-        bool enable = ready && scan_run_state_ == ScanRunState::Idle &&
+        bool enable = ready && !mission_->tearingDown() &&
+                      scan_run_state_ == ScanRunState::Idle &&
                       !manual_override_ && !start_scan_pending_;
         if (start_scan_pending_) {
             label = QStringLiteral("Starting…");
@@ -6254,16 +6361,52 @@ void SatelliteScreen::beginMotorsIdleWait(
 void SatelliteScreen::showFinalizeProgress(const QString& phase) {
     if (!finalize_dialog_) {
         finalize_dialog_ = new MissionFinalizeDialog(this);
+        connect(finalize_dialog_, &MissionFinalizeDialog::forceStopRequested,
+                this, [this] {
+                    appendLog(QStringLiteral(
+                        "[teardown] operator forced the stop"));
+                    showFinalizeProgress(QStringLiteral("Force stopping…"));
+                    mission_->forceStopTeardown();
+                });
     }
+    finalize_dialog_->setTitle(complete_mission_in_flight_
+                                   ? QStringLiteral("Completing Mission")
+                                   : QStringLiteral("Stopping Mission"));
     finalize_dialog_->setPhase(phase);
     finalize_dialog_->setDetail(QString());
     finalize_dialog_->setSkipCopyAvailable(false);
     finalize_dialog_->setAbortAvailable(false);
+    finalize_dialog_->setForceStopAvailable(false);
     if (!finalize_dialog_->isVisible()) {
         finalize_dialog_->show();
         const QPoint c = mapToGlobal(rect().center());
         finalize_dialog_->move(c.x() - finalize_dialog_->width() / 2,
                                c.y() - finalize_dialog_->height() / 2);
+    }
+}
+
+void SatelliteScreen::offerForceStop() {
+    if (!mission_->tearingDown() || !finalize_dialog_) {
+        return;
+    }
+    force_stop_offered_ = true;
+    finalize_dialog_->setForceStopAvailable(true);
+    finalize_dialog_->setDetail(QStringLiteral(
+        "The robot is taking longer than usual to answer. Force stop ends the "
+        "launch on this laptop; anything still running on the robot is "
+        "cleared by the next launch."));
+}
+
+void SatelliteScreen::teardownThen(std::function<void()> after) {
+    after_teardown_ = std::move(after);
+    mission_->teardownMission();
+    if (!mission_->tearingDown()) {
+        // Nothing was running, so there is no chain to wait for.
+        auto now = after_teardown_;
+        after_teardown_ = nullptr;
+        if (now) {
+            now();
+        }
     }
 }
 
@@ -6332,10 +6475,7 @@ void SatelliteScreen::startCompleteMissionSettle() {
                                 "[mission] motors did not confirm "
                                 "IDLE within 6 s — continuing")
                           : QStringLiteral("[mission] motors IDLE"));
-            showFinalizeProgress(QStringLiteral("Stopping the robot stack…"));
-            QCoreApplication::processEvents();
-            mission_->teardownMission();
-            finishCompleteMissionAndLeave();
+            teardownThen([this] { finishCompleteMissionAndLeave(); });
         });
     });
     conclude_wait_timer_->start();
@@ -6378,7 +6518,6 @@ void SatelliteScreen::executeCompleteMissionSshFallback() {
             QStringLiteral("/home/%1/pilot_ws/install/pilot_control/lib/"
                            "pilot_control/finalize_mission_local.py")
                 .arg(target.ssh_user);
-        QProcess proc;
         QStringList args;
         args << "-o" << "ConnectTimeout=4"
              << "-o" << "StrictHostKeyChecking=no"
@@ -6386,37 +6525,40 @@ void SatelliteScreen::executeCompleteMissionSshFallback() {
              << "-o" << "BatchMode=yes"
              << QStringLiteral("%1@%2").arg(target.ssh_user, target.host)
              << QStringLiteral("python3 %1").arg(script);
-        proc.start(QStringLiteral("ssh"), args);
-        if (!proc.waitForFinished(8000)) {
-            proc.kill();
-            proc.waitForFinished(500);
-            appendLog(QStringLiteral(
-                "[mission] offline finalize timed out (>8 s)"));
-        } else {
-            appendLog(QStringLiteral("[mission] offline finalize rc=%1 %2")
-                          .arg(proc.exitCode())
-                          .arg(QString::fromUtf8(
-                                   proc.readAllStandardOutput().trimmed())));
-            if (proc.exitStatus() == QProcess::NormalExit &&
-                proc.exitCode() == 0) {
-                // rc=0 means finalize_mission_local.py wrote
-                // mission_finalized_at — the same guarantee as the RPC.
-                markCurrentPlanCompleted();
-            }
-        }
-    } else {
-        appendLog(
-            QStringLiteral("[mission] no robot host resolved (%1) — skipping "
-                           "remote finalize")
-                .arg(error));
+        // Async: this runs on a link we already know is dead, so the 8 s
+        // ceiling is the likely case, not the exception.
+        async_proc::run(this, QStringLiteral("ssh"), args,
+                        kOfflineFinalizeTimeoutMs,
+                        [this](int code, const QString& out) {
+                            if (code == 0) {
+                                // rc=0 means finalize_mission_local.py wrote
+                                // mission_finalized_at — the same guarantee
+                                // as the RPC.
+                                appendLog(QStringLiteral(
+                                    "[mission] offline finalize done"));
+                                markCurrentPlanCompleted();
+                            } else {
+                                appendLog(QStringLiteral(
+                                              "[mission] offline finalize "
+                                              "rc=%1 %2")
+                                              .arg(code)
+                                              .arg(out));
+                            }
+                            finishSshFallbackTeardown();
+                        });
+        return;
     }
+    appendLog(QStringLiteral("[mission] no robot host resolved (%1) — skipping "
+                             "remote finalize")
+                  .arg(error));
+    finishSshFallbackTeardown();
+}
+
+void SatelliteScreen::finishSshFallbackTeardown() {
     // Skip the disarm wait and the finalize RPC; both would just time out on
     // a dead link. Killing the launch tree disarms via the controller's exit
     // handlers.
-    showFinalizeProgress(QStringLiteral("Stopping the robot stack…"));
-    QCoreApplication::processEvents();
-    mission_->teardownMission();
-    finishCompleteMissionAndLeave();
+    teardownThen([this] { finishCompleteMissionAndLeave(); });
 }
 
 void SatelliteScreen::onEstop() {
@@ -6807,6 +6949,16 @@ SatelliteScreen::ScanBlock SatelliteScreen::scanBlockReason() const {
         out.detail = QStringLiteral(
             "No mission is running. Launch the robot from Edge Review.");
         out.color = QColor(mutedColor(dark_mode_));
+        return out;
+    }
+    if (!teardown_phase_.isEmpty()) {
+        out.label = QStringLiteral("Stopping");
+        out.detail = teardown_phase_;
+        return out;
+    }
+    if (!launch_phase_.isEmpty()) {
+        out.label = QStringLiteral("Preparing");
+        out.detail = launch_phase_;
         return out;
     }
     if (director_failed_) {

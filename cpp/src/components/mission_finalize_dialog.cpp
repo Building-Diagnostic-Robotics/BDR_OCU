@@ -56,9 +56,9 @@ MissionFinalizeDialog::MissionFinalizeDialog(QWidget* parent)
     root->setContentsMargins(28, 24, 28, 24);
     root->setSpacing(12);
 
-    auto* header = new QLabel(QStringLiteral("Completing Mission"), this);
-    header->setObjectName("FinalizeHeader");
-    root->addWidget(header);
+    lbl_header_ = new QLabel(QStringLiteral("Completing Mission"), this);
+    lbl_header_->setObjectName("FinalizeHeader");
+    root->addWidget(lbl_header_);
 
     lbl_phase_ = new QLabel(QStringLiteral("Stopping autonomy…"), this);
     lbl_phase_->setObjectName("FinalizePhase");
@@ -86,11 +86,15 @@ MissionFinalizeDialog::MissionFinalizeDialog(QWidget* parent)
     btn_skip_copy_ = new QPushButton(QStringLiteral("Skip thumb-drive copy"), this);
     btn_skip_copy_->setObjectName("FinalizeSkip");
     btn_skip_copy_->hide();
+    btn_force_ = new QPushButton(QStringLiteral("Force stop"), this);
+    btn_force_->setObjectName("FinalizeAbort");
+    btn_force_->hide();
     btn_close_ = new QPushButton(QStringLiteral("Close"), this);
     btn_close_->setObjectName("FinalizeClose");
     btn_close_->hide();
     buttons->addWidget(btn_abort_);
     buttons->addWidget(btn_skip_copy_);
+    buttons->addWidget(btn_force_);
     buttons->addWidget(btn_close_);
     root->addLayout(buttons);
 
@@ -102,7 +106,15 @@ MissionFinalizeDialog::MissionFinalizeDialog(QWidget* parent)
         btn_abort_->setEnabled(false);
         emit abortAndSaveRequested();
     });
+    connect(btn_force_, &QPushButton::clicked, this, [this] {
+        btn_force_->setEnabled(false);
+        emit forceStopRequested();
+    });
     connect(btn_close_, &QPushButton::clicked, this, &QDialog::accept);
+}
+
+void MissionFinalizeDialog::setTitle(const QString& text) {
+    lbl_header_->setText(text);
 }
 
 void MissionFinalizeDialog::setPhase(const QString& text) {
@@ -131,6 +143,13 @@ void MissionFinalizeDialog::setAbortAvailable(bool available) {
     }
 }
 
+void MissionFinalizeDialog::setForceStopAvailable(bool available) {
+    btn_force_->setVisible(available);
+    if (available) {
+        btn_force_->setEnabled(true);
+    }
+}
+
 void MissionFinalizeDialog::finish(bool ok, const QString& summary) {
     busy_->setRange(0, 1);
     busy_->setValue(ok ? 1 : 0);
@@ -139,6 +158,7 @@ void MissionFinalizeDialog::finish(bool ok, const QString& summary) {
     setDetail(summary, !ok);
     btn_skip_copy_->hide();
     btn_abort_->hide();
+    btn_force_->hide();
     btn_close_->show();
     btn_close_->setFocus();
 }

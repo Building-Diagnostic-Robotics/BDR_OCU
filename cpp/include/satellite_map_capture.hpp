@@ -15,6 +15,7 @@
 
 #include "satellite_job_model.hpp"
 
+#include <QFutureWatcher>
 #include <QImage>
 #include <QObject>
 #include <QPointF>
@@ -99,6 +100,7 @@ private:
     void startDownloadPcd();
     void startDownloadPose();
     void startRendering();
+    void onRenderFinished();
     void fail(const QString& message);
     QStringList sshBaseArgs() const;
 
@@ -110,6 +112,9 @@ private:
 
     QProcess* proc_ = nullptr;
     QTimer* timeout_ = nullptr;
+    /** Re-origin + raster run here: a roof cloud is millions of points and
+        PCL would otherwise hold the GUI thread for seconds. */
+    QFutureWatcher<MapCapture>* render_watcher_ = nullptr;
     Stage stage_ = Stage::Idle;
     bool cancelling_ = false;
 

@@ -336,6 +336,8 @@ private:
     /** Legacy name kept as a thin wrapper so stray call sites compile. */
     void onSendMission();
     void onFooterBackClicked();
+    /** Selects the nearest reachable step below the current one. */
+    void stepBackToReachable();
     void onScanStartPauseClicked();
     void onScanCancelClicked();
     void beginStartScan();
@@ -368,11 +370,24 @@ private:
     void executeCompleteMissionNormalPath();
     /** finalize_mission_local.py over SSH, then teardown. No RPCs. */
     void executeCompleteMissionSshFallback();
+    /** Teardown + leave, after the offline finalize resolves either way. */
+    void finishSshFallbackTeardown();
     /** Requests IDLE and polls motorsIdle() up to a ceiling, then continues. */
     void beginMotorsIdleWait(std::function<void(bool timed_out)> on_done);
     void showFinalizeProgress(const QString& phase);
     void startCompleteMissionSettle();
     void finishCompleteMissionAndLeave();
+    /**
+     * Tears the stack down and runs `after` once it is really down.
+     *
+     * Teardown is asynchronous (up to ~40 s of remote sweeping), so every
+     * caller that used to navigate on the next line hands that navigation
+     * over here instead. The progress modal is the operator's proof that
+     * something is happening.
+     */
+    void teardownThen(std::function<void()> after);
+    /** Puts the Force-stop CTA on the teardown modal. */
+    void offerForceStop();
     /** True only in genuine Disconnected — Reconnecting does not count. */
     bool isRobotLinkUnreachable() const;
     void onEstop();
@@ -766,6 +781,16 @@ private:
      * does not stand in for looking at the real roof.
      */
     bool edges_reviewed_ = false;
+
+    /** Live launch phase from MissionController; empty once launches are up. */
+    QString launch_phase_;
+    /** Live teardown phase; non-empty means a teardown is in flight. */
+    QString teardown_phase_;
+    /** Runs when the in-flight teardown finishes (navigation, mostly). */
+    std::function<void()> after_teardown_;
+    /** Offers Force stop once the teardown has run long enough to warrant it. */
+    QTimer* force_stop_timer_ = nullptr;
+    bool force_stop_offered_ = false;
 
     // Last-rendered pill states, kept so setDarkMode() can re-render every
     // dynamic surface against the new palette.

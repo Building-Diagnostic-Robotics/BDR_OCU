@@ -1,5 +1,6 @@
 #include "satellite_mission_controller.hpp"
 
+#include "async_process.hpp"
 #include "launch_env.hpp"
 #include "robot_registry.hpp"
 
@@ -76,11 +77,10 @@ constexpr int kRobotSweepTimeoutMs = 20000;
     SIGKILL — the 3 s used before left orphans. */
 constexpr int kLaunchTerminateGraceMs = 10000;
 
-void runLaptopSweep() {
-    QProcess sweep;
-    sweep.start("bash", {"-lc", QString::fromLatin1(kLaptopLaunchSweep)});
-    sweep.waitForFinished(6000);
-}
+/** The remote launch exits with its own sweep; only orphans need killing. */
+constexpr int kReapRobotGraceMs = 2000;
+
+constexpr int kLaptopSweepTimeoutMs = 6000;
 
 }  // namespace
 
@@ -122,6 +122,20 @@ void MissionController::hookProcessLogging(QProcess* proc, const QString& tag) {
                 // operator-facing failure.
                 if (mission_active_ && !tearing_down_) {
                     emit launchDied(tag, code);
+                }
+            });
+    // A spawn failure emits errorOccurred and never `finished`, so without
+    // this a missing `bash` / `ssh` would leave the operator on the scan
+    // page with a stack that was never launched and no failure at all.
+    connect(proc, &QProcess::errorOccurred, this,
+            [this, tag](QProcess::ProcessError error) {
+                if (error != QProcess::FailedToStart) {
+                    return;
+                }
+                emit logLine(
+                    QStringLiteral("[%1] launch failed to start").arg(tag));
+                if (mission_active_ && !tearing_down_) {
+                    emit launchDied(tag, -1);
                 }
             });
 }
@@ -250,6 +264,13 @@ bool MissionController::startMission(const RoiPolygon& poly,
         return false;
     }
 
+    if (tearing_down_) {
+        if (error) {
+            *error = QStringLiteral("The previous mission is still stopping.");
+        }
+        return false;
+    }
+
     // Before the first logLine, so the launch args themselves are on record.
     openMissionLog();
 
@@ -258,27 +279,12 @@ bool MissionController::startMission(const RoiPolygon& poly,
                      .arg(roi_arg));
     emit logLine(QStringLiteral("[send] scan params%1").arg(scan.launchArgs()));
 
-    // Leave nothing stale on either side, then launch. Same launch + args
-    // as the legacy path; the robot sweep is what stops a lingering step-2
-    // map-collection tree from fighting the director for the LiDAR /
-    // FAST-LIO / ODrive nodes.
-    runLaptopSweep();
-    runRobotSweep();
-
-    const QString laptop_cmd = QString::fromLatin1(kLaunchEnvPreamble) +
+    pending_laptop_cmd_ = QString::fromLatin1(kLaunchEnvPreamble) +
         QStringLiteral(
             "ros2 launch pilot_control laptop_teleop.launch.py "
             "robot_ip:=%1 use_xterm:=false interactive_sdl:=false "
             "cmd_vel_enabled:=false")
             .arg(target_.host);
-    laptop_proc_->start("bash", QStringList() << "-lc" << laptop_cmd);
-    if (!laptop_proc_->waitForStarted(3000)) {
-        if (error) {
-            *error = QStringLiteral("Failed to start laptop launch: %1")
-                         .arg(laptop_proc_->errorString());
-        }
-        return false;
-    }
 
     // Pass the YAML list as a bare launch arg. Do NOT wrap it in
     // `$BDR_ROI_VERTICES`: the ssh remote is `bash -c` of a double-quoted
@@ -309,26 +315,47 @@ bool MissionController::startMission(const RoiPolygon& poly,
                              .arg(roiEdgeFlagsArgument(poly));
     }
     remote_script += scan.launchArgs();
-    const QString remote_cmd =
-        QStringLiteral("bash -lc \"%1\"")
-            .arg(remote_script.replace(QLatin1Char('"'), QLatin1String("\\\"")));
-    QStringList args = sshBaseArgs(target_);
-    args << remote_cmd;
-    robot_proc_->start("ssh", args);
-    if (!robot_proc_->waitForStarted(3000)) {
-        if (error) {
-            *error = QStringLiteral("Failed to start robot launch: %1")
-                         .arg(robot_proc_->errorString());
-        }
-        laptop_proc_->kill();
-        return false;
-    }
+    pending_robot_args_ = sshBaseArgs(target_);
+    pending_robot_args_ << QStringLiteral("bash -lc \"%1\"")
+                               .arg(remote_script.replace(
+                                   QLatin1Char('"'), QLatin1String("\\\"")));
 
+    // Active from here, before anything is spawned: the operator lands on
+    // the scan page immediately and Cancel has to work during the sweeps.
+    // The pill narrates the phases from launchPhase.
     mission_active_ = true;
+    force_stop_ = false;
+    const int seq = ++mission_seq_;
     emit missionStateChanged(true);
+
+    // Leave nothing stale on either side, then launch. Same launch + args
+    // as the legacy path; the robot sweep is what stops a lingering step-2
+    // map-collection tree from fighting the director for the LiDAR /
+    // FAST-LIO / ODrive nodes.
+    emit launchPhase(QStringLiteral("Clearing old processes…"));
+    runLaptopSweep([this, seq] {
+        if (mission_seq_ != seq) {
+            return;
+        }
+        runRobotSweep([this, seq] {
+            if (mission_seq_ != seq) {
+                return;
+            }
+            spawnLaunches();
+        });
+    });
+    return true;
+}
+
+void MissionController::spawnLaunches() {
+    emit launchPhase(QStringLiteral("Starting the robot software…"));
+    laptop_proc_->start("bash", QStringList() << "-lc" << pending_laptop_cmd_);
+    robot_proc_->start("ssh", pending_robot_args_);
+    pending_laptop_cmd_.clear();
+    pending_robot_args_.clear();
+    emit launchPhase(QString());
     emit logLine(QStringLiteral("[send] mission launched on %1 (%2)")
                      .arg(target_.robot_id, target_.host));
-    return true;
 }
 
 void MissionController::remoteServiceCall(const QString& service,
@@ -432,53 +459,122 @@ void MissionController::remoteDisarm(RemoteCallback on_done) {
     proc->start("ssh", args);
 }
 
-void MissionController::runRobotSweep() {
+void MissionController::runRobotSweep(std::function<void()> on_done) {
     if (!target_.valid) {
+        if (on_done) {
+            on_done();
+        }
         return;
     }
-    QProcess sweep;
     QStringList args = sshBaseArgs(target_);
     args.removeAll(QStringLiteral("-tt"));
     args << QString::fromLatin1(kRobotSweep);
-    sweep.start("ssh", args);
-    sweep.waitForFinished(kRobotSweepTimeoutMs);
+    active_sweep_ = async_proc::run(this, QStringLiteral("ssh"), args,
+                                    kRobotSweepTimeoutMs,
+                                    [on_done](int, const QString&) {
+                                        if (on_done) {
+                                            on_done();
+                                        }
+                                    });
+}
+
+void MissionController::runLaptopSweep(std::function<void()> on_done) {
+    active_sweep_ = async_proc::run(
+        this, QStringLiteral("bash"),
+        QStringList() << QStringLiteral("-lc")
+                      << QString::fromLatin1(kLaptopLaunchSweep),
+        kLaptopSweepTimeoutMs, [on_done](int, const QString&) {
+            if (on_done) {
+                on_done();
+            }
+        });
 }
 
 void MissionController::teardownMission() {
+    if (tearing_down_) {
+        return;
+    }
     if (!mission_active_ && robot_proc_->state() == QProcess::NotRunning &&
         laptop_proc_->state() == QProcess::NotRunning) {
         return;
     }
     emit logLine(QStringLiteral("[teardown] stopping launches…"));
     tearing_down_ = true;
+    force_stop_ = false;
+    // Abandons an in-flight launch chain: a Cancel during the sweeps must
+    // not be followed by spawnLaunches().
+    ++mission_seq_;
+    emit launchPhase(QString());
+    teardownStep(RobotSweep);
+}
 
-    // Robot first: the sweep Ctrl-Cs the remote launch, which shuts its
-    // tree down in order and exits, and with it the `ssh -tt` carrying it
-    // (robot_proc_). Killing the local ssh instead would hang up the pty
-    // and SIGHUP the launch — an instant death that orphans every node.
-    runRobotSweep();
-    if (robot_proc_->state() != QProcess::NotRunning &&
-        !robot_proc_->waitForFinished(2000)) {
+void MissionController::forceStopTeardown() {
+    if (!tearing_down_ || force_stop_) {
+        return;
+    }
+    force_stop_ = true;
+    emit logLine(
+        QStringLiteral("[teardown] force stop — killing the local launches"));
+    // Kill whatever the chain is currently waiting on so its callback lands
+    // now rather than at the end of its grace, then let that callback notice
+    // force_stop_ and jump ahead.
+    if (active_sweep_) {
+        active_sweep_->kill();
+    }
+    if (robot_proc_->state() != QProcess::NotRunning) {
         robot_proc_->kill();
-        robot_proc_->waitForFinished(1000);
     }
-
-    // Laptop: SIGTERM reaches `ros2 launch`, which reaps its children in
-    // order; only escalate once it has had a real chance.
     if (laptop_proc_->state() != QProcess::NotRunning) {
-        laptop_proc_->terminate();
-        if (!laptop_proc_->waitForFinished(kLaunchTerminateGraceMs)) {
-            laptop_proc_->kill();
-            laptop_proc_->waitForFinished(1000);
-        }
+        laptop_proc_->kill();
     }
-    runLaptopSweep();
+}
 
+void MissionController::teardownStep(TeardownStep step) {
+    if (force_stop_ && step < LaptopSweep) {
+        // The local launches are already dead (forceStopTeardown); skip the
+        // remaining remote waits and go clean up the laptop.
+        step = LaptopSweep;
+    }
+    switch (step) {
+        case RobotSweep:
+            // Robot first: the sweep Ctrl-Cs the remote launch, which shuts
+            // its tree down in order and exits, and with it the `ssh -tt`
+            // carrying it (robot_proc_). Killing the local ssh instead would
+            // hang up the pty and SIGHUP the launch — an instant death that
+            // orphans every node.
+            emit teardownPhase(QStringLiteral("Stopping the robot software…"));
+            runRobotSweep([this] { teardownStep(ReapRobot); });
+            return;
+        case ReapRobot:
+            emit teardownPhase(QStringLiteral("Closing the robot session…"));
+            async_proc::reap(robot_proc_, kReapRobotGraceMs,
+                             [this] { teardownStep(StopLaptop); });
+            return;
+        case StopLaptop:
+            // SIGTERM reaches `ros2 launch`, which reaps its children in
+            // order; only escalate once it has had a real chance.
+            emit teardownPhase(QStringLiteral("Stopping the laptop link…"));
+            if (laptop_proc_->state() != QProcess::NotRunning) {
+                laptop_proc_->terminate();
+            }
+            async_proc::reap(laptop_proc_, kLaunchTerminateGraceMs,
+                             [this] { teardownStep(LaptopSweep); });
+            return;
+        case LaptopSweep:
+            emit teardownPhase(QStringLiteral("Cleaning up…"));
+            runLaptopSweep([this] { teardownStep(Done); });
+            return;
+        case Done:
+            break;
+    }
     mission_active_ = false;
     tearing_down_ = false;
+    force_stop_ = false;
     emit missionStateChanged(false);
     emit logLine(QStringLiteral("[teardown] done"));
-    // After the last logLine, so it lands in the file.
+    emit teardownPhase(QString());
+    emit teardownFinished();
+    // After the last logLine, so everything lands in the file.
     closeMissionLog();
 }
 
