@@ -464,6 +464,11 @@ exactly one of seven states. The full state-transition diagram lives in
   304 path. `exclude` beats `include`; empty lists = everyone; malformed
   JSON fails **open** (a typo must not freeze the fleet). Do not move
   this to a downloaded asset without carrying the replay path with it.
+- **`include` is currently pinned to `["Roofus#0002"]`** to field-verify the
+  `swath_overlap:=0.0` launch-arg fix on one laptop. A non-empty `include`
+  means every other laptop in the fleet silently receives NO updates — this
+  is a temporary state and must go back to `[]` once the fix is confirmed.
+  Check this file before concluding "OTA is broken" for some laptop.
 - `update/auto_check_enabled=false` is the per-laptop pin:
   `UpdateChecker::start()` returns before scheduling anything. Both
   controls only *offer*; neither installs. They cannot reach an OCU
