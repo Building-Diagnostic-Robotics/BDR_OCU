@@ -874,7 +874,9 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  `setCacheRoot` (per-job tile tree), `setMaxZoomCap`, Clarity and Wayback
  layer URLs, `listWaybackReleases`.
 - `satellite_job_model.{hpp,cpp}` — plans as JSON under
- AppData/satellite_jobs; **schema 4** carries `mode`
+ AppData/satellite_jobs; **schema 6** adds the `scan` block
+ (`coverage_width_m`, `scan_speed_mps`; absent => director defaults);
+ 5 added `polygon_edge_locks_m`; **schema 4** carries `mode`
  (satellite|measured), the `polygon` + `polygon_roof_edges` arrays,
  `gps` (the map-collection seed fix), `imagery_cache` (what the office
  prefetch actually cached), `alignment` (the `Similarity2D` PCD->imagery
@@ -897,7 +899,27 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  (marker pose = anchor; verified numerically), SSH launch of
  `robot_autonomous_coverage_director.launch.py roi_vertices:='[...]'`
  (+ `roi_edge_flags` ONLY when edges are marked — older robot builds
- reject undeclared args), laptop_teleop launch for the heartbeat.
+ reject undeclared args) + `ScanParams::launchArgs()`
+ (`coverage_width swath_overlap:=0.0 desired_linear_speed`, always sent;
+ robot must be on `cliff-on-autonomy`), laptop_teleop launch for the
+ heartbeat. **Every value in `launchArgs()` must carry a decimal point.**
+ The director's launch file feeds them into the node's `parameters` dict as
+ bare `LaunchConfiguration`s, so launch_ros type-infers with YAML: `:=0` is
+ an int, the node declares `swath_overlap` as a strict double, and an int
+ override against a DOUBLE descriptor raises
+ `InvalidParameterTypeException` inside the director's `__init__` — before
+ the `/coverage/status` publisher exists. The director dies, every other
+ node in the launch keeps running and logging, and Start Scan never
+ unlocks. Cost a field session on 2026-09-15; guarded by
+ `ScanParams.LaunchArgsAlwaysCarryADecimalPoint`.
+- **Scan Parameters card** (`buildScanParamsCard`, both trims, visible once
+ the polygon is closed): `TrackSlider` (the legacy Stage 5 slider lifted to
+ `components/track_slider.*`) + a typed `QLineEdit` per knob. Slider is SI
+ and the model; the edit is a units-layer view. Ranges / step / defaults
+ live ONLY in `ScanParams` (`satellite_job_model.hpp`): width 0.30-2.00 m
+ step 0.05, speed 0.4-0.6 m/s step 0.1, defaults 0.50 / 0.40 = director
+ defaults. `snapWidth/snapSpeed` clamp + snap everything (typed input,
+ hand-edited JSON, launch args). Do not add a second copy of the ranges.
 - `satellite_ros_link.{hpp,cpp}` — the stage's own rclcpp node:
  cmd_vel/autonomy_enable pubs, coverage/odom/status subs, axis-state
  clients, `pushSessionMetadata` (coordinator SetParameters).
@@ -1188,6 +1210,27 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  must never tear down by itself — the full stack + Zenoh session takes
  30-60 s and a 20 s auto-teardown killed a healthy launch in the field.
  Do not add a link gate to `end_button_`.
+- **A disabled Start Scan must always say why, and the step-5 corner pill
+ is the only place it can.** The rail (and with it `reason_label_`, which
+ nothing ever constructs) is hidden on step 5, and a disabled button's
+ tooltip is not a surface a field operator can reach. `scanBlockReason()`
+ is the single source for both: it returns a short pill label plus one
+ plain sentence, in operator language with no ROS vocabulary.
+ `updateStatePill()` owns the pill whenever a `/coverage/status` message is
+ fresh; `refreshScanRunUi()` owns it the rest of the time — that boot / link
+ window is exactly where the operator used to read a hardcoded **"Ready"**
+ next to a dead button. Do not re-add a default pill string that claims
+ readiness, and do not collapse the two owners into one.
+- **Operator dialogs carry no raw launch output.** The robot launch is
+ 10-20 Hz of cliff / tfmini INFO lines, so a tail tells the operator
+ nothing and the traceback worth reading has already scrolled out of it.
+ The launch-wait prompt and `handleLaunchDeath` show plain sentences and
+ name the mission log instead. Every line the screen displays goes through
+ `SatelliteScreen::appendLog` → `MissionController::appendMissionLog`, which
+ is the ONE choke point writing `AppData/mission_logs/mission_<stamp>.log`
+ (flushed per line, newest `kMissionLogsKept = 10` kept). Do not also write
+ from `hookProcessLogging` — process output would land twice — and do not
+ re-log `recentRobotOutput()` at failure time for the same reason.
 - **Launch is Edge Review Next**, not a Send button. Back from step 5
  while the stack is up (and Start Scan has never run) confirms teardown;
  once autonomy has run, Back is disabled — Cancel / Complete are the exits.

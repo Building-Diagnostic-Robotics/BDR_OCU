@@ -38,7 +38,7 @@ class QWidget;
 namespace f2c_cpp {
 
 class PlotWidget;
-class PlannerTrackSlider;
+class TrackSlider;
 class FPVCameraView;
 
 class PlannerScreen : public QWidget {
@@ -652,9 +652,9 @@ private:
     QLabel* lbl_coverage_legend_boundary_ = nullptr;
     QLabel* lbl_coverage_legend_path_ = nullptr;
 
-    PlannerTrackSlider* slider_coverage_path_spacing_ = nullptr;
-    PlannerTrackSlider* slider_coverage_headland_ = nullptr;
-    PlannerTrackSlider* slider_coverage_scan_speed_ = nullptr;
+    TrackSlider* slider_coverage_path_spacing_ = nullptr;
+    TrackSlider* slider_coverage_headland_ = nullptr;
+    TrackSlider* slider_coverage_scan_speed_ = nullptr;
 
     // Scan-splitting "Distance per scan" QLineEdit always stores +
     // displays meters (operator's chosen splits live in SI on the wire
@@ -707,7 +707,7 @@ private:
     QPushButton* btn_coverage_obstacle_manual_ = nullptr;
     QPushButton* btn_coverage_detect_ = nullptr;
     // CSF "Detection Sensitivity" control (Auto-detect panel).
-    PlannerTrackSlider* csf_sensitivity_slider_ = nullptr;
+    TrackSlider* csf_sensitivity_slider_ = nullptr;
     QLabel* csf_sensitivity_value_ = nullptr;
     QPushButton* btn_coverage_clear_obstacles_ = nullptr;
     QPushButton* btn_coverage_draw_rectangle_ = nullptr;

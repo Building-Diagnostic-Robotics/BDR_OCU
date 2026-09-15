@@ -12,10 +12,14 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QJsonObject>
 #include <QTemporaryDir>
+
+#include <cmath>
 
 using f2c_cpp::Job;
 using f2c_cpp::JobStore;
+using f2c_cpp::ScanParams;
 
 namespace {
 
@@ -85,6 +89,100 @@ TEST(JobStore, PruneKeepsNewestCompletedAndAllPlanned) {
 
     // Idempotent: a second pass has nothing left to remove.
     EXPECT_TRUE(store.pruneCompleted(JobStore::kCompletedPlansKept).isEmpty());
+}
+
+// ---------------------------------------------------------------------------
+// ScanParams — operator knobs: snap grid, defaults, launch args, persistence.
+// ---------------------------------------------------------------------------
+
+TEST(ScanParams, DefaultsMatchDirectorDefaults) {
+    const ScanParams p;
+    EXPECT_DOUBLE_EQ(p.coverage_width_m, 0.50);
+    EXPECT_DOUBLE_EQ(p.scan_speed_mps, 0.40);
+}
+
+TEST(ScanParams, SnapClampsAndRoundsToGrid) {
+    EXPECT_DOUBLE_EQ(ScanParams::snapWidth(0.10), 0.30);   // below floor
+    EXPECT_DOUBLE_EQ(ScanParams::snapWidth(2.70), 2.00);   // above ceiling
+    EXPECT_DOUBLE_EQ(ScanParams::snapWidth(0.52), 0.50);   // nearest 0.05
+    EXPECT_DOUBLE_EQ(ScanParams::snapWidth(0.53), 0.55);
+    EXPECT_DOUBLE_EQ(ScanParams::snapWidth(std::nan("")), 0.50);
+
+    EXPECT_DOUBLE_EQ(ScanParams::snapSpeed(0.10), 0.40);
+    EXPECT_DOUBLE_EQ(ScanParams::snapSpeed(0.90), 0.60);
+    EXPECT_DOUBLE_EQ(ScanParams::snapSpeed(0.46), 0.50);   // nearest 0.1
+    EXPECT_DOUBLE_EQ(ScanParams::snapSpeed(0.44), 0.40);
+    EXPECT_DOUBLE_EQ(ScanParams::snapSpeed(std::nan("")), 0.40);
+}
+
+TEST(ScanParams, LaunchArgsPinOverlapToZero) {
+    ScanParams p;
+    p.coverage_width_m = 0.75;
+    p.scan_speed_mps = 0.6;
+    EXPECT_EQ(p.launchArgs(),
+              QStringLiteral(" coverage_width:=0.75 swath_overlap:=0.0 "
+                             "desired_linear_speed:=0.60"));
+    // Out-of-range input is snapped before it reaches the robot.
+    p.coverage_width_m = 9.0;
+    p.scan_speed_mps = 0.0;
+    EXPECT_EQ(p.launchArgs(),
+              QStringLiteral(" coverage_width:=2.00 swath_overlap:=0.0 "
+                             "desired_linear_speed:=0.40"));
+}
+
+TEST(ScanParams, LaunchArgsAlwaysCarryADecimalPoint) {
+    // Every value here reaches a strictly-typed double ROS parameter. An
+    // integer-looking token (e.g. "0" or "1") is inferred as an int by
+    // launch_ros and kills the director node in its constructor.
+    for (const double width : {0.30, 0.50, 1.00, 2.00}) {
+        for (const double speed : {0.40, 0.50, 0.60}) {
+            ScanParams p;
+            p.coverage_width_m = width;
+            p.scan_speed_mps = speed;
+            const QStringList tokens =
+                p.launchArgs().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+            for (const QString& token : tokens) {
+                const QString value = token.section(QStringLiteral(":="), 1);
+                ASSERT_FALSE(value.isEmpty()) << token.toStdString();
+                EXPECT_TRUE(value.contains(QLatin1Char('.')))
+                    << token.toStdString();
+            }
+        }
+    }
+}
+
+TEST(JobStore, ScanParamsRoundTripAndLegacyDefault) {
+    QTemporaryDir tmp;
+    ASSERT_TRUE(tmp.isValid());
+    JobStore store(tmp.path());
+
+    Job job = makeJob("knobs", -1);
+    job.scan.coverage_width_m = 1.25;
+    job.scan.scan_speed_mps = 0.5;
+    ASSERT_TRUE(store.save(job));
+    const QVector<Job> loaded = store.loadAll();
+    ASSERT_EQ(loaded.size(), 1);
+    EXPECT_DOUBLE_EQ(loaded[0].scan.coverage_width_m, 1.25);
+    EXPECT_DOUBLE_EQ(loaded[0].scan.scan_speed_mps, 0.5);
+
+    // A schema <= 5 plan has no "scan" block: it ran the director defaults,
+    // and must keep doing so after the upgrade.
+    QJsonObject legacy = job.toJson();
+    legacy.remove("scan");
+    legacy["schema"] = 5;
+    const Job old = Job::fromJson(legacy);
+    EXPECT_DOUBLE_EQ(old.scan.coverage_width_m, ScanParams::kWidthDefaultM);
+    EXPECT_DOUBLE_EQ(old.scan.scan_speed_mps, ScanParams::kSpeedDefaultMps);
+
+    // A hand-edited file cannot push an out-of-range value onto the robot.
+    QJsonObject edited = job.toJson();
+    QJsonObject sp = edited.value("scan").toObject();
+    sp["coverage_width_m"] = 5.0;
+    sp["scan_speed_mps"] = 1.5;
+    edited["scan"] = sp;
+    const Job clamped = Job::fromJson(edited);
+    EXPECT_DOUBLE_EQ(clamped.scan.coverage_width_m, ScanParams::kWidthMaxM);
+    EXPECT_DOUBLE_EQ(clamped.scan.scan_speed_mps, ScanParams::kSpeedMaxMps);
 }
 
 TEST(JobStore, PruneUnderCapIsNoop) {

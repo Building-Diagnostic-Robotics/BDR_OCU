@@ -92,6 +92,37 @@ struct ImageryCache {
     QString stitch_relpath;
 };
 
+/**
+ * Operator-tunable coverage knobs (schema 6). SI on the wire; the ROI card
+ * renders them through the units layer. Ranges are the operator's spec and
+ * the single source of truth for slider, typed entry, and launch args.
+ */
+struct ScanParams {
+    static constexpr double kWidthMinM = 0.30;
+    static constexpr double kWidthMaxM = 2.00;
+    static constexpr double kWidthStepM = 0.05;
+    static constexpr double kWidthDefaultM = 0.50;
+    static constexpr double kSpeedMinMps = 0.40;
+    static constexpr double kSpeedMaxMps = 0.60;
+    static constexpr double kSpeedStepMps = 0.10;
+    static constexpr double kSpeedDefaultMps = 0.40;
+
+    double coverage_width_m = kWidthDefaultM;
+    double scan_speed_mps = kSpeedDefaultMps;
+
+    /** Clamp + snap to the slider grid. Non-finite -> default. */
+    static double snapWidth(double meters);
+    static double snapSpeed(double mps);
+    ScanParams snapped() const;
+
+    /**
+     * Director launch args, leading space included:
+     * " coverage_width:=0.50 swath_overlap:=0 desired_linear_speed:=0.40".
+     * Overlap is pinned to 0 so the slider IS the lane pitch.
+     */
+    QString launchArgs() const;
+};
+
 struct Job {
     /** Planning canvas the plan was authored on — determines the mode the
         planning screen opens in when the plan is executed. */
@@ -128,6 +159,7 @@ struct Job {
     ImageryCache imagery_cache;
     Similarity2D alignment;
     double align_rmse_m = 0.0;
+    ScanParams scan;
 
     bool isMeasured() const {
         return mode == QLatin1String(kModeMeasured);

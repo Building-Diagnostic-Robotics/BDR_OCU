@@ -67,6 +67,7 @@ class MissionFinalizeDialog;
 class PanZoomImageWidget;
 class RosLink;
 class SatelliteMapWidget;
+class TrackSlider;
 
 class SatelliteScreen : public QWidget {
     Q_OBJECT
@@ -387,6 +388,22 @@ private:
     void updateStatePill();
     void setBotPill(const QString& text, const QColor& color);
     void setStatePill(const QString& text, const QColor& color);
+    /** Step-5 corner status pill over the map. */
+    void setScanStatusPill(const QString& text, const QColor& color);
+    /**
+     * Why Start Scan is locked, in the two lengths the UI needs.
+     *
+     * Step 5 hides the rail (and with it `reason_label_`), so the corner pill
+     * is the operator's ONLY view of why the button is dead — a disabled
+     * button's tooltip is not a surface you can rely on. `label` is empty
+     * only when nothing is blocking the scan.
+     */
+    struct ScanBlock {
+        QString label;   // pill text; short enough not to crowd the tool stack
+        QString detail;  // one plain sentence, no ROS vocabulary
+        QColor color;
+    };
+    ScanBlock scanBlockReason() const;
     void setMotorsChip(const QString& text, const QColor& color);
     /** Drives the motors chip from live controller_status. */
     void updateMotorsChip();
@@ -503,6 +520,22 @@ private:
     QPushButton* roi_clear_button_ = nullptr;
     QWidget* buildRoiCard(QWidget* parent);
     void refreshRoiCard();
+
+    // Scan Parameters (both trims): swath width + robot speed. Slider plus
+    // a typed value per knob; SI in the sliders, display units in the edits.
+    // Shown once a closed ROI exists; saved on the Job; sent at launch.
+    QWidget* scan_params_card_ = nullptr;
+    TrackSlider* swath_slider_ = nullptr;
+    TrackSlider* speed_slider_ = nullptr;
+    QLineEdit* swath_edit_ = nullptr;
+    QLineEdit* speed_edit_ = nullptr;
+    QLabel* swath_unit_ = nullptr;
+    QLabel* speed_unit_ = nullptr;
+    QWidget* buildScanParamsCard(QWidget* parent);
+    /** Re-renders the edits from the sliders and applies visibility. */
+    void refreshScanParamsCard();
+    ScanParams scanParams() const;
+    void setScanParams(const ScanParams& params);
 
     // Step 3 / step 4 acknowledgement cards.
     QWidget* roi_confirm_card_ = nullptr;

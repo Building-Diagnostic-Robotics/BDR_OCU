@@ -10,9 +10,13 @@ before pushing to `main` that triggers a release.
 
 ---
 
-## Unreleased - 2026-09-13
+## Unreleased - 2026-09-15
 
 - Sync laptop and robot ~/pilot_ws to cliff-on-autonomy via banner
+- Stage 6 ROI card: swath width (0.3-2 m) and speed (0.4-0.6 m/s) sliders
+- Fix scan launch arg that stopped the robot planning the scan
+- Scan page now says why Start Scan is locked, in plain language
+- Mission log saved to disk for support after a failed launch
 
 ## 2026-09-13 — OTA 082cde0
 

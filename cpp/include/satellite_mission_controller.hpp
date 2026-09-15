@@ -17,6 +17,7 @@
 
 #include "satellite_job_model.hpp"
 
+#include <QFile>
 #include <QObject>
 #include <QProcess>
 #include <QString>
@@ -61,9 +62,11 @@ public:
     bool missionActive() const { return mission_active_; }
     RobotTarget target() const { return target_; }
 
-    /** Starts laptop launch + SSH robot launch. Emits log/state signals. */
+    /** Starts laptop launch + SSH robot launch. Emits log/state signals.
+        `scan` rides along as director launch args (ScanParams::launchArgs);
+        the robot must be on `cliff-on-autonomy`, which declares them. */
     bool startMission(const RoiPolygon& poly, const geo::GeoPose& robot,
-                      QString* error = nullptr);
+                      const ScanParams& scan, QString* error = nullptr);
 
     /** Stops both launch trees: Ctrl-C to the robot launch over SSH (so
         it shuts its tree down in order) + name sweep of what ignores it,
@@ -72,8 +75,30 @@ public:
     void teardownMission();
 
     /** Last lines of the robot launch's merged stdout/stderr — the
-        director's traceback lives here when the stack dies at startup. */
+        director's traceback lives here when the stack dies at startup.
+        Developer-facing: the cliff / tfmini nodes log at 10-20 Hz, so this
+        is a rolling window, not a record. Use the mission log for that. */
     QStringList recentRobotOutput(int max_lines = 12) const;
+
+    /**
+     * Absolute path of the current (or most recent) mission log, empty
+     * before the first launch.
+     *
+     * The in-GUI log view is capped at 600 blocks and `applyStepVisibility`
+     * hides it entirely on the field trim, so without this file a failed
+     * launch leaves no evidence at all once the operator tears down.
+     */
+    QString missionLogPath() const { return mission_log_path_; }
+
+    /**
+     * Mirrors one already-formatted log line into the mission log.
+     *
+     * The screen routes every line it displays through here — including the
+     * ones this class emits via `logLine` — so the file is the complete
+     * record and each line is written exactly once. Do not also call this
+     * from `hookProcessLogging`, or process output lands twice.
+     */
+    void appendMissionLog(const QString& line);
 
     using RemoteCallback = std::function<void(bool ok, QString detail)>;
     /**
@@ -106,6 +131,9 @@ private:
     /** One SSH round trip that leaves the robot with no Stage 6 stack
         running (see kRobotSweep). Blocking; ~1 s when already clean. */
     void runRobotSweep();
+    /** Opens a fresh mission log and prunes older ones. */
+    void openMissionLog();
+    void closeMissionLog();
 
     RobotTarget target_;
     QProcess* laptop_proc_ = nullptr;
@@ -113,7 +141,14 @@ private:
     bool mission_active_ = false;
     bool tearing_down_ = false;
     QStringList robot_output_tail_;
-    static constexpr int kRobotOutputTailMax = 40;
+    QFile* mission_log_ = nullptr;
+    QString mission_log_path_;
+    // 40 was too short to be useful: cliff_horizon logs at 10 Hz and
+    // tfmini_cliff_evidence at 20 Hz, so a startup traceback was overwritten
+    // within a second and the launch-wait prompt only ever showed INFO spam.
+    static constexpr int kRobotOutputTailMax = 200;
+    /** Mission logs kept on disk; oldest are pruned at the next launch. */
+    static constexpr int kMissionLogsKept = 10;
 };
 
 }  // namespace f2c_cpp

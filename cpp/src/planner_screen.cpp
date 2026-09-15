@@ -6,6 +6,7 @@
 #include "components/fpv_camera_view.hpp"
 #include "components/pre_scan_checklist_dialog.hpp"
 #include "components/svg_icon_button.hpp"
+#include "components/track_slider.hpp"
 #include "dev_flags.hpp"
 #include "plot_widget.hpp"
 #include "video_stream_widget.hpp"
@@ -840,194 +841,6 @@ void applyDropShadow(QWidget* widget, int blur_radius, int y_offset, const QColo
 }
 
 }  // namespace
-
-class PlannerTrackSlider : public QWidget {
-public:
-    explicit PlannerTrackSlider(QWidget* parent = nullptr) : QWidget(parent) {
-        setFixedHeight(kWidgetHeight);
-        setCursor(Qt::PointingHandCursor);
-        setMouseTracking(true);
-    }
-
-    void setRange(double minimum, double maximum) {
-        minimum_ = minimum;
-        maximum_ = std::max(minimum_, maximum);
-        setValue(value_);
-    }
-
-    void setStep(double step) { step_ = std::max(0.0, step); }
-    double step() const { return step_; }
-    void setDecimals(int decimals) { decimals_ = std::max(0, decimals); }
-    void setDarkMode(bool dark_mode) {
-        dark_mode_ = dark_mode;
-        update();
-    }
-
-    void setValue(double value) {
-        const double snapped = snapValue(value);
-        if (std::abs(value_ - snapped) < 1e-9) {
-            return;
-        }
-        value_ = snapped;
-        update();
-    }
-
-    double value() const { return value_; }
-    double minimum() const { return minimum_; }
-    double maximum() const { return maximum_; }
-
-    std::function<void(double)> on_value_changed;
-
-protected:
-    void paintEvent(QPaintEvent* event) override {
-        Q_UNUSED(event);
-
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-
-        const qreal track_height = 8.0;
-        const qreal track_radius = track_height / 2.0;
-        const qreal track_left = kThumbRadius;
-        const qreal track_right = width() - kThumbRadius;
-        const qreal track_width = std::max<qreal>(0.0, track_right - track_left);
-        const qreal track_y = (height() - track_height) / 2.0;
-        const QRectF track_rect(track_left, track_y, track_width, track_height);
-
-        const QColor track_unfilled = isEnabled()
-                                          ? (dark_mode_ ? QColor(QStringLiteral("#3F3F47"))
-                                                        : QColor(QStringLiteral("#D4D4D8")))
-                                          : (dark_mode_ ? QColor(QStringLiteral("#27272A"))
-                                                        : QColor(QStringLiteral("#E5E7EB")));
-        const QColor accent = isEnabled()
-                                  ? (dark_mode_ ? QColor(QStringLiteral("#00BC7D"))
-                                                : QColor(QStringLiteral("#009966")))
-                                  : (dark_mode_ ? QColor(QStringLiteral("#3F3F47"))
-                                                : QColor(QStringLiteral("#A1A1AA")));
-
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(track_unfilled);
-        painter.drawRoundedRect(track_rect, track_radius, track_radius);
-
-        const qreal handle_cx = trackValueX(value_, track_left, track_width);
-        const qreal handle_cy = track_rect.center().y();
-
-        const qreal filled_right = std::clamp<qreal>(handle_cx, track_left, track_right);
-        if (filled_right > track_left) {
-            QRectF filled_rect(track_left, track_y, filled_right - track_left, track_height);
-            painter.setBrush(accent);
-            painter.drawRoundedRect(filled_rect, track_radius, track_radius);
-        }
-
-        const qreal handle_radius = dragging_ ? kThumbRadius + 1.0 : kThumbRadius;
-        const QPointF handle_center(handle_cx, handle_cy);
-
-        const QColor shadow_color(0, 0, 0, dark_mode_ ? 90 : 60);
-        painter.setBrush(shadow_color);
-        painter.drawEllipse(handle_center + QPointF(0.0, 2.0),
-                            handle_radius + 1.5, handle_radius + 1.5);
-
-        painter.setBrush(accent);
-        painter.drawEllipse(handle_center, handle_radius, handle_radius);
-    }
-
-    void mousePressEvent(QMouseEvent* event) override {
-        if (!isEnabled() || event->button() != Qt::LeftButton) {
-            QWidget::mousePressEvent(event);
-            return;
-        }
-
-        dragging_ = true;
-        updateFromX(event->pos().x());
-        event->accept();
-    }
-
-    void mouseMoveEvent(QMouseEvent* event) override {
-        if (dragging_ && isEnabled()) {
-            updateFromX(event->pos().x());
-            event->accept();
-            return;
-        }
-
-        QWidget::mouseMoveEvent(event);
-        update();
-    }
-
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        if (dragging_ && event->button() == Qt::LeftButton) {
-            dragging_ = false;
-            update();
-            event->accept();
-            return;
-        }
-
-        QWidget::mouseReleaseEvent(event);
-    }
-
-    void leaveEvent(QEvent* event) override {
-        QWidget::leaveEvent(event);
-        if (!dragging_) {
-            update();
-        }
-    }
-
-private:
-    static constexpr int kWidgetHeight = 28;
-    static constexpr qreal kThumbRadius = 10.0;
-
-    double clampValue(double value) const {
-        return std::min(maximum_, std::max(minimum_, value));
-    }
-
-    double snapValue(double value) const {
-        const double clamped = clampValue(value);
-        if (step_ <= 0.0 || maximum_ <= minimum_) {
-            return clamped;
-        }
-
-        const double steps = std::round((clamped - minimum_) / step_);
-        const double snapped = minimum_ + (steps * step_);
-        const double factor = std::pow(10.0, decimals_);
-        return std::round(clampValue(snapped) * factor) / factor;
-    }
-
-    qreal trackValueX(double value, qreal track_left, qreal track_width) const {
-        if (maximum_ <= minimum_ || track_width <= 0.0) {
-            return track_left;
-        }
-        const double t = (value - minimum_) / (maximum_ - minimum_);
-        return track_left + std::clamp<qreal>(t, 0.0, 1.0) * track_width;
-    }
-
-    void updateFromX(double x) {
-        const qreal track_left = kThumbRadius;
-        const qreal track_right = width() - kThumbRadius;
-        const qreal track_width = std::max<qreal>(0.0, track_right - track_left);
-        if (maximum_ <= minimum_ || track_width <= 0.0) {
-            return;
-        }
-
-        const qreal clamped = std::clamp<qreal>(x, track_left, track_right);
-        const double t = (clamped - track_left) / track_width;
-        const double next_value = snapValue(minimum_ + t * (maximum_ - minimum_));
-        if (std::abs(next_value - value_) < 1e-9) {
-            return;
-        }
-
-        value_ = next_value;
-        if (on_value_changed) {
-            on_value_changed(value_);
-        }
-        update();
-    }
-
-    double minimum_ = 0.0;
-    double maximum_ = 1.0;
-    double value_ = 0.0;
-    double step_ = 0.01;
-    int decimals_ = 2;
-    bool dragging_ = false;
-    bool dark_mode_ = true;
-};
 
 PlannerScreen::PlannerScreen(QWidget* parent) : QWidget(parent) {
     setFocusPolicy(Qt::StrongFocus);
@@ -5974,7 +5787,7 @@ void PlannerScreen::buildUi() {
                                       double maximum,
                                       double step,
                                       int decimals,
-                                      PlannerTrackSlider** out_slider,
+                                      TrackSlider** out_slider,
                                       QLabel** out_value_label,
                                       QLabel** out_min_label = nullptr,
                                       QLabel** out_max_label = nullptr) -> QWidget* {
@@ -6008,7 +5821,7 @@ void PlannerScreen::buildUi() {
             make_stepper_button(block, QStringLiteral(":/assets/missionplanner/stepper_minus.svg"));
         slider_row->addWidget(btn_minus, 0, Qt::AlignVCenter);
 
-        auto* slider = new PlannerTrackSlider(block);
+        auto* slider = new TrackSlider(block);
         slider->setRange(minimum, maximum);
         slider->setStep(step);
         slider->setDecimals(decimals);
@@ -6536,7 +6349,7 @@ void PlannerScreen::buildUi() {
         auto* sens_minus = make_stepper_button(
             sens_block, QStringLiteral(":/assets/missionplanner/stepper_minus.svg"));
         sens_slider_row->addWidget(sens_minus, 0, Qt::AlignVCenter);
-        csf_sensitivity_slider_ = new PlannerTrackSlider(sens_block);
+        csf_sensitivity_slider_ = new TrackSlider(sens_block);
         csf_sensitivity_slider_->setRange(kCsfSensitivityMin, kCsfSensitivityMax);
         csf_sensitivity_slider_->setStep(1.0);
         csf_sensitivity_slider_->setDecimals(0);

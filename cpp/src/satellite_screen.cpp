@@ -18,6 +18,7 @@
 #include "components/mission_finalize_dialog.hpp"
 #include "components/offline_finalize_dialog.hpp"
 #include "components/satellite_plan_confirm_dialog.hpp"
+#include "components/track_slider.hpp"
 #include "video_stream_widget.hpp"
 #include "pan_zoom_image.hpp"
 #include "satellite_map_capture.hpp"
@@ -37,6 +38,7 @@
 #include <QDialog>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QDoubleValidator>
 #include <QFile>
 #include <QtConcurrent/QtConcurrent>
 #include <QGraphicsBlurEffect>
@@ -633,6 +635,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 map_->setEditLocked(active);
                 tool_rect_button_->setEnabled(!active);
                 tool_polygon_button_->setEnabled(!active);
+                refreshScanParamsCard();
                 draw_button_->setEnabled(!active);
                 place_robot_button_->setEnabled(!active);
                 clear_roi_button_->setEnabled(!active);
@@ -2019,8 +2022,11 @@ QWidget* SatelliteScreen::buildScanStatusPill(QWidget* parent) {
         pill, QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8,
         QStringLiteral("#71717B"));
     layout->addWidget(scan_status_dot_, 0, Qt::AlignVCenter);
+    // "Standby", not "Ready": before the director reports there is nothing
+    // ready about the robot, and Start Scan is disabled. refreshScanRunUi()
+    // overwrites this on the first paint of step 5.
     scan_status_text_ = scanText(
-        pill, QStringLiteral("Ready"),
+        pill, QStringLiteral("Standby"),
         QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
                        "font-weight: 700; color: #D4D4D8;"));
     layout->addWidget(scan_status_text_, 0, Qt::AlignVCenter);
@@ -2575,6 +2581,7 @@ void SatelliteScreen::applyStepVisibility() {
                               (step == Step::RoiDefinition ||
                                step == Step::EdgeReview);
         roi_card_->setVisible(roi_step);
+        refreshScanParamsCard();
         if (step == Step::RoiDefinition && !map_->polygon().valid() &&
             !map_->isDrawing()) {
             map_->armPolygonDraw();
@@ -2652,6 +2659,8 @@ QWidget* SatelliteScreen::buildLeftRail() {
     layout->addWidget(plan_card_);
     roi_card_ = buildRoiCard(rail_content);
     layout->addWidget(roi_card_);
+    scan_params_card_ = buildScanParamsCard(rail_content);
+    layout->addWidget(scan_params_card_);
     align_card_ = buildAlignCard(rail_content);
     layout->addWidget(align_card_);
     roi_confirm_card_ = buildAckCard(
@@ -3566,6 +3575,145 @@ void SatelliteScreen::refreshRoiCard() {
     }
 }
 
+QWidget* SatelliteScreen::buildScanParamsCard(QWidget* parent) {
+    // Same shape as the legacy Stage 5 slider blocks: name on the left, a
+    // typed value + unit on the right, the track underneath. The slider is
+    // the model (SI); the edit is a view of it in the operator's units.
+    auto* card = new QWidget(parent);
+    card->setObjectName("SatScanParamsCard");
+    auto* layout = new QVBoxLayout(card);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(10);
+
+    auto* title = new QLabel(QStringLiteral("SCAN PARAMETERS"), card);
+    title->setObjectName("SatRoiSection");
+    layout->addWidget(title);
+
+    const auto makeRow = [&](const QString& name, double lo, double hi,
+                             double step, int decimals, TrackSlider** slider,
+                             QLineEdit** edit, QLabel** unit) {
+        auto* row = new QWidget(card);
+        auto* rl = new QVBoxLayout(row);
+        rl->setContentsMargins(0, 0, 0, 0);
+        rl->setSpacing(2);
+        auto* head = new QHBoxLayout();
+        head->setContentsMargins(0, 0, 0, 0);
+        head->setSpacing(6);
+        auto* label = new QLabel(name, row);
+        label->setObjectName("SatScanParamName");
+        head->addWidget(label);
+        head->addStretch(1);
+        *edit = new QLineEdit(row);
+        (*edit)->setObjectName("SatScanParamEdit");
+        (*edit)->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        (*edit)->setFixedSize(64, 24);
+        // Digits only; range is enforced on commit by ScanParams::snap*.
+        auto* validator = new QDoubleValidator(0.0, 1.0e6, 2, *edit);
+        validator->setNotation(QDoubleValidator::StandardNotation);
+        (*edit)->setValidator(validator);
+        head->addWidget(*edit);
+        *unit = new QLabel(row);
+        (*unit)->setObjectName("SatScanParamUnit");
+        head->addWidget(*unit);
+        rl->addLayout(head);
+        *slider = new TrackSlider(row);
+        (*slider)->setRange(lo, hi);
+        (*slider)->setStep(step);
+        (*slider)->setDecimals(decimals);
+        (*slider)->setDarkMode(dark_mode_);
+        rl->addWidget(*slider);
+        layout->addWidget(row);
+    };
+    makeRow(QStringLiteral("Swath Width"), ScanParams::kWidthMinM,
+            ScanParams::kWidthMaxM, ScanParams::kWidthStepM, 2,
+            &swath_slider_, &swath_edit_, &swath_unit_);
+    makeRow(QStringLiteral("Robot Speed"), ScanParams::kSpeedMinMps,
+            ScanParams::kSpeedMaxMps, ScanParams::kSpeedStepMps, 1,
+            &speed_slider_, &speed_edit_, &speed_unit_);
+    setScanParams(ScanParams{});
+
+    swath_slider_->on_value_changed = [this](double) { refreshScanParamsCard(); };
+    speed_slider_->on_value_changed = [this](double) { refreshScanParamsCard(); };
+
+    // Typed value: parse in display units, back to SI, snap to the grid,
+    // and let the slider re-render the edit. Bad input just redraws.
+    const auto commit = [this](QLineEdit* edit, TrackSlider* slider,
+                               double (*snap)(double)) {
+        bool ok = false;
+        const double shown = edit->text().trimmed().toDouble(&ok);
+        if (ok) {
+            const bool metric = UnitsProvider::instance()->isMetric();
+            slider->setValue(snap(metric ? shown : units::feetToMeters(shown)));
+        }
+        refreshScanParamsCard();
+    };
+    connect(swath_edit_, &QLineEdit::editingFinished, this, [this, commit] {
+        commit(swath_edit_, swath_slider_, &ScanParams::snapWidth);
+    });
+    connect(speed_edit_, &QLineEdit::editingFinished, this, [this, commit] {
+        commit(speed_edit_, speed_slider_, &ScanParams::snapSpeed);
+    });
+
+    connect(map_, &SatelliteMapWidget::roiChanged, this,
+            &SatelliteScreen::refreshScanParamsCard);
+    connect(map_, &SatelliteMapWidget::interactionChanged, this,
+            &SatelliteScreen::refreshScanParamsCard);
+    connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
+            [this] { refreshScanParamsCard(); });
+    return card;
+}
+
+void SatelliteScreen::refreshScanParamsCard() {
+    if (!scan_params_card_) {
+        return;
+    }
+    const bool metric = UnitsProvider::instance()->isMetric();
+    const double width_m = swath_slider_->value();
+    const double speed_mps = speed_slider_->value();
+    swath_edit_->setText(QString::number(
+        metric ? width_m : units::metersToFeet(width_m), 'f', 2));
+    speed_edit_->setText(QString::number(
+        metric ? speed_mps : units::metersToFeet(speed_mps), 'f', metric ? 1 : 2));
+    swath_unit_->setText(units::lengthUnitSuffix().trimmed());
+    speed_unit_->setText(units::speedUnitSuffix().trimmed());
+
+    // Office: rides with the plan card. Field: steps 3-4 beside the ROI
+    // card. Either way only once there is a closed ROI to parameterise.
+    const Step step = selected_step_;
+    const bool on_step = planning_only_
+                             ? (step == Step::SatelliteMap ||
+                                step == Step::RoiDefinition ||
+                                step == Step::EdgeReview)
+                             : (step == Step::RoiDefinition ||
+                                step == Step::EdgeReview);
+    const bool closed = map_->polygon().valid() && !map_->isDrawing();
+    scan_params_card_->setVisible(on_step && closed);
+    const bool editable = !mission_->missionActive();
+    swath_slider_->setEnabled(editable);
+    speed_slider_->setEnabled(editable);
+    swath_edit_->setEnabled(editable);
+    speed_edit_->setEnabled(editable);
+}
+
+ScanParams SatelliteScreen::scanParams() const {
+    ScanParams p;
+    if (swath_slider_ && speed_slider_) {
+        p.coverage_width_m = swath_slider_->value();
+        p.scan_speed_mps = speed_slider_->value();
+    }
+    return p.snapped();
+}
+
+void SatelliteScreen::setScanParams(const ScanParams& params) {
+    if (!swath_slider_ || !speed_slider_) {
+        return;
+    }
+    const ScanParams s = params.snapped();
+    swath_slider_->setValue(s.coverage_width_m);
+    speed_slider_->setValue(s.scan_speed_mps);
+    refreshScanParamsCard();
+}
+
 QWidget* SatelliteScreen::buildCanvasTools(QWidget* parent) {
     // Ported from the Stage 5 PlotWidget tool stack: view tools live on the
     // canvas edge, not in the rail, because they are about looking rather
@@ -3977,6 +4125,17 @@ QPushButton#SatRoiClearButton {
 QPushButton#SatRoiClearButton:hover { background: #3f3f47; color: @TEXT@; }
 #SatRoiNote { background: rgba(39,39,42,0.6); border-radius: 10px; }
 
+/* ---- Scan Parameters (swath width / robot speed, both trims) ---- */
+QLabel#SatScanParamName { background: transparent; font-size: 12px; color: #9f9fa9; }
+QLineEdit#SatScanParamEdit {
+    background: #27272a; border: 1px solid #3f3f47; border-radius: 4px; padding: 0 6px;
+    font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px; font-weight: 500;
+    color: @TEXT@; selection-background-color: #009966; selection-color: #ffffff;
+}
+QLineEdit#SatScanParamEdit:focus { border: 1px solid #00d492; color: #00d492; }
+QLineEdit#SatScanParamEdit:disabled { color: #52525c; }
+QLabel#SatScanParamUnit { background: transparent; font-size: 12px; color: #71717b; min-width: 28px; }
+
 /* ---- Step 1 floating search (Figma 238:4509) + layer chip (238:4531) ---- */
 #SatSearchBar { background: rgba(24,24,27,0.95); border: 1px solid #3f3f47; border-radius: 24px; }
 QLineEdit#SatSearchEdit {
@@ -4046,6 +4205,12 @@ void SatelliteScreen::setDarkMode(bool dark_mode) {
     setMotorsChip(motors_text_, remap(motors_color_));
     setTopBatteryState(last_batt_pct_, last_batt_stale_);
     refreshCanvasToolIcons();
+    if (swath_slider_) {
+        swath_slider_->setDarkMode(dark_mode_);
+    }
+    if (speed_slider_) {
+        speed_slider_->setDarkMode(dark_mode_);
+    }
     // Step chips carry per-element colours for the same reason the pills do,
     // so they need re-rendering here too — applyTheme()'s sheet does not
     // reach them.
@@ -4159,6 +4324,7 @@ void SatelliteScreen::loadJob(const Job& job) {
         map_->setPolygon(job.polygon);
     }
     map_->setMarker(job.robot);
+    setScanParams(job.scan);
     emit map_->roiChanged();
     emit map_->markerChanged();
 
@@ -4224,6 +4390,7 @@ void SatelliteScreen::newJob() {
     map_->setRoi(RoiRect{});
     map_->clearPolygon();
     map_->setMarker(geo::GeoPose{});
+    setScanParams(ScanParams{});
     canvas_aimed_ = false;
     confirmed_vertices_.clear();
     edges_reviewed_ = false;
@@ -4243,6 +4410,7 @@ Job SatelliteScreen::jobFromRail() const {
     job.roi = map_->roi();
     job.polygon = map_->polygon();
     job.robot = map_->marker();
+    job.scan = scanParams();
     job.updated = QDateTime::currentDateTime();
     // Stamp what this plan was actually drawn against. Only meaningful on the
     // satellite canvas — a measured plan came off a tape, not off imagery.
@@ -5253,7 +5421,7 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
     edges_reviewed_ = true;
     refreshStepUi();
     QString error;
-    if (!mission_->startMission(poly, marker, &error)) {
+    if (!mission_->startMission(poly, marker, scanParams(), &error)) {
         appendLog(QStringLiteral("[send] FAILED: %1").arg(error));
         return;
     }
@@ -5323,27 +5491,35 @@ void SatelliteScreen::onDirectorWatchTick() {
                 : QStringLiteral("Waiting for the first topic from the robot "
                                  "(Zenoh session + stack boot)."));
     }
+    // Keeps the step-5 corner pill's counter ticking; it is the only place a
+    // field operator can read why Start Scan is still dead.
+    refreshScanRunUi();
     const qint64 limit = have_link ? kDirectorWaitPromptMs
                                    : kRobotLinkWaitPromptMs;
     if (director_wait_prompted_ || waited_ms < limit) {
         return;
     }
     director_wait_prompted_ = true;
-    const QStringList tail = mission_->recentRobotOutput(6);
+    // No raw launch output here. It is 10-20 Hz of cliff / tfmini INFO lines
+    // that tell the operator nothing, and the traceback worth reading is long
+    // gone from the tail by now. The full record is in the mission log.
     QString body =
         have_link
             ? QStringLiteral(
-                  "The robot is reachable but the coverage director has not "
-                  "reported in %1 s. It may still be booting, or it may have "
-                  "failed to start.\n")
+                  "The robot is switched on and connected, but the part of "
+                  "its software that plans the scan has not started in %1 s.\n"
+                  "\nKeep waiting, or cancel to shut the robot software down "
+                  "and launch again.")
                   .arg(waited_s)
             : QStringLiteral(
-                  "No topic has arrived from the robot in %1 s. Check the "
-                  "radio link and that the robot launch is running.\n")
+                  "No data has arrived from the robot in %1 s. Check that the "
+                  "robot is switched on and the radio is powered and in "
+                  "range.\n"
+                  "\nKeep waiting, or cancel to stop the launch.")
                   .arg(waited_s);
-    if (!tail.isEmpty()) {
-        body += QStringLiteral("\nLast robot output:\n%1")
-                    .arg(tail.join(QLatin1Char('\n')));
+    const QString log_path = mission_->missionLogPath();
+    if (!log_path.isEmpty()) {
+        body += QStringLiteral("\n\nDetails for support: %1").arg(log_path);
     }
     // confirmDialog is modal; the timer keeps ticking underneath, so a
     // status that arrives while the operator reads this resolves on the
@@ -5591,26 +5767,27 @@ void SatelliteScreen::handleLaunchDeath(const QString& side, int exit_code) {
     director_failed_ = true;   // re-entry guard until teardown resets state
     setAutonomyEnabled(false);
     const bool robot = side == QLatin1String("robot");
-    const QStringList tail = robot ? mission_->recentRobotOutput(8) : QStringList();
+    // No tail re-log: every one of those lines already went through appendLog
+    // as it arrived, so the mission log holds them in order. Repeating them
+    // here would only duplicate them in the file.
     appendLog(QStringLiteral("[launch] %1 launch exited (rc=%2)")
                   .arg(side).arg(exit_code));
-    for (const QString& line : tail) {
-        appendLog(QStringLiteral("  %1").arg(line));
-    }
+    // Path read before teardownMission() closes the log; the file itself
+    // stays on disk for support.
+    const QString log_path = mission_->missionLogPath();
     mission_->teardownMission();
     QString body =
         robot ? QStringLiteral(
-                    "The robot launch exited (rc=%1). The plan stays PLANNED "
-                    "— press Next on Edge Review to relaunch.\n")
+                    "The software on the robot stopped (code %1). Your plan is "
+                    "saved — press Next on Edge Review to launch again.")
                     .arg(exit_code)
               : QStringLiteral(
-                    "The laptop launch (Zenoh bridge + heartbeat) exited "
-                    "(rc=%1); the robot halts without it. The plan stays "
-                    "PLANNED — press Next on Edge Review to relaunch.\n")
+                    "The link software on this laptop stopped (code %1), and "
+                    "the robot halts without it. Your plan is saved — press "
+                    "Next on Edge Review to launch again.")
                     .arg(exit_code);
-    if (!tail.isEmpty()) {
-        body += QStringLiteral("\nLast robot output:\n%1")
-                    .arg(tail.join(QLatin1Char('\n')));
+    if (!log_path.isEmpty()) {
+        body += QStringLiteral("\n\nDetails for support: %1").arg(log_path);
     }
     BdrMessageBox::warning(
         this,
@@ -5697,6 +5874,7 @@ void SatelliteScreen::refreshScanRunUi() {
     const bool ready = active && directorReady();
     const CoverageStatus status = ros_->coverageStatus();
     const bool status_live = active && status.fresh(10000);
+    const ScanBlock block = scanBlockReason();
 
     if (disarm_button_) {
         disarm_button_->setEnabled(active);
@@ -5737,18 +5915,19 @@ void SatelliteScreen::refreshScanRunUi() {
                 loadTintedSvg(icon, 20, 20, QStringLiteral("#FFFFFF")));
         }
         scan_start_pause_button_->setEnabled(enable);
-        if (manual_override_) {
-            scan_start_pause_button_->setToolTip(QStringLiteral(
-                "Click the map view to hand control back to autonomy."));
-        } else if (start_scan_pending_) {
-            scan_start_pause_button_->setToolTip(
-                QStringLiteral("Waiting for the coordinator to accept the "
-                               "session metadata…"));
-        } else if (!ready && active) {
-            scan_start_pause_button_->setToolTip(
-                QStringLiteral("Waiting for the coverage director…"));
-        } else {
-            scan_start_pause_button_->setToolTip(QString());
+        scan_start_pause_button_->setToolTip(enable ? QString()
+                                                    : block.detail);
+    }
+
+    // A disabled Start Scan must always say why, and step 5 hides the rail's
+    // reason label, so the corner pill carries it. updateStatePill() owns the
+    // pill whenever a status message is fresh (it has the director's real
+    // state); this owns it the rest of the time, which is exactly the boot /
+    // link window where the operator is left guessing.
+    if (!status.fresh(kDirectorFreshMs)) {
+        setScanStatusPill(block.label, block.color);
+        if (scan_status_pill_) {
+            scan_status_pill_->setToolTip(block.detail);
         }
     }
 
@@ -6576,13 +6755,7 @@ void SatelliteScreen::updateStatePill() {
             // the operator's only view of WHY the robot is standing still.
             label = stopHeadline(status);
         }
-        scan_status_text_->setText(label);
-        scan_status_dot_->setPixmap(loadTintedSvg(
-            QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8,
-            color.name()));
-        if (scan_status_pill_) {
-            scan_status_pill_->adjustSize();
-        }
+        setScanStatusPill(label, color);
     }
 
     QString reason;
@@ -6600,12 +6773,96 @@ void SatelliteScreen::updateStatePill() {
     if (reason_label_) {
         reason_label_->setText(reason);
     }
+    // Step 5 has no reason label, so the pill carries it on hover too.
+    if (scan_status_pill_) {
+        scan_status_pill_->setToolTip(reason);
+    }
     const double frac = status.coverageFraction();
     if (coverage_bar_ && frac >= 0.0) {
         coverage_bar_->setVisible(true);
         coverage_bar_->setValue(int(qBound(0.0, frac, 1.0) * 1000));
     }
     maybePromptStop(status);
+}
+
+void SatelliteScreen::setScanStatusPill(const QString& text,
+                                        const QColor& color) {
+    if (!scan_status_dot_ || !scan_status_text_) {
+        return;
+    }
+    scan_status_text_->setText(text);
+    scan_status_dot_->setPixmap(loadTintedSvg(
+        QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8, 8,
+        color.name()));
+    if (scan_status_pill_) {
+        scan_status_pill_->adjustSize();
+    }
+}
+
+SatelliteScreen::ScanBlock SatelliteScreen::scanBlockReason() const {
+    ScanBlock out;
+    out.color = QColor(kAmber);
+    if (!mission_->missionActive()) {
+        out.label = QStringLiteral("Standby");
+        out.detail = QStringLiteral(
+            "No mission is running. Launch the robot from Edge Review.");
+        out.color = QColor(mutedColor(dark_mode_));
+        return out;
+    }
+    if (director_failed_) {
+        out.label = QStringLiteral("Launch failed");
+        out.detail = QStringLiteral(
+            "The robot software stopped. Go back to Edge Review and launch "
+            "again.");
+        out.color = QColor(kEstopRed);
+        return out;
+    }
+    if (manual_override_) {
+        out.label = QStringLiteral("Manual");
+        out.detail = QStringLiteral(
+            "You are driving manually. Click the map to hand control back to "
+            "the robot.");
+        return out;
+    }
+    if (start_scan_pending_) {
+        out.label = QStringLiteral("Starting…");
+        out.detail = QStringLiteral("Sending the scan details to the robot.");
+        return out;
+    }
+    const CoverageStatus status = ros_->coverageStatus();
+    if (status.fresh(kDirectorFreshMs)) {
+        // The robot is talking, so its own state is the reason. Only reached
+        // when directorReady() is false, i.e. an ERROR state.
+        out.label = stopHeadline(status);
+        out.detail = status.error.isEmpty() ? stopGuidance(status)
+                                            : status.error;
+        out.color = QColor(kEstopRed);
+        return out;
+    }
+    // Nothing from the director yet. Same clock onDirectorWatchTick runs, so
+    // the pill and the launch-wait prompt can never disagree.
+    const qint64 base =
+        first_robot_topic_wall_ms_ > 0 ? first_robot_topic_wall_ms_
+                                      : launch_wall_ms_;
+    const qint64 waited_s =
+        base > 0 ? (QDateTime::currentMSecsSinceEpoch() - base) / 1000 : 0;
+    if (first_robot_topic_wall_ms_ == 0) {
+        out.label = QStringLiteral("Connecting · %1s").arg(waited_s);
+        out.detail = QStringLiteral(
+            "Waiting for the first data from the robot. Check that the robot "
+            "is switched on and the radio is in range.");
+        return out;
+    }
+    if (director_wait_prompted_) {
+        out.label = QStringLiteral("Not responding · %1s").arg(waited_s);
+        out.color = QColor(kEstopRed);
+    } else {
+        out.label = QStringLiteral("Starting up · %1s").arg(waited_s);
+    }
+    out.detail = QStringLiteral(
+        "The robot is connected, but the part of its software that plans the "
+        "scan has not started yet.");
+    return out;
 }
 
 bool SatelliteScreen::isStopState(const QString& state) {
@@ -6727,6 +6984,11 @@ void SatelliteScreen::maybePromptStop(const CoverageStatus& status) {
 
 void SatelliteScreen::appendLog(const QString& line) {
     log_view_->appendPlainText(line);
+    // Single choke point for the mission log: MissionController::logLine is
+    // connected here, so process output and screen-originated lines both land
+    // in the file exactly once. The view is capped and hidden on the field
+    // trim; the file is the only record that outlives a teardown.
+    mission_->appendMissionLog(line);
 }
 
 }  // namespace f2c_cpp

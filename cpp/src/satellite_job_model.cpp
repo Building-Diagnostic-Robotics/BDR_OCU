@@ -14,6 +14,55 @@
 
 namespace f2c_cpp {
 
+namespace {
+
+double snapToGrid(double value, double lo, double hi, double step,
+                  double fallback) {
+    if (!std::isfinite(value)) {
+        return fallback;
+    }
+    const double clamped = std::min(hi, std::max(lo, value));
+    const double snapped = lo + std::round((clamped - lo) / step) * step;
+    // Two decimals is the finest grid either knob uses; kills 0.30000000004.
+    return std::round(std::min(hi, snapped) * 100.0) / 100.0;
+}
+
+}  // namespace
+
+double ScanParams::snapWidth(double meters) {
+    return snapToGrid(meters, kWidthMinM, kWidthMaxM, kWidthStepM,
+                      kWidthDefaultM);
+}
+
+double ScanParams::snapSpeed(double mps) {
+    return snapToGrid(mps, kSpeedMinMps, kSpeedMaxMps, kSpeedStepMps,
+                      kSpeedDefaultMps);
+}
+
+ScanParams ScanParams::snapped() const {
+    ScanParams out;
+    out.coverage_width_m = snapWidth(coverage_width_m);
+    out.scan_speed_mps = snapSpeed(scan_speed_mps);
+    return out;
+}
+
+QString ScanParams::launchArgs() const {
+    const ScanParams s = snapped();
+    // `swath_overlap:=0.0`, never `:=0`. The director's launch file passes
+    // this straight into the node's `parameters` dict as a bare
+    // LaunchConfiguration, so launch_ros type-infers it with YAML: "0" is an
+    // int, and the node declares the parameter as a strict double
+    // (`declare_parameter("swath_overlap", 0.05)`). An int override against a
+    // DOUBLE descriptor raises InvalidParameterTypeException inside the
+    // director's __init__ — before it creates the /coverage/status publisher —
+    // so the director dies while every other node in the launch keeps running
+    // and Start Scan never unlocks. Same trap for any float arg added here.
+    return QStringLiteral(" coverage_width:=%1 swath_overlap:=0.0 "
+                          "desired_linear_speed:=%2")
+        .arg(QString::number(s.coverage_width_m, 'f', 2),
+             QString::number(s.scan_speed_mps, 'f', 2));
+}
+
 QVector<geo::GeoPoint> RoiRect::corners() const {
     QVector<geo::GeoPoint> out;
     if (!valid) {
@@ -76,10 +125,11 @@ QJsonObject Job::toJson() const {
     robot_obj["heading_deg"] = robot.heading_deg;
 
     QJsonObject obj;
-    // Schema 5 adds per-edge pinned lengths; 4 added the polygon, alignment
-    // and imagery-cache blocks; 3 added imagery provenance. Readers tolerate
+    // Schema 6 adds the scan knobs (coverage width / speed); 5 added
+    // per-edge pinned lengths; 4 added the polygon, alignment and
+    // imagery-cache blocks; 3 added imagery provenance. Readers tolerate
     // every one of those being absent, so older plans load unchanged.
-    obj["schema"] = 5;
+    obj["schema"] = 6;
     obj["id"] = id;
     obj["name"] = name;
     obj["address"] = address;
@@ -158,6 +208,13 @@ QJsonObject Job::toJson() const {
         a["reflected"] = alignment.reflected;
         a["rmse_m"] = align_rmse_m;
         obj["alignment"] = a;
+    }
+    {
+        const ScanParams s = scan.snapped();
+        QJsonObject sp;
+        sp["coverage_width_m"] = s.coverage_width_m;
+        sp["scan_speed_mps"] = s.scan_speed_mps;
+        obj["scan"] = sp;
     }
     return obj;
 }
@@ -269,6 +326,14 @@ Job Job::fromJson(const QJsonObject& obj) {
         job.alignment.valid = true;
         job.align_rmse_m = a.value("rmse_m").toDouble();
     }
+    // Absent on schema <= 5 plans: they ran the director defaults, which is
+    // exactly what ScanParams{} is. Snap so a hand-edited file cannot push
+    // a value outside the operator range onto the robot.
+    const QJsonObject sp = obj.value("scan").toObject();
+    job.scan.coverage_width_m = ScanParams::snapWidth(
+        sp.value("coverage_width_m").toDouble(ScanParams::kWidthDefaultM));
+    job.scan.scan_speed_mps = ScanParams::snapSpeed(
+        sp.value("scan_speed_mps").toDouble(ScanParams::kSpeedDefaultMps));
     return job;
 }
 

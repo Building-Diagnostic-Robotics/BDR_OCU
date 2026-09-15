@@ -179,6 +179,7 @@ set(HEADERS
     include/components/fpv_camera_view.hpp
     include/components/auto_hide_scroll_bar.hpp
     include/components/svg_icon_button.hpp
+    include/components/track_slider.hpp
     include/components/camera_switch_pill.hpp
     include/components/rollback_banner.hpp
     include/components/update_banner.hpp
@@ -270,6 +271,7 @@ set(GUI_SOURCES
     src/components/fpv_camera_view.cpp
     src/components/auto_hide_scroll_bar.cpp
     src/components/svg_icon_button.cpp
+    src/components/track_slider.cpp
     src/components/camera_switch_pill.cpp
     src/components/rollback_banner.cpp
     src/components/update_banner.cpp

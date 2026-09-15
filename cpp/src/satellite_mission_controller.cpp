@@ -4,8 +4,10 @@
 #include "robot_registry.hpp"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QFileInfoList>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -124,6 +126,60 @@ void MissionController::hookProcessLogging(QProcess* proc, const QString& tag) {
             });
 }
 
+void MissionController::openMissionLog() {
+    closeMissionLog();
+    const QString dir_path =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
+        QStringLiteral("/mission_logs");
+    QDir dir(dir_path);
+    if (!dir.mkpath(QStringLiteral("."))) {
+        return;
+    }
+    // QDir::Time is newest-first, so everything from index kMissionLogsKept-1
+    // on is the oldest: dropping them leaves room for the one about to open.
+    const QFileInfoList existing = dir.entryInfoList(
+        {QStringLiteral("*.log")}, QDir::Files, QDir::Time);
+    for (int i = kMissionLogsKept - 1; i < existing.size(); ++i) {
+        QFile::remove(existing.at(i).absoluteFilePath());
+    }
+    const QString path =
+        dir.filePath(QStringLiteral("mission_%1.log")
+                         .arg(QDateTime::currentDateTime().toString(
+                             QStringLiteral("yyyyMMdd_hhmmss"))));
+    auto* file = new QFile(path, this);
+    if (!file->open(QIODevice::WriteOnly | QIODevice::Append |
+                    QIODevice::Text)) {
+        delete file;
+        return;
+    }
+    mission_log_ = file;
+    mission_log_path_ = path;
+}
+
+void MissionController::closeMissionLog() {
+    if (!mission_log_) {
+        return;
+    }
+    mission_log_->close();
+    delete mission_log_;
+    mission_log_ = nullptr;
+    // mission_log_path_ deliberately survives: the failure dialogs shown
+    // after teardown still need to name the file.
+}
+
+void MissionController::appendMissionLog(const QString& line) {
+    if (!mission_log_) {
+        return;
+    }
+    mission_log_->write(QStringLiteral("%1 %2\n")
+                            .arg(QDateTime::currentDateTimeUtc().toString(
+                                     Qt::ISODateWithMs),
+                                 line)
+                            .toUtf8());
+    // Flushed per line: the whole point is to survive a crash or a kill.
+    mission_log_->flush();
+}
+
 QStringList MissionController::recentRobotOutput(int max_lines) const {
     if (max_lines <= 0 || robot_output_tail_.size() <= max_lines) {
         return robot_output_tail_;
@@ -176,6 +232,7 @@ QString MissionController::roiEdgeFlagsArgument(const RoiPolygon& poly) {
 
 bool MissionController::startMission(const RoiPolygon& poly,
                                      const geo::GeoPose& robot,
+                                     const ScanParams& scan,
                                      QString* error) {
     if (mission_active_) {
         if (error) *error = QStringLiteral("A mission is already active.");
@@ -193,9 +250,13 @@ bool MissionController::startMission(const RoiPolygon& poly,
         return false;
     }
 
+    // Before the first logLine, so the launch args themselves are on record.
+    openMissionLog();
+
     const QString roi_arg = roiVerticesArgument(poly, robot);
     emit logLine(QStringLiteral("[send] roi_vertices=%1 (robot_init frame)")
                      .arg(roi_arg));
+    emit logLine(QStringLiteral("[send] scan params%1").arg(scan.launchArgs()));
 
     // Leave nothing stale on either side, then launch. Same launch + args
     // as the legacy path; the robot sweep is what stops a lingering step-2
@@ -247,6 +308,7 @@ bool MissionController::startMission(const RoiPolygon& poly,
         remote_script += QStringLiteral(" roi_edge_flags:=%1")
                              .arg(roiEdgeFlagsArgument(poly));
     }
+    remote_script += scan.launchArgs();
     const QString remote_cmd =
         QStringLiteral("bash -lc \"%1\"")
             .arg(remote_script.replace(QLatin1Char('"'), QLatin1String("\\\"")));
@@ -416,6 +478,8 @@ void MissionController::teardownMission() {
     tearing_down_ = false;
     emit missionStateChanged(false);
     emit logLine(QStringLiteral("[teardown] done"));
+    // After the last logLine, so it lands in the file.
+    closeMissionLog();
 }
 
 }  // namespace f2c_cpp

@@ -225,8 +225,21 @@ re-saved once with a connection before step 2 can run.
 
 Send converts the ROI polygon from geographic coordinates into `robot_init`
 metres relative to the marker, and SSH-launches
-`robot_autonomous_coverage_director.launch.py` with `roi_vertices` and, when
-any edge is marked, `roi_edge_flags`.
+`robot_autonomous_coverage_director.launch.py` with `roi_vertices`, the
+scan parameters, and, when any edge is marked, `roi_edge_flags`.
+
+### Scan parameters
+
+Once the ROI is closed, a **Scan Parameters** block appears in the rail
+(field steps 3-4, and the office plan rail): **Swath Width** 0.30-2.00 m in
+0.05 m steps and **Robot Speed** 0.4-0.6 m/s in 0.1 steps. Drag the slider
+or click the value and type; typed input is converted from the display
+unit, clamped, and snapped. Both are saved on the plan and travel at Send as
+`coverage_width:=W swath_overlap:=0 desired_linear_speed:=V`. Overlap is
+pinned to 0 so the width you set is the lane pitch the planner uses. Speed
+also feeds the MPC cruise/cap through `mpc_desired_linear_speed`. Plans
+saved before this block existed load with the director defaults
+(0.50 m / 0.40 m/s).
 
 Vertices and flags travel in **raw corner order**. The robot resolves flags to
 segments before `Polygon.buffer(0)`, which may reorder rings — resolving after

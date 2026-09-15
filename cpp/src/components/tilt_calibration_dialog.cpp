@@ -14,6 +14,7 @@
 #include <QProcess>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSizePolicy>
 #include <QRegularExpression>
 #include <QStackedWidget>
 #include <QTimer>
@@ -84,7 +85,8 @@ void TiltCalibrationDialog::buildUi() {
     lbl_setup_subtitle_ = new QLabel(tr("Periodic calibration recommended every 3 scans."), page1);
     lbl_setup_subtitle_->setObjectName("subText");
     lbl_setup_subtitle_->setWordWrap(true);
-    p1Layout->addWidget(lbl_setup_subtitle_, 0, Qt::AlignLeft);
+    lbl_setup_subtitle_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    p1Layout->addWidget(lbl_setup_subtitle_);
 
     frame_instructions_ = new QFrame(page1);
     frame_instructions_->setObjectName("instructionsFrame");
@@ -97,7 +99,8 @@ void TiltCalibrationDialog::buildUi() {
         auto* l = new QLabel(text, frame_instructions_);
         l->setObjectName("subText");
         l->setWordWrap(true);
-        instrLayout->addWidget(l, 0, Qt::AlignLeft);
+        l->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        instrLayout->addWidget(l);
     };
     addInstr(tr("1. Place the robot on level, stable ground."));
     addInstr(tr("2. Ensure the robot is perfectly stationary."));
@@ -111,6 +114,8 @@ void TiltCalibrationDialog::buildUi() {
     btn_start_->setObjectName("primaryButton");
     btn_start_->setCursor(Qt::PointingHandCursor);
     btn_start_->setMinimumHeight(40);
+    btn_start_->setAutoDefault(false);
+    btn_start_->setAttribute(Qt::WA_StyledBackground, true);
     connect(btn_start_, &QPushButton::clicked, this, &TiltCalibrationDialog::onStartCalibrationClicked);
     btnRow->addWidget(btn_start_);
 
@@ -118,6 +123,8 @@ void TiltCalibrationDialog::buildUi() {
     btn_skip_->setObjectName("secondaryButton");
     btn_skip_->setCursor(Qt::PointingHandCursor);
     btn_skip_->setMinimumHeight(40);
+    btn_skip_->setAutoDefault(false);
+    btn_skip_->setAttribute(Qt::WA_StyledBackground, true);
     connect(btn_skip_, &QPushButton::clicked, this, &TiltCalibrationDialog::onSkipClicked);
     btnRow->addWidget(btn_skip_);
 
@@ -340,6 +347,13 @@ void TiltCalibrationDialog::applyStyle() {
                       .arg(dialog_bg, border, text, muted, badge_fg,
                            control_bg, t.accent, t.accent_hover, control_hover)
                       .arg(result_fill));
+
+    // QStackedWidget pages do not inherit a parent-of-parent stylesheet
+    // when DashboardScreen already has one. Put the same sheet on the
+    // stack so the badge, labels, and buttons actually match.
+    if (stack_) {
+        stack_->setStyleSheet(styleSheet());
+    }
 }
 
 void TiltCalibrationDialog::switchToPage(int index) {
