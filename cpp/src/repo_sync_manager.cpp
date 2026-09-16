@@ -402,7 +402,9 @@ void RepoSyncManager::startStage(Stage s) {
         // One round trip for everything we need to know. Single quotes keep
         // the laptop shell from expanding it; the remote shell does. Exits 0
         // even when the repo is missing, so exit 255 unambiguously means
-        // "could not reach the robot".
+        // "could not reach the robot". helpers=ok also requires --no-build
+        // in robot_switch_branch.sh: a stale helper is executable but every
+        // switch would fail on the unknown arg.
         runBash(sshPrefix(stage_ == Stage::RobotVerify ? 10 : 5) +
                     QStringLiteral(
                         "'cd $HOME/pilot_ws 2>/dev/null || { printf \"repo=missing\\n\"; exit 0; }; "
@@ -412,7 +414,8 @@ void RepoSyncManager::startStage(Stage s) {
                         "printf \"dirty=%s\\n\" \"$(git status --porcelain --untracked-files=no | head -1)\"; "
                         "printf \"recv=%s\\n\" \"$(git config --get receive.denyCurrentBranch)\"; "
                         "if [ -x $HOME/pilot_deploy/rebuild_affected.sh ] && "
-                        "[ -x $HOME/pilot_deploy/robot_switch_branch.sh ]; "
+                        "[ -x $HOME/pilot_deploy/robot_switch_branch.sh ] && "
+                        "grep -q -- --no-build $HOME/pilot_deploy/robot_switch_branch.sh; "
                         "then printf \"helpers=ok\\n\"; else printf \"helpers=missing\\n\"; fi'"),
                 kTimeoutProbeMs);
         break;

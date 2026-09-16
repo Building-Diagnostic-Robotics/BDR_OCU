@@ -24,6 +24,7 @@ An actionable mismatch raises **Robot software** below the OTA banner
 (OTA stays first). View Details opens a frameless modal (`show()`, not
 `exec()`): **Sync now** / **Later** (4 h snooze). **Prepare robot**
 appears only when Check says helpers or `updateInstead` are missing.
+A helper without `--no-build` is treated as missing (same Prepare CTA).
 
 ## Sync now
 
@@ -57,7 +58,9 @@ path will not automate. A package add/remove is what the
 `package.xml` guard is for.
 
 The `--no-build` flag has to be on the robot *before* the first
-switch. Re-run **Prepare robot** from a laptop whose
+switch. Check greps `~/pilot_deploy/robot_switch_branch.sh` for
+`--no-build`; a pre-flag copy reports `helpers=missing` so Prepare
+is offered. Re-run **Prepare robot** from a laptop whose
 `scripts/deploy/robot_switch_branch.sh` already has the flag
 (cherry-picked onto the laptop's current branch if that is not yet
 `cliff-on-autonomy`).
@@ -124,5 +127,6 @@ Robot helpers (do not edit from BDR_CP):
 ```
 pilot_control/scripts/deploy/install_deploy_helpers.sh
 pilot_control/scripts/deploy/rebuild_affected.sh
+pilot_control/scripts/deploy/test_rebuild_affected.sh
 pilot_control/scripts/deploy/robot_switch_branch.sh
 ```
