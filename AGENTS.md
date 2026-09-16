@@ -521,6 +521,15 @@ are missing. Modal is `show()`, not `exec()`.
 - **Do NOT call `workspacePackageNames()`** from the static
   `packagesForChangedFiles`. The static map must stay lock-step with
   `rebuild_affected.sh`; the instance method filters to present pkgs.
+- **A switch is scoped the same as a sync.** Diff from
+  `switchFromHead_` (the pre-checkout SHA — Checkout overwrites
+  `laptopHeadBefore_`) and `--packages-above`. Full `colcon build`
+  only when `needsFullWorkspaceBuild` (build-affecting path, no
+  mapped prefix) or a `package.xml` was added/removed/renamed.
+  `robot_switch_branch.sh --no-build` then `rebuild_affected.sh`;
+  omit `--no-build` when the fallback fired so the switch script
+  does the full build itself. Do not send `--no-build` until
+  Prepare has copied a flag-capable helper onto the robot.
 - Check-only queries `origin/<deploy>`, not the laptop's current
   branch, and must not overwrite `branch_` with laptop HEAD.
 - Arm after login / `goToStage3` when the SSH target is known — not
@@ -889,8 +898,10 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  4-gon on load. `JobStore::assetsDir(id)` is the per-job asset folder
  (`tiles/`, `site.jpg`, `imagery.json`). **Plan lifecycle**:
  `last_executed_at` is stamped ONLY on a successful finalize
- (`SatelliteScreen::markCurrentPlanCompleted`, from both the RPC and
- SSH Complete Mission paths), never at Send; valid => COMPLETED.
+ (`SatelliteScreen::markCurrentPlanCompleted`, from the RPC and
+ SSH Complete Mission paths), never at Send and never after
+ abort-and-save (partial sweep stays PLANNED so it can be re-run);
+ valid => COMPLETED.
  `JobStore::remove(id)` deletes the JSON **and** the assets folder.
  `JobStore::pruneCompleted()` keeps the `kCompletedPlansKept = 5` most
  recently completed plans and runs after every stamp; PLANNED plans are
@@ -1200,10 +1211,12 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  (shown, not `exec()` — async callbacks must keep flowing) →
  `concludeCoverage()` → wait until `/coverage/status` shows save done
  (`complete` or `copy` in pending/copying/done/skipped) → motors IDLE
- wait → teardown. Skip-copy (`/coverage/skip_copy`) and abort-and-save
- are CTAs on that modal so a dead USB cannot strand the robot. Do
- **not** wait for the thumb-drive copy; that surfaces later on the
- Dashboard Upload card. SSH-offline fallback is unchanged
+ wait → teardown. Abort-and-save is the live CTA when conclude
+ refuses (offered at 10 s, consumed on click, leaves the plan
+ PLANNED). Skip-copy (`/coverage/skip_copy`) stays connected on the
+ dialog but Stage 6 never surfaces it — the OCU does not wait on the
+ copy (those states already count as save-done) and the Dashboard
+ Upload card owns that state. SSH-offline fallback is unchanged
  (`finalize_mission_local.py` via direct `python3`). **The only hard
  death signal is `MissionController::launchDied(side, rc)`** (the SSH
  session carrying the robot launch, or the laptop launch, exiting
@@ -1321,7 +1334,8 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  watchdog-deferred finalize. COMPLETED means data is on disk; an aborted
  mission must leave the plan PLANNED so it can be re-run. Only
  `markCurrentPlanCompleted()` writes the stamp, and only from the two
- finalize-success branches. Do not raise the auto-prune above
+ finalize-success branches — abort-and-save is a third path that
+ deliberately does **not** stamp. Do not raise the auto-prune above
  `kCompletedPlansKept = 5` without operator signoff, and never let
  `pruneCompleted()` touch a PLANNED plan.
 - **Do not re-enable the rotate handle on an unselected marker.** The
@@ -1373,11 +1387,13 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  and Confirm cannot place the robot. `loadSiteImage()` refuses manifests
  that lack it rather than silently producing a bad anchor.
 - **Robot-side counterpart is pilot_ws branch `cliff-on-autonomy`**
- (worktree `~/BDR_data/pilot_ws`), commit `1c5676e`: GPS-stamped
- `map_collection_node` + `roi_edge_flags`/`roof_edge_clearance` on
+ (worktree `~/BDR_data/pilot_ws`), tip `dbc303e`: GPS-stamped
+ `map_collection_node` + `roi_vertices` / `roi_edge_flags` on
  `robot_autonomous_coverage_director.launch.py` + differential erosion in
- `coverage_planner_core.py` (tests: 54 passing). Robot must be rebuilt from
- that branch for the state pill + edge setback to be live.
+ `coverage_planner_core.py`. `roof_edge_clearance` was dropped in
+ `8e0fc53` (seeded strip is the open-edge standoff); the OCU never
+ sent that arg. Robot must be rebuilt from that branch for the
+ state pill + edge setback to be live.
  Do **not** go back to `feature/ocu-satellite-roi` despite its name: that
  branch only carries the older `robot_autonomous_coverage.launch.py` +
  `coverage_horizon_manager.py` stack, and the OCU launches the *director*

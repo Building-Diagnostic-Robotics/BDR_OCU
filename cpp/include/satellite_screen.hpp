@@ -386,6 +386,9 @@ private:
      * something is happening.
      */
     void teardownThen(std::function<void()> after);
+    /** Puts the Abort-and-save CTA on the finalize modal. A click
+        consumes it; a later phase reset can re-assert the offer. */
+    void offerAbortAndSave();
     /** Puts the Force-stop CTA on the teardown modal. */
     void offerForceStop();
     /** True only in genuine Disconnected — Reconnecting does not count. */
@@ -712,6 +715,12 @@ private:
     int arm_wait_ticks_ = 0;
     QTimer* conclude_wait_timer_ = nullptr;
     int conclude_wait_ticks_ = 0;
+    /** Abort-and-save CTA. Offered is re-asserted after a phase reset;
+        consumed (a click) never re-enables. */
+    bool abort_offered_ = false;
+    bool abort_consumed_ = false;
+    /** Operator chose abort-and-save — skip the COMPLETED stamp. */
+    bool abort_save_used_ = false;
 
     // Teleop card.
     QWidget* teleop_card_ = nullptr;

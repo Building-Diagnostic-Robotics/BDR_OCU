@@ -536,7 +536,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &SatelliteScreen::refreshStepUi);
     connect(map_, &SatelliteMapWidget::interactionChanged, this,
             &SatelliteScreen::maybeRearmRoiDraw);
-    // Units toggle: re-suffix + re-display the length fields (values stay)
+    // Units toggle: re-suffix + re-display the length fields (values stay
     // SI in the model; only the presentation flips — house rule).
     connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
             [this](Units) {
@@ -682,6 +682,9 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     first_robot_topic_wall_ms_ = 0;
                     director_wait_prompted_ = false;
                     start_scan_pending_ = false;
+                    abort_offered_ = false;
+                    abort_consumed_ = false;
+                    abort_save_used_ = false;
                     metadata_pushed_ = false;
                     stop_prompt_key_.clear();
                     scan_run_state_ = ScanRunState::Idle;
@@ -6379,6 +6382,9 @@ void SatelliteScreen::showFinalizeProgress(const QString& phase) {
                 });
         connect(finalize_dialog_, &MissionFinalizeDialog::abortAndSaveRequested,
                 this, [this] {
+                    abort_consumed_ = true;
+                    abort_save_used_ = true;
+                    conclude_wait_ticks_ = 0;
                     appendLog(QStringLiteral(
                         "[mission] operator abort-and-save"));
                     ros_->abortCoverage(
@@ -6428,6 +6434,21 @@ void SatelliteScreen::showFinalizeProgress(const QString& phase) {
         finalize_dialog_->move(c.x() - finalize_dialog_->width() / 2,
                                c.y() - finalize_dialog_->height() / 2);
     }
+    // showFinalizeProgress clears CTAs per phase. Re-assert an offer
+    // already made while settle is still waiting; a consumed click stays
+    // dead (offerAbortAndSave no-ops).
+    if (conclude_wait_timer_ && conclude_wait_timer_->isActive() &&
+        abort_offered_) {
+        offerAbortAndSave();
+    }
+}
+
+void SatelliteScreen::offerAbortAndSave() {
+    if (!finalize_dialog_ || abort_consumed_) {
+        return;
+    }
+    abort_offered_ = true;
+    finalize_dialog_->setAbortAvailable(true);
 }
 
 void SatelliteScreen::offerForceStop() {
@@ -6478,6 +6499,9 @@ void SatelliteScreen::startCompleteMissionSettle() {
         conclude_wait_timer_->setInterval(250);
     }
     conclude_wait_ticks_ = 0;
+    abort_offered_ = false;
+    abort_consumed_ = false;
+    abort_save_used_ = false;
     disconnect(conclude_wait_timer_, &QTimer::timeout, nullptr, nullptr);
     connect(conclude_wait_timer_, &QTimer::timeout, this, [this] {
         if (!complete_mission_in_flight_) {
@@ -6495,16 +6519,12 @@ void SatelliteScreen::startCompleteMissionSettle() {
             copy == QLatin1String("done") ||
             copy == QLatin1String("skipped") ||
             copy == QLatin1String("failed");
-        if (finalize_dialog_) {
-            if (copy == QLatin1String("failed") ||
-                copy == QLatin1String("waiting_for_drive")) {
-                finalize_dialog_->setSkipCopyAvailable(true);
-            }
-            // 250 ms × 40 = 10 s. Conclude can refuse while work is still
-            // active; abort-and-save is the door that still reaches disk.
-            if (!save_done && conclude_wait_ticks_ >= 40) {
-                finalize_dialog_->setAbortAvailable(true);
-            }
+        // 250 ms × 40 = 10 s. Conclude can refuse while work is still
+        // active; abort-and-save is the door that still reaches disk.
+        // Skip-copy stays unwired here: those copy states already count as
+        // save_done, so the button would appear and vanish in the same tick.
+        if (!save_done && conclude_wait_ticks_ >= 40) {
+            offerAbortAndSave();
         }
         // 250 ms × 120 = 30 s ceiling. Do not wait on the thumb-drive
         // copy — Dashboard surfaces that. A hung conclude RPC must not
@@ -6513,7 +6533,7 @@ void SatelliteScreen::startCompleteMissionSettle() {
             return;
         }
         conclude_wait_timer_->stop();
-        if (save_done || status.complete) {
+        if ((save_done || status.complete) && !abort_save_used_) {
             markCurrentPlanCompleted();
         }
         if (copy == QLatin1String("pending") ||
