@@ -408,10 +408,10 @@ private:
     /**
      * Why Start Scan is locked, in the two lengths the UI needs.
      *
-     * Step 5 hides the rail (and with it `reason_label_`), so the corner pill
-     * is the operator's ONLY view of why the button is dead — a disabled
-     * button's tooltip is not a surface you can rely on. `label` is empty
-     * only when nothing is blocking the scan.
+     * Step 5 hides the rail, so the corner pill is the operator's ONLY view
+     * of why the button is dead — a disabled button's tooltip is not a
+     * surface you can rely on. `label` is empty only when nothing is
+     * blocking the scan.
      */
     struct ScanBlock {
         QString label;   // pill text; short enough not to crowd the tool stack
@@ -635,7 +635,6 @@ private:
 
     // Mission card.
     QWidget* mission_card_ = nullptr;
-    QLabel* reason_label_ = nullptr;
     QProgressBar* coverage_bar_ = nullptr;
     QLabel* segment_label_ = nullptr;
     QPushButton* end_button_ = nullptr;
@@ -726,7 +725,6 @@ private:
     QTimer* teleop_timer_ = nullptr;
     QTimer* slow_timer_ = nullptr;
     QTimer* metadata_timer_ = nullptr;
-    QTimer* autonomy_latch_timer_ = nullptr;
     QTimer* manager_watch_timer_ = nullptr;
     int metadata_attempts_ = 0;
     bool metadata_pushed_ = false;

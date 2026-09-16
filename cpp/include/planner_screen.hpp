@@ -748,7 +748,6 @@ private:
     QComboBox* combo_coverage_presets_ = nullptr;
     QLineEdit* edit_coverage_preset_name_ = nullptr;
     QVBoxLayout* coverage_custom_presets_layout_ = nullptr;
-    QVBoxLayout* coverage_obstacles_layout_ = nullptr;
     std::vector<QLabel*> label12_labels_;
     std::vector<QLabel*> label9_labels_;
     std::vector<QLabel*> label10_labels_;
@@ -828,9 +827,6 @@ private:
     QPushButton* btn_scan_cancel_ = nullptr;
     QLabel* lbl_scan_cancel_icon_ = nullptr;
     QLabel* lbl_scan_cancel_text_ = nullptr;
-    QPushButton* btn_complete_mission_ = nullptr;
-    QLabel* lbl_complete_mission_icon_ = nullptr;
-    QLabel* lbl_complete_mission_text_ = nullptr;
     QTimer* scan_tick_timer_ = nullptr;
     QTimer* scan_manual_teleop_timer_ = nullptr;
     QTimer* scan_camera_restart_timer_ = nullptr;

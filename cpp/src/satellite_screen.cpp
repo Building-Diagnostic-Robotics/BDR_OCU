@@ -700,9 +700,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     map_->clearTelemetry();
                     setStatePill(QStringLiteral("NO MISSION"),
                                  QColor(mutedColor(dark_mode_)));
-                    if (reason_label_) {
-                        reason_label_->clear();
-                    }
                 } else {
                     scan_distance_m_ = 0.0;
                     scan_quality_sum_ = 0.0;
@@ -5513,11 +5510,6 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
     // Run-state bookkeeping was reset by the previous teardown
     // (missionActiveChanged(false)); only the launch clock is new.
     setStatePill(QStringLiteral("LAUNCHING"), QColor(kAmber));
-    if (reason_label_) {
-        reason_label_->setText(QStringLiteral(
-            "Launching robot stack… Start Scan unlocks when the director "
-            "reports in."));
-    }
     launch_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
     manager_watch_timer_->start();
     setSelectedStep(Step::AutonomousScan);
@@ -5571,14 +5563,6 @@ void SatelliteScreen::onDirectorWatchTick() {
                      ? QStringLiteral("LAUNCHING · director %1s").arg(waited_s)
                      : QStringLiteral("LAUNCHING · robot link %1s").arg(waited_s),
                  QColor(kAmber));
-    if (reason_label_) {
-        reason_label_->setText(
-            have_link
-                ? QStringLiteral("Robot stack is up; waiting for the coverage "
-                                 "director to report initialized.")
-                : QStringLiteral("Waiting for the first topic from the robot "
-                                 "(Zenoh session + stack boot)."));
-    }
     // Keeps the step-5 corner pill's counter ticking; it is the only place a
     // field operator can read why Start Scan is still dead.
     refreshScanRunUi();
@@ -5716,10 +5700,6 @@ bool SatelliteScreen::directorReady() const {
 
 void SatelliteScreen::onScanStartPauseClicked() {
     if (manual_override_) {
-        if (reason_label_) {
-            reason_label_->setText(QStringLiteral(
-                "Click the map to hand control back to autonomy."));
-        }
         return;
     }
     switch (scan_run_state_) {
@@ -6998,9 +6978,6 @@ void SatelliteScreen::updateStatePill() {
                !status.not_ready.isEmpty()) {
         reason = QStringLiteral("Waiting on: %1")
                      .arg(status.not_ready.join(QStringLiteral(", ")));
-    }
-    if (reason_label_) {
-        reason_label_->setText(reason);
     }
     // Step 5 has no reason label, so the pill carries it on hover too.
     if (scan_status_pill_) {
