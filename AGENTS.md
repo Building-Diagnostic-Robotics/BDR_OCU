@@ -26,14 +26,15 @@ release. The full, tickable checklist lives in `docs/DEV_BYPASSES.md`.
 
 Quick inventory of current bypass sites:
 
-- `cpp/src/startup_screen.cpp` — `kEnableLaunchDashboardPassthrough = true`
-  forces Stage 2 Continue always-enabled regardless of preflight result.
-  RGB row is **`left_rgb` only** (label "RGB Camera"); the robot preflight
-  checks one See3CAM. Do not fold `right_rgb` back into the rollup.
-- `cpp/src/planner_screen.cpp` — `kBypassPlannerStageGates = true` lets
-  the operator click into Scan Splitting / Scan stages without a saved
-  map, completed plan, or published waypoints. Intentionally open during
-  field testing; close before customer delivery.
+- Operational gates are folded under compile-time `kDevMode`
+  (`cpp/include/dev_flags.hpp`). A Release build compiles them out.
+  `kEnableLaunchDashboardPassthrough` and `kBypassPlannerStageGates`
+  are both `= kDevMode`, not hardcoded `true`. Full site table lives
+  in `docs/DEV_BYPASSES.md`.
+- `cpp/src/startup_screen.cpp` — RGB row is **`left_rgb` only**
+  (label "RGB Camera"); the robot preflight checks one See3CAM. Do
+  not fold `right_rgb` back into the rollup. Stage 2 Continue is
+  ungated only when `kDevMode` is on.
 - `cpp/src/app_shell.cpp` — `DashboardScreen::viewRecordingsRequested`
   signal is emitted but intentionally not connected yet. Dialog `.cpp`
   files are present but excluded from `GUI_SOURCES` until this lands —
