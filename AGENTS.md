@@ -519,17 +519,18 @@ are missing. Modal is `show()`, not `exec()`.
 - **Do NOT treat** `pilot_control/scripts/F2C/cpp/` as source of
   truth — this binary is the only copy.
 - **Do NOT call `workspacePackageNames()`** from the static
-  `packagesForChangedFiles`. The static map must stay lock-step with
+  `packagesForChangedFiles`. The static map and the unmapped /
+  `package.xml` A/D/R/C guard must stay lock-step with
   `rebuild_affected.sh`; the instance method filters to present pkgs.
 - **A switch is scoped the same as a sync.** Diff from
   `switchFromHead_` (the pre-checkout SHA — Checkout overwrites
-  `laptopHeadBefore_`) and `--packages-above`. Full `colcon build`
-  only when `needsFullWorkspaceBuild` (build-affecting path, no
-  mapped prefix) or a `package.xml` was added/removed/renamed.
-  `robot_switch_branch.sh --no-build` then `rebuild_affected.sh`;
-  omit `--no-build` when the fallback fired so the switch script
-  does the full build itself. Do not send `--no-build` until
-  Prepare has copied a flag-capable helper onto the robot.
+  `laptopHeadBefore_`) and `--packages-above`. Full laptop
+  `colcon build` only when `needsFullWorkspaceBuild` (build-affecting
+  path, no mapped prefix) or a `package.xml` was added/removed/renamed.
+  Always `robot_switch_branch.sh --no-build` then `rebuild_affected.sh`,
+  which decides scoped vs full from **its** range (robot pre-switch
+  SHA → new HEAD). Do not send `--no-build` until Prepare has copied
+  a flag-capable helper onto the robot.
 - Check-only queries `origin/<deploy>`, not the laptop's current
   branch, and must not overwrite `branch_` with laptop HEAD.
 - Arm after login / `goToStage3` when the SSH target is known — not

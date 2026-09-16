@@ -32,13 +32,35 @@ another branch and the tree is clean, Sync **switches** (never
 `--force`). Then:
 
 - `git fetch` / `merge --ff-only` when origin is ahead
-- rebuild affected colcon packages on the laptop
+- Diff the pre-switch SHA (`switchFromHead_`) to HEAD; rebuild
+  `--packages-above` the mapped packages (same path as a same-branch
+  sync — a switch is not a full workspace build)
 - `git push` (explicit refspec, no `--force`) to the robot
-- `~/pilot_deploy/robot_switch_branch.sh` if the robot branch differs
-- `~/pilot_deploy/rebuild_affected.sh` on the robot
+- `~/pilot_deploy/robot_switch_branch.sh --no-build` if the robot
+  branch differs, then `rebuild_affected.sh <pre-switch> <new>`
 - verify robot HEAD == laptop HEAD
 
+A full `colcon build --symlink-install` is the **fallback**, not
+the default. Each side decides from **its own** range: the laptop
+from `switchFromHead_` / `laptopHeadBefore_` (unmapped compile
+unit or `package.xml` A/D/R/C → `fullBuild_`); the robot from
+`rebuild_affected.sh <robotHead_> <new>` — same two triggers.
+The OCU always sends `--no-build`; it does not second-guess the
+robot's range.
+
 Dirty or diverged trees are hard fails. Nothing is discarded.
+
+`--symlink-install` does not prune `install/`. A *file* removed from
+a surviving package can leave a stale install entry; the only real
+fix is `rm -rf build install && colcon build` by hand, which this
+path will not automate. A package add/remove is what the
+`package.xml` guard is for.
+
+The `--no-build` flag has to be on the robot *before* the first
+switch. Re-run **Prepare robot** from a laptop whose
+`scripts/deploy/robot_switch_branch.sh` already has the flag
+(cherry-picked onto the laptop's current branch if that is not yet
+`cliff-on-autonomy`).
 
 ## Gates
 
@@ -63,10 +85,12 @@ The manager never runs `reset --hard`, `checkout -f`, `clean`, or
 successful sync mentions that in the result detail only.
 
 `packagesForChangedFiles` is a static prefix map (lock-step with
-`rebuild_affected.sh`). It must not call `workspacePackageNames()` —
-that walks the laptop tree and is not unit-testable in isolation.
-The instance `affectedPackages()` filters the static result to
-packages that actually exist.
+`rebuild_affected.sh`, including the unmapped / `package.xml`
+guard). It must not call `workspacePackageNames()` — that walks
+the laptop tree and is not unit-testable in isolation. The
+instance `affectedPackages()` filters the static result to
+packages that actually exist. `rebuild_affected.sh` is the
+robot's only scoped-vs-full decider.
 
 ## Prepare robot
 

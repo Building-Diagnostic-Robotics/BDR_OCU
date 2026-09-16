@@ -76,6 +76,16 @@ public:
     static bool isSafeHost(const QString& host);
     /// prefix → colcon packages. Lock-step with rebuild_affected.sh.
     static QStringList packagesForChangedFiles(const QStringList& changedFiles);
+    /// True when a build-affecting path matches no mapped prefix (new
+    /// package, or a workspace-root CMake / interface file). Forces a
+    /// full colcon build instead of silently skipping the compile.
+    static bool needsFullWorkspaceBuild(const QStringList& changedFiles);
+    struct NameStatusParse {
+        QStringList files;
+        bool package_xml_added_or_removed = false;
+    };
+    /// Parses `git diff --name-status` (M/A/D plus R/C with two paths).
+    static NameStatusParse parseNameStatus(const QString& text);
 
     void setRobotReachable(bool online) {
         reach_ = online ? Reachability::Online : Reachability::Offline;
@@ -152,6 +162,14 @@ private:
     bool laptopDirty_ = false;
     QString laptopHeadBefore_;
     QString laptopHeadAfter_;
+    /// Pre-checkout SHA on a Switch. Diff uses this instead of
+    /// laptopHeadBefore_, which Checkout overwrites with the new tip.
+    QString switchFromHead_;
+    /// Full laptop colcon: unmapped compile unit or package.xml A/D/R.
+    /// The robot decides scoped-vs-full itself inside rebuild_affected.sh.
+    bool fullBuild_ = false;
+    /// Set once in Stage::Diff; LaptopBuild must not walk the tree again.
+    QStringList affectedPkgs_;
 
     bool originOffline_ = false;
     QString originSha_;

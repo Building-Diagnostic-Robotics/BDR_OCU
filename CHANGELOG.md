@@ -12,7 +12,7 @@ before pushing to `main` that triggers a release.
 
 ## Unreleased - 2026-09-15
 
-- Sync laptop and robot ~/pilot_ws to cliff-on-autonomy via banner
+- Sync laptop/robot ~/pilot_ws; switch rebuilds only changed pkgs
 - Stage 6 ROI: swath width (0.3-2 m) + speed (0.4-0.6 m/s) sliders
 - Start Scan now unlocks, and says why in plain language when it doesn't
 - Cancel and Complete Mission show progress; can save a partial sweep

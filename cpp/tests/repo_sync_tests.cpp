@@ -85,3 +85,46 @@ TEST(PackagesForChangedFiles, IgnoresPythonAndUnmappedPaths) {
                     {QStringLiteral("README.md")})
                     .isEmpty());
 }
+
+TEST(NeedsFullWorkspaceBuild, MappedCompileStaysScoped) {
+    EXPECT_FALSE(RepoSyncManager::needsFullWorkspaceBuild(
+        {QStringLiteral("src/pilot_control/src/foo.cpp")}));
+    EXPECT_FALSE(RepoSyncManager::needsFullWorkspaceBuild(
+        {QStringLiteral("src/pilot_control/CMakeLists.txt"),
+         QStringLiteral("src/pilot_control/scripts/foo.py")}));
+}
+
+TEST(NeedsFullWorkspaceBuild, UnmappedCompileForcesFull) {
+    EXPECT_TRUE(RepoSyncManager::needsFullWorkspaceBuild(
+        {QStringLiteral("src/new_pkg/src/foo.cpp")}));
+    EXPECT_TRUE(RepoSyncManager::needsFullWorkspaceBuild(
+        {QStringLiteral("CMakeLists.txt")}));
+}
+
+TEST(NeedsFullWorkspaceBuild, PythonAloneDoesNot) {
+    EXPECT_FALSE(RepoSyncManager::needsFullWorkspaceBuild(
+        {QStringLiteral("src/pilot_control/scripts/foo.py"),
+         QStringLiteral("README.md")}));
+}
+
+TEST(ParseNameStatus, CollectsPathsAndFlagsPackageXml) {
+    const auto parsed = RepoSyncManager::parseNameStatus(QStringLiteral(
+        "M\tsrc/pilot_control/src/foo.cpp\n"
+        "A\tsrc/pilot_control/scripts/bar.py\n"));
+    EXPECT_FALSE(parsed.package_xml_added_or_removed);
+    EXPECT_EQ(parsed.files.size(), 2);
+
+    const auto added = RepoSyncManager::parseNameStatus(
+        QStringLiteral("A\tsrc/new_pkg/package.xml\n"));
+    EXPECT_TRUE(added.package_xml_added_or_removed);
+    EXPECT_EQ(added.files, QStringList{QStringLiteral("src/new_pkg/package.xml")});
+
+    const auto removed = RepoSyncManager::parseNameStatus(
+        QStringLiteral("D\tsrc/old_pkg/package.xml\n"));
+    EXPECT_TRUE(removed.package_xml_added_or_removed);
+
+    const auto renamed = RepoSyncManager::parseNameStatus(
+        QStringLiteral("R100\tsrc/old/package.xml\tsrc/new/package.xml\n"));
+    EXPECT_TRUE(renamed.package_xml_added_or_removed);
+    EXPECT_EQ(renamed.files.size(), 2);
+}

@@ -16,6 +16,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QList>
 #include <QRegularExpression>
 #include <QTimer>
 
@@ -56,6 +57,58 @@ QString kv(const QString& text, const QString& key) {
 }
 
 QString shortSha(const QString& sha) { return sha.left(12); }
+
+/// Hex SHA from `git rev-parse`. Interpolated into /bin/bash -c.
+bool isSafeSha(const QString& sha) {
+    static const QRegularExpression re(QStringLiteral("^[0-9a-fA-F]{7,40}$"));
+    return re.match(sha).hasMatch();
+}
+
+bool isPackageXmlPath(const QString& path) {
+    return path == QStringLiteral("package.xml") ||
+           path.endsWith(QStringLiteral("/package.xml"));
+}
+
+bool isBuildAffecting(const QString& f) {
+    static const QStringList exts = {
+        QStringLiteral(".cpp"), QStringLiteral(".hpp"), QStringLiteral(".h"),
+        QStringLiteral(".hh"), QStringLiteral(".c"), QStringLiteral(".cc"),
+        QStringLiteral(".cxx"), QStringLiteral(".inl"), QStringLiteral(".msg"),
+        QStringLiteral(".srv"), QStringLiteral(".action"), QStringLiteral(".idl"),
+    };
+    for (const QString& e : exts) {
+        if (f.endsWith(e)) return true;
+    }
+    const QString base = f.section(QLatin1Char('/'), -1);
+    return base == QStringLiteral("CMakeLists.txt") ||
+           base == QStringLiteral("package.xml") ||
+           base == QStringLiteral("setup.py") ||
+           base == QStringLiteral("setup.cfg");
+}
+
+struct Mapping { QString prefix; QStringList pkgs; };
+
+const QList<Mapping>& packageMappings() {
+    static const QList<Mapping> mappings = {
+        { QStringLiteral("src/pilot_control/"), { QStringLiteral("pilot_control") } },
+        { QStringLiteral("src/ros_odrive/"), { QStringLiteral("odrive_can"),
+                                               QStringLiteral("odrive_ros2_control"),
+                                               QStringLiteral("odrive_botwheel_explorer") } },
+        { QStringLiteral("src/livox_ros_driver2/"), { QStringLiteral("livox_ros_driver2") } },
+        { QStringLiteral("src/FAST_LIO/"), { QStringLiteral("fast_lio") } },
+        { QStringLiteral("src/walabot_driver/"), { QStringLiteral("walabot_driver") } },
+        { QStringLiteral("src/Livox-SDK2/"), { QStringLiteral("livox_ros_driver2"),
+                                               QStringLiteral("fast_lio") } },
+    };
+    return mappings;
+}
+
+bool pathHasKnownPrefix(const QString& f) {
+    for (const Mapping& m : packageMappings()) {
+        if (f.startsWith(m.prefix)) return true;
+    }
+    return false;
+}
 
 /// Last few lines of output, for the failure detail field.
 QString tail(const QString& text, int lines = 6) {
@@ -132,6 +185,9 @@ void RepoSyncManager::begin(Mode mode, const QString& firstStageLabel) {
     behind_ = 0;
     ahead_ = 0;
     changedFiles_.clear();
+    switchFromHead_.clear();
+    fullBuild_ = false;
+    affectedPkgs_.clear();
     emit syncStarted(firstStageLabel);
     if (mode == Mode::Prepare) {
         startStage(Stage::Prepare);
@@ -301,33 +357,40 @@ void RepoSyncManager::startStage(Stage s) {
                 kTimeoutNetworkMs);
         break;
 
-    case Stage::Diff:
-        runBash(QStringLiteral("git diff --name-only %1 %2")
-                    .arg(laptopHeadBefore_, laptopHeadAfter_),
+    case Stage::Diff: {
+        const QString from =
+            !switchFromHead_.isEmpty() ? switchFromHead_ : laptopHeadBefore_;
+        if (!isSafeSha(from) || !isSafeSha(laptopHeadAfter_)) {
+            // Cannot name the range safely — rebuild everything rather
+            // than interpolate an untrusted string or skip the compile.
+            fullBuild_ = true;
+            startStage(Stage::LaptopBuild);
+            return;
+        }
+        runBash(QStringLiteral("git diff --name-status %1 %2")
+                    .arg(from, laptopHeadAfter_),
                 kTimeoutProbeMs);
         break;
+    }
 
     case Stage::LaptopBuild: {
-        const QStringList pkgs = (mode_ == Mode::Switch)
-                                     ? QStringList()
-                                     : affectedPackages(changedFiles_);
-        if (mode_ == Mode::Switch) {
+        if (fullBuild_) {
             emit syncStarted(QStringLiteral("Rebuilding laptop (full)…"));
             runBash(kSourceRos + kSourceWs +
                         QStringLiteral("cd $HOME/pilot_ws && colcon build --symlink-install"),
                     kTimeoutBuildMs);
-        } else {
-            emit syncStarted(QStringLiteral("Rebuilding affected packages…"));
-            runBash(kSourceRos + kSourceWs +
-                        // --packages-above builds the named packages AND
-                        // everything that recursively depends on them. (There
-                        // is no --packages-above-and-including; colcon exits 2
-                        // on an unrecognized flag and builds nothing.)
-                        QStringLiteral("cd $HOME/pilot_ws && colcon build --symlink-install "
-                                       "--packages-above %1")
-                            .arg(pkgs.join(QLatin1Char(' '))),
-                    kTimeoutBuildMs);
+            break;
         }
+        emit syncStarted(QStringLiteral("Rebuilding affected packages…"));
+        runBash(kSourceRos + kSourceWs +
+                    // --packages-above builds the named packages AND
+                    // everything that recursively depends on them. (There
+                    // is no --packages-above-and-including; colcon exits 2
+                    // on an unrecognized flag and builds nothing.)
+                    QStringLiteral("cd $HOME/pilot_ws && colcon build --symlink-install "
+                                   "--packages-above %1")
+                        .arg(affectedPkgs_.join(QLatin1Char(' '))),
+                kTimeoutBuildMs);
         break;
     }
 
@@ -365,16 +428,28 @@ void RepoSyncManager::startStage(Stage s) {
                 kTimeoutNetworkMs);
         break;
 
-    case Stage::RobotSwitch:
+    case Stage::RobotSwitch: {
         emit syncStarted(QStringLiteral("Switching robot to %1…").arg(branch_));
-        // The expected SHA makes the robot verify rather than force.
-        runBash(sshPrefix(10) + QStringLiteral("'%1/robot_switch_branch.sh %2 %3'")
+        if (!isSafeSha(laptopHeadAfter_)) {
+            finish(LevelBad, QStringLiteral("Robot switch failed"),
+                   QStringLiteral("Laptop HEAD is not a usable SHA; refusing to run the switch script."));
+            return;
+        }
+        // Always --no-build. rebuild_affected.sh decides scoped vs full
+        // from the robot's own before/after range.
+        runBash(sshPrefix(10) + QStringLiteral("'%1/robot_switch_branch.sh --no-build %2 %3'")
                                     .arg(robotDeployDir(), branch_, laptopHeadAfter_),
-                kTimeoutBuildMs);
+                kTimeoutNetworkMs);
         break;
+    }
 
     case Stage::RobotBuild:
         emit syncStarted(QStringLiteral("Rebuilding robot…"));
+        if (!isSafeSha(robotHead_) || !isSafeSha(laptopHeadAfter_)) {
+            finish(LevelBad, QStringLiteral("Robot build failed"),
+                   QStringLiteral("Missing a usable before/after SHA; refusing to start the rebuild."));
+            return;
+        }
         runBash(sshPrefix(10) + QStringLiteral("'%1/rebuild_affected.sh %2 %3'")
                                     .arg(robotDeployDir(), robotHead_, laptopHeadAfter_),
                 kTimeoutBuildMs);
@@ -531,6 +606,9 @@ void RepoSyncManager::onProcessFinished(int exitCode, QProcess::ExitStatus statu
                        .arg(branch_, nowOn.isEmpty() ? laptopBranch_ : nowOn, detail));
             return;
         }
+        if (switchFromHead_.isEmpty()) {
+            switchFromHead_ = laptopHeadBefore_;
+        }
         laptopBranch_ = branch_;
         laptopHeadBefore_ = kv(stdOut_, QStringLiteral("head"));
         laptopHeadAfter_ = laptopHeadBefore_;
@@ -538,7 +616,7 @@ void RepoSyncManager::onProcessFinished(int exitCode, QProcess::ExitStatus statu
         if (!originSha_.isEmpty() && behind_ > 0) {
             startStage(Stage::Merge);
         } else {
-            startStage(Stage::LaptopBuild);   // full rebuild for a switch
+            startStage(Stage::Diff);
         }
         return;
     }
@@ -553,22 +631,23 @@ void RepoSyncManager::onProcessFinished(int exitCode, QProcess::ExitStatus statu
         laptopHeadAfter_ = kv(stdOut_, QStringLiteral("head"));
         behind_ = 0;
         localSha_ = laptopHeadAfter_;
-        if (mode_ == Mode::Switch) {
-            startStage(Stage::LaptopBuild);   // full rebuild for a switch
-        } else {
-            startStage(Stage::Diff);
-        }
+        startStage(Stage::Diff);
         return;
 
-    case Stage::Diff:
-        changedFiles_ = stdOut_.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-        if (affectedPackages(changedFiles_).isEmpty()) {
+    case Stage::Diff: {
+        const NameStatusParse parsed = parseNameStatus(stdOut_);
+        changedFiles_ = parsed.files;
+        affectedPkgs_ = affectedPackages(changedFiles_);
+        fullBuild_ = parsed.package_xml_added_or_removed ||
+                     needsFullWorkspaceBuild(changedFiles_);
+        if (fullBuild_ || !affectedPkgs_.isEmpty()) {
+            startStage(Stage::LaptopBuild);
+        } else {
             // Python/launch/config only — symlink-install already picked it up.
             beginRobotPhase();
-        } else {
-            startStage(Stage::LaptopBuild);
         }
         return;
+    }
 
     case Stage::LaptopBuild:
         if (!ok) {
@@ -651,7 +730,10 @@ void RepoSyncManager::onProcessFinished(int exitCode, QProcess::ExitStatus statu
                        .arg(branch_, tail(stdOut_ + stdErr_, 12)));
             return;
         }
-        startStage(Stage::RobotVerify);
+        // Checkout only. RobotBuild runs rebuild_affected.sh against
+        // robotHead_ (pre-switch) → laptopHeadAfter_; that script owns
+        // scoped vs full from the robot's range.
+        startStage(Stage::RobotBuild);
         return;
 
     case Stage::RobotBuild:
@@ -928,46 +1010,59 @@ void RepoSyncManager::fillSnapshot(Level level, const QString& headline,
     Q_UNUSED(level);
 }
 
-QStringList RepoSyncManager::packagesForChangedFiles(const QStringList& changedFiles) {
-    struct Mapping { QString prefix; QStringList pkgs; };
-    const QList<Mapping> mappings = {
-        { QStringLiteral("src/pilot_control/"), { QStringLiteral("pilot_control") } },
-        { QStringLiteral("src/ros_odrive/"), { QStringLiteral("odrive_can"),
-                                               QStringLiteral("odrive_ros2_control"),
-                                               QStringLiteral("odrive_botwheel_explorer") } },
-        { QStringLiteral("src/livox_ros_driver2/"), { QStringLiteral("livox_ros_driver2") } },
-        { QStringLiteral("src/FAST_LIO/"), { QStringLiteral("fast_lio") } },
-        { QStringLiteral("src/walabot_driver/"), { QStringLiteral("walabot_driver") } },
-        { QStringLiteral("src/Livox-SDK2/"), { QStringLiteral("livox_ros_driver2"),
-                                               QStringLiteral("fast_lio") } },
-    };
-
-    auto isBuildAffecting = [](const QString& f) {
-        static const QStringList exts = {
-            QStringLiteral(".cpp"), QStringLiteral(".hpp"), QStringLiteral(".h"),
-            QStringLiteral(".hh"), QStringLiteral(".c"), QStringLiteral(".cc"),
-            QStringLiteral(".cxx"), QStringLiteral(".inl"), QStringLiteral(".msg"),
-            QStringLiteral(".srv"), QStringLiteral(".action"), QStringLiteral(".idl"),
-        };
-        for (const QString& e : exts) {
-            if (f.endsWith(e)) return true;
+RepoSyncManager::NameStatusParse
+RepoSyncManager::parseNameStatus(const QString& text) {
+    NameStatusParse out;
+    const QStringList lines =
+        text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString& raw : lines) {
+        const QStringList parts =
+            raw.split(QLatin1Char('\t'), Qt::SkipEmptyParts);
+        if (parts.isEmpty()) continue;
+        const QChar st = parts.at(0).isEmpty() ? QChar() : parts.at(0).at(0);
+        QStringList paths;
+        if ((st == QLatin1Char('R') || st == QLatin1Char('C')) &&
+            parts.size() >= 3) {
+            paths << parts.at(1) << parts.at(2);
+        } else if (parts.size() >= 2) {
+            paths << parts.at(1);
+        } else {
+            continue;
         }
-        const QString base = f.section('/', -1);
-        return base == QStringLiteral("CMakeLists.txt") ||
-               base == QStringLiteral("package.xml") ||
-               base == QStringLiteral("setup.py") ||
-               base == QStringLiteral("setup.cfg");
-    };
+        for (const QString& p : paths) {
+            if (!out.files.contains(p)) out.files << p;
+        }
+        if (st == QLatin1Char('A') || st == QLatin1Char('D') ||
+            st == QLatin1Char('R') || st == QLatin1Char('C')) {
+            for (const QString& p : paths) {
+                if (isPackageXmlPath(p)) {
+                    out.package_xml_added_or_removed = true;
+                }
+            }
+        }
+    }
+    return out;
+}
 
+bool RepoSyncManager::needsFullWorkspaceBuild(const QStringList& changedFiles) {
+    for (const QString& f : changedFiles) {
+        if (isBuildAffecting(f) && !pathHasKnownPrefix(f)) return true;
+    }
+    return false;
+}
+
+QStringList RepoSyncManager::packagesForChangedFiles(const QStringList& changedFiles) {
     QStringList toBuild;
-    for (const Mapping& m : mappings) {
+    for (const Mapping& m : packageMappings()) {
         bool touched = false;
         for (const QString& f : changedFiles) {
-            if (f.startsWith(m.prefix) && isBuildAffecting(f)) { touched = true; break; }
+            if (f.startsWith(m.prefix) && isBuildAffecting(f)) {
+                touched = true;
+                break;
+            }
         }
         if (touched) toBuild << m.pkgs;
     }
-
     toBuild.removeDuplicates();
     return toBuild;
 }
