@@ -172,6 +172,17 @@ constexpr const char* kSatViewZoomKey = "satellite/zoom";
 constexpr double kDefaultLat = 39.5;
 constexpr double kDefaultLon = -98.35;
 constexpr int kDefaultZoom = 5;
+/**
+ * Zoom-out ceiling for the imagery canvas. The operator works one roof, so
+ * the view is bounded to the cached site disc (capped here, since that is
+ * `PrefetchRequest::radius_m`'s default and the deepest disc ever cached)
+ * and, before anything anchors it, to the continental US.
+ */
+constexpr double kMaxViewRadiusM = 500.0;
+constexpr double kUsSouthLat = 24.4;
+constexpr double kUsNorthLat = 49.4;
+constexpr double kUsWestLon = -125.0;
+constexpr double kUsEastLon = -66.9;
 constexpr double kTeleopAngularSpeed = 1.0;  // rad/s
 
 // Measured plans live in a fictional geo frame anchored at the reference
@@ -366,6 +377,9 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     tiles_ = new TileService(this);
     map_ = new SatelliteMapWidget(tiles_, this);
     map_->installEventFilter(this);
+    // Nothing anchors the canvas yet, so the zoom-out ceiling is the
+    // continental US. A cached site tightens it to the prefetch disc.
+    applySiteViewBounds(TileService::SiteManifest{});
     ros_ = new RosLink(this);
     mission_ = new MissionController(this);
 
@@ -533,7 +547,9 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // but does flip the step-3 gate, so the footer must re-evaluate.
     connect(map_, &SatelliteMapWidget::interactionChanged, this,
             &SatelliteScreen::refreshStepUi);
-    // Units toggle: re-suffix + re-display the length fields (values stay
+    connect(map_, &SatelliteMapWidget::interactionChanged, this,
+            &SatelliteScreen::maybeRearmRoiDraw);
+    // Units toggle: re-suffix + re-display the length fields (values stay)
     // SI in the model; only the presentation flips — house rule).
     connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
             [this](Units) {
@@ -2588,6 +2604,22 @@ void SatelliteScreen::refreshStepUi() {
     }
 }
 
+void SatelliteScreen::maybeRearmRoiDraw() {
+    // The frame's step 3 has no Draw button: entry arms the canvas and only
+    // Clear ROI re-arms it. Anything that preempts the draw — the ruler
+    // calls cancelInteraction() — would otherwise leave the operator on a
+    // step whose whole job is placing vertices, with no way to place them.
+    // cancelInteraction() has already dropped rings of one or two vertices,
+    // and a ring of three or more is a usable shape that armPolygonDraw()
+    // would wipe, so the gate is exactly "no polygon".
+    if (planning_only_ || selected_step_ != Step::RoiDefinition ||
+        map_->polygon().valid() || map_->isDrawing() ||
+        map_->isPlacingMarker() || map_->isMeasuring()) {
+        return;
+    }
+    map_->armPolygonDraw();
+}
+
 void SatelliteScreen::applyStepVisibility() {
     // Scaffolding stage: the rail still holds today's cards, shown and
     // hidden per step. Each card gets reshaped into the frame's flat
@@ -2629,13 +2661,9 @@ void SatelliteScreen::applyStepVisibility() {
     // Frames show a clean canvas on step 1 (238:4289): the saved ROI and
     // robot marker only appear once the operator reaches the ROI work.
     map_->setOverlaysHidden(locate_step);
-    // Frame tool stack is zoom-in + fit; zoom-out / ruler are office extras.
-    if (zoom_out_button_) {
-        zoom_out_button_->setVisible(!frame_rail);
-    }
-    if (measure_button_) {
-        measure_button_->setVisible(!frame_rail);
-    }
+    // All four pills in both trims. The frames carry zoom-in + fit only
+    // because the wheel used to zoom out, and the wheel pans now — a field
+    // operator with no zoom-out control has no way back out of a roof.
     if (back_label_) {
         // 238:4304 labels the top-bar back "Dashboard" on step 1; the later
         // frames (222:1170) say "Back".
@@ -3793,8 +3821,8 @@ QWidget* SatelliteScreen::buildCanvasTools(QWidget* parent) {
     // canvas edge, not in the rail, because they are about looking rather
     // than planning. Icons come from the same missionplanner set.
     // Figma 238:4518: separate 32 px pills, 6 px apart, 12 px in from the
-    // canvas corner. The frames carry zoom-in + fit only; the field trim
-    // hides the rest (wheel still zooms out), the office keeps all four.
+    // canvas corner. The frames carry zoom-in + fit only; both trims get
+    // all four, because the wheel pans and cannot double as zoom-out.
     auto* host = new QWidget(parent);
     host->setObjectName("SatCanvasTools");
     host->setAttribute(Qt::WA_TranslucentBackground, true);
@@ -3819,9 +3847,9 @@ QWidget* SatelliteScreen::buildCanvasTools(QWidget* parent) {
         QStringLiteral(":/assets/satellite/tool_zoom_in.svg"), QString(),
         QStringLiteral("Zoom in"));
     connect(zoom_in, &QPushButton::clicked, map_, &SatelliteMapWidget::zoomIn);
-    zoom_out_button_ = makeTool(QString(), QStringLiteral("−"),
-                                QStringLiteral("Zoom out"));
-    connect(zoom_out_button_, &QPushButton::clicked, map_,
+    auto* zoom_out = makeTool(QString(), QStringLiteral("−"),
+                              QStringLiteral("Zoom out"));
+    connect(zoom_out, &QPushButton::clicked, map_,
             &SatelliteMapWidget::zoomOut);
     auto* fit = makeTool(QStringLiteral(":/assets/satellite/tool_fit.svg"),
                          QString(), QStringLiteral("Fit to ROI"));
@@ -4414,6 +4442,8 @@ void SatelliteScreen::loadJob(const Job& job) {
         // zoom-capping against) whichever plan was on the canvas before.
         tiles_->resetToSharedCache();
     }
+    // Before the view is chosen, so the zoom below lands already clamped.
+    applySiteViewBounds(site_manifest);
 
     const int geo_zoom = job.imagery_cache.cached && job.imagery_cache.max_zoom > 0
                              ? job.imagery_cache.max_zoom
@@ -4457,6 +4487,7 @@ void SatelliteScreen::loadJob(const Job& job) {
 void SatelliteScreen::newJob() {
     resetAlignmentSession();
     tiles_->resetToSharedCache();
+    applySiteViewBounds(TileService::SiteManifest{});
     current_job_id_.clear();
     jobs_combo_->setCurrentIndex(0);
     job_name_->clear();
@@ -4548,6 +4579,7 @@ void SatelliteScreen::adoptImageryManifest(
     // Hand the canvas to the job's tile tree so the operator sees the
     // offline pyramid they just paid for, capped where it ends.
     applyImageryManifest(manifest, job_store_.assetsDir(job.id));
+    applySiteViewBounds(manifest);
 }
 
 void SatelliteScreen::saveJob() {
@@ -4850,6 +4882,27 @@ void SatelliteScreen::applyImageryManifest(
     // Past the prefetched ceiling there is nothing on disk and no internet on
     // the roof, so the canvas must not let the operator zoom into blanks.
     tiles_->setMaxZoomCap(manifest.max_zoom);
+}
+
+void SatelliteScreen::applySiteViewBounds(
+    const TileService::SiteManifest& manifest) {
+    // The measured canvas lives in a fictional frame at lat/lon 0 and floors
+    // on the collected map's hull instead, so geographic bounds would drag
+    // its view to the edge of the US box. The guard has to read the screen's
+    // plan mode, NOT the widget's imagery flag: applyModeVisibility() runs
+    // after loadJob() in both measured entry paths, so the widget still
+    // thinks it is the imagery canvas when this is called.
+    if (plan_mode_ == PlanMode::Measured) {
+        map_->clearViewBounds();
+        return;
+    }
+    if (manifest.cached && manifest.radius_m > 0.0) {
+        map_->setViewBounds(geo::GeoPoint{manifest.lat, manifest.lon},
+                            std::min(manifest.radius_m, kMaxViewRadiusM));
+        return;
+    }
+    map_->setViewBoundsLatLon(kUsSouthLat, kUsWestLon, kUsNorthLat,
+                              kUsEastLon);
 }
 
 // ---- Alignment --------------------------------------------------------------
@@ -5313,6 +5366,14 @@ void SatelliteScreen::applyAlignmentAnchor() {
     marker.valid = true;
     map_->setMarker(marker);
     emit map_->markerChanged();
+    // The fit is the surveyed answer to "where is the robot", so re-centre
+    // the zoom-out ceiling on it instead of the prefetch disc's centre. Only
+    // a real manifest states how far the tiles actually reach; without a
+    // radius the bounds stay wherever loadJob left them.
+    if (site_manifest_.radius_m > 0.0) {
+        map_->setViewBounds(origin,
+                            std::min(site_manifest_.radius_m, kMaxViewRadiusM));
+    }
     map_->setView(origin.lat, origin.lon, map_->zoom());
 
     if (!current_job_id_.isEmpty()) {

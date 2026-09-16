@@ -18,6 +18,7 @@ before pushing to `main` that triggers a release.
 - Scan page now says why Start Scan is locked, in plain language
 - Cancel and Complete Mission show progress instead of freezing
 - Launching the scan no longer leaves you stuck on Edge Review
+- Map: two-finger scroll pans, Ctrl+scroll zooms, zoom-out bounded
 
 ## 2026-09-13 — OTA 082cde0
 

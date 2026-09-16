@@ -152,6 +152,14 @@ The canvas carries a tool stack ported from the Stage 5 plot: **Zoom in**,
 right-click clears). Save Plan fits the view to the ROI before taking the
 thumbnail.
 
+Map gestures: **two-finger scroll pans**, **Ctrl + scroll zooms** about the
+cursor, and the pills do the rest. Scroll pans rather than zooms because a
+laptop trackpad has no middle button and the draw tools own the left one — on
+the roof, step 3 opens with the polygon tool already armed, so without this
+the canvas could not be moved at all. Zoom-out is bounded: to the cached site
+disc once a plan has imagery, and to the continental US before anything
+anchors the view.
+
 Roof edges are the ones with a fall hazard on the far side. The robot applies
 `roof_edge_clearance` (0.5 m default) as a planning setback on those edges
 only — an unmarked interior edge gets the normal treatment. Physical keep-out

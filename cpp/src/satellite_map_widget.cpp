@@ -11,6 +11,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QResizeEvent>
 #include <QWheelEvent>
 
 #include <cmath>
@@ -25,6 +26,10 @@ constexpr double kHitRadiusPx = 12.0;
 constexpr double kMarkerRadiusPx = 11.0;
 constexpr double kMarkerArrowPx = 30.0;
 constexpr double kRotateHandleOffsetPx = 28.0;
+/** One wheel notch in eighths of a degree — Qt's standard mouse step. */
+constexpr int kWheelNotch = 120;
+/** Gap after which a Ctrl+scroll residual is a new gesture, not this one. */
+constexpr int kWheelIdleMs = 200;
 
 constexpr const char* kAttribution =
     "Esri, Maxar, Earthstar Geographics, and the GIS User Community";
@@ -63,8 +68,20 @@ SatelliteMapWidget::SatelliteMapWidget(TileService* tiles, QWidget* parent)
 
 void SatelliteMapWidget::setImageryEnabled(bool enabled) {
     imagery_enabled_ = enabled;
+    const int before_zoom = zoom_;
+    const double before_nx = center_nx_;
+    const double before_ny = center_ny_;
     zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
+    // The two canvases have different floors and only the imagery one honours
+    // the view bounds, so the centre has to be re-clamped as well — otherwise
+    // the legality of the view depends on the order the screen happens to
+    // call this in relative to loadJob().
+    clampCenter();
     update();
+    if (zoom_ != before_zoom || center_nx_ != before_nx ||
+        center_ny_ != before_ny) {
+        emitViewChanged();
+    }
 }
 
 int SatelliteMapWidget::fetchZoomCeiling() const {
@@ -83,7 +100,20 @@ int SatelliteMapWidget::maxZoomNow() const {
 
 int SatelliteMapWidget::minZoomNow() const {
     if (imagery_enabled_) {
-        return kMinZoom;
+        if (view_bounds_.isEmpty()) {
+            return kMinZoom;
+        }
+        // Smallest level whose viewport span still fits inside the box:
+        // span_norm = viewport_px / (tile * 2^z) <= box, so
+        // 2^z >= viewport_px / (tile * box).
+        const double vw = std::max(1, width());
+        const double vh = std::max(1, height());
+        const double zx =
+            std::log2(vw / (double(kTileSize) * view_bounds_.width()));
+        const double zy =
+            std::log2(vh / (double(kTileSize) * view_bounds_.height()));
+        const int z = int(std::ceil(std::max(zx, zy)));
+        return qBound(kMinZoom, z, maxZoomNow());
     }
     // Equatorial Web-Mercator metres/pixel at zoom 0 (256 px tile).
     constexpr double kMpp0 = 156543.03392804097;
@@ -126,6 +156,53 @@ void SatelliteMapWidget::zoomBy(int delta) {
 void SatelliteMapWidget::zoomIn() { zoomBy(1); }
 
 void SatelliteMapWidget::zoomOut() { zoomBy(-1); }
+
+void SatelliteMapWidget::setViewBounds(const geo::GeoPoint& center,
+                                       double radius_m) {
+    const double m_per_norm = geo::metersPerNormUnit(center.lat);
+    if (radius_m <= 0.0 || m_per_norm <= 0.0) {
+        clearViewBounds();
+        return;
+    }
+    // Mercator is conformal: one normalized unit is the same ground distance
+    // on both axes at a given latitude, so the disc is a square box.
+    const double half = radius_m / m_per_norm;
+    view_bounds_ = QRectF(geo::lonToNormX(center.lon) - half,
+                          geo::latToNormY(center.lat) - half, 2.0 * half,
+                          2.0 * half);
+    applyViewBounds();
+}
+
+void SatelliteMapWidget::setViewBoundsLatLon(double south, double west,
+                                             double north, double east) {
+    // Normalized y grows southward, so the north edge is the smaller value.
+    const double min_nx = geo::lonToNormX(west);
+    const double max_nx = geo::lonToNormX(east);
+    const double min_ny = geo::latToNormY(north);
+    const double max_ny = geo::latToNormY(south);
+    if (max_nx <= min_nx || max_ny <= min_ny) {
+        clearViewBounds();
+        return;
+    }
+    view_bounds_ =
+        QRectF(min_nx, min_ny, max_nx - min_nx, max_ny - min_ny);
+    applyViewBounds();
+}
+
+void SatelliteMapWidget::clearViewBounds() {
+    if (view_bounds_.isEmpty()) {
+        return;
+    }
+    view_bounds_ = QRectF();
+    update();
+}
+
+void SatelliteMapWidget::applyViewBounds() {
+    zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
+    clampCenter();
+    update();
+    emitViewChanged();
+}
 
 bool SatelliteMapWidget::fitToRoi(int margin_px) {
     QVector<geo::GeoPoint> points = polygon_.vertices;
@@ -210,6 +287,24 @@ double SatelliteMapWidget::centerLon() const {
 void SatelliteMapWidget::clampCenter() {
     center_ny_ = qBound(0.0, center_ny_, 1.0);
     center_nx_ = center_nx_ - std::floor(center_nx_);
+    if (!imagery_enabled_ || view_bounds_.isEmpty()) {
+        return;
+    }
+    // A zoom floor alone still lets the operator pan off the roof (or off
+    // the cached tiles), so the centre is held inside the box too, inset by
+    // half a viewport. When the viewport is wider than the box — the floor
+    // level itself — inset would invert the range, so pin to the centre.
+    const double world_px = double(kTileSize) * (1 << zoom_);
+    const double half_w = width() / 2.0 / world_px;
+    const double half_h = height() / 2.0 / world_px;
+    center_nx_ = 2.0 * half_w >= view_bounds_.width()
+                     ? view_bounds_.center().x()
+                     : qBound(view_bounds_.left() + half_w, center_nx_,
+                              view_bounds_.right() - half_w);
+    center_ny_ = 2.0 * half_h >= view_bounds_.height()
+                     ? view_bounds_.center().y()
+                     : qBound(view_bounds_.top() + half_h, center_ny_,
+                              view_bounds_.bottom() - half_h);
 }
 
 void SatelliteMapWidget::emitViewChanged() {
@@ -1785,13 +1880,76 @@ void SatelliteMapWidget::leaveEvent(QEvent* event) {
     QWidget::leaveEvent(event);
 }
 
+void SatelliteMapWidget::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    // Both floors are functions of the viewport, so a resize can leave the
+    // view a level below the floor — the step rails appearing and vanishing
+    // change the canvas width by 288 px. Emit only on a real change: resize
+    // events arrive continuously while the operator drags the window edge.
+    const int before_zoom = zoom_;
+    const double before_nx = center_nx_;
+    const double before_ny = center_ny_;
+    zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
+    clampCenter();
+    if (zoom_ != before_zoom || center_nx_ != before_nx ||
+        center_ny_ != before_ny) {
+        emitViewChanged();
+    }
+}
+
 void SatelliteMapWidget::wheelEvent(QWheelEvent* event) {
-    // Zooming moves the chip out from under the editor. Mouse-driven pans
-    // commit via focus-out, but the wheel never takes focus away.
+    // Zooming and panning both move the chip out from under the editor.
+    // Mouse-driven pans commit via focus-out, but the wheel never takes
+    // focus away.
     cancelEdgeLengthEdit();
-    const int dz = event->angleDelta().y() > 0 ? 1 : -1;
+    if (!(event->modifiers() & Qt::ControlModifier)) {
+        // Two-finger trackpad scroll pans. A laptop has no middle button and
+        // the draw tools own the left one, so this is the only pan gesture
+        // the operator has on the roof while a draw is armed.
+        QPointF delta = event->pixelDelta();
+        if (delta.isNull()) {
+            // A mouse wheel reports no pixel delta: eighths of a degree.
+            delta = QPointF(event->angleDelta()) / 8.0;
+        }
+        if (delta.isNull()) {
+            event->accept();
+            return;
+        }
+        const double world_px = double(kTileSize) * (1 << zoom_);
+        center_nx_ -= delta.x() / world_px;
+        center_ny_ -= delta.y() / world_px;
+        clampCenter();
+        update();
+        emitViewChanged();
+        event->accept();
+        return;
+    }
+    // Ctrl + scroll zooms about the cursor. A trackpad emits many small
+    // deltas per flick, so accumulate notches rather than stepping a whole
+    // level per event.
+    if (wheel_clock_.isValid() && wheel_clock_.elapsed() > kWheelIdleMs) {
+        wheel_accum_ = 0;
+    }
+    wheel_clock_.restart();
+    const int dy = event->angleDelta().y();
+    if (dy == 0) {
+        event->accept();
+        return;
+    }
+    if ((dy < 0) != (wheel_accum_ < 0)) {
+        wheel_accum_ = 0;  // direction flip: a stale residual would lag
+    }
+    wheel_accum_ += dy;
+    int dz = wheel_accum_ / kWheelNotch;
+    if (dz == 0) {
+        event->accept();
+        return;
+    }
+    wheel_accum_ -= dz * kWheelNotch;
+    dz = qBound(-2, dz, 2);  // a fast mouse spin must not fling six levels
     const int new_zoom = qBound(minZoomNow(), zoom_ + dz, maxZoomNow());
     if (new_zoom == zoom_) {
+        event->accept();
         return;
     }
     const QPointF pos = event->position();
@@ -1809,6 +1967,7 @@ void SatelliteMapWidget::wheelEvent(QWheelEvent* event) {
     clampCenter();
     update();
     emitViewChanged();
+    event->accept();
 }
 
 }  // namespace f2c_cpp

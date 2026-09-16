@@ -16,6 +16,7 @@
 #include "satellite_job_model.hpp"
 #include "satellite_ros_link.hpp"
 
+#include <QElapsedTimer>
 #include <QWidget>
 
 class QLineEdit;
@@ -43,6 +44,21 @@ public:
      * and leaves the view alone when there is no ROI.
      */
     bool fitToRoi(int margin_px = 56);
+
+    /**
+     * View bounds: the box the viewport may never leave. The zoom floor
+     * becomes the smallest level that still fits inside it and the centre is
+     * clamped so the view stays within it. Imagery canvas only — the
+     * measured canvas already floors on the collected map's hull.
+     *
+     * Two callers: a cached site (centre + prefetch radius), so the operator
+     * cannot zoom out past the tiles that are on disk, and the unanchored
+     * fallback, so a stray gesture cannot leave them looking at an ocean.
+     */
+    void setViewBounds(const geo::GeoPoint& center, double radius_m);
+    void setViewBoundsLatLon(double south, double west, double north,
+                             double east);
+    void clearViewBounds();
 
     /**
      * Measured (grid) mode: disables tile fetching/painting and the Esri
@@ -166,10 +182,11 @@ public:
     /** View ceiling: what the wheel, zoomIn and fitToRoi clamp to. */
     int maxZoomNow() const;
     /**
-     * View floor. Imagery keeps `kMinZoom`. The measured canvas cannot
-     * zoom out past the collected map's hull plus an offset (15 m or 25 %
-     * of the larger side), so the operator stays on the roof instead of
-     * the empty grid. Empty-map fallback is a 100 m disc.
+     * View floor. Imagery floors on the current view bounds, or `kMinZoom`
+     * when none are set. The measured canvas cannot zoom out past the
+     * collected map's hull plus an offset (15 m or 25 % of the larger
+     * side), so the operator stays on the roof instead of the empty grid.
+     * Empty-map fallback is a 100 m disc.
      */
     int minZoomNow() const;
     /** Fetch ceiling: the cached / native limit tiles are requested at. */
@@ -197,6 +214,7 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void leaveEvent(QEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     /** Escape / focus-out handling for the inline dimension editor. */
     bool eventFilter(QObject* watched, QEvent* event) override;
 
@@ -219,6 +237,8 @@ private:
 
     /** Zoom about the view centre, clamped to the current ceiling. */
     void zoomBy(int delta);
+    /** Re-clamps zoom and centre after the bounds change. */
+    void applyViewBounds();
     /** Turns a diagonal into the north-up four-gon it spans. */
     void applyRectangleFromDiagonal(const geo::GeoPoint& a,
                                     const geo::GeoPoint& b);
@@ -279,6 +299,12 @@ private:
     double center_nx_ = 0.5;
     double center_ny_ = 0.5;
     int zoom_ = 5;
+    QRectF view_bounds_;  // normalized world box; empty = unbounded
+    // Ctrl+wheel notch accumulator. A trackpad emits many small deltas per
+    // flick, so zoom steps on accumulated notches instead of one level per
+    // event (one flick used to cross ten levels).
+    int wheel_accum_ = 0;
+    QElapsedTimer wheel_clock_;
 
     RoiRect roi_;
     RoiPolygon polygon_;

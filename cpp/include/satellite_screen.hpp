@@ -215,6 +215,9 @@ private:
     /** Shows only the active step's rail cards. Called from
         applyModeVisibility() so every existing call site keeps working. */
     void applyStepVisibility();
+    /** Re-arms the step-3 polygon draw after a tool preempted it — that
+        rail has no Draw button to get back with. */
+    void maybeRearmRoiDraw();
 
     void refreshJobsCombo(const QString& select_id = QString());
     /** Re-reads the store and rebuilds the combo items WITHOUT loading a
@@ -273,6 +276,9 @@ private:
     /** Points the tile service at a job's offline pyramid + zoom ceiling. */
     void applyImageryManifest(const TileService::SiteManifest& manifest,
                               const QString& assets_dir);
+    /** Bounds the canvas to the cached site disc, or to the continental US
+        when nothing anchors it yet. */
+    void applySiteViewBounds(const TileService::SiteManifest& manifest);
 
     // ---- Alignment (robot map <-> satellite imagery) ----
     void onCollectMap();
@@ -575,7 +581,6 @@ private:
     QWidget* map_page_ = nullptr;
     QWidget* canvas_tools_ = nullptr;
     QPushButton* measure_button_ = nullptr;
-    QPushButton* zoom_out_button_ = nullptr;
     QLabel* back_label_ = nullptr;  // "Dashboard" / "Back" in the field trim
     struct CanvasTool {
         QPushButton* button = nullptr;

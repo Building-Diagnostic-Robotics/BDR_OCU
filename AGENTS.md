@@ -1328,6 +1328,40 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 - **Do not re-enable the rotate handle on an unselected marker.** The
  selection gate exists so a drag near the arrow cannot spin the heading;
  `hitTest` returns `RotateMarker` only while `marker_selected_`.
+- **Wheel pans, `Ctrl`+wheel zooms, and the tool stack shows all four pills
+ in both trims.** A trackpad has no middle button and the draw tools own the
+ left one, so two-finger scroll is the operator's only pan gesture — step 3
+ opens with polygon draw armed, and before this the canvas could not be
+ panned from the moment the step opened. The cost is that the wheel can no
+ longer zoom out, which is why the zoom-out and ruler pills are no longer
+ hidden in the field trim (Figma 238:4518 carries zoom-in + fit only).
+ `Ctrl`+wheel accumulates `kWheelNotch = 120` of `angleDelta` per level
+ instead of stepping one per event; without it a single trackpad flick
+ crossed ten levels. Do not remap scroll back to zoom without giving the
+ field trim another pan gesture first.
+- **`maybeRearmRoiDraw()` is what keeps step 3 drawable.** The ruler — and
+ anything else that calls `cancelInteraction()` — disarms the draw, and the
+ field's step-3 rail has no Draw button, only Clear ROI, which wipes. So the
+ screen re-arms on `interactionChanged` whenever there is no polygon. Gate
+ on `polygon().valid()`: `armPolygonDraw()` assigns `polygon_ = RoiPolygon{}`,
+ so re-arming over a ring of three or more destroys the operator's shape.
+ Rings of one or two vertices are already dropped by `cancelInteraction()`,
+ which is why "no polygon" is the right gate.
+- **`SatelliteMapWidget::setViewBounds` is the zoom-out ceiling**, imagery
+ canvas only (the measured canvas floors on the collected map's hull). It
+ feeds BOTH `minZoomNow()` and `clampCenter()` — a zoom floor without the
+ pan clamp still lets the operator slide off the roof, or off the cached
+ tiles. Cached site → the manifest's disc capped at `kMaxViewRadiusM = 500`;
+ nothing anchored → the continental US box, which is what keeps the boot
+ view at `kDefaultZoom = 5` legal. `applyAlignmentAnchor` re-centres the
+ disc on the surveyed origin ONLY when `site_manifest_.radius_m > 0`:
+ inventing a radius for a manifest that has none clamps the view onto a
+ bogus anchor and the ROI vanishes off-screen. The `roi` shot mode is the
+ tripwire — its synthetic manifest carries no radius. Measured plans live
+ at lat/lon 0: `applySiteViewBounds` must `clearViewBounds()` on
+ `plan_mode_ == Measured`, not the widget's imagery flag — `loadJob` runs
+ before `applyModeVisibility()`, so the flag is still stale-true. `measured`
+ / `measured_map` shots catch a regression.
 - The `ScanSetupDialog` satellite gate reads `imagery_reachable_` in the
  click handler as well as disabling the card. Keep both: a queued click
  can land after a probe flips the state.
