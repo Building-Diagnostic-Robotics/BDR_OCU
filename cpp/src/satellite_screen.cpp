@@ -30,6 +30,7 @@
 #include "settings_constants.hpp"
 #include "units_system.hpp"
 
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -6308,6 +6309,46 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
             map_->setHighlightedEdge(event->type() == QEvent::Enter ? idx.toInt()
                                                                     : -1);
             return false;
+        }
+    }
+    // Space = E-Stop on the scan step, focus-independent. It sits here on
+    // the qApp-wide filter (installed in the ctor) rather than in a
+    // keyPressEvent override precisely because a kill switch must not
+    // depend on where the caret happens to be: the Start Scan button, the
+    // teleop checkbox and the speed slider all consume Space themselves
+    // when focused, so a keyPressEvent override would silently do nothing
+    // in exactly the states the operator is most likely to be in (they
+    // just clicked Start Scan). Above the teleop gate below on purpose —
+    // E-Stop works whether or not keyboard teleop is enabled.
+    //
+    // One exclusion: text entry, where a space typed into a name/search
+    // field is a space. Everything else loses Space to E-Stop, a modal
+    // confirm on top of the screen included — we consume the event, so the
+    // dialog never sees it and there is no double action. Press, release
+    // and autorepeat are all swallowed (only a fresh press fires), so a
+    // held key can neither re-fire the stop nor leak through to whatever
+    // holds focus.
+    //
+    // Gated on estop_button_->isEnabled() so the shortcut and the button
+    // share one source of truth (refreshScanRunUi: mission must be
+    // active). Bypassing that gate is how Stage 5's Space shortcut can
+    // paint a stopped state for a press the robot never received.
+    if ((event->type() == QEvent::KeyPress ||
+         event->type() == QEvent::KeyRelease) &&
+        isVisible() && !planning_only_ &&
+        selected_step_ == Step::AutonomousScan) {
+        auto* key = static_cast<QKeyEvent*>(event);
+        QWidget* focus = QApplication::focusWidget();
+        const bool typing = qobject_cast<QLineEdit*>(focus) ||
+                            qobject_cast<QAbstractSpinBox*>(focus) ||
+                            qobject_cast<QPlainTextEdit*>(focus);
+        if (key->key() == Qt::Key_Space && !typing) {
+            if (event->type() == QEvent::KeyPress && !key->isAutoRepeat() &&
+                estop_button_ && estop_button_->isEnabled()) {
+                appendLog(QStringLiteral("[key] Space -> E-Stop"));
+                onEstop();
+            }
+            return true;
         }
     }
     if (!isVisible() || !teleop_check_ || !teleop_check_->isChecked()) {
