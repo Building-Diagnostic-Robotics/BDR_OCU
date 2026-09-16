@@ -18,7 +18,7 @@ before pushing to `main` that triggers a release.
 - Pre-launch clears a wedged ROS 2 daemon
 - Stop modal waits 3s so a sweep-end blip is not a prompt
 
-## Unreleased - 2026-09-15
+## 2026-09-15 — OTA 7db7705
 
 - Sync laptop/robot ~/pilot_ws; switch rebuilds only changed pkgs
 - Stage 6 ROI: swath width (0.3-2 m) + speed (0.4-0.6 m/s) sliders
