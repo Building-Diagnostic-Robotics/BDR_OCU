@@ -32,11 +32,13 @@ jobs:
     # Job-level env so both the colcon build (odrive_can) and the OCU CMake
     # configure pick up ccache automatically. CCACHE_BASEDIR makes hashes
     # path-relative so cache hits survive across runners with different
-    # workspace paths.
+    # workspace paths. BDR_ARCGIS_API_KEY is job-level so build.sh and any
+    # reconfigure inside create_deb.sh both see it.
     env:
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
+      BDR_ARCGIS_API_KEY: ${{ secrets.BDR_ARCGIS_API_KEY }}
 
     steps:
       - name: Checkout
@@ -154,6 +156,13 @@ jobs:
           cmake --build _f2c_build -j$(nproc)
           sudo cmake --install _f2c_build
           sudo ldconfig
+
+      - name: Verify ArcGIS key is present
+        run: |
+          if [ -z "${BDR_ARCGIS_API_KEY}" ]; then
+            echo "::error::BDR_ARCGIS_API_KEY secret is empty — refusing to publish a build with dead satellite imagery."
+            exit 1
+          fi
 
       - name: Build OCU
         working-directory: cpp

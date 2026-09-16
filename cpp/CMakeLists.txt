@@ -312,9 +312,12 @@ if(BDR_ARCGIS_API_KEY STREQUAL "")
     set(_bdr_key_file "${CMAKE_CURRENT_SOURCE_DIR}/config/arcgis_key.txt")
     if(EXISTS "${_bdr_key_file}")
         file(READ "${_bdr_key_file}" BDR_ARCGIS_API_KEY)
-        string(STRIP "${BDR_ARCGIS_API_KEY}" BDR_ARCGIS_API_KEY)
     endif()
 endif()
+# Strip once, after resolution: a secret piped from a file keeps its
+# trailing newline, and a newline inside the generated string literal
+# is ill-formed C++.
+string(STRIP "${BDR_ARCGIS_API_KEY}" BDR_ARCGIS_API_KEY)
 if(BDR_ARCGIS_API_KEY STREQUAL "")
     message(WARNING
         "BDR_ARCGIS_API_KEY is empty — Stage 6 satellite tile downloads "
