@@ -101,7 +101,8 @@ jobs:
             ros-humble-nav-msgs ros-humble-tf2 ros-humble-tf2-geometry-msgs \
             ros-humble-ament-cmake ros-humble-rosidl-default-generators \
             ros-humble-rosidl-default-runtime \
-            ros-humble-ortools-vendor
+            ros-humble-ortools-vendor \
+            libgtest-dev
 
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -160,6 +161,15 @@ jobs:
           source /opt/ros/humble/setup.bash
           source "${GITHUB_WORKSPACE}/_ros_ws/install/setup.bash"
           ./build.sh Release
+
+      - name: Run unit tests
+        # libgtest-dev is required: without it CMake skips every test
+        # target and ctest would pass with zero tests.
+        working-directory: cpp/build
+        run: |
+          source /opt/ros/humble/setup.bash
+          source "${GITHUB_WORKSPACE}/_ros_ws/install/setup.bash"
+          ctest --output-on-failure
 
       - name: Package .deb
         working-directory: cpp
