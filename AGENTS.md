@@ -1216,9 +1216,8 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  30-60 s and a 20 s auto-teardown killed a healthy launch in the field.
  Do not add a link gate to `end_button_`.
 - **A disabled Start Scan must always say why, and the step-5 corner pill
- is the only place it can.** The rail (and with it `reason_label_`, which
- nothing ever constructs) is hidden on step 5, and a disabled button's
- tooltip is not a surface a field operator can reach. `scanBlockReason()`
+ is the only place it can.** The rail is hidden on step 5, and a disabled
+ button's tooltip is not a surface a field operator can reach. `scanBlockReason()`
  is the single source for both: it returns a short pill label plus one
  plain sentence, in operator language with no ROS vocabulary.
  `updateStatePill()` owns the pill whenever a `/coverage/status` message is
