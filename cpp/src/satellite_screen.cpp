@@ -500,19 +500,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     scan_footer_->hide();
     root->addWidget(scan_footer_);
 
-    // ---- Step acknowledgements ----
-    connect(roi_confirm_check_, &QCheckBox::toggled, this, [this](bool on) {
-        // Snapshot the geometry that was confirmed, so a later vertex drag
-        // revokes it but marking a roof edge does not.
-        confirmed_vertices_ = on ? map_->polygon().vertices
-                                 : QVector<geo::GeoPoint>{};
-        refreshStepUi();
-    });
-    connect(edge_review_check_, &QCheckBox::toggled, this, [this](bool on) {
-        edges_reviewed_ = on;
-        refreshStepUi();
-    });
-
     map_capture_ = new MapCaptureRunner(this);
     connect(map_capture_, &MapCaptureRunner::progress, this,
             [this](const QString& message) {
@@ -670,6 +657,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 place_robot_button_->setEnabled(!active);
                 clear_roi_button_->setEnabled(!active);
                 save_button_->setEnabled(!active);
+                top_back_button_->setEnabled(!active);
                 updateAlignCardUi();
                 if (active) {
                     canvas_stack_->setCurrentWidget(map_page_);
@@ -1276,11 +1264,6 @@ void SatelliteScreen::applyModeVisibility() {
     // rules left visible down to the active step.
     refreshStepUi();
     applyStepVisibility();
-    if (roi_confirm_check_) {
-        roi_confirm_check_->blockSignals(true);
-        roi_confirm_check_->setChecked(roiMatchesConfirmed());
-        roi_confirm_check_->blockSignals(false);
-    }
 }
 
 void SatelliteScreen::setTopBatteryState(double pct, bool stale) {
@@ -1336,6 +1319,7 @@ QWidget* SatelliteScreen::buildTopBar() {
 
     // Back button — the Stage 4/5 SVG construction (back_vector_a/b).
     auto* back = new QPushButton(top_bar);
+    top_back_button_ = back;
     back->setObjectName("SatBackButton");
     back->setCursor(Qt::PointingHandCursor);
     back->setFixedSize(40, 32);
@@ -1443,36 +1427,6 @@ QWidget* SatelliteScreen::buildTopBar() {
     layout->addWidget(status_host, 0, Qt::AlignVCenter);
     layout->addSpacing(kTopStatusWindowControlsReservedWidth);
     return top_bar;
-}
-
-QWidget* SatelliteScreen::buildAckCard(QWidget* parent,
-                                       const QString& object_name,
-                                       const QString& icon,
-                                       const QString& title,
-                                       const QString& description,
-                                       const QString& check,
-                                       QCheckBox** out_check) {
-    auto* card = new QWidget(parent);
-    card->setObjectName("SatCard");
-    card->setProperty("satCardRole", object_name);
-    card->setAttribute(Qt::WA_StyledBackground, true);
-    auto* layout = new QVBoxLayout(card);
-    layout->setContentsMargins(16, 14, 16, 16);
-    layout->setSpacing(8);
-    layout->addWidget(makeCardHeader(icon, title, card));
-
-    auto* body = new QLabel(description, card);
-    body->setObjectName("SatFieldLabel");
-    body->setWordWrap(true);
-    layout->addWidget(body);
-
-    auto* box = new QCheckBox(check, card);
-    box->setObjectName("SatCheck");
-    layout->addWidget(box);
-    if (out_check) {
-        *out_check = box;
-    }
-    return card;
 }
 
 QWidget* SatelliteScreen::buildStepHeader() {
@@ -2470,7 +2424,11 @@ void SatelliteScreen::refreshStepUi() {
         const bool active = step == selected_step_;
         const bool available = stepAvailable(step);
         const bool complete = stepComplete(step);
-        const bool clickable = stepReachable(step);
+        // Once autonomy has driven, Cancel Scan / Complete Mission are the
+        // only exits. The chip handler already refuses, but only into the
+        // log, which is hidden on step 5 — so the chip has to look dead too.
+        const bool clickable =
+            stepReachable(step) && !(scan_autonomy_ran_ && !active);
         chip.button->setVisible(available);
         if (chip.chevron) {
             bool next_visible = false;
@@ -2727,12 +2685,6 @@ void SatelliteScreen::applyStepVisibility() {
         align_card_->setVisible(!planning_only_ && step == Step::Alignment &&
                                 plan_mode_ == PlanMode::Measured);
     }
-    if (roi_confirm_card_) {
-        roi_confirm_card_->setVisible(false);
-    }
-    if (edge_review_card_) {
-        edge_review_card_->setVisible(false);
-    }
     if (teleop_card_) {
         teleop_card_->setVisible(false);
     }
@@ -2765,25 +2717,6 @@ QWidget* SatelliteScreen::buildLeftRail() {
     layout->addWidget(scan_params_card_);
     align_card_ = buildAlignCard(rail_content);
     layout->addWidget(align_card_);
-    roi_confirm_card_ = buildAckCard(
-        rail_content, QStringLiteral("roiConfirm"),
-        QStringLiteral(":/assets/exploration/map.svg"),
-        QStringLiteral("Confirm ROI"),
-        QStringLiteral("Check the outline against the aligned robot map and "
-                       "drag any vertex that does not match the real roof. "
-                       "Adjusting the shape clears this confirmation."),
-        QStringLiteral("ROI matches the roof"), &roi_confirm_check_);
-    layout->addWidget(roi_confirm_card_);
-    edge_review_card_ = buildAckCard(
-        rail_content, QStringLiteral("edgeReview"),
-        QStringLiteral(":/assets/missionplanner/scan_card_telemetry.svg"),
-        QStringLiteral("Edge Review"),
-        QStringLiteral("Tap every ROI edge with a fall hazard beyond it — "
-                       "red edges get a larger planning setback. A roof with "
-                       "no hazardous edges is a valid answer; what matters is "
-                       "that you have looked."),
-        QStringLiteral("Edges reviewed"), &edge_review_check_);
-    layout->addWidget(edge_review_card_);
     teleop_card_ = buildTeleopCard(rail_content);
     layout->addWidget(teleop_card_);
     log_card_ = buildLogCard(rail_content);
@@ -5833,6 +5766,7 @@ void SatelliteScreen::beginStartScan() {
         scan_run_state_ = ScanRunState::Running;
         scan_autonomy_ran_ = true;
         refreshScanRunUi();
+        refreshStepUi();
         return;
     }
     ros_->requestAxisState(RosLink::kAxisClosedLoop);
@@ -5855,6 +5789,7 @@ void SatelliteScreen::beginStartScan() {
             scan_run_state_ = ScanRunState::Running;
             scan_autonomy_ran_ = true;
             refreshScanRunUi();
+            refreshStepUi();
             return;
         }
         if (arm_wait_ticks_ >= 60) {
@@ -5875,6 +5810,7 @@ void SatelliteScreen::beginStartScan() {
             scan_run_state_ = ScanRunState::Running;
             scan_autonomy_ran_ = true;
             refreshScanRunUi();
+            refreshStepUi();
         }
     });
     arm_wait_timer_->start();

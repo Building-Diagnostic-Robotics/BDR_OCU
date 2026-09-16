@@ -204,12 +204,6 @@ private:
     static double computeReprojectionQualityPercent(
         const QVector<QVector<QPointF>>& planned, const QVector<QPointF>& trail);
     QWidget* buildLogCard(QWidget* parent);
-    /** Card carrying a step's acknowledgement checkbox — the whole content
-        of steps 3 and 4 until their Figma frames land. */
-    QWidget* buildAckCard(QWidget* parent, const QString& object_name,
-                          const QString& icon, const QString& title,
-                          const QString& description, const QString& check,
-                          QCheckBox** out_check);
     void applyTheme();
     void applyModeVisibility();
     /** Shows only the active step's rail cards. Called from
@@ -558,12 +552,6 @@ private:
     ScanParams scanParams() const;
     void setScanParams(const ScanParams& params);
 
-    // Step 3 / step 4 acknowledgement cards.
-    QWidget* roi_confirm_card_ = nullptr;
-    QCheckBox* roi_confirm_check_ = nullptr;
-    QWidget* edge_review_card_ = nullptr;
-    QCheckBox* edge_review_check_ = nullptr;
-
     // Align card + pages.
     struct Correspondence {
         QPointF sat_px;  // stitched site.jpg pixel
@@ -581,6 +569,7 @@ private:
     QWidget* map_page_ = nullptr;
     QWidget* canvas_tools_ = nullptr;
     QPushButton* measure_button_ = nullptr;
+    QPushButton* top_back_button_ = nullptr;
     QLabel* back_label_ = nullptr;  // "Dashboard" / "Back" in the field trim
     struct CanvasTool {
         QPushButton* button = nullptr;
