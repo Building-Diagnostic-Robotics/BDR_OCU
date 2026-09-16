@@ -14,6 +14,7 @@
 
 #include "async_process.hpp"
 #include "link_health_monitor.hpp"
+#include "mission_finalize_policy.hpp"
 #include "components/bdr_message_box.hpp"
 #include "components/fpv_camera_view.hpp"
 #include "components/mission_finalize_dialog.hpp"
@@ -682,7 +683,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     first_robot_topic_wall_ms_ = 0;
                     director_wait_prompted_ = false;
                     start_scan_pending_ = false;
-                    abort_offered_ = false;
                     abort_consumed_ = false;
                     abort_save_used_ = false;
                     metadata_pushed_ = false;
@@ -6434,20 +6434,12 @@ void SatelliteScreen::showFinalizeProgress(const QString& phase) {
         finalize_dialog_->move(c.x() - finalize_dialog_->width() / 2,
                                c.y() - finalize_dialog_->height() / 2);
     }
-    // showFinalizeProgress clears CTAs per phase. Re-assert an offer
-    // already made while settle is still waiting; a consumed click stays
-    // dead (offerAbortAndSave no-ops).
-    if (conclude_wait_timer_ && conclude_wait_timer_->isActive() &&
-        abort_offered_) {
-        offerAbortAndSave();
-    }
 }
 
 void SatelliteScreen::offerAbortAndSave() {
     if (!finalize_dialog_ || abort_consumed_) {
         return;
     }
-    abort_offered_ = true;
     finalize_dialog_->setAbortAvailable(true);
 }
 
@@ -6499,7 +6491,6 @@ void SatelliteScreen::startCompleteMissionSettle() {
         conclude_wait_timer_->setInterval(250);
     }
     conclude_wait_ticks_ = 0;
-    abort_offered_ = false;
     abort_consumed_ = false;
     abort_save_used_ = false;
     disconnect(conclude_wait_timer_, &QTimer::timeout, nullptr, nullptr);
@@ -6519,11 +6510,10 @@ void SatelliteScreen::startCompleteMissionSettle() {
             copy == QLatin1String("done") ||
             copy == QLatin1String("skipped") ||
             copy == QLatin1String("failed");
-        // 250 ms × 40 = 10 s. Conclude can refuse while work is still
-        // active; abort-and-save is the door that still reaches disk.
         // Skip-copy stays unwired here: those copy states already count as
         // save_done, so the button would appear and vanish in the same tick.
-        if (!save_done && conclude_wait_ticks_ >= 40) {
+        if (finalize_policy::shouldOfferAbort(save_done, conclude_wait_ticks_,
+                                             abort_consumed_)) {
             offerAbortAndSave();
         }
         // 250 ms × 120 = 30 s ceiling. Do not wait on the thumb-drive
@@ -6533,7 +6523,8 @@ void SatelliteScreen::startCompleteMissionSettle() {
             return;
         }
         conclude_wait_timer_->stop();
-        if ((save_done || status.complete) && !abort_save_used_) {
+        if (finalize_policy::shouldStampCompleted(save_done, status.complete,
+                                                  abort_save_used_)) {
             markCurrentPlanCompleted();
         }
         if (copy == QLatin1String("pending") ||
