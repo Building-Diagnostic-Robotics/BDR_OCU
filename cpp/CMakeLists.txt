@@ -609,7 +609,20 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME mission_finalize_policy_tests COMMAND mission_finalize_policy_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests)")
+        # Stage 6 stop-modal dwell. Header-only, no Qt/ROS.
+        add_executable(stop_prompt_policy_tests
+            tests/stop_prompt_policy_tests.cpp
+        )
+        target_include_directories(stop_prompt_policy_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(stop_prompt_policy_tests PRIVATE
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME stop_prompt_policy_tests COMMAND stop_prompt_policy_tests)
+
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

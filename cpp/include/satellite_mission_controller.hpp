@@ -19,6 +19,7 @@
 
 #include <QFile>
 #include <QObject>
+#include <QtGlobal>
 #include <QPointer>
 #include <QProcess>
 #include <QString>
@@ -126,6 +127,20 @@ public:
      */
     void appendMissionLog(const QString& line);
 
+    /**
+     * Continue or abandon after `robotSweepFailed`. `true` spawns the
+     * launches that the failed sweep parked; `false` is a no-op — the
+     * screen owns teardown. No-op if the mission is already down.
+     */
+    void resumeAfterSweep(bool proceed);
+
+    /** True once the launch itself printed a line. Everything before
+        BDR_LAUNCH_BEGIN is the login shell and does not count. */
+    bool robotLaunchSpoke() const { return robot_launch_spoke_; }
+    /** Wall-clock ms of `spawnLaunches`; 0 until the ssh is started. */
+    qint64 robotSpawnMs() const { return robot_spawn_ms_; }
+    bool robotLaunchRunning() const;
+
     using RemoteCallback = std::function<void(bool ok, QString detail)>;
     /**
      * `ros2 service call` on the robot over SSH — the legacy autonomy
@@ -157,6 +172,12 @@ signals:
      * the OCU publishes gets across). Both are fatal to the run.
      */
     void launchDied(const QString& side, int exit_code);
+    /**
+     * Pre-launch sweep returned non-zero. The script itself cannot fail
+     * (`set +e` / `|| true`); this is ssh unreachable (255) or the 20 s
+     * hang deadline (-1). Launches are parked until resumeAfterSweep.
+     */
+    void robotSweepFailed(int exit_code);
 
 private:
     /** Teardown chain; each step continues the next from its callback. */
@@ -164,8 +185,11 @@ private:
 
     void hookProcessLogging(QProcess* proc, const QString& tag);
     /** One SSH round trip that leaves the robot with no Stage 6 stack
-        running (see kRobotSweep). ~1 s when already clean. */
-    void runRobotSweep(std::function<void()> on_done);
+        running (see kRobotSweep). ~1 s when already clean. `kill_daemon`
+        is pre-launch only — teardown must not take down a CLI daemon
+        that an in-flight `ros2 service call` still needs. */
+    void runRobotSweep(std::function<void(int rc, int elapsed_ms)> on_done,
+                       bool kill_daemon = false);
     void runLaptopSweep(std::function<void()> on_done);
     /** Second half of startMission, once both sweeps are clear. */
     void spawnLaunches();
@@ -186,9 +210,15 @@ private:
     bool force_stop_ = false;
     /** Bumped by every start / teardown; async chains abandon a stale one. */
     int mission_seq_ = 0;
+    /** Seq parked by a failed sweep; resumeAfterSweep only proceeds
+        if it still matches. -1 = nothing parked. */
+    int parked_launch_seq_ = -1;
     QString pending_laptop_cmd_;
     QStringList pending_robot_args_;
     QStringList robot_output_tail_;
+    bool robot_marker_seen_ = false;
+    bool robot_launch_spoke_ = false;
+    qint64 robot_spawn_ms_ = 0;
     QFile* mission_log_ = nullptr;
     QString mission_log_path_;
     // 40 was too short to be useful: cliff_horizon logs at 10 Hz and

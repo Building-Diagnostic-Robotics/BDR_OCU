@@ -27,6 +27,7 @@ QStringList sshBaseArgs(const RobotTarget& target) {
            << "-o" << "StrictHostKeyChecking=no"
            << "-o" << "UserKnownHostsFile=/dev/null"
            << "-o" << "BatchMode=yes"
+           << "-o" << "LogLevel=ERROR"
            << QStringLiteral("%1@%2").arg(target.ssh_user, target.host);
 }
 
@@ -43,6 +44,10 @@ QStringList sshBaseArgs(const RobotTarget& target) {
  * the data collector is given time to release the Seek SDK, and only the
  * survivors get -9. Exits quickly when nothing is running: every pgrep
  * loop breaks on its first iteration.
+ *
+ * `set +e` and `|| true` mean this script exits 0 whenever ssh lands;
+ * a non-zero from runRobotSweep is reachability (255) or the hang
+ * deadline (-1), not "a process survived".
  */
 const char* kRobotSweep =
     "set +e; "
@@ -68,6 +73,21 @@ const char* kRobotSweep =
     "done; "
     "pkill -9 -f '[/]pilot_control/unified_data_collector' >/dev/null 2>&1 || true; "
     "pkill -9 -f '[r]os2 launch pilot_control robot_' >/dev/null 2>&1 || true";
+
+/** Pre-launch only. A wedged CLI daemon can swallow the next
+    `ros2 launch`. Must not run at teardown — conclude / disarm still
+    need `ros2 service call`. `pkill` of `_ros2_daemon`, not
+    `ros2 daemon stop`: this sweep does not source kLaunchEnvPreamble,
+    so `ros2` is not on PATH (rc=127). Echo only when something died
+    so a no-op cannot hide in the mission log. */
+const char* kPreLaunchDaemonKill =
+    "; if pkill -f '[_]ros2_daemon' >/dev/null 2>&1; then "
+    "echo swept:ros2_daemon; fi";
+
+/** Printed after the login shell finishes sourcing, before `ros2 launch`.
+    The mute alarm keys off this so a MOTD / profile echo cannot count
+    as the robot having started. */
+constexpr const char* kLaunchBeginMarker = "BDR_LAUNCH_BEGIN";
 
 /** Upper bound for one robot sweep: 10 s launch wait + 5 s UDC wait +
     SSH round trip. Typical when nothing is running: ~1 s. */
@@ -107,6 +127,14 @@ void MissionController::hookProcessLogging(QProcess* proc, const QString& tag) {
                         robot_output_tail_.append(trimmed);
                         while (robot_output_tail_.size() > kRobotOutputTailMax) {
                             robot_output_tail_.removeFirst();
+                        }
+                        if (!robot_marker_seen_) {
+                            if (trimmed.contains(
+                                    QLatin1String(kLaunchBeginMarker))) {
+                                robot_marker_seen_ = true;
+                            }
+                        } else {
+                            robot_launch_spoke_ = true;
                         }
                     }
                 }
@@ -253,6 +281,10 @@ bool MissionController::startMission(const RoiPolygon& poly,
         return false;
     }
     robot_output_tail_.clear();
+    robot_marker_seen_ = false;
+    robot_launch_spoke_ = false;
+    robot_spawn_ms_ = 0;
+    parked_launch_seq_ = -1;
     if (!poly.valid() || !robot.valid) {
         if (error) *error = QStringLiteral("ROI and robot placement are both required.");
         return false;
@@ -296,7 +328,7 @@ bool MissionController::startMission(const RoiPolygon& poly,
     // `[...]` is safe here: no spaces (one argv), the inner -lc string is
     // double-quoted (no glob), and `set -f` covers a dropped quote layer.
     QString remote_script = QString::fromLatin1(kLaunchEnvPreamble) +
-        QStringLiteral("set -f; ");
+        QStringLiteral("set -f; echo %1; ").arg(QLatin1String(kLaunchBeginMarker));
     const bool any_roof_edge =
         std::any_of(poly.roof_edges.begin(), poly.roof_edges.end(),
                     [](bool marked) { return marked; });
@@ -337,17 +369,26 @@ bool MissionController::startMission(const RoiPolygon& poly,
         if (mission_seq_ != seq) {
             return;
         }
-        runRobotSweep([this, seq] {
+        runRobotSweep([this, seq](int rc, int) {
             if (mission_seq_ != seq) {
                 return;
             }
+            if (rc != 0) {
+                parked_launch_seq_ = seq;
+                emit launchPhase(QStringLiteral("Cleanup did not finish"));
+                emit robotSweepFailed(rc);
+                return;
+            }
             spawnLaunches();
-        });
+        }, /*kill_daemon=*/true);
     });
     return true;
 }
 
 void MissionController::spawnLaunches() {
+    robot_marker_seen_ = false;
+    robot_launch_spoke_ = false;
+    robot_spawn_ms_ = QDateTime::currentMSecsSinceEpoch();
     emit launchPhase(QStringLiteral("Starting the robot software…"));
     laptop_proc_->start("bash", QStringList() << "-lc" << pending_laptop_cmd_);
     robot_proc_->start("ssh", pending_robot_args_);
@@ -459,23 +500,61 @@ void MissionController::remoteDisarm(RemoteCallback on_done) {
     proc->start("ssh", args);
 }
 
-void MissionController::runRobotSweep(std::function<void()> on_done) {
+void MissionController::runRobotSweep(
+    std::function<void(int rc, int elapsed_ms)> on_done, bool kill_daemon) {
     if (!target_.valid) {
+        emit logLine(QStringLiteral("[sweep] robot skipped (no target)"));
         if (on_done) {
-            on_done();
+            on_done(0, 0);
         }
         return;
     }
     QStringList args = sshBaseArgs(target_);
     args.removeAll(QStringLiteral("-tt"));
-    args << QString::fromLatin1(kRobotSweep);
-    active_sweep_ = async_proc::run(this, QStringLiteral("ssh"), args,
-                                    kRobotSweepTimeoutMs,
-                                    [on_done](int, const QString&) {
-                                        if (on_done) {
-                                            on_done();
-                                        }
-                                    });
+    QString remote = QString::fromLatin1(kRobotSweep);
+    if (kill_daemon) {
+        remote += QString::fromLatin1(kPreLaunchDaemonKill);
+    }
+    args << remote;
+    const qint64 t0 = QDateTime::currentMSecsSinceEpoch();
+    active_sweep_ = async_proc::run(
+        this, QStringLiteral("ssh"), args, kRobotSweepTimeoutMs,
+        [this, on_done, t0](int rc, const QString& out) {
+            const int elapsed_ms =
+                int(QDateTime::currentMSecsSinceEpoch() - t0);
+            emit logLine(QStringLiteral("[sweep] robot rc=%1 elapsed=%2ms")
+                             .arg(rc)
+                             .arg(elapsed_ms));
+            if (!out.isEmpty()) {
+                const QStringList lines =
+                    out.split('\n', Qt::SkipEmptyParts);
+                for (const QString& line : lines) {
+                    emit logLine(QStringLiteral("[sweep] %1")
+                                     .arg(line.trimmed()));
+                }
+            }
+            if (on_done) {
+                on_done(rc, elapsed_ms);
+            }
+        });
+}
+
+void MissionController::resumeAfterSweep(bool proceed) {
+    if (!proceed || !mission_active_ || tearing_down_ ||
+        mission_seq_ != parked_launch_seq_) {
+        return;
+    }
+    if (pending_robot_args_.isEmpty()) {
+        emit logLine(QStringLiteral("[send] sweep resume with nothing to launch"));
+        parked_launch_seq_ = -1;
+        return;
+    }
+    parked_launch_seq_ = -1;
+    spawnLaunches();
+}
+
+bool MissionController::robotLaunchRunning() const {
+    return robot_proc_ && robot_proc_->state() == QProcess::Running;
 }
 
 void MissionController::runLaptopSweep(std::function<void()> on_done) {
@@ -543,7 +622,7 @@ void MissionController::teardownStep(TeardownStep step) {
             // hang up the pty and SIGHUP the launch — an instant death that
             // orphans every node.
             emit teardownPhase(QStringLiteral("Stopping the robot software…"));
-            runRobotSweep([this] { teardownStep(ReapRobot); });
+            runRobotSweep([this](int, int) { teardownStep(ReapRobot); });
             return;
         case ReapRobot:
             emit teardownPhase(QStringLiteral("Closing the robot session…"));

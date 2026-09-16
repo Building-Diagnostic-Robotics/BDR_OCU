@@ -346,7 +346,8 @@ private:
     void handleLaunchDeath(const QString& side, int exit_code);
     void maybePromptRevisit();
     /** Director entered a stop state while autonomy was on: one modeless
-        modal per distinct (state, reason) explaining how to resolve it. */
+        modal per distinct (state, reason) once kStopDwellSamples consecutive
+        samples are stopped. The corner pill updates on the first sample. */
     void maybePromptStop(const CoverageStatus& status);
     static bool isStopState(const QString& state);
     static QString stopHeadline(const CoverageStatus& status);
@@ -427,7 +428,9 @@ private:
     void updateMotorsChip();
     void appendLog(const QString& line);
     bool confirmDialog(const QString& title, const QString& body,
-                       const QString& accept_label);
+                       const QString& accept_label,
+                       const QString& reject_label = QStringLiteral("Cancel"));
+    void onRobotSweepFailed(int exit_code);
 
     // Core services.
     TileService* tiles_ = nullptr;
@@ -694,6 +697,7 @@ private:
     bool revisit_prompt_open_ = false;
     bool stop_prompt_open_ = false;
     QString stop_prompt_key_;   // last (state|stop|stale) explained
+    int stop_dwell_samples_ = 0;  // consecutive stopped status samples
     bool revisit_hold_ = false;  // WAITING_REVISIT latched (prompt edge)
     bool director_failed_ = false;
     // Director-boot bookkeeping. The only hard "death" signal is a launch
@@ -703,6 +707,12 @@ private:
     qint64 launch_wall_ms_ = 0;
     qint64 first_robot_topic_wall_ms_ = 0;
     bool director_wait_prompted_ = false;
+    /** One-shot mute log for this launch; reset with the rest of the
+        boot bookkeeping when the mission goes inactive. */
+    bool robot_mute_noted_ = false;
+    /** Sweep-failure dialog is up; the 180 s launch-wait prompt must
+        not stack an exec() on top of it. */
+    bool sweep_prompt_open_ = false;
     /** Start Scan was pressed before the coordinator accepted the session
         metadata; the push loop resumes Start Scan when it lands. */
     bool start_scan_pending_ = false;

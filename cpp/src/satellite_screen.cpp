@@ -15,6 +15,7 @@
 #include "async_process.hpp"
 #include "link_health_monitor.hpp"
 #include "mission_finalize_policy.hpp"
+#include "stop_prompt_policy.hpp"
 #include "components/bdr_message_box.hpp"
 #include "components/fpv_camera_view.hpp"
 #include "components/mission_finalize_dialog.hpp"
@@ -153,6 +154,9 @@ constexpr qint64 kDirectorFreshMs = 3000;
 // down automatically.
 constexpr qint64 kDirectorWaitPromptMs = 120000;
 constexpr qint64 kRobotLinkWaitPromptMs = 180000;
+/** Mute launch alarm. Clocked from spawnLaunches, not launch_wall_ms_
+    — the sweeps in front of spawn can eat ~31 s. Pill + log only. */
+constexpr qint64 kRobotMuteAlarmMs = 25000;
 
 // A clean teardown is ~5-10 s; past this the robot has most likely stopped
 // answering, so the operator is offered the local-only kill instead of
@@ -682,11 +686,14 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     launch_wall_ms_ = 0;
                     first_robot_topic_wall_ms_ = 0;
                     director_wait_prompted_ = false;
+                    robot_mute_noted_ = false;
+                    sweep_prompt_open_ = false;
                     start_scan_pending_ = false;
                     abort_consumed_ = false;
                     abort_save_used_ = false;
                     metadata_pushed_ = false;
                     stop_prompt_key_.clear();
+                    stop_dwell_samples_ = 0;
                     scan_run_state_ = ScanRunState::Idle;
                     scan_autonomy_ran_ = false;
                     manual_override_ = false;
@@ -726,6 +733,8 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             });
     connect(mission_, &MissionController::launchDied, this,
             &SatelliteScreen::handleLaunchDeath);
+    connect(mission_, &MissionController::robotSweepFailed, this,
+            &SatelliteScreen::onRobotSweepFailed);
     connect(mission_, &MissionController::launchPhase, this,
             [this](const QString& phase) {
                 launch_phase_ = phase;
@@ -5445,9 +5454,10 @@ void centerSatPrompt(QDialog* dialog, QWidget* parent) {
 }  // namespace
 
 bool SatelliteScreen::confirmDialog(const QString& title, const QString& body,
-                                    const QString& accept_label) {
+                                    const QString& accept_label,
+                                    const QString& reject_label) {
     QDialog* dialog = makeSatPrompt(this, title, body, accept_label,
-                                    QStringLiteral("Cancel"));
+                                    reject_label);
     dialog->setModal(true);
     const int rc = dialog->exec();
     delete dialog;
@@ -5545,6 +5555,9 @@ void SatelliteScreen::onDirectorWatchTick() {
         manager_watch_timer_->stop();
         return;
     }
+    if (sweep_prompt_open_) {
+        return;
+    }
     const CoverageStatus status = ros_->coverageStatus();
     if (status.fresh(kDirectorFreshMs)) {
         // Director is publishing: the boot wait is over. updateStatePill()
@@ -5559,13 +5572,32 @@ void SatelliteScreen::onDirectorWatchTick() {
     }
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     const bool have_link = first_robot_topic_wall_ms_ > 0;
+    const qint64 spawn_ms = mission_->robotSpawnMs();
+    const qint64 mute_ms = spawn_ms > 0 ? now - spawn_ms : 0;
+    const bool mute = !have_link && !mission_->robotLaunchSpoke() &&
+                      mission_->robotLaunchRunning() &&
+                      mute_ms >= kRobotMuteAlarmMs;
     const qint64 base = have_link ? first_robot_topic_wall_ms_ : launch_wall_ms_;
     const qint64 waited_ms = base > 0 ? now - base : 0;
     const qint64 waited_s = waited_ms / 1000;
-    setStatePill(have_link
-                     ? QStringLiteral("LAUNCHING · director %1s").arg(waited_s)
-                     : QStringLiteral("LAUNCHING · robot link %1s").arg(waited_s),
-                 QColor(kAmber));
+    if (mute) {
+        setStatePill(QStringLiteral("LAUNCHING · no output %1s")
+                         .arg(mute_ms / 1000),
+                     QColor(kAmber));
+        if (!robot_mute_noted_) {
+            robot_mute_noted_ = true;
+            appendLog(QStringLiteral(
+                          "[link] robot launch is silent after %1 s")
+                          .arg(mute_ms / 1000));
+        }
+    } else {
+        setStatePill(have_link
+                         ? QStringLiteral("LAUNCHING · director %1s")
+                               .arg(waited_s)
+                         : QStringLiteral("LAUNCHING · robot link %1s")
+                               .arg(waited_s),
+                     QColor(kAmber));
+    }
     // Keeps the step-5 corner pill's counter ticking; it is the only place a
     // field operator can read why Start Scan is still dead.
     refreshScanRunUi();
@@ -5618,6 +5650,58 @@ void SatelliteScreen::onDirectorWatchTick() {
     appendLog(QStringLiteral("[nav] operator cancelled the launch wait"));
     setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
+    teardownThen([this] { setSelectedStep(Step::EdgeReview); });
+}
+
+void SatelliteScreen::onRobotSweepFailed(int exit_code) {
+    const bool unreachable = exit_code == 255;
+    const bool timed_out = exit_code < 0;
+    const QString title =
+        unreachable ? QStringLiteral("Could not reach the robot")
+        : timed_out ? QStringLiteral("Robot cleanup timed out")
+                    : QStringLiteral("Robot cleanup failed");
+    QString body =
+        unreachable
+            ? QStringLiteral(
+                  "The laptop could not connect to the robot to clear old "
+                  "software. Launching now will likely fail.\n"
+                  "\nCancel, or launch anyway.")
+        : timed_out
+            ? QStringLiteral(
+                  "Clearing old software on the robot took too long. The "
+                  "robot may still be busy, or it may be fine.\n"
+                  "\nLaunch anyway, or cancel and try again.")
+            : QStringLiteral(
+                  "Clearing old software on the robot did not finish "
+                  "(code %1).\n"
+                  "\nCancel, or launch anyway.")
+                  .arg(exit_code);
+    const QString log_path = mission_->missionLogPath();
+    if (!log_path.isEmpty()) {
+        body += QStringLiteral("\n\nDetails for support: %1").arg(log_path);
+    }
+    // Timeout: Launch anyway is the likely story (slow but alive).
+    // Unreachable / other: Cancel is the safe primary.
+    const bool launch_is_primary = timed_out;
+    sweep_prompt_open_ = true;
+    const bool accepted = confirmDialog(
+        title, body,
+        launch_is_primary ? QStringLiteral("Launch anyway")
+                          : QStringLiteral("Cancel launch"),
+        launch_is_primary ? QStringLiteral("Cancel launch")
+                          : QStringLiteral("Launch anyway"));
+    sweep_prompt_open_ = false;
+    if (!mission_->missionActive()) {
+        return;
+    }
+    const bool launch_anyway =
+        launch_is_primary ? accepted : !accepted;
+    if (launch_anyway) {
+        appendLog(QStringLiteral("[nav] operator launched after sweep failed"));
+        mission_->resumeAfterSweep(true);
+        return;
+    }
+    appendLog(QStringLiteral("[nav] operator cancelled after sweep failed"));
     teardownThen([this] { setSelectedStep(Step::EdgeReview); });
 }
 
@@ -6971,8 +7055,8 @@ void SatelliteScreen::updateStatePill() {
         } else if (state == QLatin1String("WAITING_REVISIT")) {
             label = QStringLiteral("Revisit?");
         } else if (isStopState(state)) {
-            // The rail's reason label is hidden on step 5; the corner pill is
-            // the operator's only view of WHY the robot is standing still.
+            // Instant. maybePromptStop dwells three samples before the
+            // modal; the pill is the only surface for a one-tick blip.
             label = stopHeadline(status);
         }
         setScanStatusPill(label, color);
@@ -7074,6 +7158,17 @@ SatelliteScreen::ScanBlock SatelliteScreen::scanBlockReason() const {
     const qint64 waited_s =
         base > 0 ? (QDateTime::currentMSecsSinceEpoch() - base) / 1000 : 0;
     if (first_robot_topic_wall_ms_ == 0) {
+        const qint64 spawn_ms = mission_->robotSpawnMs();
+        const qint64 mute_ms =
+            spawn_ms > 0 ? QDateTime::currentMSecsSinceEpoch() - spawn_ms : 0;
+        if (!mission_->robotLaunchSpoke() && mission_->robotLaunchRunning() &&
+            mute_ms >= kRobotMuteAlarmMs) {
+            out.label = QStringLiteral("No output · %1s").arg(mute_ms / 1000);
+            out.detail = QStringLiteral(
+                "The robot session is up, but it has not printed a line. "
+                "Cancel and launch again if this stays silent.");
+            return out;
+        }
         out.label = QStringLiteral("Connecting · %1s").arg(waited_s);
         out.detail = QStringLiteral(
             "Waiting for the first data from the robot. Check that the robot "
@@ -7175,7 +7270,10 @@ void SatelliteScreen::maybePromptStop(const CoverageStatus& status) {
     const QString state = status.state.toUpper();
     const QString key = state + QLatin1Char('|') + status.stop +
                         QLatin1Char('|') + status.stale;
-    if (!isStopState(state)) {
+    const bool stopped = isStopState(state);
+    stop_dwell_samples_ =
+        stop_prompt_policy::advanceStopDwell(stop_dwell_samples_, stopped);
+    if (!stopped) {
         stop_prompt_key_.clear();   // re-arm for the next distinct stop
         return;
     }
@@ -7183,6 +7281,10 @@ void SatelliteScreen::maybePromptStop(const CoverageStatus& status) {
     // driving by hand, and not a stop we have already explained.
     if (!mission_->missionActive() || scan_run_state_ != ScanRunState::Running ||
         manual_override_ || stop_prompt_open_ || key == stop_prompt_key_) {
+        return;
+    }
+    if (!stop_prompt_policy::stopPromptDue(stop_dwell_samples_, false,
+                                           false)) {
         return;
     }
     stop_prompt_key_ = key;

@@ -1226,9 +1226,16 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  and returns to Edge Review. The status watchdog (`onDirectorWatchTick`,
  1 Hz) is advisory: it drives a `LAUNCHING · robot link / director Xs`
  pill, starts its clock at the first robot topic (`noteRobotTopic`), and
- after 120 s (180 s with no topic at all) asks Keep waiting / cancel. It
- must never tear down by itself — the full stack + Zenoh session takes
- 30-60 s and a 20 s auto-teardown killed a healthy launch in the field.
+ after 120 s (180 s with no topic at all) asks Keep waiting / cancel. A
+ mute robot launch (SSH up, no output from the launch itself — the
+ first line after `BDR_LAUNCH_BEGIN` — for 25 s) only changes the
+ pill and logs once. Lines before the marker are profile noise; a
+ marker with nothing after it is the silent-`ros2 launch` case seen
+ in the field. That clock is
+ `robotSpawnMs()` from `spawnLaunches`, not `launch_wall_ms_`, because
+ the sweeps in front of spawn can eat ~31 s. It must never tear down by
+ itself — the full stack + Zenoh session takes 30-60 s and a 20 s
+ auto-teardown killed a healthy launch in the field.
  Do not add a link gate to `end_button_`.
 - **A disabled Start Scan must always say why, and the step-5 corner pill
  is the only place it can.** The rail is hidden on step 5, and a disabled
@@ -1240,6 +1247,23 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  window is exactly where the operator used to read a hardcoded **"Ready"**
  next to a dead button. Do not re-add a default pill string that claims
  readiness, and do not collapse the two owners into one.
+- **The stop modal dwells three `/coverage/status` samples
+ (`stop_prompt_policy::kStopDwellSamples`).** The executor latches a
+ stop reason for as little as one 20 Hz tick (`degenerate_path` at the
+ end of a sweep that has not settled yet); the status topic is 1 Hz, so
+ a healthy robot can look stopped on a single sample. The corner pill
+ still updates on the first sample — that is the operator's view of a
+ blip. Do not drop the dwell, do not exempt ERROR / STALE_INPUT, and do
+ not move the pill behind the same counter. A stop that persists is
+ operator-actionable; a one-tick latch is not.
+ The counter counts **consecutive stopped samples, not repeats of one
+ reason** — a robot failing to replan cycles `blocked_*` →
+ `route_invalid` → `replan_*` across samples, so keying the dwell to a
+ matching `state|stop|stale` let a genuinely stuck robot reset the count
+ forever and never prompt. `stop_prompt_key_` is for the
+ already-explained dedupe only. `stop_dwell_samples_` resets in the
+ `missionActiveChanged(false)` handler with the rest of the run state;
+ leaving it set let the next mission's first stop skip the dwell.
 - **Operator dialogs carry no raw launch output.** The robot launch is
  10-20 Hz of cliff / tfmini INFO lines, so a tail tells the operator
  nothing and the traceback worth reading has already scrolled out of it.
@@ -1256,13 +1280,19 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 - **Launch/teardown primitives are shared and deliberately dumb.**
  `cpp/include/launch_env.hpp` holds the one env preamble and the one
  laptop sweep used by both the legacy Stage 4/5 path and Stage 6.
- `MissionController::kRobotSweep` is the single robot sweep, run before
+ `MissionController::kRobotSweep` is the shared robot sweep, run before
  a launch (a lingering step-2 map-collection tree must not coexist with
  the director) and at teardown: **`pkill -INT` the launch** (Ctrl-C —
  launch shuts its ~25 children down in order), wait for it to exit, kill
  by name what ignores shutdown (Fast-LIO, Livox, ODrive, director, MPC,
  UDC, bag record, zenohd), wait for UDC to release the Seek SDK, `-9`
- only the survivors. **Never SIGKILL `ros2 launch` first and never
+ only the survivors. The pre-launch path appends a `_ros2_daemon` kill
+ after that body — a wedged CLI daemon can block the next `ros2 launch`
+ — and must NOT run at teardown, where an in-flight `ros2 service call`
+ (conclude / disarm) still needs it. A non-zero sweep rc is ssh
+ unreachable (255) or the 20 s hang deadline (-1); the script itself
+ cannot fail (`set +e` / `|| true`). The launch path parks and asks
+ before spawning; teardown only logs. **Never SIGKILL `ros2 launch` first and never
  `terminate()` the local `ssh -tt` before the remote launch has exited**
  — both orphan every node (the stray `ros2 bag record` found on
  2026-09-13 was exactly that), and the next launch then fights orphans

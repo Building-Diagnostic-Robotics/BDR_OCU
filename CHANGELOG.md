@@ -10,6 +10,14 @@ before pushing to `main` that triggers a release.
 
 ---
 
+## Unreleased
+
+- CI embeds the ArcGIS key so satellite maps work after OTA
+- Launch warns at 25s if the robot never prints a line
+- Failed robot cleanup now asks before launching anyway
+- Pre-launch clears a wedged ROS 2 daemon
+- Stop modal waits 3s so a sweep-end blip is not a prompt
+
 ## Unreleased - 2026-09-15
 
 - Sync laptop/robot ~/pilot_ws; switch rebuilds only changed pkgs
