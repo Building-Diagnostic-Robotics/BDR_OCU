@@ -6365,6 +6365,74 @@ void SatelliteScreen::showFinalizeProgress(const QString& phase) {
                     showFinalizeProgress(QStringLiteral("Force stopping…"));
                     mission_->forceStopTeardown();
                 });
+        connect(finalize_dialog_, &MissionFinalizeDialog::skipCopyRequested,
+                this, [this] {
+                    appendLog(QStringLiteral(
+                        "[mission] operator skipped thumb-drive copy"));
+                    ros_->skipCopy([this](bool ok, const QString& detail) {
+                        if (ok) {
+                            appendLog(QStringLiteral(
+                                          "[mission] skip-copy accepted: %1")
+                                          .arg(detail));
+                            return;
+                        }
+                        appendLog(QStringLiteral(
+                                      "[mission] skip-copy via bridge failed "
+                                      "(%1) — retrying over SSH")
+                                      .arg(detail));
+                        mission_->remoteServiceCall(
+                            QStringLiteral("/coverage/skip_copy"),
+                            QStringLiteral("std_srvs/srv/Trigger"),
+                            QStringLiteral("{}"),
+                            [this](bool ssh_ok, const QString& ssh_detail) {
+                                appendLog(
+                                    ssh_ok ? QStringLiteral(
+                                                 "[mission] skip-copy "
+                                                 "accepted: %1")
+                                                 .arg(ssh_detail)
+                                           : QStringLiteral(
+                                                 "[mission] skip-copy "
+                                                 "failed (%1)")
+                                                 .arg(ssh_detail));
+                            });
+                    });
+                });
+        connect(finalize_dialog_, &MissionFinalizeDialog::abortAndSaveRequested,
+                this, [this] {
+                    appendLog(QStringLiteral(
+                        "[mission] operator abort-and-save"));
+                    ros_->abortCoverage(
+                        true, [this](bool ok, const QString& detail) {
+                            if (ok) {
+                                appendLog(QStringLiteral(
+                                              "[mission] abort-and-save "
+                                              "accepted: %1")
+                                              .arg(detail));
+                                return;
+                            }
+                            appendLog(QStringLiteral(
+                                          "[mission] abort-and-save via "
+                                          "bridge failed (%1) — retrying "
+                                          "over SSH")
+                                          .arg(detail));
+                            mission_->remoteServiceCall(
+                                QStringLiteral("/coverage/abort"),
+                                QStringLiteral("std_srvs/srv/SetBool"),
+                                QStringLiteral("{data: true}"),
+                                [this](bool ssh_ok,
+                                       const QString& ssh_detail) {
+                                    appendLog(
+                                        ssh_ok ? QStringLiteral(
+                                                     "[mission] abort-and-save "
+                                                     "accepted: %1")
+                                                     .arg(ssh_detail)
+                                               : QStringLiteral(
+                                                     "[mission] abort-and-save "
+                                                     "failed (%1)")
+                                                     .arg(ssh_detail));
+                                });
+                        });
+                });
     }
     finalize_dialog_->setTitle(complete_mission_in_flight_
                                    ? QStringLiteral("Completing Mission")
@@ -6447,6 +6515,17 @@ void SatelliteScreen::startCompleteMissionSettle() {
             copy == QLatin1String("done") ||
             copy == QLatin1String("skipped") ||
             copy == QLatin1String("failed");
+        if (finalize_dialog_) {
+            if (copy == QLatin1String("failed") ||
+                copy == QLatin1String("waiting_for_drive")) {
+                finalize_dialog_->setSkipCopyAvailable(true);
+            }
+            // 250 ms × 40 = 10 s. Conclude can refuse while work is still
+            // active; abort-and-save is the door that still reaches disk.
+            if (!save_done && conclude_wait_ticks_ >= 40) {
+                finalize_dialog_->setAbortAvailable(true);
+            }
+        }
         // 250 ms × 120 = 30 s ceiling. Do not wait on the thumb-drive
         // copy — Dashboard surfaces that. A hung conclude RPC must not
         // strand the operator on this page.
@@ -6493,13 +6572,24 @@ void SatelliteScreen::executeCompleteMissionNormalPath() {
                      : QStringLiteral("[mission] conclude failed (%1) — "
                                       "retrying over SSH")
                            .arg(detail));
+        if (!ok && finalize_dialog_ && !detail.isEmpty()) {
+            finalize_dialog_->setDetail(detail, true);
+        }
         if (ok) {
             return;
         }
-        mission_->remoteServiceCall(QStringLiteral("/coverage/conclude"),
-                                    QStringLiteral("std_srvs/srv/Trigger"),
-                                    QStringLiteral("{}"),
-                                    [](bool, const QString&) {});
+        mission_->remoteServiceCall(
+            QStringLiteral("/coverage/conclude"),
+            QStringLiteral("std_srvs/srv/Trigger"),
+            QStringLiteral("{}"),
+            [this](bool ssh_ok, const QString& ssh_detail) {
+                if (!complete_mission_in_flight_ || !finalize_dialog_) {
+                    return;
+                }
+                if (!ssh_ok && !ssh_detail.isEmpty()) {
+                    finalize_dialog_->setDetail(ssh_detail, true);
+                }
+            });
     });
 }
 
