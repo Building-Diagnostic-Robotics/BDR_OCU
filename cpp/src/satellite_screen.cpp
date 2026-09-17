@@ -14,6 +14,7 @@
 
 #include "alignment_geometry.hpp"
 #include "async_process.hpp"
+#include "dev_flags.hpp"
 #include "link_health_monitor.hpp"
 #include "mission_finalize_policy.hpp"
 #include "stop_prompt_policy.hpp"
@@ -2671,6 +2672,15 @@ bool SatelliteScreen::roiMatchesConfirmed() const {
 bool SatelliteScreen::stepReachable(Step step) const {
     if (!stepAvailable(step)) {
         return false;
+    }
+    // BDR_REWIRE: dev mode lets the operator click any step chip so the five
+    // pages can be inspected without a robot. stepAvailable() above still
+    // applies — it is trim, not a gate, and bypassing it would show a step
+    // the current mode does not have. Step 5 renders with no telemetry and
+    // its own controls stay gated by scanBlockReason(); this only opens
+    // navigation. A Release build compiles this out.
+    if constexpr (kDevMode) {
+        return true;
     }
     // The scan page only exists for a launched stack. The way onto it is
     // Edge Review Next (which launches), never a chip or a skip-ahead.

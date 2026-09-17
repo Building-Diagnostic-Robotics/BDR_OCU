@@ -51,6 +51,7 @@ connected.** The New-Scan metadata modal still shows (Cancel proceeds).
 | 5 | Start Scan metadata push | `app_shell.cpp` metadata callback (`!ok && !kDevMode`) | Failed push no longer aborts arming |
 | 5 | Complete Mission needs finished run | `planner_screen.cpp` `updateFooter()` + `onCompleteMissionClicked()` | Allowed without a `Completed` run |
 | 4/5 | Link-offline grey-out | `app_shell.cpp` `isRobotLinkOffline()` / `isRobotLinkUnreachable()` | Both return `false` → controls stay live |
+| 6 | Step chip nav gates | `satellite_screen.cpp` `stepReachable()` | All five steps clickable without a named plan, a collected map, a confirmed ROI, or a live mission. `stepAvailable()` still applies — it is trim (the office hides steps 2 and 5, measured hides step 1), not a gate, so bypassing it would show a step the mode does not have. Step 5 renders with no telemetry and its own controls remain gated by `scanBlockReason()` |
 
 **Re-assert verification:** a plain Release build (`-DCMAKE_BUILD_TYPE=Release`,
 no flag) restores every gate above. `rg -n 'kDevMode|BDR_REWIRE' cpp/`
