@@ -12,9 +12,9 @@ before pushing to `main` that triggers a release.
 
 ## Unreleased
 
+- Robot map is now clearly visible on the light-mode canvas
 - Satellite map rotates to match the point cloud as you pick pairs
-- A suspect pair is ringed and named so you know what to re-pick
-- Alignment weights picks by zoom; one bad pair can't drag the fit
+- A suspect pair is ringed and named; one bad pick can't drag the fit
 - OCU update banner now appears within ~2 min of a release, not 5
 - Robot software check runs the moment you reach the Dashboard
 

@@ -1571,8 +1571,18 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  puts all the density information in the alpha channel, so it vanishes on
  a white drafting surface — including in the step-2 picker, where the
  operator places correspondences. `tintDensityRasterForLightCanvas` is the
- light variant: a flat RGB rewrite that preserves alpha, so it does not
- re-run PCL. `SatelliteMapWidget` caches it in `map_raster_painted_` and
+ light variant: it rewrites RGB **and lifts the alpha** (120-235 → 160-255,
+ proportionally, so the density ordering survives), which is the half that
+ does the real work — re-inking alone left 90% of a real cloud under 4.5:1
+ and the bulk of it *worse* in light than in dark. Contrast compresses at
+ the bright end, so even pure black at the renderer's floor only reaches
+ 3.6:1, bare parity with dark mode, and glare eats that margin. The floor
+ is structural and **not** a resolution knob: the 2nd-percentile hit count
+ is always 1, so `log1p(0)` pins every single-hit pixel (76% of a real
+ cloud) to `kSingleHitAlpha` whatever `kProjectionMaxDim` is — verified
+ 4096 down to 512. Alpha and ink are the only two levers. It is still a
+ per-pixel pass over the finished raster, so it does not re-run PCL.
+ `SatelliteMapWidget` caches it in `map_raster_painted_` and
  keeps `map_raster_` pristine (tinting the tinted copy would compound);
  `SatelliteScreen::updateCorrespondenceUi` applies it to the PCD pane only
  — the satellite stitch is a photograph and must never be recolored.

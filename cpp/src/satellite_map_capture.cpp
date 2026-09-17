@@ -34,6 +34,15 @@ constexpr int kProjectionMinDim = 64;
 constexpr double kTopDownZMin = -10.0;
 constexpr double kTopDownZMax = 10.0;
 
+// The raster carries every point at one flat gray and puts all the density
+// information in the alpha channel, so these two ends are the faintest and
+// densest returns the operator ever sees. They are tuned for a near-black
+// canvas; tintDensityRasterForLightCanvas remaps onto its own range.
+constexpr int kSingleHitAlpha = 120;
+constexpr int kFlatAlpha = 170;
+constexpr int kMaxHitAlpha = 235;
+constexpr int kPointGray = 210;
+
 constexpr const char* kManifestBegin = "__MANIFEST_BEGIN__";
 constexpr const char* kManifestEnd = "__MANIFEST_END__";
 
@@ -260,10 +269,6 @@ QImage renderTopDownAlphaDensity(const QString& pcd_path, QRectF* bounds_out,
     const double log_high = std::log1p(double(high_count - 1u));
     const double log_range = std::max(1e-6, log_high - log_low);
     const bool has_contrast = high_count > low_count;
-    constexpr int kSingleHitAlpha = 120;
-    constexpr int kFlatAlpha = 170;
-    constexpr int kMaxHitAlpha = 235;
-    constexpr int kPointGray = 210;
 
     for (int v = 0; v < height; ++v) {
         QRgb* row = reinterpret_cast<QRgb*>(image.scanLine(v));
@@ -298,11 +303,25 @@ QImage tintDensityRasterForLightCanvas(const QImage& raster) {
     if (raster.isNull()) {
         return raster;
     }
-    // Dark enough to read as ink on white at the renderer's lowest alpha
-    // (120), without going pure black — the cloud is survey data, not a
-    // hard-edged drawing, and full black makes the sparse returns look like
-    // noise speckle.
-    constexpr int kLightCanvasPointGray = 52;
+    // Re-inking alone is not enough, which is why this also lifts the alpha.
+    // Contrast compresses at the bright end: the same absolute brightness
+    // step measures 3.6:1 against the dark canvas and only 2.6:1 against a
+    // white one. On a real field cloud 76% of occupied pixels sit at
+    // kSingleHitAlpha, so most of the cloud read WORSE in light mode than in
+    // dark. Darker ink cannot close that — even pure black at the renderer's
+    // floor reaches just 3.6:1, bare parity with dark mode, and glare eats
+    // the margin. Ink 24 over this range measures 5.0:1 on the CAD sheet and
+    // 4.7:1 on the picker's matte.
+    //
+    // That floor is structural rather than a resolution artifact: the
+    // 2nd-percentile hit count is always 1, so log1p(0) pins every
+    // single-hit pixel to it whatever kProjectionMaxDim is (checked 4096
+    // down to 512). Alpha and ink are the only two knobs on this.
+    constexpr int kLightCanvasPointGray = 24;
+    constexpr int kLightFloorAlpha = 160;
+    constexpr int kLightPeakAlpha = 255;
+    constexpr double kSourceSpan =
+        double(kMaxHitAlpha - kSingleHitAlpha);
 
     QImage out = raster.convertToFormat(QImage::Format_ARGB32);
     for (int y = 0; y < out.height(); ++y) {
@@ -312,8 +331,16 @@ QImage tintDensityRasterForLightCanvas(const QImage& raster) {
             if (alpha == 0) {
                 continue;
             }
+            // Proportional, so the density ordering the operator reads the
+            // roof's structure from survives the lift.
+            const double t = std::clamp(
+                double(alpha - kSingleHitAlpha) / kSourceSpan, 0.0, 1.0);
+            const int lifted =
+                kLightFloorAlpha +
+                int(std::round(t * double(kLightPeakAlpha -
+                                          kLightFloorAlpha)));
             row[x] = qRgba(kLightCanvasPointGray, kLightCanvasPointGray,
-                           kLightCanvasPointGray, alpha);
+                           kLightCanvasPointGray, lifted);
         }
     }
     return out;
