@@ -34,6 +34,13 @@ public:
     void setImage(const QImage& image);
     bool hasImage() const { return !image_.isNull(); }
     QSize imageSize() const { return image_.size(); }
+    /**
+     * Screen pixels per image pixel, as currently displayed. Read by the
+     * alignment pick-precision model: a pick made zoomed out is worth less
+     * than one made zoomed in, because the operator could not have placed it
+     * as finely. See SatelliteScreen::pairSigmaM.
+     */
+    double scale() const { return scale_; }
 
     void setPickEnabled(bool enabled);
     /** Greys the pane out and refuses picks — used for "not your turn". */

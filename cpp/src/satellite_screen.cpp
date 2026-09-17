@@ -109,6 +109,16 @@ constexpr int kCorrPcdPaneStretch = 42;
 // inside this, and a dead link should not hold the operator for long.
 constexpr int kImageryProbeTimeoutMs = 3000;
 
+// Alignment pick-precision model. Careful crosshair placement, in SCREEN
+// pixels — this subsumes the integer quantisation of QMouseEvent::pos(),
+// which is the smaller term.
+constexpr double kPickScreenPx = 1.5;
+// Irreducible per-pick error: imagery internal distortion, feature ambiguity,
+// cloud edge sharpness. Without a floor a hard-zoomed pick would tend to
+// sigma -> 0 and steamroll every other pair, when in truth no amount of zoom
+// localises a roof corner in satellite imagery to a centimetre.
+constexpr double kPickFloorM = 0.12;
+
 /**
  * Per-step operator-facing strings. `arrive` is what the footer promises
  * when this step is the *destination*, so the button always names where it
@@ -5202,6 +5212,26 @@ int SatelliteScreen::minCorrespondences() const {
     return capture_gps_.valid ? 3 : 5;
 }
 
+double SatelliteScreen::pairSigmaM(const Correspondence& c,
+                                   double px_per_m) const {
+    // Satellite pixels only become metres once a scale is known; with none,
+    // that side contributes nothing and the cloud sigma plus the floor carry
+    // the weighting on their own.
+    const double sat_m = (px_per_m > 0.0) ? (c.sigma_sat_px / px_per_m) : 0.0;
+    const double pcd_m = std::max(0.0, c.sigma_pcd_m);
+    return std::sqrt(sat_m * sat_m + pcd_m * pcd_m +
+                     kPickFloorM * kPickFloorM);
+}
+
+QVector<double> SatelliteScreen::correspondenceSigmas(double px_per_m) const {
+    QVector<double> sigmas;
+    sigmas.reserve(correspondences_.size());
+    for (const Correspondence& c : correspondences_) {
+        sigmas.append(pairSigmaM(c, px_per_m));
+    }
+    return sigmas;
+}
+
 QString SatelliteScreen::loadSiteImage() {
     if (current_job_id_.isEmpty()) {
         return QStringLiteral(
@@ -5360,6 +5390,15 @@ void SatelliteScreen::onSatellitePicked(QPointF image_pt) {
         return;
     }
     pending_sat_px_ = image_pt;
+    // Precision is set by the view the pick was made in, so it has to be read
+    // now — the operator is free to zoom between the two halves of a pair.
+    // The pane shows the stitch unprojected here, so screen px per displayed
+    // px IS screen px per original px; the parallel OCU additionally divides
+    // by its re-projected canvas scale, which this screen has no equivalent
+    // of until the aligned preview lands.
+    const double view_scale = sat_pick_ ? sat_pick_->scale() : 1.0;
+    pending_sat_sigma_px_ =
+        (view_scale > 1e-9) ? (kPickScreenPx / view_scale) : kPickScreenPx;
     have_pending_sat_ = true;
     updateCorrespondenceUi();
 }
@@ -5371,8 +5410,20 @@ void SatelliteScreen::onPcdPicked(QPointF image_pt) {
     Correspondence pair;
     pair.sat_px = pending_sat_px_;
     pair.pcd_m = pcdImageToWorld(pcd_bounds_m_, pcd_image_.size(), image_pt);
+    pair.sigma_sat_px = pending_sat_sigma_px_;
+    // The raster's ground scale is known exactly, so this side lands in metres
+    // directly. Same (width - 1) span pcdImageToWorld maps over.
+    const double view_scale = pcd_pick_ ? pcd_pick_->scale() : 1.0;
+    const double m_per_raster_px =
+        (pcd_image_.isNull() || pcd_bounds_m_.width() <= 0.0)
+            ? 0.0
+            : pcd_bounds_m_.width() / std::max(1, pcd_image_.width() - 1);
+    pair.sigma_pcd_m = (view_scale > 1e-9)
+                           ? (kPickScreenPx / view_scale) * m_per_raster_px
+                           : kPickScreenPx * m_per_raster_px;
     correspondences_.append(pair);
     have_pending_sat_ = false;
+    pending_sat_sigma_px_ = 0.0;
     updateCorrespondenceUi();
 }
 
@@ -5385,6 +5436,7 @@ void SatelliteScreen::onUndoCorrespondence() {
     }
     if (have_pending_sat_) {
         have_pending_sat_ = false;
+        pending_sat_sigma_px_ = 0.0;
     } else if (!correspondences_.isEmpty()) {
         correspondences_.removeLast();
     }
@@ -5394,6 +5446,7 @@ void SatelliteScreen::onUndoCorrespondence() {
 void SatelliteScreen::onClearCorrespondences() {
     correspondences_.clear();
     have_pending_sat_ = false;
+    pending_sat_sigma_px_ = 0.0;
     pcd_to_sat_ = Similarity2D{};
     align_rmse_m_ = 0.0;
     alignment_confirmed_ = false;
@@ -5414,6 +5467,7 @@ void SatelliteScreen::resetAlignmentSession() {
     site_manifest_ = TileService::SiteManifest{};
     correspondences_.clear();
     have_pending_sat_ = false;
+    pending_sat_sigma_px_ = 0.0;
     pcd_to_sat_ = Similarity2D{};
     align_rmse_m_ = 0.0;
     alignment_confirmed_ = false;
@@ -5518,6 +5572,14 @@ void SatelliteScreen::updateCorrespondenceUi() {
     const int sat_count = pairs + (have_pending_sat_ ? 1 : 0);
     const QString muted = mutedColor(dark_mode_);
     const QString text = textColor(dark_mode_);
+    // The studentised outlier test and leaveOneOutOutlier both abstain below 4
+    // pairs, so a GPS-seeded 3-pair fit is solvable but unchecked. Say so —
+    // otherwise a minimum-effort alignment looks as verified as a good one.
+    const QString requirement_note =
+        !capture_gps_.valid
+            ? QStringLiteral(" — no GPS seed")
+            : (required < 4 ? QStringLiteral(" — 4+ to check for a bad pick")
+                            : QString());
 
     // Instruction (235:2385): prompt in light grey, requirement muted.
     corr_instruction_->setText(
@@ -5528,8 +5590,7 @@ void SatelliteScreen::updateCorrespondenceUi() {
                   "<span style='color:%2'>(min %3 pairs required%4)</span>")
                   .arg(text, muted)
                   .arg(required)
-                  .arg(capture_gps_.valid ? QString()
-                                          : QStringLiteral(" — no GPS seed"))
+                  .arg(requirement_note)
             : QStringLiteral(
                   "<span style='color:%1'>Capture a point cloud from the "
                   "robot</span> <span style='color:%2'>— then click matching "
@@ -5618,8 +5679,21 @@ void SatelliteScreen::onAlignClicked() {
         pcd.append(c.pcd_m);
         sat.append(c.sat_px);
     }
-    const auto fit = estimateSimilarity2D(pcd, sat);
-    if (!fit || !fit->transform.valid) {
+    // The satellite half of each pair's sigma is in pixels, so weighting needs
+    // a px/m to convert it. The manifest's own ground resolution is the honest
+    // source; only if it is missing is a scale bootstrapped from an unweighted
+    // seed fit, which is enough because sigma ratios move slowly with scale.
+    double px_per_m = (site_manifest_.res_m > 0.0)
+                          ? (1.0 / site_manifest_.res_m)
+                          : 0.0;
+    if (px_per_m <= 0.0) {
+        const auto seed = estimateSimilarity2D(pcd, sat);
+        if (seed && seed->transform.valid) {
+            px_per_m = seed->transform.scalePxPerM();
+        }
+    }
+    const auto fit = fitSimilarityRobust(pcd, sat, correspondenceSigmas(px_per_m));
+    if (!fit || !fit->fit.transform.valid) {
         const QString why = QStringLiteral(
             "Could not estimate a 2D transform. Spread the points around "
             "the site and try again.");
@@ -5629,9 +5703,11 @@ void SatelliteScreen::onAlignClicked() {
                 .arg(uiThemeTokens(dark_mode_).danger, why));
         return;
     }
-    pcd_to_sat_ = fit->transform;
-    align_rmse_m_ = fit->rmse_m;
-    appendLog(QStringLiteral("[align] fit from %1 pairs (%2), RMSE %3, "
+    pcd_to_sat_ = fit->fit.transform;
+    // Weighted, so this is the residual measured against what each pick was
+    // actually worth rather than against an assumption that all are equal.
+    align_rmse_m_ = fit->fit.weighted_rmse_m;
+    appendLog(QStringLiteral("[align] fit from %1 pairs (%2), weighted RMSE %3, "
                              "%4 px/m")
                   .arg(correspondences_.size())
                   .arg(pcd_to_sat_.reflected
@@ -5639,6 +5715,24 @@ void SatelliteScreen::onAlignClicked() {
                            : QStringLiteral("scale, rotation"))
                   .arg(units::formatLength(align_rmse_m_, 3))
                   .arg(pcd_to_sat_.scalePxPerM(), 0, 'f', 2));
+    // The robust pass also reports which pairs disagree with the rest. Stage 6
+    // has no surface for that yet (the Figma correspondence frames carry no
+    // per-pair markers), so it goes to the mission log, where it is at least
+    // recoverable when an operator asks why a fit looked off.
+    for (int index : fit->outliers) {
+        appendLog(QStringLiteral("[align] pair %1 is %2 sigma off its own "
+                                 "expected precision (residual %3)")
+                      .arg(index + 1)
+                      .arg(fit->studentized[index], 0, 'f', 1)
+                      .arg(units::formatLength(fit->fit.residuals_m[index], 3)));
+    }
+    for (int index : fit->weakly_checked) {
+        appendLog(QStringLiteral("[align] pair %1 carries too much leverage to "
+                                 "be checked; a blunder under %2 would be "
+                                 "invisible")
+                      .arg(index + 1)
+                      .arg(units::formatLength(fit->min_detectable_m[index], 2)));
+    }
     applyAlignmentAnchor();
     updateCorrespondenceUi();
 }

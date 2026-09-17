@@ -12,6 +12,8 @@ before pushing to `main` that triggers a release.
 
 ## Unreleased
 
+- Alignment weights each pick by the zoom it was made at
+- One mispicked pair no longer drags the whole alignment
 - OCU update banner now appears within ~2 min of a release, not 5
 - Robot software check runs the moment you reach the Dashboard
 - "Later" on the robot banner now snoozes 1 h instead of 4 h

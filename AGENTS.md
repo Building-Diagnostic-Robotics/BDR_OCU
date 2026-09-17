@@ -520,8 +520,10 @@ are missing. Modal is `show()`, not `exec()`.
   result detail only.
 - **Do NOT add a production branch selector.** Changing the target
   means changing `kRobotDeployBranch` and shipping an OCU.
-- **Do NOT treat** `pilot_control/scripts/F2C/cpp/` as source of
-  truth — this binary is the only copy.
+- **Do NOT build or ship from** `pilot_control/scripts/F2C/cpp/`.
+  That tree is a **live parallel OCU**, not a stale fork — alignment
+  work lands there first and is ported here (see "Porting from the
+  parallel OCU" under Stage 6). This repo is the only copy that ships.
 - **Do NOT call `workspacePackageNames()`** from the static
   `packagesForChangedFiles`. The static map and the unmapped /
   `package.xml` A/D/R/C guard must stay lock-step with
@@ -1126,6 +1128,48 @@ across plans or visits. A cancelled Back keeps everything.
 The `(image, bounds_m)` pair IS the point cloud's scale bookkeeping — there
 is no metres-per-pixel member. Convert with `pcdImageToWorld` /
 `worldToPcdImage`. Raster row 0 is **max northing**, so both helpers flip Y.
+
+The fit is **precision-weighted and robust**, not plain least squares.
+Each pick records the zoom it was made at (`Correspondence::sigma_sat_px`
+/ `sigma_pcd_m`, captured in `onSatellitePicked` / `onPcdPicked` from
+`PanZoomImageWidget::scale()` — the operator zooms between the two halves
+of a pair, so it cannot be recovered later). `pairSigmaM` combines the two
+sides in PCD metres over `kPickFloorM`, and `onAlignClicked` runs
+`fitSimilarityRobust`, so a sloppy pick is downweighted instead of
+dragging the whole solve. `align_rmse_m` therefore holds **weighted**
+RMSE — the field name predates the change and is kept for schema
+compatibility. Sigma needs a px/m to make the satellite term metric:
+the manifest's `res_m` is the honest source, and only when it is missing
+is a scale bootstrapped from an unweighted seed fit.
+
+The robust pass also reports `outliers`, `weakly_checked`, `studentized`
+and `min_detectable_m`. **None of that has a UI surface yet** — the Figma
+correspondence frames carry no per-pair markers — so it goes to the
+mission log. Do not read the absence of a warning as an all-clear below
+4 pairs: both the studentised test and `leaveOneOutOutlier` abstain
+there, which is why the 3-pair GPS-seeded minimum is annotated
+"4+ to check for a bad pick" in the instruction bar.
+
+### Porting from the parallel OCU
+
+`pilot_control/scripts/F2C/cpp/` (pilot_ws branch `autonomy`) is a **live
+parallel OCU** where alignment work is developed. `similarity_2d.*` and
+`alignment_geometry.*` are ports of that tree at commit `a287113`, and
+their file headers name it. Keep the **code** identical to upstream —
+the provenance note is the only intended difference — so the next port
+stays a three-way diff instead of archaeology. Fix bugs in both copies
+or in neither. The tests are the deliberate exception: upstream uses a
+hand-rolled `int main()` / `printf` harness and this repo is uniformly
+GoogleTest, so `similarity_2d_tests`, `robust_fit_tests`,
+`canvas_extent_tests`, `aligned_canvas_tests` and `pick_loop_tests` are
+converted rather than copied.
+
+`alignedCanvasFor` is ported but **has no consumer here yet**: the live
+re-projected satellite preview is a later increment. Its tests are what
+keep it honest in the meantime, so do not delete it as dead code.
+`canvas_extent_tests` transcribes an extent rule this repo never shipped
+— it exists only so the upstream regression has something to fail
+against.
 
 ### Offline imagery (office prefetch)
 

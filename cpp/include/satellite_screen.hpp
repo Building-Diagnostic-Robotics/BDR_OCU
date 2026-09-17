@@ -586,7 +586,29 @@ private:
     struct Correspondence {
         QPointF sat_px;  // stitched site.jpg pixel
         QPointF pcd_m;   // robot_init metres
+        /**
+         * 1-sigma pick uncertainty on the satellite side, in SATELLITE
+         * pixels, captured from the pane's zoom at the moment of the pick —
+         * the operator is free to zoom between the two halves of a pair, so
+         * it cannot be recovered later.
+         */
+        double sigma_sat_px = 0.0;
+        /**
+         * 1-sigma pick uncertainty on the cloud side, in metres. The raster's
+         * ground scale is known exactly, so this side needs no fitted scale
+         * to become metric.
+         */
+        double sigma_pcd_m = 0.0;
     };
+
+    /**
+     * Combined 1-sigma for one pair, in PCD metres, at a given px/m. The two
+     * sides are measured in different units, so the satellite term needs a
+     * scale to become metric — hence the argument rather than a member.
+     */
+    double pairSigmaM(const Correspondence& c, double px_per_m) const;
+    /** Absolute 1-sigma per pair (PCD metres), in `correspondences_` order. */
+    QVector<double> correspondenceSigmas(double px_per_m) const;
 
     QWidget* align_card_ = nullptr;
     QPushButton* collect_map_button_ = nullptr;
@@ -643,6 +665,8 @@ private:
     GpsFix capture_gps_;
     QVector<Correspondence> correspondences_;
     QPointF pending_sat_px_;
+    /** Satellite-side sigma of the half-formed pair, in satellite pixels. */
+    double pending_sat_sigma_px_ = 0.0;
     bool have_pending_sat_ = false;
     Similarity2D pcd_to_sat_;
     double align_rmse_m_ = 0.0;

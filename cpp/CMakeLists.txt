@@ -150,6 +150,7 @@ set(HEADERS
     include/satellite_site_prefetch.hpp
     include/components/satellite_plan_confirm_dialog.hpp
     include/satellite_job_model.hpp
+    include/alignment_geometry.hpp
     include/similarity_2d.hpp
     include/pan_zoom_image.hpp
     include/satellite_map_capture.hpp
@@ -285,6 +286,7 @@ set(GUI_SOURCES
     src/robot_reachability_probe.cpp
     src/satellite_job_model.cpp
     src/similarity_2d.cpp
+    src/alignment_geometry.cpp
     src/pan_zoom_image.cpp
     src/satellite_map_capture.cpp
     src/satellite_tile_service.cpp
@@ -503,6 +505,46 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME similarity_2d_tests COMMAND similarity_2d_tests)
 
+        add_executable(robust_fit_tests
+            tests/robust_fit_tests.cpp
+            src/similarity_2d.cpp
+        )
+        target_include_directories(robust_fit_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${EIGEN3_INCLUDE_DIRS}
+        )
+        target_link_libraries(robust_fit_tests PRIVATE
+            Eigen3::Eigen
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME robust_fit_tests COMMAND robust_fit_tests)
+
+        # The alignment-geometry tests are identical in shape and differ only
+        # in which invariant they cover, so they are declared in a loop rather
+        # than as three copies of the same block. They need QT_GUI_LIBS, not
+        # QT_CORE_LIBS: QTransform and QPolygonF live in QtGui.
+        foreach(alignment_test canvas_extent_tests aligned_canvas_tests
+                               pick_loop_tests)
+            add_executable(${alignment_test}
+                tests/${alignment_test}.cpp
+                src/alignment_geometry.cpp
+                src/similarity_2d.cpp
+            )
+            target_include_directories(${alignment_test} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/include
+                ${EIGEN3_INCLUDE_DIRS}
+            )
+            target_link_libraries(${alignment_test} PRIVATE
+                Eigen3::Eigen
+                ${QT_GUI_LIBS}
+                GTest::gtest
+                GTest::gtest_main
+            )
+            add_test(NAME ${alignment_test} COMMAND ${alignment_test})
+        endforeach()
+
         # The header is listed so AUTOMOC generates TileService's moc — it
         # lives in include/, which AUTOMOC only scans for targets that name it.
         add_executable(satellite_tile_policy_tests
@@ -636,7 +678,7 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME estop_latch_policy_tests COMMAND estop_latch_policy_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests)")
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()
