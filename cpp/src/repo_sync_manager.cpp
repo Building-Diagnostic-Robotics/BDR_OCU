@@ -12,6 +12,7 @@
 
 #include "repo_sync_manager.hpp"
 #include "settings_constants.hpp"
+#include "update/update_log.hpp"
 
 #include <QDir>
 #include <QDirIterator>
@@ -228,11 +229,13 @@ void RepoSyncManager::prepareRobot() {
 void RepoSyncManager::finish(Level level, const QString& headline, const QString& detail) {
     // Order matters: clearing stage_ first makes any straggler signal from a
     // killed QProcess a no-op, so we can never finish twice.
+    const Mode mode = mode_;
     stage_ = Stage::Idle;
     mode_ = Mode::None;
     busy_ = false;
     if (watchdog_) watchdog_->stop();
     fillSnapshot(level, headline, detail);
+    logOutcome(mode, level);
     emit syncFinished(static_cast<int>(level), headline, detail);
     emit snapshotReady(snapshot_);
 }
@@ -1011,6 +1014,60 @@ void RepoSyncManager::fillSnapshot(Level level, const QString& headline,
         snapshot_.offer_update = false;
     }
     Q_UNUSED(level);
+}
+
+void RepoSyncManager::logOutcome(Mode mode, Level level) const {
+    const char* mode_name = "none";
+    switch (mode) {
+        case Mode::Check:   mode_name = "check";   break;
+        case Mode::Sync:    mode_name = "sync";    break;
+        case Mode::Switch:  mode_name = "switch";  break;
+        case Mode::Prepare: mode_name = "prepare"; break;
+        case Mode::None:    break;
+    }
+    // One line per outcome, every field the banner decision reads. The check
+    // runs on a timer with no operator-visible trace, so when a banner does not
+    // appear this log is the only way to tell "robot in sync" from "the probe
+    // failed and the snapshot fell back to robot_pending".
+    QStringList fields;
+    fields << QString::fromLatin1(mode_name)
+           << QStringLiteral("offer=%1").arg(snapshot_.offer_update ? 1 : 0)
+           << QStringLiteral("pending=%1").arg(snapshot_.robot_pending ? 1 : 0)
+           << QStringLiteral("deploy=%1").arg(snapshot_.deploy_branch)
+           << QStringLiteral("laptop=%1@%2").arg(snapshot_.laptop_branch,
+                                                 shortSha(snapshot_.laptop_sha))
+           << QStringLiteral("on_deploy=%1").arg(snapshot_.laptop_on_deploy ? 1 : 0)
+           << QStringLiteral("laptop_dirty=%1").arg(snapshot_.laptop_dirty ? 1 : 0)
+           << QStringLiteral("origin=%1").arg(
+                  snapshot_.origin_offline
+                      ? QStringLiteral("offline")
+                      : QStringLiteral("behind%1/ahead%2")
+                            .arg(snapshot_.behind)
+                            .arg(snapshot_.ahead));
+    if (snapshot_.robot_online) {
+        fields << QStringLiteral("robot=%1@%2").arg(
+                      snapshot_.robot_branch.isEmpty() ? QStringLiteral("detached")
+                                                       : snapshot_.robot_branch,
+                      shortSha(snapshot_.robot_sha))
+               << QStringLiteral("repo_ok=%1").arg(snapshot_.robot_repo_ok ? 1 : 0)
+               << QStringLiteral("helpers_ok=%1").arg(snapshot_.robot_helpers_ok ? 1 : 0)
+               << QStringLiteral("recv_ok=%1").arg(snapshot_.robot_recv_ok ? 1 : 0)
+               << QStringLiteral("robot_dirty=%1").arg(snapshot_.robot_dirty ? 1 : 0);
+    } else {
+        fields << QStringLiteral("robot=offline");
+    }
+    fields << QStringLiteral("| %1").arg(snapshot_.headline);
+
+    // Severity rides the log level rather than a field, so grepping WARN/ERROR
+    // in update.log finds the sync problems without knowing this format.
+    const QString line = fields.join(QLatin1Char(' '));
+    if (level == LevelBad) {
+        update::log::error("reposync", line);
+    } else if (level == LevelWarn) {
+        update::log::warn("reposync", line);
+    } else {
+        update::log::info("reposync", line);
+    }
 }
 
 RepoSyncManager::NameStatusParse

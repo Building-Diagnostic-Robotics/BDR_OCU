@@ -20,6 +20,17 @@ Network or SSH failure on that timer is silent. A laptop that is
 already current with the robot merely offline does **not** raise a
 banner (`robot_pending`).
 
+Because both of those cases are invisible on screen, **every check
+outcome is logged** — one line per finish, tagged `reposync`, in
+`<CacheLocation>/update.log` (`~/.cache/PilotControl/BDR Coverage
+Planner/update.log`). The line carries the fields the banner decision
+reads (`offer=`, `pending=`, laptop and robot branch@sha, `repo_ok=`,
+`helpers_ok=`, `recv_ok=`, dirty flags) plus the headline, and rides
+the log level (WARN/ERROR for an actionable or failed check). When a
+banner did not appear, that log is what distinguishes "robot really is
+in sync" from "the SSH probe failed, so the snapshot fell back to
+`robot_pending`".
+
 An actionable mismatch raises **Robot software** below the OTA banner
 (OTA stays first). View Details opens a frameless modal (`show()`, not
 `exec()`): **Sync now** / **Later** (4 h snooze). **Prepare robot**

@@ -144,6 +144,7 @@ private:
     void finishRobotDeferred(const QString& why);
     void reportCheck();
     void fillSnapshot(Level level, const QString& headline, const QString& detail);
+    void logOutcome(Mode mode, Level level) const;
 
     QString workspacePath() const;
     QString robotRepoUrl() const;

@@ -575,6 +575,7 @@ if(BDR_BUILD_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/include
         )
         target_link_libraries(repo_sync_tests PRIVATE
+            bdr_update_core
             ${QT_CORE_LIBS}
             GTest::gtest
             GTest::gtest_main
