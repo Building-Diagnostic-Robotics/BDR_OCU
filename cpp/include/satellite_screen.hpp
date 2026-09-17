@@ -736,12 +736,11 @@ private:
     /** Fit the pane's current canvas was warped by, to skip a needless re-warp. */
     Similarity2D sat_view_fit_;
     /**
-     * Theme the current canvas was painted in. The rotation leaves padding in
-     * its corners which follows the palette, and the fit does not change on a
-     * theme toggle — so without this the `sameTransform` skip would leave a
-     * dark margin around a light-mode pane.
+     * The latest fit was rejected as implausible, so the pane is showing the
+     * previous projection. Nothing derived from the rejected fit may be drawn
+     * while this holds, and the instruction bar says why the view is parked.
      */
-    bool sat_view_dark_ = true;
+    bool preview_held_ = false;
     /**
      * The fit became the robot anchor (applyAlignmentAnchor ran). Distinct
      * from `pcd_to_sat_.valid`, which only means the solve converged: the

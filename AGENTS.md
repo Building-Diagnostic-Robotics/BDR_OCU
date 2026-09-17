@@ -1140,7 +1140,15 @@ sides in PCD metres over `kPickFloorM`, and `onAlignClicked` runs
 `fitSimilarityRobust`, so a sloppy pick is downweighted instead of
 dragging the whole solve. `align_rmse_m` therefore holds **weighted**
 RMSE — the field name predates the change and is kept for schema
-compatibility. Sigma needs a px/m to make the satellite term metric:
+compatibility. The success card calls it **"Fit consistency"**, not RMSE,
+and that wording is deliberate: from the second pair on the operator picks
+against imagery the earlier picks have already turned, so pairs 3..N are
+not independent observations and the number reads optimistic against
+ground truth. It is not an accuracy estimate and must not be labelled as
+one. Below 4 pairs the card also says the fit was never checked for a bad
+pick, because the studentised test abstains there and the instruction bar
+that says so is off screen by the time the card is up.
+Sigma needs a px/m to make the satellite term metric:
 the manifest's `res_m` is the honest source, and only when it is missing
 is a scale bootstrapped from an unweighted seed fit.
 
@@ -1192,7 +1200,23 @@ instruction bar then read.
  next pick is made in. A fit whose scale is more than
  `kScaleRejectFrac` from the manifest's own `res_m` holds the last good
  projection instead. With no `res_m` there is nothing to check against
- and the fit is allowed through.
+ and the fit is allowed through. A hold sets `preview_held_`, and
+ **everything derived from the rejected fit then goes off screen** —
+ residual spurs, robot glyph, and the diagnostics behind the outlier
+ ring (`invalidateAlignmentResiduals`) — because a pane that sits still
+ while a robot marker is flung off it reads as a rendering fault, and a
+ ring naming the worst pair of a fit we just called wrong is worse than
+ no ring. The hold is **announced** in `#SatCorrBar`: silently freezing
+ the imagery is the same silent-refusal class as a disabled button with
+ no reason.
+- **The re-projected canvas carries no palette.** Rotation leaves the
+ canvas corners empty and they are filled `Qt::transparent`, so the
+ pane's own matte shows through and a theme toggle needs no repaint
+ here. Do not go back to filling them with a theme colour: that puts a
+ palette inside the image, which then has to be re-warped on every
+ toggle and tracked with a "which theme was this painted in" member —
+ two bugs came out of exactly that. The point-cloud raster next to it
+ already relies on the same matte.
 - `applySatelliteView` holds the operator's viewpoint across the warp by
  carrying the anchor in original pixels — the one frame both canvases
  agree on — and correcting the zoom by the change in linear scale.

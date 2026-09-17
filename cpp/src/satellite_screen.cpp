@@ -5383,6 +5383,7 @@ void SatelliteScreen::resetSatelliteView() {
     sat_view_xform_ = QTransform();
     sat_view_fit_ = Similarity2D{};
     preview_fit_ = Similarity2D{};
+    preview_held_ = false;
     if (sat_pick_) {
         sat_pick_->setResidualLines(QVector<QLineF>());
         sat_pick_->setFlaggedMarker(-1);
@@ -5402,10 +5403,10 @@ QImage SatelliteScreen::renderAlignedSatellite(const Similarity2D& fit,
     }
     QImage out(canvas.width, canvas.height,
                QImage::Format_ARGB32_Premultiplied);
-    // The rotation leaves padding in the canvas corners. It follows the theme
-    // for the same reason the rest of the pane's chrome does: a near-black
-    // margin beside a light UI reads as a dead feed.
-    out.fill(dark_mode_ ? QColor(0x0b, 0x0b, 0x0b) : QColor(0xE4, 0xE4, 0xE7));
+    // The rotation leaves the canvas corners empty. Transparent, so the pane's
+    // own matte shows through them: the image then carries no palette of its
+    // own and a theme toggle needs no repaint here.
+    out.fill(Qt::transparent);
     {
         QPainter painter(&out);
         painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
@@ -5473,6 +5474,7 @@ bool SatelliteScreen::plausibleForProjection(const Similarity2D& fit) const {
 
 void SatelliteScreen::updateSatelliteAlignmentView() {
     preview_fit_ = Similarity2D{};
+    preview_held_ = false;
     invalidateAlignmentResiduals();
 
     // Two pairs determine a similarity exactly, so the imagery can be put into
@@ -5522,28 +5524,27 @@ void SatelliteScreen::updateSatelliteAlignmentView() {
                 sat_pick_->setImage(sat_image_);
             }
         }
-    } else {
-        // An implausible fit HOLDS the last good projection rather than
-        // swinging the imagery somewhere useless — but it still has to be
-        // repainted on a theme toggle, so the held fit is what gets re-warped
-        // rather than skipping the block outright. Invalid means no good
-        // projection was ever established; the unprojected pane is then right.
-        const Similarity2D want = plausibleForProjection(preview_fit_)
-                                      ? preview_fit_
-                                      : sat_view_fit_;
-        // Only re-warp when the fit actually moved, or the palette under its
-        // padding did: updateCorrespondenceUi runs on refreshes that changed
-        // neither, and this is a multi-megapixel blit.
-        if (want.valid && (!sameTransform(sat_view_fit_, want) ||
-                           sat_view_dark_ != dark_mode_)) {
+    } else if (plausibleForProjection(preview_fit_)) {
+        // Only re-warp when the fit actually moved: updateCorrespondenceUi runs
+        // on refreshes that changed nothing, and this is a multi-megapixel blit.
+        if (!sameTransform(sat_view_fit_, preview_fit_)) {
             QTransform xform;
-            const QImage aligned = renderAlignedSatellite(want, &xform);
+            const QImage aligned = renderAlignedSatellite(preview_fit_, &xform);
             if (!aligned.isNull()) {
-                sat_view_fit_ = want;
-                sat_view_dark_ = dark_mode_;
+                sat_view_fit_ = preview_fit_;
                 applySatelliteView(aligned, xform);
             }
         }
+    } else {
+        // An implausible fit holds the last good projection rather than swinging
+        // the imagery somewhere useless. Nothing derived from it may be drawn
+        // either — a stable pane with a robot glyph flung off it looks like a
+        // rendering fault — and the operator has to be told the view is parked,
+        // or the imagery simply stops responding to picks with no explanation.
+        // That includes the residual diagnostics: a ring naming the worst pair
+        // of a fit we have just called wrong is worse than no ring.
+        preview_held_ = true;
+        invalidateAlignmentResiduals();
     }
 
     if (!sat_pick_) {
@@ -5553,7 +5554,7 @@ void SatelliteScreen::updateSatelliteAlignmentView() {
     // carried into whatever frame the pane is currently showing. Two short
     // spurs, not an overlay of the cloud.
     QVector<QLineF> residuals;
-    if (preview_fit_.valid) {
+    if (preview_fit_.valid && !preview_held_) {
         residuals.reserve(correspondences_.size());
         for (const Correspondence& c : correspondences_) {
             residuals.append(
@@ -5572,7 +5573,7 @@ void SatelliteScreen::updateSatelliteAlignmentView() {
     // Where the fit puts robot_init, live. The solved anchor and this agree
     // once Align has run — both are the robust fit over the same picks — so
     // the glyph has one owner rather than two writers racing.
-    if (preview_fit_.valid) {
+    if (preview_fit_.valid && !preview_held_) {
         const QPointF origin = sat_view_xform_.map(preview_fit_.apply(
             QPointF(0.0, 0.0)));
         const QPointF ahead =
@@ -5964,8 +5965,15 @@ void SatelliteScreen::updateCorrespondenceUi() {
     // with nothing explaining it is just an unexplained mark on the imagery,
     // and this bar is the only text surface the picker has.
     QString advisory;
-    if (corr_outlier_index_ >= 0 &&
-        corr_outlier_index_ < corr_studentized_.size()) {
+    if (preview_held_) {
+        // Otherwise the imagery just stops turning and the operator has no way
+        // to tell a parked view from a working one.
+        advisory = QStringLiteral(
+                       " <span style='color:%1'>· Map held — the latest pair "
+                       "disagrees with the imagery's own scale; re-pick it</span>")
+                       .arg(uiThemeTokens(dark_mode_).warning);
+    } else if (corr_outlier_index_ >= 0 &&
+               corr_outlier_index_ < corr_studentized_.size()) {
         advisory =
             QStringLiteral(
                 " <span style='color:%1'>· Pair %2 is %3σ off its own expected "
@@ -6018,9 +6026,21 @@ void SatelliteScreen::updateCorrespondenceUi() {
     if (align_success_card_) {
         align_success_card_->setVisible(aligned);
         if (aligned) {
-            align_success_rmse_->setText(
-                QStringLiteral("RMSE: %1")
-                    .arg(units::formatLength(align_rmse_m_, 3)));
+            // Consistency, not accuracy. From the second pair on the operator
+            // picks against imagery the earlier picks have already turned, so
+            // this measures how well the picks agree with each other and reads
+            // optimistic against ground truth. Naming it "RMSE" invited reading
+            // it as the error the ROI will inherit.
+            QString summary = QStringLiteral("Fit consistency: %1")
+                                  .arg(units::formatLength(align_rmse_m_, 3));
+            // The studentised test abstains below 4 pairs, so this fit was never
+            // checked for a blunder. The instruction bar says so while picking,
+            // but it is off screen by the time this card is up.
+            if (correspondences_.size() < 4) {
+                summary += QStringLiteral("\nNot checked for a bad pick (%1 pairs)")
+                               .arg(correspondences_.size());
+            }
+            align_success_rmse_->setText(summary);
         }
     }
     // The step gate and the footer's Align visibility both read pcd_image_ /
@@ -6139,10 +6159,16 @@ void SatelliteScreen::onAlignClicked() {
         }
         const OutlierReport dropped = leaveOneOutOutlier(
             pcd, sat, weights, kOutlierImprovementFrac);
-        if (dropped.valid) {
+        // `flagged` is the improvement threshold's own answer — without reading
+        // it this logs a "worth dropping" line for gains too small to act on.
+        // The pane rings the studentised worst, which need not be the pair whose
+        // removal helps most, so name both or the two surfaces read as
+        // contradicting each other.
+        if (dropped.valid && dropped.flagged) {
             appendLog(
-                QStringLiteral("[align] dropping pair %1 would take the fit "
-                               "from %2 to %3")
+                QStringLiteral("[align] pair %1 is ringed; dropping pair %2 "
+                               "would take the fit from %3 to %4")
+                    .arg(worst + 1)
                     .arg(dropped.worst_index + 1)
                     .arg(units::formatLength(dropped.full_rmse_m, 3),
                          units::formatLength(dropped.best_rmse_without_m, 3)));
