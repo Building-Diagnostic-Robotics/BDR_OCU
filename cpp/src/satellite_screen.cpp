@@ -4413,7 +4413,7 @@ QLabel#SatPcdEmptyHint {
 }
 QLabel#SatAlignSuccessTitle {
     background: transparent; font-family: 'Arimo'; font-weight: 600; font-size: 16px;
-    color: #FFFFFF;
+    color: @TEXT@;
 }
 QLabel#SatAlignSuccessRmse {
     background: transparent; font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace;
