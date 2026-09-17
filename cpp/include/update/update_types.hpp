@@ -80,7 +80,11 @@ struct VersionInfo {
 inline constexpr const char* kOtaTargetsMarker = "<!-- ota-targets:";
 
 /// How often to poll GitHub Releases when no in-flight check is running.
-constexpr int kPollIntervalMs = 5 * 60 * 1000;  // 5 minutes
+/// Conditional (ETag) requests answer 304 and GitHub does not count those
+/// against the unauthenticated 60/hour/IP budget, so this cadence is close to
+/// free in steady state. Do not push it below a minute: a cold ETag makes every
+/// poll a scored 200, and tripping 403 parks the poller for kRateLimitCooldownMs.
+constexpr int kPollIntervalMs = 2 * 60 * 1000;  // 2 minutes
 
 /// Delay between app start and the first poll (avoids startup network thrash).
 constexpr int kFirstCheckDelayMs = 30 * 1000;  // 30 s
@@ -89,7 +93,11 @@ constexpr int kFirstCheckDelayMs = 30 * 1000;  // 30 s
 constexpr int kRequestTimeoutMs = 10 * 1000;  // 10 s
 
 /// Initial backoff applied after a failed check; doubles up to the cap.
-constexpr int kBackoffStartMs = kPollIntervalMs;
+/// Deliberately NOT kPollIntervalMs: the healthy cadence is tuned for how fast
+/// a release should be noticed, while this one is tuned for how hard to retry a
+/// network that just failed. Tying them means shortening the poll silently makes
+/// failure retries more aggressive.
+constexpr int kBackoffStartMs = 5 * 60 * 1000;  // 5 minutes
 
 /// Maximum backoff between retries when the network is flapping.
 constexpr int kBackoffMaxMs = 30 * 60 * 1000;  // 30 minutes

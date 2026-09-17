@@ -172,7 +172,7 @@ private:
 
     bool started_ = false;
     int consecutive_failures_ = 0;
-    int current_backoff_ms_ = kPollIntervalMs;
+    int current_backoff_ms_ = kBackoffStartMs;
 };
 
 }  // namespace f2c_cpp::update

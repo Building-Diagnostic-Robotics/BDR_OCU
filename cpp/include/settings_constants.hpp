@@ -66,6 +66,12 @@ constexpr const char* kRobotDeployBranch = "cliff-on-autonomy";
 /** Epoch-ms until the robot-software banner stays hidden. 0 = none. */
 constexpr const char* kSettingsRobotSyncSnoozeKey = "robot_sync/snooze_until_ms";
 
+/** How long "Later" hides the robot-software banner. Deliberately shorter than
+ *  the OTA snooze (`update::kSnoozeDurationMs`, 4 h): a stale robot `~/pilot_ws`
+ *  blocks Stage 6 outright, so it is worth re-offering within the same session.
+ *  `long long` keeps this header free of any Qt include. */
+constexpr long long kRobotSyncSnoozeMs = 1LL * 60LL * 60LL * 1000LL;  // 1 hour
+
 /** Per-robot offload cache. Append `robot_id` — do not share across the fleet. */
 constexpr const char* kSettingsOffloadIncompletePrefix =
     "dashboard/offload_incomplete/";

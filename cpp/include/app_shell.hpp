@@ -160,6 +160,10 @@ private:
     /// time. Phase 6 = signal-only Install Now (Q3=A).
     void showUpdateModal(const update::VersionInfo& info);
     bool armRobotSync();
+    /// Dashboard entry asks the robot-software question immediately instead of
+    /// re-rendering a cached snapshot. Throttled by kRobotSyncMinRecheckMs so
+    /// bouncing Stage 3 <-> Stage 6 cannot spam the robot with ssh probes.
+    void requestRobotSyncCheckNow();
     void onRobotSyncCheckTick();
     void onRobotSyncSnapshot(const RepoSyncSnapshot& snap);
     void showRobotSyncDialog();
@@ -429,6 +433,10 @@ private:
     RobotSyncBanner* robot_sync_banner_ = nullptr;
     RobotSyncDialog* robot_sync_dialog_ = nullptr;
     QTimer* robot_sync_poll_ = nullptr;
+    /// Floor between robot-sync checks, so repeated Dashboard entries coalesce.
+    static constexpr qint64 kRobotSyncMinRecheckMs = 60 * 1000;
+    /// Epoch-ms of the last check we started (poll or Dashboard entry). 0 = none.
+    qint64 last_robot_sync_check_ms_ = 0;
 
     QWidget* central_root_ = nullptr;
     QWidget* window_controls_ = nullptr;

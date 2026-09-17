@@ -72,7 +72,7 @@ void UpdateChecker::start() {
         return;
     }
     started_ = true;
-    current_backoff_ms_ = kPollIntervalMs;
+    current_backoff_ms_ = kBackoffStartMs;
     consecutive_failures_ = 0;
 
     // Replay any persisted release before kicking off the network poll.
@@ -365,7 +365,7 @@ void UpdateChecker::onReplyFinished() {
     if (http_status == 304) {
         log::info("checker", QStringLiteral("304 Not Modified (etag hit)"));
         consecutive_failures_ = 0;
-        current_backoff_ms_ = kPollIntervalMs;
+        current_backoff_ms_ = kBackoffStartMs;
         scheduleNextPoll(kPollIntervalMs);
         replayPersistedRelease();
         return;
@@ -378,7 +378,7 @@ void UpdateChecker::onReplyFinished() {
                   QStringLiteral("HTTP 403 (rate-limited?), cooling down for %1 min")
                       .arg(kRateLimitCooldownMs / 60000));
         consecutive_failures_ = 0;  // not a real failure, don't escalate backoff
-        current_backoff_ms_ = kPollIntervalMs;
+        current_backoff_ms_ = kBackoffStartMs;
         scheduleNextPoll(kRateLimitCooldownMs);
         emit checkFailed(QStringLiteral("rate limited"));
         return;
@@ -438,7 +438,7 @@ void UpdateChecker::handleSuccess(const QByteArray& payload) {
     }
 
     consecutive_failures_ = 0;
-    current_backoff_ms_ = kPollIntervalMs;
+    current_backoff_ms_ = kBackoffStartMs;
     scheduleNextPoll(kPollIntervalMs);
 
     if (!isUpdateNewer(currentSha(), info.commitSha)) {

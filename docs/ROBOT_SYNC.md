@@ -8,8 +8,11 @@ Read `AGENTS.md` first for the short-form rules.
 
 ## What it does
 
-After Dashboard login (`goToStage3`), the OCU waits 30 s, then checks
-every 5 minutes:
+Every Dashboard entry (`goToStage3`) runs a check immediately —
+`requestRobotSyncCheckNow()`, throttled by `kRobotSyncMinRecheckMs`
+(60 s) so bouncing Stage 3 ↔ Stage 6 coalesces — and a poll then runs
+every 5 minutes. Re-entering the Dashboard re-checks rather than
+re-rendering `lastSnapshot()`, which may be stale or empty:
 
 1. Laptop `~/pilot_ws` HEAD vs compiled-in `kRobotDeployBranch`
    (`cliff-on-autonomy`) and `origin/<deploy>`.
@@ -33,7 +36,8 @@ in sync" from "the SSH probe failed, so the snapshot fell back to
 
 An actionable mismatch raises **Robot software** below the OTA banner
 (OTA stays first). View Details opens a frameless modal (`show()`, not
-`exec()`): **Sync now** / **Later** (4 h snooze). **Prepare robot**
+`exec()`): **Sync now** / **Later** (1 h snooze, `kRobotSyncSnoozeMs` —
+the OTA snooze is a separate 4 h). **Prepare robot**
 appears only when Check says helpers or `updateInstead` are missing.
 A helper without `--no-build` is treated as missing (same Prepare CTA).
 

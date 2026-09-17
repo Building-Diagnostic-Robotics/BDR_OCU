@@ -1079,6 +1079,10 @@ void AppShellWindow::goToStage3() {
     // stick. Complete Mission does not wait on the copy; Dashboard does.
     stage3_->refreshThumbCopyStatus();
     armRobotSync();
+    // Ask on every Dashboard entry, not just the first: refreshRobotSyncBanner
+    // alone only re-renders lastSnapshot(), which may be minutes stale or the
+    // empty default if the first check failed.
+    requestRobotSyncCheckNow();
     refreshRobotSyncBanner();
     stack_->setCurrentWidget(stage3_);
 }
@@ -1361,10 +1365,18 @@ bool AppShellWindow::armRobotSync() {
         repo_sync_->clearRobotReachable();
     }
     if (robot_sync_poll_ && !robot_sync_poll_->isActive()) {
-        QTimer::singleShot(30 * 1000, this, &AppShellWindow::onRobotSyncCheckTick);
         robot_sync_poll_->start();
     }
     return true;
+}
+
+void AppShellWindow::requestRobotSyncCheckNow() {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (last_robot_sync_check_ms_ > 0 &&
+        now - last_robot_sync_check_ms_ < kRobotSyncMinRecheckMs) {
+        return;
+    }
+    onRobotSyncCheckTick();
 }
 
 void AppShellWindow::onRobotSyncCheckTick() {
@@ -1374,6 +1386,10 @@ void AppShellWindow::onRobotSyncCheckTick() {
     if (!armRobotSync()) {
         return;
     }
+    // Stamped here rather than in requestRobotSyncCheckNow so a 5-minute poll
+    // also feeds the throttle — otherwise a poll and a Dashboard entry landing
+    // seconds apart would probe the robot twice.
+    last_robot_sync_check_ms_ = QDateTime::currentMSecsSinceEpoch();
     repo_sync_->checkOnly();
 }
 
@@ -1405,7 +1421,7 @@ void AppShellWindow::onRobotSyncSnapshot(const RepoSyncSnapshot& snap) {
 void AppShellWindow::applyRobotSyncSnooze() {
     QSettings s(kSettingsOrgName, kSettingsAppName);
     s.setValue(kSettingsRobotSyncSnoozeKey,
-               QDateTime::currentMSecsSinceEpoch() + update::kSnoozeDurationMs);
+               QDateTime::currentMSecsSinceEpoch() + kRobotSyncSnoozeMs);
     if (robot_sync_banner_) {
         robot_sync_banner_->hide();
     }

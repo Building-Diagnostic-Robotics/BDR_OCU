@@ -12,6 +12,12 @@ before pushing to `main` that triggers a release.
 
 ## Unreleased
 
+- OCU update banner now appears within ~2 min of a release, not 5
+- Robot software check runs the moment you reach the Dashboard
+- "Later" on the robot banner now snoozes 1 h instead of 4 h
+
+## 2026-09-17 — OTA e9b2b52
+
 - CI embeds the ArcGIS key so satellite maps work after OTA
 - Launch warns at 25s if the robot never prints a line
 - Failed robot cleanup now asks before launching anyway

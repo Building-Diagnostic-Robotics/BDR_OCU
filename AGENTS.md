@@ -483,13 +483,16 @@ exactly one of seven states. The full state-transition diagram lives in
 
 ## Robot workspace sync (production-wired)
 
-Operator-driven laptop ↔ robot `~/pilot_ws` updater. After
-`goToStage3` the OCU waits 30 s, then checks every 5 min. Failures
-on that timer stay silent. An actionable mismatch (laptop not on
+Operator-driven laptop ↔ robot `~/pilot_ws` updater. Every
+`goToStage3` asks immediately (`requestRobotSyncCheckNow`, throttled
+by `kRobotSyncMinRecheckMs = 60 s`), then checks every 5 min. Failures
+on that timer stay silent, but every outcome is logged — one
+`reposync` line per check in `update.log`. An actionable mismatch (laptop not on
 `kRobotDeployBranch`, origin ahead, robot SHA/branch mismatch, or
 helpers / `updateInstead` missing) raises a banner **below** the OTA
 banner. Laptop current + robot merely offline is `robot_pending` —
-no banner. Later snoozes 4 h.
+no banner. Later snoozes 1 h (`kRobotSyncSnoozeMs`, its own constant —
+the OTA snooze stays 4 h).
 
 Sync targets compiled-in `kRobotDeployBranch` (`cliff-on-autonomy`).
 A clean laptop on another branch switches; a dirty or diverged tree
