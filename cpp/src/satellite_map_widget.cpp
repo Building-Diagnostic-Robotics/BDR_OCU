@@ -22,7 +22,10 @@ namespace f2c_cpp {
 namespace {
 
 constexpr int kTileSize = 256;
-constexpr double kHandleRadiusPx = 7.0;
+// Drawn to match kHitRadiusPx rather than the Figma frame: the grab radius
+// has always been 12 px while the handle was painted at 7, so on a touch
+// panel the target was 5 px larger than it looked.
+constexpr double kHandleRadiusPx = 9.0;
 constexpr double kHitRadiusPx = 12.0;
 constexpr double kEdgeHitBandPx = 6.0;
 constexpr double kMarkerRadiusPx = 11.0;
@@ -1490,9 +1493,9 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
             : (roi_.valid && i < 4 ? roi_.roof_edges[size_t(i)] : false);
         if (marked) {
             painter.setPen(
-                QPen(satpal::danger(), 3.0, Qt::SolidLine, Qt::RoundCap));
+                QPen(satpal::danger(), 4.5, Qt::SolidLine, Qt::RoundCap));
         } else {
-            painter.setPen(QPen(edge, 2.0,
+            painter.setPen(QPen(edge, 3.0,
                                 edit_locked_ ? Qt::SolidLine : Qt::DashLine,
                                 Qt::RoundCap));
         }
