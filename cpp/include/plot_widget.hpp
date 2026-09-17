@@ -1,6 +1,7 @@
 #pragma once
 
 #include "coverage_pipeline.hpp"
+#include "touch_canvas_gestures.hpp"
 
 #include <QImage>
 #include <QPoint>
@@ -17,6 +18,7 @@ class QKeyEvent;
 class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
+class QTouchEvent;
 class QWheelEvent;
 
 namespace f2c_cpp {
@@ -142,8 +144,17 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    /** Touch pan / pinch. QTouchEvent has no dedicated virtual in Qt 5. */
+    bool event(QEvent* event) override;
 
 private:
+    // Zoom clamp, as a multiple of the fit-to-data scale. The floor only
+    // stops a pinch-out flinging the cloud into a dot; the ceiling has to
+    // leave room to pick apart the centimetre-scale reprojection error
+    // lines, which needs roughly 20x fit.
+    static constexpr double kMinScaleOfFit = 1.0 / 8.0;
+    static constexpr double kMaxScaleOfFit = 32.0;
+
     std::vector<Point2D> points_;
     // Cached density raster of `points_` (a responsive base layer drawn in
     // place of per-point ellipses). Rebuilt only when `points_` or the theme
@@ -193,6 +204,16 @@ private:
     double offset_y_ = 0.0;
     double data_min_x_ = 0, data_max_x_ = 1;
     double data_min_y_ = 0, data_max_y_ = 1;
+    // The zoom clamp is relative to the fit-to-data scale, so it stays off
+    // until the bounds mean something. Before the first updateDataBounds()
+    // the placeholder 0..1 span implies a nonsense fit scale.
+    bool data_bounds_valid_ = false;
+
+    // Touch pan / pinch. A finger that stays inside the slop circle is
+    // replayed as a left click, so obstacle selection and the measure /
+    // rectangle / waypoint taps stay reachable by touch.
+    touch_gestures::GestureState touch_;
+    touch::SynthesizedMouseGuard touch_guard_;
 
     enum class SelectionPurpose { None, Roi, Obstacle, Cut };
     SelectionPurpose selection_purpose_ = SelectionPurpose::None;
@@ -219,6 +240,15 @@ private:
     QPointF worldToScreen(const Point2D& p) const;
     Point2D screenToWorld(const QPointF& p) const;
     void updateDataBounds();
+    /** Scale at which the data bounds exactly fill the canvas — what
+        fitToData() lands on, without mutating the view. Zero when the
+        bounds are not meaningful yet. */
+    double fitScale() const;
+    /** Multiplies the zoom by `factor`, clamped, holding the world point
+        under `anchor` fixed. Shared by the wheel and pinch. */
+    void zoomAtScreenPoint(double factor, const QPointF& anchor);
+    /** Touch pan / pinch. True when the event is consumed. */
+    bool handleTouchGesture(QTouchEvent* event);
     // Rasterize `points_` into `point_cloud_image_` (density-modulated alpha,
     // theme-aware color). No-op (clears the image) when there are no points.
     void rebuildPointCloudImage();

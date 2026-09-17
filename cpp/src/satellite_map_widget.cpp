@@ -24,6 +24,7 @@ namespace {
 constexpr int kTileSize = 256;
 constexpr double kHandleRadiusPx = 7.0;
 constexpr double kHitRadiusPx = 12.0;
+constexpr double kEdgeHitBandPx = 6.0;
 constexpr double kMarkerRadiusPx = 11.0;
 constexpr double kMarkerArrowPx = 30.0;
 constexpr double kRotateHandleOffsetPx = 28.0;
@@ -81,6 +82,9 @@ SatelliteMapWidget::SatelliteMapWidget(TileService* tiles, QWidget* parent)
     setMouseTracking(true);
     setCursor(Qt::OpenHandCursor);
     setFocusPolicy(Qt::ClickFocus);
+    // Without this the xcb backend never delivers touch — the operator's
+    // panel reaches us only as the X server's emulated pointer.
+    setAttribute(Qt::WA_AcceptTouchEvents, true);
     connect(tiles_, &TileService::tileReady, this,
             [this](int, int, int) { update(); });
     // Dimension chips + scale bar are unit-aware; repaint on toggle.
@@ -103,17 +107,20 @@ SatelliteMapWidget::SatelliteMapWidget(TileService* tiles, QWidget* parent)
 
 void SatelliteMapWidget::setImageryEnabled(bool enabled) {
     imagery_enabled_ = enabled;
-    const int before_zoom = zoom_;
+    const double before_zoom = continuousZoom();
     const double before_nx = center_nx_;
     const double before_ny = center_ny_;
-    zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
+    // Switching to the measured canvas drops any view rotation: its grid and
+    // point-cloud raster are axis-aligned blits.
+    setBearingDeg(bearing_deg_);
+    setContinuousZoom(before_zoom);
     // The two canvases have different floors and only the imagery one honours
     // the view bounds, so the centre has to be re-clamped as well — otherwise
     // the legality of the view depends on the order the screen happens to
     // call this in relative to loadJob().
     clampCenter();
     update();
-    if (zoom_ != before_zoom || center_nx_ != before_nx ||
+    if (continuousZoom() != before_zoom || center_nx_ != before_nx ||
         center_ny_ != before_ny) {
         emitViewChanged();
     }
@@ -141,8 +148,8 @@ int SatelliteMapWidget::minZoomNow() const {
         // Smallest level whose viewport span still fits inside the box:
         // span_norm = viewport_px / (tile * 2^z) <= box, so
         // 2^z >= viewport_px / (tile * box).
-        const double vw = std::max(1, width());
-        const double vh = std::max(1, height());
+        const double vw = rotatedViewportPx().width();
+        const double vh = rotatedViewportPx().height();
         const double zx =
             std::log2(vw / (double(kTileSize) * view_bounds_.width()));
         const double zy =
@@ -159,8 +166,11 @@ int SatelliteMapWidget::minZoomNow() const {
     const double larger = std::max(hull.width(), hull.height());
     const double margin = std::max(15.0, 0.25 * larger);
     hull.adjust(-margin, -margin, margin, margin);
-    const double vw = std::max(1, width());
-    const double vh = std::max(1, height());
+    // Measured canvas: bearing is pinned to 0 here, so this is the widget
+    // size — it goes through the same helper only so the two branches stay
+    // readable side by side.
+    const double vw = rotatedViewportPx().width();
+    const double vh = rotatedViewportPx().height();
     const double zx = std::log2(kMpp0 * vw / std::max(1.0, hull.width()));
     const double zy = std::log2(kMpp0 * vh / std::max(1.0, hull.height()));
     const int z = int(std::ceil(std::max(zx, zy)));
@@ -170,7 +180,7 @@ int SatelliteMapWidget::minZoomNow() const {
 void SatelliteMapWidget::setView(double lat, double lon, int zoom) {
     center_nx_ = geo::lonToNormX(lon);
     center_ny_ = geo::latToNormY(lat);
-    zoom_ = qBound(minZoomNow(), zoom, maxZoomNow());
+    setContinuousZoom(zoom);
     clampCenter();
     update();
     emitViewChanged();
@@ -178,11 +188,17 @@ void SatelliteMapWidget::setView(double lat, double lon, int zoom) {
 
 void SatelliteMapWidget::zoomBy(int delta) {
     cancelEdgeLengthEdit();
-    const int new_zoom = qBound(minZoomNow(), zoom_ + delta, maxZoomNow());
-    if (new_zoom == zoom_) {
+    // A button press lands on a whole level, so it also snaps away whatever
+    // fraction a pinch left behind. Rounding towards the press direction
+    // keeps "out" from skipping a level when the fraction is non-zero: from
+    // 18.4, out is 18.0 and in is 19.0.
+    const double from = delta > 0 ? std::floor(continuousZoom())
+                                  : std::ceil(continuousZoom());
+    const double before = continuousZoom();
+    setContinuousZoom(from + delta);
+    if (continuousZoom() == before) {
         return;
     }
-    zoom_ = new_zoom;
     clampCenter();
     update();
     emitViewChanged();
@@ -191,6 +207,125 @@ void SatelliteMapWidget::zoomBy(int delta) {
 void SatelliteMapWidget::zoomIn() { zoomBy(1); }
 
 void SatelliteMapWidget::zoomOut() { zoomBy(-1); }
+
+void SatelliteMapWidget::panByPixels(const QPointF& delta) {
+    const QPointF d = normDeltaFromScreen(delta);
+    center_nx_ -= d.x();
+    center_ny_ -= d.y();
+    clampCenter();
+    emitViewChanged();
+}
+
+bool SatelliteMapWidget::zoomAtScreenPoint(double levels,
+                                           const QPointF& anchor) {
+    const double before = continuousZoom();
+    // The normalized point under the anchor has to stay under it, so read it
+    // before the scale changes.
+    const QPointF n_under = viewTransform().inverted().map(anchor);
+    setContinuousZoom(before + levels);
+    if (continuousZoom() == before) {
+        return false;
+    }
+    // Solve the centre that puts n_under back on the anchor. The rotation is
+    // about the viewport centre, so the anchor's offset from there is what
+    // maps into normalized space.
+    const QPointF d = normDeltaFromScreen(
+        anchor - QPointF(width() / 2.0, height() / 2.0));
+    center_nx_ = n_under.x() - d.x();
+    center_ny_ = n_under.y() - d.y();
+
+    clampCenter();
+    emitViewChanged();
+    return true;
+}
+
+void SatelliteMapWidget::setBearingDeg(double degrees) {
+    // The measured canvas blits an axis-aligned metric grid and point-cloud
+    // raster; rotating the view there would need both redrawn as quads for
+    // no operator benefit, so bearing is imagery-only.
+    if (!bearingSupported()) {
+        degrees = 0.0;
+    }
+    degrees = std::fmod(degrees, 360.0);
+    if (degrees < 0.0) {
+        degrees += 360.0;
+    }
+    if (qFuzzyCompare(bearing_deg_ + 1.0, degrees + 1.0)) {
+        return;
+    }
+    bearing_deg_ = degrees;
+    // A rotated viewport covers a wider normalized box, so both the pan
+    // clamp and the zoom floor move with it.
+    setContinuousZoom(continuousZoom());
+    clampCenter();
+    update();
+    emit bearingChanged(bearing_deg_);
+}
+
+double SatelliteMapWidget::worldPixels() const {
+    return double(kTileSize) * std::exp2(continuousZoom());
+}
+
+QSizeF SatelliteMapWidget::rotatedViewportPx() const {
+    // Axis-aligned extent the viewport covers once the content is turned
+    // under it. At bearing 0 this is just the widget size; at 45 deg it is
+    // ~1.41x on both axes, which is why the pan clamp, the zoom floor and
+    // the tile query all have to ask rather than use width()/height().
+    const double rad = bearing_deg_ * geo::kDegToRad;
+    const double c = std::abs(std::cos(rad));
+    const double s = std::abs(std::sin(rad));
+    const double w = std::max(1, width());
+    const double h = std::max(1, height());
+    return QSizeF(w * c + h * s, w * s + h * c);
+}
+
+void SatelliteMapWidget::setContinuousZoom(double zoom) {
+    const double clamped =
+        qBound(double(minZoomNow()), zoom, double(maxZoomNow()));
+    const int level = int(std::floor(clamped));
+    zoom_ = level;
+    zoom_frac_ = clamped - double(level);
+}
+
+QTransform SatelliteMapWidget::viewTransform() const {
+    const double world_px = worldPixels();
+    // Memoized because the telemetry layer maps every swath and trail point
+    // through here, and QTransform::rotate() costs a sin/cos each time — on
+    // a multi-thousand-point trail that doubles the transcendentals per
+    // frame. The cache validates itself against its own inputs rather than
+    // being invalidated by the mutators, so there is no site to forget.
+    if (xform_valid_ && xform_world_px_ == world_px &&
+        xform_bearing_ == bearing_deg_ && xform_nx_ == center_nx_ &&
+        xform_ny_ == center_ny_ && xform_size_ == size()) {
+        return xform_;
+    }
+    QTransform t;
+    // Read bottom-up: translate to the view centre, scale to world pixels,
+    // spin the result about the viewport centre, land it there. Qt rotates
+    // clockwise for a positive angle in widget coordinates, and the bearing
+    // is the compass direction that ends up pointing at the top of the
+    // screen, so the content turns the other way.
+    t.translate(width() / 2.0, height() / 2.0);
+    t.rotate(-bearing_deg_);
+    t.scale(world_px, world_px);
+    t.translate(-center_nx_, -center_ny_);
+    xform_ = t;
+    xform_world_px_ = world_px;
+    xform_bearing_ = bearing_deg_;
+    xform_nx_ = center_nx_;
+    xform_ny_ = center_ny_;
+    xform_size_ = size();
+    xform_valid_ = true;
+    return t;
+}
+
+QPointF SatelliteMapWidget::normDeltaFromScreen(const QPointF& delta) const {
+    // Differencing two mapped points drops the translation and keeps the
+    // rotation and scale, which is safer than re-deriving the sign of the
+    // inverse rotation by hand.
+    const QTransform inv = viewTransform().inverted();
+    return inv.map(delta) - inv.map(QPointF(0.0, 0.0));
+}
 
 void SatelliteMapWidget::setViewBounds(const geo::GeoPoint& center,
                                        double radius_m) {
@@ -233,7 +368,7 @@ void SatelliteMapWidget::clearViewBounds() {
 }
 
 void SatelliteMapWidget::applyViewBounds() {
-    zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
+    setContinuousZoom(continuousZoom());
     clampCenter();
     update();
     emitViewChanged();
@@ -248,14 +383,23 @@ bool SatelliteMapWidget::fitToRoi(int margin_px) {
         height() <= 2 * margin_px) {
         return false;
     }
-    double min_nx = 1.0, max_nx = 0.0, min_ny = 1.0, max_ny = 0.0;
+    // The viewport is axis-aligned on screen, so it is the ROI's extent in
+    // the ROTATED frame that has to fit. Spans are translation-invariant, so
+    // turning about the origin is enough. At bearing 0 this is the plain
+    // north-up bounding box.
+    const double rad = bearing_deg_ * geo::kDegToRad;
+    const double c = std::cos(rad);
+    const double s = std::sin(rad);
+    double min_rx = 1.0e9, max_rx = -1.0e9, min_ry = 1.0e9, max_ry = -1.0e9;
     for (const geo::GeoPoint& p : points) {
         const double nx = geo::lonToNormX(p.lon);
         const double ny = geo::latToNormY(p.lat);
-        min_nx = std::min(min_nx, nx);
-        max_nx = std::max(max_nx, nx);
-        min_ny = std::min(min_ny, ny);
-        max_ny = std::max(max_ny, ny);
+        const double rx = nx * c + ny * s;
+        const double ry = -nx * s + ny * c;
+        min_rx = std::min(min_rx, rx);
+        max_rx = std::max(max_rx, rx);
+        min_ry = std::min(min_ry, ry);
+        max_ry = std::max(max_ry, ry);
     }
     // Largest zoom whose world-pixel span of the bounds still fits. A
     // degenerate (zero-area) ROI is framed at the ceiling rather than
@@ -265,16 +409,19 @@ bool SatelliteMapWidget::fitToRoi(int margin_px) {
     int chosen = minZoomNow();
     for (int z = maxZoomNow(); z >= minZoomNow(); --z) {
         const double world_px = double(kTileSize) * (1 << z);
-        if ((max_nx - min_nx) * world_px <= avail_w &&
-            (max_ny - min_ny) * world_px <= avail_h) {
+        if ((max_rx - min_rx) * world_px <= avail_w &&
+            (max_ry - min_ry) * world_px <= avail_h) {
             chosen = z;
             break;
         }
     }
     cancelEdgeLengthEdit();
-    center_nx_ = (min_nx + max_nx) / 2.0;
-    center_ny_ = (min_ny + max_ny) / 2.0;
-    zoom_ = chosen;
+    // Centre of the rotated box, turned back into normalized space.
+    const double mid_rx = (min_rx + max_rx) / 2.0;
+    const double mid_ry = (min_ry + max_ry) / 2.0;
+    center_nx_ = mid_rx * c - mid_ry * s;
+    center_ny_ = mid_rx * s + mid_ry * c;
+    setContinuousZoom(chosen);
     clampCenter();
     update();
     emitViewChanged();
@@ -329,9 +476,10 @@ void SatelliteMapWidget::clampCenter() {
     // the cached tiles), so the centre is held inside the box too, inset by
     // half a viewport. When the viewport is wider than the box — the floor
     // level itself — inset would invert the range, so pin to the centre.
-    const double world_px = double(kTileSize) * (1 << zoom_);
-    const double half_w = width() / 2.0 / world_px;
-    const double half_h = height() / 2.0 / world_px;
+    const double world_px = worldPixels();
+    const QSizeF span = rotatedViewportPx();
+    const double half_w = span.width() / 2.0 / world_px;
+    const double half_h = span.height() / 2.0 / world_px;
     center_nx_ = 2.0 * half_w >= view_bounds_.width()
                      ? view_bounds_.center().x()
                      : qBound(view_bounds_.left() + half_w, center_nx_,
@@ -349,9 +497,7 @@ void SatelliteMapWidget::emitViewChanged() {
 // ---- Coordinate helpers -----------------------------------------------------
 
 QPointF SatelliteMapWidget::screenFromNorm(double nx, double ny) const {
-    const double world_px = double(kTileSize) * (1 << zoom_);
-    return QPointF((nx - center_nx_) * world_px + width() / 2.0,
-                   (ny - center_ny_) * world_px + height() / 2.0);
+    return viewTransform().map(QPointF(nx, ny));
 }
 
 QPointF SatelliteMapWidget::screenFromGeo(const geo::GeoPoint& point) const {
@@ -360,10 +506,8 @@ QPointF SatelliteMapWidget::screenFromGeo(const geo::GeoPoint& point) const {
 }
 
 geo::GeoPoint SatelliteMapWidget::geoFromScreen(const QPointF& pos) const {
-    const double world_px = double(kTileSize) * (1 << zoom_);
-    const double nx = center_nx_ + (pos.x() - width() / 2.0) / world_px;
-    const double ny = center_ny_ + (pos.y() - height() / 2.0) / world_px;
-    return geo::GeoPoint{geo::normYToLat(ny), geo::normXToLon(nx)};
+    const QPointF n = viewTransform().inverted().map(pos);
+    return geo::GeoPoint{geo::normYToLat(n.y()), geo::normXToLon(n.x())};
 }
 
 QPointF SatelliteMapWidget::screenFromBody(const QPointF& body) const {
@@ -373,7 +517,10 @@ QPointF SatelliteMapWidget::screenFromBody(const QPointF& body) const {
 }
 
 double SatelliteMapWidget::metersPerPixelNow() const {
-    return geo::metersPerPixel(centerLat(), zoom_);
+    // Rotation is rigid and Mercator is conformal, so the bearing does not
+    // enter here — only the fractional zoom, which geo::metersPerPixel()
+    // cannot express because it takes an integer level.
+    return geo::metersPerNormUnit(centerLat()) / worldPixels();
 }
 
 // ---- Plan objects -----------------------------------------------------------
@@ -770,7 +917,11 @@ QPointF SatelliteMapWidget::markerScreenPos() const {
 
 QPointF SatelliteMapWidget::markerArrowTipScreen() const {
     const QPointF base = markerScreenPos();
-    const double rad = marker_.heading_deg * geo::kDegToRad;
+    // A fixed pixel offset in a compass direction, so unlike every other
+    // overlay point this one does not pass through the view transform and
+    // has to subtract the bearing itself. The heading stays geographic.
+    const double rad =
+        (marker_.heading_deg - bearing_deg_) * geo::kDegToRad;
     // Compass -> screen: north is -y, east is +x.
     return base + QPointF(std::sin(rad), -std::cos(rad)) * kMarkerArrowPx;
 }
@@ -837,7 +988,7 @@ SatelliteMapWidget::Drag SatelliteMapWidget::hitTest(const QPointF& pos,
             const double t = qBound(
                 0.0, QPointF::dotProduct(pos - edge.p1(), ab) / len_sq, 1.0);
             const QPointF closest = edge.p1() + ab * t;
-            if (QLineF(pos, closest).length() <= 6.0) {
+            if (QLineF(pos, closest).length() <= kEdgeHitBandPx) {
                 if (edge_index) {
                     *edge_index = i;
                 }
@@ -995,19 +1146,39 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
     // Past the fetch ceiling the view keeps zooming but the tile level does
     // not: tiles at `tile_z` are painted `tile_px` wide instead of 256, and
     // nothing is requested at levels that have no data. Below the ceiling
-    // tile_z == zoom_ and tile_px == kTileSize, so this is the plain path.
+    // tile_z == zoom_ and tile_px is 256 scaled by the zoom fraction alone,
+    // so the overzoom path and fractional zoom share one multiplication.
     const int tile_z = std::min(zoom_, fetchZoomCeiling());
-    const double tile_px = double(kTileSize) * (1 << (zoom_ - tile_z));
     const int n = 1 << tile_z;
-    const double world_px = tile_px * n;
-    const double left = center_nx_ * world_px - width() / 2.0;
-    const double top = center_ny_ * world_px - height() / 2.0;
+    const double world_px = worldPixels();
+    const double tile_px = world_px / n;
+    // World-pixel coordinates of the view centre. Tiles are laid out around
+    // it in an un-rotated frame and the painter turns the whole layer, so
+    // this is the one place the bearing touches the tile maths.
+    const double ox = center_nx_ * world_px;
+    const double oy = center_ny_ * world_px;
+    const QSizeF span = rotatedViewportPx();
+    const double half_w = span.width() / 2.0;
+    const double half_h = span.height() / 2.0;
 
-    const int tx0 = int(std::floor(left / tile_px));
-    const int ty0 = int(std::floor(top / tile_px));
-    const int tx1 = int(std::floor((left + width()) / tile_px));
-    const int ty1 = int(std::floor((top + height()) / tile_px));
+    const int tx0 = int(std::floor((ox - half_w) / tile_px));
+    const int ty0 = int(std::floor((oy - half_h) / tile_px));
+    const int tx1 = int(std::floor((ox + half_w) / tile_px));
+    const int ty1 = int(std::floor((oy + half_h) / tile_px));
 
+    // The turn is only installed once there is one. A rotating painter
+    // transform — even by zero degrees — moves every tile blit onto
+    // QPainter's general transformed path, which resamples on a different
+    // grid than the aligned blit, so an unconditional rotate visibly
+    // changes the imagery on a north-up view.
+    const bool turned = std::abs(bearing_deg_) > 1e-9;
+    QPointF frame(width() / 2.0, height() / 2.0);
+    painter.save();
+    if (turned) {
+        painter.translate(frame.x(), frame.y());
+        painter.rotate(-bearing_deg_);
+        frame = QPointF(0.0, 0.0);
+    }
     painter.setRenderHint(QPainter::Antialiasing, false);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     for (int ty = ty0; ty <= ty1; ++ty) {
@@ -1016,7 +1187,8 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
         }
         for (int tx = tx0; tx <= tx1; ++tx) {
             const int wrapped = ((tx % n) + n) % n;
-            const QPointF dest(tx * tile_px - left, ty * tile_px - top);
+            const QPointF dest(tx * tile_px - ox + frame.x(),
+                               ty * tile_px - oy + frame.y());
             const QRectF dest_rect(dest, QSizeF(tile_px, tile_px));
             const QPixmap tile = tiles_->cachedTile(tile_z, wrapped, ty);
             if (!tile.isNull()) {
@@ -1076,6 +1248,7 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
             tiles_->fetch(tile_z, wrapped, ty);
         }
     }
+    painter.restore();
     painter.setRenderHint(QPainter::Antialiasing, true);
 }
 
@@ -1084,7 +1257,7 @@ void SatelliteMapWidget::setMapRaster(const QImage& image,
     map_raster_ = image;
     map_raster_m_ = bounds_m;
     refreshMapRasterTint();
-    zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
+    setContinuousZoom(continuousZoom());
     update();
 }
 
@@ -1221,9 +1394,17 @@ void SatelliteMapWidget::paintTelemetry(QPainter& painter) {
     if (!grid_.image.isNull()) {
         const double k = grid_.resolution / mpp;
         // body x axis (E,N) = (s, c) -> screen (s, -c); body y = (-c, s) -> (-c, -s)
-        QTransform t(k * s, -k * c,   // image u axis in screen coords
-                     -k * c, -k * s,  // image v axis in screen coords
+        QTransform t(k * s, -k * c,   // image u axis in north-up screen px
+                     -k * c, -k * s,  // image v axis in north-up screen px
                      0.0, 0.0);
+        // Every other overlay reaches the screen through viewTransform() and
+        // so inherits the bearing; this matrix is hand-built, so the view
+        // rotation has to be composed in explicitly or the grid would stay
+        // north-up while the imagery turned under it. The translation is
+        // applied last because origin_screen is already rotated.
+        QTransform view_rotation;
+        view_rotation.rotate(-bearing_deg_);
+        t *= view_rotation;
         const QPointF origin_screen = screenFromBody(grid_.origin_body);
         t *= QTransform::fromTranslate(origin_screen.x(), origin_screen.y());
         painter.save();
@@ -1676,6 +1857,9 @@ void SatelliteMapWidget::paintChrome(QPainter& painter) {
 // ---- Interaction ------------------------------------------------------------
 
 void SatelliteMapWidget::mousePressEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     if (event->button() == Qt::RightButton) {
         if (draw_polygon_armed_) {
             // Close the polygon. Fewer than three points is not a shape;
@@ -1778,6 +1962,9 @@ void SatelliteMapWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     hover_pos_ = event->pos();
     hover_valid_ = true;
     if (draw_polygon_armed_ || measure_state_ == Measure::WantSecond) {
@@ -1799,14 +1986,9 @@ void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
             update();
             emit roiChanged();
             break;
-        case Drag::Pan: {
-            const double world_px = double(kTileSize) * (1 << zoom_);
-            center_nx_ -= delta.x() / world_px;
-            center_ny_ -= delta.y() / world_px;
-            clampCenter();
-            emitViewChanged();
+        case Drag::Pan:
+            panByPixels(QPointF(delta));
             break;
-        }
         case Drag::MoveRoi: {
             const QPointF enu(delta.x() * mpp, -delta.y() * mpp);
             if (polygon_.valid()) {
@@ -1879,6 +2061,9 @@ void SatelliteMapWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void SatelliteMapWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     if (event->button() == Qt::LeftButton) {
         const bool stationary =
             (event->pos() - drag_press_pos_).manhattanLength() <= 4;
@@ -1958,12 +2143,12 @@ void SatelliteMapWidget::resizeEvent(QResizeEvent* event) {
     // view a level below the floor — the step rails appearing and vanishing
     // change the canvas width by 288 px. Emit only on a real change: resize
     // events arrive continuously while the operator drags the window edge.
-    const int before_zoom = zoom_;
+    const double before_zoom = continuousZoom();
     const double before_nx = center_nx_;
     const double before_ny = center_ny_;
-    zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
+    setContinuousZoom(before_zoom);
     clampCenter();
-    if (zoom_ != before_zoom || center_nx_ != before_nx ||
+    if (continuousZoom() != before_zoom || center_nx_ != before_nx ||
         center_ny_ != before_ny) {
         emitViewChanged();
     }
@@ -1987,12 +2172,8 @@ void SatelliteMapWidget::wheelEvent(QWheelEvent* event) {
             event->accept();
             return;
         }
-        const double world_px = double(kTileSize) * (1 << zoom_);
-        center_nx_ -= delta.x() / world_px;
-        center_ny_ -= delta.y() / world_px;
-        clampCenter();
+        panByPixels(delta);
         update();
-        emitViewChanged();
         event->accept();
         return;
     }
@@ -2019,27 +2200,113 @@ void SatelliteMapWidget::wheelEvent(QWheelEvent* event) {
     }
     wheel_accum_ -= dz * kWheelNotch;
     dz = qBound(-2, dz, 2);  // a fast mouse spin must not fling six levels
-    const int new_zoom = qBound(minZoomNow(), zoom_ + dz, maxZoomNow());
-    if (new_zoom == zoom_) {
-        event->accept();
-        return;
+    if (zoomAtScreenPoint(dz, event->position())) {
+        update();
     }
-    const QPointF pos = event->position();
-    const double world_before = double(kTileSize) * (1 << zoom_);
-    const double nx_under =
-        center_nx_ + (pos.x() - width() / 2.0) / world_before;
-    const double ny_under =
-        center_ny_ + (pos.y() - height() / 2.0) / world_before;
-
-    zoom_ = new_zoom;
-    const double world_after = double(kTileSize) * (1 << zoom_);
-    center_nx_ = nx_under - (pos.x() - width() / 2.0) / world_after;
-    center_ny_ = ny_under - (pos.y() - height() / 2.0) / world_after;
-
-    clampCenter();
-    update();
-    emitViewChanged();
     event->accept();
+}
+
+bool SatelliteMapWidget::event(QEvent* event) {
+    if (touch::isTouchEventType(event->type())) {
+        // Accepting TouchBegin is what stops Qt synthesizing a mouse press
+        // from the same sequence.
+        if (handleTouchGesture(static_cast<QTouchEvent*>(event))) {
+            event->accept();
+            return true;
+        }
+    }
+    return QWidget::event(event);
+}
+
+bool SatelliteMapWidget::handleTouchGesture(QTouchEvent* event) {
+    if (event->type() == QEvent::TouchCancel) {
+        touch_.reset();
+        touch_guard_.endTouch();
+        return true;
+    }
+
+    const QVector<touch_gestures::Point> points = touch::activePoints(event);
+    // The inline dimension editor is a child of this widget and does not
+    // accept touch, so Qt looks for a touch-aware ancestor and lands here.
+    // Declining TouchBegin hands the whole sequence back to the platform's
+    // synthesized mouse, which is what reaches the editor. (The canvas tool
+    // stack is parented to the page, not to us, so Qt never routes those
+    // taps through here in the first place.)
+    if (event->type() == QEvent::TouchBegin && !points.isEmpty() &&
+        childAt(touch::asQPointF(points.first()).toPoint()) != nullptr) {
+        return false;
+    }
+
+    if (points.isEmpty()) {
+        const bool tapped = touch_.release();
+        touch_guard_.endTouch();
+        if (tapped) {
+            // The tap itself places nothing — no vertex, no roof-edge
+            // toggle, no marker selection. It still has to commit the inline
+            // editor, because with a mouse the press elsewhere on the canvas
+            // would move focus and the FocusOut filter would commit for us.
+            // A tap over the editor never reaches here (declined above), so
+            // one that does is always outside it.
+            commitEdgeLengthEdit();
+            emit canvasTapped();
+        }
+        return true;
+    }
+
+    touch_guard_.beginTouch();
+
+    // Deliberately NOT cancelInteraction(): polygon drawing is one click per
+    // corner, so "place two corners, pinch out, place the rest" is a normal
+    // roof workflow, and cancelling would delete a sub-three-vertex ring and
+    // disarm the draw. Touching the canvas mid-draw is how the operator gets
+    // the next corner on screen.
+    const touch_gestures::GestureState::Motion motion =
+        touch_.update(points.constData(), points.size());
+
+    // A view move discards the inline dimension edit, matching the wheel:
+    // the chip slides out from under the editor and a touch never moves
+    // focus, so nothing else would close it. A tap takes the other branch
+    // above and commits instead.
+    if (motion.pan || motion.pinch) {
+        cancelEdgeLengthEdit();
+    }
+
+    bool moved = false;
+    if (motion.pan) {
+        panByPixels(touch::asQPointF(motion.pan_delta));
+        moved = true;
+    }
+    if (motion.pinch) {
+        // Twist before the pan and zoom: the bearing is part of the view
+        // transform both of those solve against, so applying it first keeps
+        // the anchor arithmetic in one frame instead of two.
+        if (motion.twist_deg != 0.0) {
+            setBearingDeg(bearing_deg_ + motion.twist_deg);
+            moved = true;
+        }
+        // The midpoint travelling is a pan and the zoom anchors where the
+        // fingers actually are; together they make the gesture behave the
+        // way an operator expects from a phone map. Pan first so the anchor
+        // is already in post-pan coordinates.
+        const QPointF midpoint_delta = touch::asQPointF(motion.pinch_pan_delta);
+        if (!midpoint_delta.isNull()) {
+            panByPixels(midpoint_delta);
+            moved = true;
+        }
+        // Continuous, not whole levels. The tile pyramid is still integer —
+        // zoom_frac_ paints the level scaled — so the map now tracks the
+        // fingers instead of popping 2x every sqrt(2) of separation, which
+        // read as a dead gesture and provoked overshoot.
+        const double levels = std::log2(touch_.takeScaleFactor());
+        if (levels != 0.0 &&
+            zoomAtScreenPoint(levels, touch::asQPointF(motion.pinch_center))) {
+            moved = true;
+        }
+    }
+    if (moved) {
+        update();
+    }
+    return true;
 }
 
 }  // namespace f2c_cpp

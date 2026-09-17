@@ -1597,6 +1597,65 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  `roof_edge_clearance` implementation in `coverage_horizon_manager.py` —
  that one is the dead horizon-manager path, kept only for history.
 
+## Touch input on the three canvases (production-wired)
+
+The field laptop is a touch panel and the operator works standing on a roof,
+so the map canvases take pinch/pan/twist directly. Two headers carry it:
+`cpp/include/touch_gesture_state.hpp` is the Qt-free state machine (Idle /
+Single / Pinch, tap slop, scale accumulator, twist dead zone) and is unit
+tested by `tests/touch_gesture_state_tests.cpp`;
+`cpp/include/touch_canvas_gestures.hpp` is the Qt glue plus
+`SynthesizedMouseGuard`, which swallows the mouse events the system
+synthesizes from touch so a pinch can never also read as a click or drag.
+Three widgets consume them: `SatelliteMapWidget`, `PlotWidget` and
+`PanZoomImageWidget`. Mouse and wheel behaviour is unchanged on all three.
+
+One finger always pans. Two fingers pinch, anchored on the live midpoint, and
+twist. Gestures are ungated — always on, no preference.
+
+### Rules for agents touching this path
+
+- **A tap on a canvas places nothing, and that is a correctness
+  requirement, not an oversight.** ROI vertices and correspondence picks
+  need pointer accuracy: a fingertip tap is worth several pixels of slop,
+  and a misplaced correspondence silently corrupts the alignment fit that
+  every exported ROI vertex inherits. So all three canvases dropped tap
+  forwarding — the operator pans and zooms with fingers and *picks* with
+  the trackpad. Do not "restore" tap-to-pick on any of them.
+- The one carve-out is `SatelliteMapWidget::canvasTapped()`, which replaces
+  the forwarded click. `SatelliteScreen` consumes it **only on step 5**, to
+  leave manual override, because that is the one canvas action with no
+  precision requirement. Adding a second consumer means re-arguing the rule
+  above.
+- **Pinch zoom is fractional.** `zoom_frac_` / `setContinuousZoom()` split
+  the view zoom into the integer tile level and a painted remainder, because
+  on integer levels alone a pinch reads as dead until it suddenly jumps 2x,
+  and operators overshoot. `worldPixels()` is the single scale source;
+  do not reintroduce `256 << zoom_` at a call site.
+- **`paintTiles` installs the view rotation only when the bearing is
+  non-zero.** A `painter.rotate(0.0)` still promotes the painter's transform
+  type, which moves every tile blit off QPainter's aligned path onto the
+  general transformed path and resamples on a different grid — merely
+  *having* the rotation feature shifted the whole canvas by ~6/255 per
+  channel on a north-up view. The tripwire is that a bearing-0
+  `BDR_DEV_STAGE6_SHOT` is pixel-identical to a pre-rotation build.
+- **Rotation is imagery-only.** `bearingSupported()` is `imagery_enabled_`:
+  the measured/CAD canvas draws an axis-aligned metric grid and has no
+  bearing to show or reset. `measured` / `measured_map` shots catch a
+  regression.
+- **The compass pill is not optional.** A twist is easy to trigger by
+  accident while pinching, so every rotatable surface must always show where
+  north is and reset in one click — `SatelliteScreen::refreshCompass()` for
+  the map (it is the 5th pill in the canvas tool stack, hidden in measured
+  mode) and `PanZoomImageWidget`'s own `reset_rotation_` chip for the
+  alignment panes. A bearing with no way back is how an operator loses
+  track of which way the roof faces.
+- `PanZoomImageWidget`'s bearing is a **view** property only: `pointPicked`
+  keeps emitting image pixels, so the similarity fit and both pick-precision
+  sigmas are untouched by a twist.
+- `BDR_DEV_STAGE6_SHOT_BEARING=<deg>` renders a rotated Stage 6 view
+  headlessly — the agent-side check for the rotation paths.
+
 ## Theming (light mode is a field requirement, not a preference)
 
 The operator runs this on a laptop on a roof in direct sun, where the

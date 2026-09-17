@@ -98,6 +98,9 @@ public:
     void devSelectMarker();
     /** Dev shot only: frame the ROI as a finished draw would. */
     void devFitRoi();
+    /** Dev shot only: the view rotation a two-finger twist leaves behind,
+        on the satellite canvas and both alignment panes. */
+    void devSetViewBearing(double degrees);
     /** Dev screenshot hook: renders the Save Plan confirmation to a PNG. */
     void devRenderPlanConfirm(const QString& png_path);
     /** Dev screenshot hook: renders the shared Stage 6 confirm prompt (the
@@ -630,6 +633,14 @@ private:
     QVector<CanvasTool> canvas_tool_buttons_;
     /** Re-tints the tool icons for the current palette. */
     void refreshCanvasToolIcons();
+    // Compass pill: shows where north is once the operator twists the map,
+    // and resets to north-up on click. Always visible on the satellite
+    // canvas — a bearing with no way back and no cue which way is north is
+    // worse on a roof than the jumpy zoom it ships alongside.
+    QPushButton* compass_button_ = nullptr;
+    /** Re-points the needle and re-labels the tooltip for the live bearing
+        and palette. */
+    void refreshCompass();
     QWidget* correspond_page_ = nullptr;
     PanZoomImageWidget* sat_pick_ = nullptr;
     PanZoomImageWidget* pcd_pick_ = nullptr;

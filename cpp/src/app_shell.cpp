@@ -992,6 +992,21 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                 setDarkMode(!shot_dark);
             });
         }
+        // BDR_DEV_STAGE6_SHOT_BEARING=<deg>: turn the satellite canvas and
+        // the alignment panes, the state a two-finger twist leaves behind.
+        // There is no other way to see a rotated view without a touchscreen,
+        // and the layers that need the bearing composed in by hand (tiles,
+        // the occupancy grid, the marker arrow, the robot glyph) are exactly
+        // the ones a refactor breaks silently.
+        const double shot_bearing =
+            qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_BEARING").toDouble();
+        if (shot_bearing != 0.0) {
+            QTimer::singleShot(3500, this, [this, shot_bearing]() {
+                if (stage6_) {
+                    stage6_->devSetViewBearing(shot_bearing);
+                }
+            });
+        }
         QTimer::singleShot(5000, this, [this, shot_path]() {
             grab().save(shot_path);
             QApplication::quit();

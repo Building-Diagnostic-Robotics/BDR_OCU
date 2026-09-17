@@ -11,16 +11,23 @@
 
 #pragma once
 
+#include "touch_canvas_gestures.hpp"
+
 #include <QColor>
 #include <QImage>
+#include <QLineF>
 #include <QPointF>
 #include <QVector>
 #include <QWidget>
 
+#include <QTransform>
+
 class QMouseEvent;
+class QPushButton;
 class QVariantAnimation;
 class QPaintEvent;
 class QResizeEvent;
+class QTouchEvent;
 class QWheelEvent;
 
 namespace f2c_cpp {
@@ -41,6 +48,18 @@ public:
      * as finely. See SatelliteScreen::pairSigmaM.
      */
     double scale() const { return scale_; }
+
+    /**
+     * View rotation in degrees, driven by a two-finger twist. The cloud and
+     * the stitch arrive at different orientations, so being able to spin one
+     * to roughly match the other is what makes the same building corner
+     * findable in both panes.
+     *
+     * Purely a view property: `pointPicked` keeps emitting IMAGE pixels, so
+     * the similarity fit and both pick-precision sigmas are untouched by it.
+     */
+    double bearingDeg() const { return bearing_deg_; }
+    void setBearingDeg(double degrees);
 
     void setPickEnabled(bool enabled);
     /** Greys the pane out and refuses picks — used for "not your turn". */
@@ -89,17 +108,40 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    /** Touch pan / pinch. QTouchEvent has no dedicated virtual in Qt 5. */
+    bool event(QEvent* event) override;
 
 private:
     QRectF viewRect() const;
+    /**
+     * Image pixels -> screen: scale, translate by `offset_`, then rotate
+     * about the pane centre. `offset_` therefore lives in the PRE-rotation
+     * frame, which is why pan deltas and zoom anchors have to be un-rotated
+     * before they can be solved against it.
+     */
+    QTransform viewTransform() const;
+    /** Just the rotation half of viewTransform(), for turning a screen
+        point or delta back into the frame `offset_` is expressed in. */
+    QTransform rotationTransform() const;
+    QPointF preRotationDelta(const QPointF& screen_delta) const;
     QPointF imageToScreen(const QPointF& image_pt) const;
     QPointF screenToImage(const QPointF& screen_pt) const;
     void zoomAt(const QPointF& screen_pos, double factor);
+    /** Touch pan / pinch / twist. True when the event is consumed. */
+    bool handleTouchGesture(QTouchEvent* event);
+    /** Places and shows/hides the reset-rotation chip. */
+    void layoutResetRotation();
+    /** Re-sheets the chip for the current palette. */
+    void applyResetRotationStyle();
 
     QImage image_;
     bool dark_mode_ = true;
     double scale_ = 1.0;
     QPointF offset_;
+    // Degrees clockwise. A twist is easy to trigger by accident while
+    // pinching, so the reset chip below is not optional.
+    double bearing_deg_ = 0.0;
+    QPushButton* reset_rotation_ = nullptr;
     bool view_fitted_ = false;
     // Set once the operator pans or zooms. Until then the view re-fits on
     // every resize — setImage() usually runs before layout has given the
@@ -128,6 +170,13 @@ private:
 
     bool panning_ = false;
     QPoint last_pan_pos_;
+
+    // Touch pan / pinch / twist. A finger never clicks this pane: a
+    // misplaced correspondence silently biases the alignment fit, and a
+    // fingertip cannot be aimed well enough to risk it. Fingers frame the
+    // two panes, the trackpad picks. See touch_gesture_state.hpp.
+    touch_gestures::GestureState touch_;
+    touch::SynthesizedMouseGuard touch_guard_;
 };
 
 }  // namespace f2c_cpp

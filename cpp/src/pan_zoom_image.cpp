@@ -5,6 +5,7 @@
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QVariantAnimation>
 #include <QWheelEvent>
@@ -36,7 +37,19 @@ PanZoomImageWidget::PanZoomImageWidget(QWidget* parent) : QWidget(parent) {
     setMouseTracking(true);
     setMinimumSize(240, 180);
     setAttribute(Qt::WA_StyledBackground, true);
+    // Without this the xcb backend never delivers touch — the operator's
+    // panel reaches us only as the X server's emulated pointer.
+    setAttribute(Qt::WA_AcceptTouchEvents, true);
     setCursor(Qt::OpenHandCursor);
+    // A real child widget rather than a painted chip, so it still works by
+    // finger: children receive the platform's synthesized mouse events, and
+    // the canvas itself deliberately swallows taps.
+    reset_rotation_ = new QPushButton(QStringLiteral("⟲  Level"), this);
+    reset_rotation_->setCursor(Qt::PointingHandCursor);
+    reset_rotation_->hide();
+    connect(reset_rotation_, &QPushButton::clicked, this,
+            [this] { setBearingDeg(0.0); });
+    applyResetRotationStyle();
 }
 
 void PanZoomImageWidget::setImage(const QImage& image) {
@@ -129,7 +142,26 @@ void PanZoomImageWidget::setDarkMode(bool dark_mode) {
         return;
     }
     dark_mode_ = dark_mode;
+    // A sheet set in the constructor would hold the boot palette for the
+    // life of the process — this screen is built once and reused.
+    applyResetRotationStyle();
     update();
+}
+
+void PanZoomImageWidget::applyResetRotationStyle() {
+    if (!reset_rotation_) {
+        return;
+    }
+    const UiThemeTokens t = uiThemeTokens(dark_mode_);
+    reset_rotation_->setStyleSheet(
+        QStringLiteral("QPushButton {"
+                       " background: %1; color: %2; border: 1px solid %3;"
+                       " border-radius: 8px; padding: 4px 10px;"
+                       " font-family: 'Arimo'; font-size: 11px;"
+                       " font-weight: bold; }")
+            .arg(t.overlay_bg, t.text, t.overlay_border));
+    reset_rotation_->adjustSize();
+    layoutResetRotation();
 }
 
 void PanZoomImageWidget::setMarkers(const QVector<QPointF>& image_points,
@@ -177,32 +209,100 @@ void PanZoomImageWidget::fitToView() {
         view_fitted_ = false;
         return;
     }
-    const double sx = view.width() / std::max(1, image_.width());
-    const double sy = view.height() / std::max(1, image_.height());
+    // A rotated image needs a bigger box, so the fit measures its turned
+    // extent. The rotation pivots on the pane centre, so centring in the
+    // pre-rotation frame still lands centred on screen.
+    const double rad = bearing_deg_ * 3.141592653589793 / 180.0;
+    const double ac = std::abs(std::cos(rad));
+    const double as = std::abs(std::sin(rad));
+    const double iw = std::max(1, image_.width());
+    const double ih = std::max(1, image_.height());
+    const double sx = view.width() / (iw * ac + ih * as);
+    const double sy = view.height() / (iw * as + ih * ac);
     scale_ = std::min(sx, sy);
-    offset_ = QPointF(view.center().x() - 0.5 * image_.width() * scale_,
-                      view.center().y() - 0.5 * image_.height() * scale_);
+    offset_ = QPointF(view.center().x() - 0.5 * iw * scale_,
+                      view.center().y() - 0.5 * ih * scale_);
     view_fitted_ = true;
 }
 
+QTransform PanZoomImageWidget::rotationTransform() const {
+    const double cx = width() / 2.0;
+    const double cy = height() / 2.0;
+    QTransform r;
+    r.translate(cx, cy);
+    r.rotate(bearing_deg_);
+    r.translate(-cx, -cy);
+    return r;
+}
+
+QTransform PanZoomImageWidget::viewTransform() const {
+    QTransform t = rotationTransform();
+    t.translate(offset_.x(), offset_.y());
+    t.scale(scale_, scale_);
+    return t;
+}
+
+QPointF PanZoomImageWidget::preRotationDelta(
+    const QPointF& screen_delta) const {
+    // Differencing two mapped points drops the translation and keeps the
+    // rotation, rather than re-deriving the inverse's signs by hand.
+    const QTransform inv = rotationTransform().inverted();
+    return inv.map(screen_delta) - inv.map(QPointF(0.0, 0.0));
+}
+
 QPointF PanZoomImageWidget::imageToScreen(const QPointF& image_pt) const {
-    return QPointF(offset_.x() + image_pt.x() * scale_,
-                   offset_.y() + image_pt.y() * scale_);
+    return viewTransform().map(image_pt);
 }
 
 QPointF PanZoomImageWidget::screenToImage(const QPointF& screen_pt) const {
     if (scale_ < 1e-12) {
         return QPointF();
     }
-    return QPointF((screen_pt.x() - offset_.x()) / scale_,
-                   (screen_pt.y() - offset_.y()) / scale_);
+    return viewTransform().inverted().map(screen_pt);
 }
 
 void PanZoomImageWidget::zoomAt(const QPointF& screen_pos, double factor) {
     const QPointF img = screenToImage(screen_pos);
     scale_ = std::clamp(scale_ * factor, 0.02, 40.0);
-    offset_ = QPointF(screen_pos.x() - img.x() * scale_,
-                      screen_pos.y() - img.y() * scale_);
+    // `offset_` is pre-rotation, so the anchor has to come back into that
+    // frame before it can be solved for. At bearing 0 `pre` is `screen_pos`.
+    const QPointF pre = rotationTransform().inverted().map(screen_pos);
+    offset_ = pre - img * scale_;
+}
+
+void PanZoomImageWidget::setBearingDeg(double degrees) {
+    degrees = std::fmod(degrees, 360.0);
+    if (degrees < 0.0) {
+        degrees += 360.0;
+    }
+    if (qFuzzyCompare(bearing_deg_ + 1.0, degrees + 1.0)) {
+        return;
+    }
+    bearing_deg_ = degrees;
+    // Same contract as pan and zoom: once the operator has framed the pane
+    // by hand, a resize must stop re-fitting it — otherwise the next layout
+    // pass would silently throw the orientation away.
+    user_adjusted_ = true;
+    layoutResetRotation();
+    update();
+}
+
+void PanZoomImageWidget::layoutResetRotation() {
+    if (!reset_rotation_) {
+        return;
+    }
+    const bool rotated = bearing_deg_ > 0.5 && bearing_deg_ < 359.5;
+    reset_rotation_->setVisible(rotated);
+    if (!rotated) {
+        return;
+    }
+    reset_rotation_->setToolTip(
+        QStringLiteral("Rotated %1° — click to level the pane")
+            .arg(bearing_deg_, 0, 'f', 0));
+    const QSize hint = reset_rotation_->sizeHint();
+    reset_rotation_->resize(hint);
+    reset_rotation_->move(width() - hint.width() - 10, 10);
+    reset_rotation_->raise();
 }
 
 void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
@@ -220,10 +320,14 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
     }
 
     if (!image_.isNull()) {
-        const QRectF dest(
-            offset_,
-            QSizeF(image_.width() * scale_, image_.height() * scale_));
-        painter.drawImage(dest, image_);
+        // Drawn through the view transform rather than into a computed rect:
+        // the rect cannot express the bearing. Markers and the robot glyph
+        // stay in screen space below, which is what keeps their labels
+        // upright on a rotated pane.
+        painter.save();
+        painter.setTransform(viewTransform());
+        painter.drawImage(QPointF(0.0, 0.0), image_);
+        painter.restore();
     } else if (!empty_text_.isEmpty()) {
         painter.setPen(QColor(appThemeTokens().muted));
         painter.setFont(QFont(QStringLiteral("Arimo"), 11));
@@ -256,8 +360,12 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
 
     if (robot_visible_) {
         const QPointF origin = imageToScreen(robot_origin_);
-        const double c = std::cos(robot_heading_rad_);
-        const double s = std::sin(robot_heading_rad_);
+        // A fixed pixel-size glyph, so unlike the markers it does not pass
+        // through the view transform and has to pick the bearing up itself.
+        const double heading =
+            robot_heading_rad_ + bearing_deg_ * 3.141592653589793 / 180.0;
+        const double c = std::cos(heading);
+        const double s = std::sin(heading);
         auto rot = [&](double x, double y) {
             return origin + QPointF(c * x - s * y, s * x + c * y);
         };
@@ -367,9 +475,13 @@ void PanZoomImageWidget::resizeEvent(QResizeEvent* event) {
     if (!view_fitted_ || !user_adjusted_) {
         fitToView();
     }
+    layoutResetRotation();
 }
 
 void PanZoomImageWidget::mousePressEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     // Shift-drag pans even while picking is armed, so the operator can
     // reposition without burning a correspondence.
     if (event->button() == Qt::MiddleButton ||
@@ -394,9 +506,12 @@ void PanZoomImageWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void PanZoomImageWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     if (panning_) {
         const QPoint delta = event->pos() - last_pan_pos_;
-        offset_ += delta;
+        offset_ += preRotationDelta(QPointF(delta));
         last_pan_pos_ = event->pos();
         update();
         event->accept();
@@ -404,6 +519,9 @@ void PanZoomImageWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void PanZoomImageWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     if (panning_ && (event->button() == Qt::MiddleButton ||
                      event->button() == Qt::LeftButton)) {
         panning_ = false;
@@ -421,6 +539,85 @@ void PanZoomImageWidget::wheelEvent(QWheelEvent* event) {
     zoomAt(event->position(), std::pow(1.15, steps));
     update();
     event->accept();
+}
+
+bool PanZoomImageWidget::event(QEvent* event) {
+    if (touch::isTouchEventType(event->type())) {
+        // Accepting TouchBegin is what stops Qt synthesizing a mouse press
+        // from the same sequence.
+        if (handleTouchGesture(static_cast<QTouchEvent*>(event))) {
+            event->accept();
+            return true;
+        }
+    }
+    return QWidget::event(event);
+}
+
+bool PanZoomImageWidget::handleTouchGesture(QTouchEvent* event) {
+    if (event->type() == QEvent::TouchCancel) {
+        touch_.reset();
+        touch_guard_.endTouch();
+        return true;
+    }
+
+    const QVector<touch_gestures::Point> points = touch::activePoints(event);
+    // The reset-rotation chip is a child widget and does not accept touch,
+    // so Qt looks for a touch-aware ancestor and lands here. Declining
+    // TouchBegin hands the sequence back to the platform's synthesized
+    // mouse, which is what reaches the button — the operator twists with
+    // fingers, so undoing it must not demand the trackpad.
+    if (event->type() == QEvent::TouchBegin && !points.isEmpty() &&
+        childAt(touch::asQPointF(points.first()).toPoint()) != nullptr) {
+        return false;
+    }
+
+    if (points.isEmpty()) {
+        // A tap is deliberately inert: this widget is half of the
+        // correspondence picker, and a misplaced pair silently biases the
+        // alignment fit. Fingers frame the two panes, the trackpad picks.
+        touch_.release();
+        touch_guard_.endTouch();
+        return true;
+    }
+
+    touch_guard_.beginTouch();
+    // The state machine runs regardless, so the gesture bookkeeping stays
+    // coherent; only the view transform needs an image, same as the wheel.
+    const touch_gestures::GestureState::Motion motion =
+        touch_.update(points.constData(), points.size());
+    if (image_.isNull()) {
+        return true;
+    }
+
+    bool moved = false;
+    if (motion.pan) {
+        offset_ += preRotationDelta(touch::asQPointF(motion.pan_delta));
+        moved = true;
+    }
+    if (motion.pinch) {
+        // Twist first: the pan and zoom below both solve against the view
+        // transform, so applying the bearing up front keeps that arithmetic
+        // in one frame instead of two.
+        if (motion.twist_deg != 0.0) {
+            setBearingDeg(bearing_deg_ + motion.twist_deg);
+        }
+        // The midpoint travelling is a pan and the zoom anchors where the
+        // fingers actually are; together they make the gesture behave the
+        // way an operator expects from a phone map. Pan first so the anchor
+        // is already in post-pan coordinates.
+        offset_ +=
+            preRotationDelta(touch::asQPointF(motion.pinch_pan_delta));
+        zoomAt(touch::asQPointF(motion.pinch_center),
+               touch_.takeScaleFactor());
+        moved = true;
+    }
+    if (moved) {
+        // Same contract as the wheel and mouse paths: once the operator has
+        // framed the pane by hand, a resize must stop re-fitting it.
+        user_adjusted_ = true;
+        update();
+    }
+    return true;
 }
 
 }  // namespace f2c_cpp

@@ -552,6 +552,18 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &SatelliteScreen::refreshStepUi);
     connect(map_, &SatelliteMapWidget::interactionChanged, this,
             &SatelliteScreen::maybeRearmRoiDraw);
+    // Touch carve-out for one non-precision action. A finger tap on a canvas
+    // places nothing anywhere in the app, but handing control back from
+    // manual override is the one canvas "click" that does not need aiming —
+    // a mouse gets it from the press filter below, and without this a finger
+    // could enter teleop (a press on the FPV view, a separate widget that
+    // still sees synthesized mouse events) with no way back out, while
+    // Start Scan and Resume sit disabled behind manual_override_.
+    connect(map_, &SatelliteMapWidget::canvasTapped, this, [this] {
+        if (selected_step_ == Step::AutonomousScan && manual_override_) {
+            setManualOverride(false);
+        }
+    });
     // Units toggle: re-suffix + re-display the length fields (values stay
     // SI in the model; only the presentation flips — house rule).
     connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
@@ -1041,6 +1053,17 @@ void SatelliteScreen::devSelectMarker() { map_->setMarkerSelected(true); }
 
 void SatelliteScreen::devFitRoi() { map_->fitToRoi(); }
 
+void SatelliteScreen::devSetViewBearing(double degrees) {
+    map_->setBearingDeg(degrees);
+    if (sat_pick_) {
+        sat_pick_->setBearingDeg(degrees);
+    }
+    if (pcd_pick_) {
+        // Opposite sign, so one shot shows both directions.
+        pcd_pick_->setBearingDeg(-degrees);
+    }
+}
+
 void SatelliteScreen::devRenderPlanConfirm(const QString& png_path) {
     geo::GeoPoint centroid;
     double roi_radius_m = 0.0;
@@ -1260,6 +1283,7 @@ void SatelliteScreen::refreshTitle() {
 void SatelliteScreen::applyModeVisibility() {
     const bool measured = plan_mode_ == PlanMode::Measured;
     map_->setImageryEnabled(!measured);
+    refreshCompass();
     refreshTitle();
     if (geo_tools_host_) {
         // Address search / tile download / imagery provenance are geographic
@@ -4090,6 +4114,13 @@ QWidget* SatelliteScreen::buildCanvasTools(QWidget* parent) {
     connect(map_, &SatelliteMapWidget::interactionChanged, this, [this] {
         measure_button_->setChecked(map_->isMeasuring());
     });
+    compass_button_ = makeTool(QString(), QString(),
+                               QStringLiteral("Reset to north"));
+    connect(compass_button_, &QPushButton::clicked, this,
+            [this] { map_->setBearingDeg(0.0); });
+    connect(map_, &SatelliteMapWidget::bearingChanged, this,
+            [this](double) { refreshCompass(); });
+    refreshCompass();
     // A roof drawn at site-overview zoom is a few dozen pixels wide — too
     // small to grab a vertex or read an edge chip. Frame it as soon as the
     // gesture completes; the operator can wheel back out if they want.
@@ -4108,6 +4139,58 @@ void SatelliteScreen::refreshCanvasToolIcons() {
         }
         tool.button->setIcon(QIcon(loadTintedSvg(tool.icon, 16, 16, color)));
     }
+    refreshCompass();
+}
+
+void SatelliteScreen::refreshCompass() {
+    if (!compass_button_) {
+        return;
+    }
+    // Rotation is imagery-only: the measured canvas blits an axis-aligned
+    // grid, so there is no bearing to show or reset there.
+    compass_button_->setVisible(map_->bearingSupported());
+    if (!map_->bearingSupported()) {
+        return;
+    }
+    const double bearing = map_->bearingDeg();
+    // Painted rather than an SVG asset because the needle has to turn: the
+    // tool stack's icons are static exports and there is no rotated variant
+    // to export 360 of.
+    const int side = 18;
+    const qreal dpr = devicePixelRatioF();
+    QPixmap needle(QSize(side, side) * dpr);
+    needle.setDevicePixelRatio(dpr);
+    needle.fill(Qt::transparent);
+    {
+        QPainter p(&needle);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.translate(side / 2.0, side / 2.0);
+        // Same sign as the view transform: the bearing is the compass
+        // direction at the top of the screen, so the needle turns the other
+        // way to keep pointing at true north.
+        p.rotate(-bearing);
+        // A needle as two halves of one diamond: north in the danger red so
+        // it reads as "that way" at 18 px, south in a muted grey so the
+        // whole glyph still looks like a compass rather than an arrow key.
+        const double tip = side / 2.0 - 1.0;
+        const double waist = 4.0;
+        p.setPen(Qt::NoPen);
+        p.setBrush(satpal::danger());
+        p.drawPolygon(QPolygonF({QPointF(0.0, -tip), QPointF(waist, 0.0),
+                                 QPointF(-waist, 0.0)}));
+        QColor tail(textColor(dark_mode_));
+        tail.setAlphaF(0.55);
+        p.setBrush(tail);
+        p.drawPolygon(QPolygonF({QPointF(0.0, tip), QPointF(waist, 0.0),
+                                 QPointF(-waist, 0.0)}));
+    }
+    compass_button_->setIcon(QIcon(needle));
+    compass_button_->setIconSize(QSize(side, side));
+    compass_button_->setToolTip(
+        bearing < 0.5 || bearing > 359.5
+            ? QStringLiteral("North up")
+            : QStringLiteral("Bearing %1° — click to reset to north")
+                  .arg(bearing, 0, 'f', 0));
 }
 
 void SatelliteScreen::refreshDrawButton() {

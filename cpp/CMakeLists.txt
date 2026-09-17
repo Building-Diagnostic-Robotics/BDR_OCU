@@ -678,7 +678,20 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME estop_latch_policy_tests COMMAND estop_latch_policy_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests)")
+        # Touchscreen pan / pinch bookkeeping. Header-only, no Qt/ROS.
+        add_executable(touch_gesture_state_tests
+            tests/touch_gesture_state_tests.cpp
+        )
+        target_include_directories(touch_gesture_state_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(touch_gesture_state_tests PRIVATE
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME touch_gesture_state_tests COMMAND touch_gesture_state_tests)
+
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

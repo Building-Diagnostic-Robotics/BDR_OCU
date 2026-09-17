@@ -15,11 +15,14 @@
 #include "satellite_geo_math.hpp"
 #include "satellite_job_model.hpp"
 #include "satellite_ros_link.hpp"
+#include "touch_canvas_gestures.hpp"
 
 #include <QElapsedTimer>
+#include <QTransform>
 #include <QWidget>
 
 class QLineEdit;
+class QTouchEvent;
 
 namespace f2c_cpp {
 
@@ -201,6 +204,20 @@ public:
     /** Fetch ceiling: the cached / native limit tiles are requested at. */
     int fetchZoomCeiling() const;
 
+    /**
+     * Compass bearing shown at the top of the screen, degrees clockwise
+     * from north. Two-finger twist drives it; the canvas compass resets it.
+     *
+     * This is a VIEW property and nothing else. `RoiPolygon` vertices,
+     * `RoiRect::heading_deg` and the robot marker's heading stay
+     * geographic, so no exported geometry may ever read it — rotating the
+     * map must not rotate the roof. Forced to zero on the measured canvas,
+     * whose metric grid and point-cloud raster are axis-aligned blits.
+     */
+    double bearingDeg() const { return bearing_deg_; }
+    void setBearingDeg(double degrees);
+    bool bearingSupported() const { return imagery_enabled_; }
+
 signals:
     void viewChanged(double lat, double lon, int zoom);
     void roiChanged();
@@ -214,6 +231,15 @@ signals:
         polygon closed). Emitted after roiChanged(); the screen frames it. */
     void drawFinished();
     void markerSelectionChanged(bool selected);
+    /** View bearing changed — lets the canvas compass re-point without
+        polling. Fires on reset too. */
+    void bearingChanged(double degrees);
+    /** A finger tapped the canvas without panning it. Carries no position:
+        a tap places nothing here (see touch_gesture_state.hpp), so the only
+        legitimate consumer is a screen-level action that is indifferent to
+        where it landed — currently the scan step's hand-back from manual
+        override, which a mouse gets from any press on the map. */
+    void canvasTapped();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -224,6 +250,8 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
     void leaveEvent(QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    /** Touch pan / pinch. QTouchEvent has no dedicated virtual in Qt 5. */
+    bool event(QEvent* event) override;
     /** Escape / focus-out handling for the inline dimension editor. */
     bool eventFilter(QObject* watched, QEvent* event) override;
 
@@ -246,6 +274,17 @@ private:
 
     /** Zoom about the view centre, clamped to the current ceiling. */
     void zoomBy(int delta);
+    /** Pans by a screen-pixel delta — trackpad scroll or finger travel. */
+    void panByPixels(const QPointF& delta);
+    /**
+     * Moves `levels` zoom levels while holding the world point under
+     * `anchor` fixed, clamped to the current floor / ceiling. Shared by
+     * Ctrl+wheel (whole levels, unchanged feel) and pinch (fractional).
+     * False when already at the limit.
+     */
+    bool zoomAtScreenPoint(double levels, const QPointF& anchor);
+    /** Touch pan / pinch. True when the event is consumed. */
+    bool handleTouchGesture(QTouchEvent* event);
     /** Re-clamps zoom and centre after the bounds change. */
     void applyViewBounds();
     /** Turns a diagonal into the north-up four-gon it spans. */
@@ -253,6 +292,36 @@ private:
                                     const geo::GeoPoint& b);
     /** In-progress polygon / rectangle / ruler, drawn above the plan. */
     void paintInteraction(QPainter& painter);
+
+    /**
+     * World pixels across the whole normalized Mercator square. The one
+     * place zoom becomes a scale, so the fractional part has a single
+     * definition — every coordinate helper and the tile painter read it.
+     */
+    double worldPixels() const;
+    /** Axis-aligned screen extent the viewport covers once the content is
+        rotated under it — widget size at bearing 0, ~1.41x at 45 deg. */
+    QSizeF rotatedViewportPx() const;
+    /** Zoom as a real number; `zoom_` is its floor. */
+    double continuousZoom() const { return double(zoom_) + zoom_frac_; }
+    /**
+     * Sets the continuous zoom, splitting it into the integer level tiles
+     * are fetched at and the fraction they are painted scaled by. Clamped
+     * against the level floor / ceiling as a real number: a pinch must not
+     * be able to sit at 19.6 on a pyramid cached to 19, which would be
+     * permanent blur with nothing on screen to explain it.
+     */
+    void setContinuousZoom(double zoom);
+    /**
+     * Normalized Mercator -> screen: translate by the view centre, scale by
+     * worldPixels(), rotate by the bearing about the viewport centre.
+     * `screenFromNorm` / `geoFromScreen` are this matrix and its inverse,
+     * so the whole overlay layer inherits rotation for free.
+     */
+    QTransform viewTransform() const;
+    /** A screen-pixel delta as a normalized-space delta — the inverse of
+        the view's rotation and scale, with the translation divided out. */
+    QPointF normDeltaFromScreen(const QPointF& delta) const;
 
     // Coordinate helpers (valid during paint/mouse handling).
     QPointF screenFromNorm(double nx, double ny) const;
@@ -309,12 +378,34 @@ private:
     double center_nx_ = 0.5;
     double center_ny_ = 0.5;
     int zoom_ = 5;
+    // Fraction of a level above zoom_, in [0, 1). Tiles are still selected
+    // at zoom_ and are simply painted 2^zoom_frac_ wider, which is what
+    // turns a pinch from a 2x pop per sqrt(2) of finger travel into
+    // something that tracks the fingers.
+    double zoom_frac_ = 0.0;
+    // Degrees clockwise from north, view-only. See bearingDeg().
+    double bearing_deg_ = 0.0;
+    // viewTransform()'s memo, plus the inputs it was built from. Validated
+    // against those inputs on every call, so no mutator has to invalidate it.
+    mutable QTransform xform_;
+    mutable double xform_world_px_ = 0.0;
+    mutable double xform_bearing_ = 0.0;
+    mutable double xform_nx_ = 0.0;
+    mutable double xform_ny_ = 0.0;
+    mutable QSize xform_size_;
+    mutable bool xform_valid_ = false;
     QRectF view_bounds_;  // normalized world box; empty = unbounded
     // Ctrl+wheel notch accumulator. A trackpad emits many small deltas per
     // flick, so zoom steps on accumulated notches instead of one level per
     // event (one flick used to cross ten levels).
     int wheel_accum_ = 0;
     QElapsedTimer wheel_clock_;
+    // Touch pan / pinch / twist. A finger never clicks this canvas —
+    // placing a polygon corner, toggling a roof edge and selecting the
+    // marker are precision acts and stay trackpad work. See
+    // touch_gesture_state.hpp.
+    touch_gestures::GestureState touch_;
+    touch::SynthesizedMouseGuard touch_guard_;
 
     RoiRect roi_;
     RoiPolygon polygon_;

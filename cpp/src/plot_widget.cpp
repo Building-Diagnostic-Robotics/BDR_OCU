@@ -48,6 +48,9 @@ PlotWidget::PlotWidget(QWidget* parent)
     setMinimumSize(400, 400);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
+    // Without this the xcb backend never delivers touch — the operator's
+    // panel reaches us only as the X server's emulated pointer.
+    setAttribute(Qt::WA_AcceptTouchEvents, true);
     
     // White background
     QPalette pal = palette();
@@ -342,13 +345,16 @@ void PlotWidget::resetView() {
     update();
 }
 
+// Anchoring on the screen position of world (0,0) leaves both offsets
+// untouched, which is exactly what these buttons did before the clamp
+// existed. They gain the limit and nothing else.
 void PlotWidget::zoomIn() {
-    scale_ *= 1.2;
+    zoomAtScreenPoint(1.2, QPointF(offset_x_, offset_y_));
     update();
 }
 
 void PlotWidget::zoomOut() {
-    scale_ /= 1.2;
+    zoomAtScreenPoint(1.0 / 1.2, QPointF(offset_x_, offset_y_));
     update();
 }
 
@@ -526,6 +532,7 @@ void PlotWidget::updateDataBounds() {
     data_max_x_ += margin_x;
     data_min_y_ -= margin_y;
     data_max_y_ += margin_y;
+    data_bounds_valid_ = true;
 }
 
 void PlotWidget::rebuildPointCloudImage() {
@@ -670,20 +677,52 @@ void PlotWidget::rebuildPointCloudImage() {
         QRectF(QPointF(min_x, min_y), QPointF(max_x, max_y)).normalized();
 }
 
-void PlotWidget::fitToData() {
-    updateDataBounds();
-    
+double PlotWidget::fitScale() const {
+    if (!data_bounds_valid_) {
+        return 0.0;
+    }
     double data_w = data_max_x_ - data_min_x_;
     double data_h = data_max_y_ - data_min_y_;
-    
+
     if (data_w < 1e-10) data_w = 1;
     if (data_h < 1e-10) data_h = 1;
-    
+
     const double canvas_padding = planner_preview_mode_ ? 18.0 : 40.0;
-    double scale_x = std::max(1.0, width() - canvas_padding) / data_w;
-    double scale_y = std::max(1.0, height() - canvas_padding) / data_h;
-    scale_ = std::min(scale_x, scale_y);
-    
+    const double scale_x = std::max(1.0, width() - canvas_padding) / data_w;
+    const double scale_y = std::max(1.0, height() - canvas_padding) / data_h;
+    return std::min(scale_x, scale_y);
+}
+
+void PlotWidget::zoomAtScreenPoint(double factor, const QPointF& anchor) {
+    if (!(factor > 0.0)) {
+        return;
+    }
+    const Point2D world_before = screenToWorld(anchor);
+    double target = scale_ * factor;
+    // Mouse-wheel granularity used to hide the absence of any limit here; a
+    // two-finger fling does not, so every zoom path shares one clamp.
+    const double fit = fitScale();
+    if (fit > 0.0) {
+        target = std::clamp(target, fit * kMinScaleOfFit,
+                            fit * kMaxScaleOfFit);
+    }
+    if (target == scale_) {
+        return;
+    }
+    scale_ = target;
+    // Keep the anchored world point under the same pixel.
+    offset_x_ = anchor.x() - world_before.x * scale_;
+    offset_y_ = anchor.y() + world_before.y * scale_;
+}
+
+void PlotWidget::fitToData() {
+    updateDataBounds();
+
+    const double fit = fitScale();
+    if (fit > 0.0) {
+        scale_ = fit;
+    }
+
     double center_x = (data_min_x_ + data_max_x_) / 2;
     double center_y = (data_min_y_ + data_max_y_) / 2;
     
@@ -1667,6 +1706,9 @@ void PlotWidget::drawMeasureOverlay(QPainter& painter) {
 }
 
 void PlotWidget::mousePressEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     if (event->button() == Qt::LeftButton) {
         if (measure_mode_ != MeasureMode::None) {
             if (measure_finished_) {  // start a fresh measurement
@@ -1779,6 +1821,9 @@ void PlotWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void PlotWidget::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     if (measure_mode_ != MeasureMode::None && event->button() == Qt::LeftButton) {
         // The double-click delivered an extra press; drop the duplicate point.
         const int min_pts = measure_mode_ == MeasureMode::Area ? 3 : 2;
@@ -1855,6 +1900,9 @@ void PlotWidget::keyPressEvent(QKeyEvent* event) {
 }
 
 void PlotWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     cursor_pos_ = event->pos();
     
     if (panning_) {
@@ -1975,6 +2023,9 @@ void PlotWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void PlotWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (touch_guard_.shouldIgnore(event)) {
+        return;
+    }
     if (event->button() == Qt::LeftButton) {
         if (panning_) {
             panning_ = false;
@@ -1984,23 +2035,72 @@ void PlotWidget::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void PlotWidget::wheelEvent(QWheelEvent* event) {
-    double factor = (event->angleDelta().y() > 0) ? 1.2 : (1.0 / 1.2);
-    
+    const double factor = (event->angleDelta().y() > 0) ? 1.2 : (1.0 / 1.2);
+
     // Zoom centered on cursor
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
-    QPointF cursor = event->position();
+    zoomAtScreenPoint(factor, event->position());
 #else
-    QPointF cursor = event->posF();
+    zoomAtScreenPoint(factor, event->posF());
 #endif
-    Point2D world_before = screenToWorld(cursor);
-    
-    scale_ *= factor;
-    
-    // Adjust offset to keep cursor position fixed
-    offset_x_ = cursor.x() - world_before.x * scale_;
-    offset_y_ = cursor.y() + world_before.y * scale_;
-    
+
     update();
+}
+
+bool PlotWidget::event(QEvent* event) {
+    if (touch::isTouchEventType(event->type())) {
+        // Accepting TouchBegin is what stops Qt synthesizing a mouse press
+        // from the same sequence.
+        if (handleTouchGesture(static_cast<QTouchEvent*>(event))) {
+            event->accept();
+            return true;
+        }
+    }
+    return QWidget::event(event);
+}
+
+bool PlotWidget::handleTouchGesture(QTouchEvent* event) {
+    if (event->type() == QEvent::TouchCancel) {
+        touch_.reset();
+        touch_guard_.endTouch();
+        return true;
+    }
+
+    const QVector<touch_gestures::Point> points = touch::activePoints(event);
+    if (points.isEmpty()) {
+        // A tap is deliberately inert. Obstacle selection, the measure tool
+        // and custom waypoints all live on single clicks here, and a
+        // fingertip is not accurate enough to aim them.
+        touch_.release();
+        touch_guard_.endTouch();
+        return true;
+    }
+
+    touch_guard_.beginTouch();
+    const touch_gestures::GestureState::Motion motion =
+        touch_.update(points.constData(), points.size());
+
+    bool moved = false;
+    if (motion.pan) {
+        offset_x_ += motion.pan_delta.x;
+        offset_y_ += motion.pan_delta.y;
+        moved = true;
+    }
+    if (motion.pinch) {
+        // The midpoint travelling is a pan and the zoom anchors where the
+        // fingers actually are; together they make the gesture behave the
+        // way an operator expects from a phone map. Pan first so the anchor
+        // is already in post-pan coordinates.
+        offset_x_ += motion.pinch_pan_delta.x;
+        offset_y_ += motion.pinch_pan_delta.y;
+        zoomAtScreenPoint(touch_.takeScaleFactor(),
+                          touch::asQPointF(motion.pinch_center));
+        moved = true;
+    }
+    if (moved) {
+        update();
+    }
+    return true;
 }
 
 void PlotWidget::resizeEvent(QResizeEvent* event) {
