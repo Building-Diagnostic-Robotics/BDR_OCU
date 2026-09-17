@@ -71,9 +71,42 @@ Canvas oldRule(const Similarity2D& fit, QSize sat, const QRectF& pcd) {
 }
 
 /// Production, via the real function.
-Canvas newRule(const Similarity2D& fit, QSize sat) {
-    const AlignedCanvas a = alignedCanvasFor(fit, sat, kMaxDim);
+Canvas newRule(const Similarity2D& fit, QSize sat,
+               const QRectF& keep = QRectF()) {
+    const AlignedCanvas a = alignedCanvasFor(fit, sat, kMaxDim, keep);
     return Canvas{a.width, a.height, a.metres_per_px, a.transform, a.valid};
+}
+
+/// A fit that turns the imagery by `deg` at one canvas pixel per image pixel.
+Similarity2D turnedFit(double deg) {
+    const double rad = deg * 3.14159265358979 / 180.0;
+    Similarity2D f;
+    f.a00 = std::cos(rad);
+    f.a01 = std::sin(rad);
+    f.a10 = std::sin(rad);
+    f.a11 = -std::cos(rad);
+    f.reflected = true;
+    f.tx = 700.0;
+    f.ty = 450.0;
+    f.valid = true;
+    return f;
+}
+
+/// True when every corner of the canvas maps back onto the image, i.e. the
+/// canvas holds no padding at all.
+bool canvasIsAllImagery(const Canvas& c, QSize sat) {
+    bool ok = false;
+    const QTransform back = c.x.inverted(&ok);
+    if (!ok) return false;
+    const QRectF img(0, 0, sat.width(), sat.height());
+    for (const QPointF& p : {QPointF(0, 0), QPointF(c.w - 1, 0),
+                             QPointF(0, c.h - 1), QPointF(c.w - 1, c.h - 1)}) {
+        // Half a pixel of slack: the canvas is sized with a ceil() and a +1.
+        if (!img.adjusted(-0.75, -0.75, 0.75, 0.75).contains(back.map(p))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// Fraction of the canvas the imagery actually occupies. fitToView shows the
@@ -143,4 +176,51 @@ TEST(CanvasExtent, DoesNotCoarsenTheImagery) {
     ASSERT_TRUE(new_way.ok);
     EXPECT_NEAR(std::sqrt(std::abs(new_way.x.determinant())), 1.0, 1e-9)
         << "canvas px == original px, so sigma units stay honest";
+}
+
+// The crop must cost nothing on a view that is not turned: there are no empty
+// corners to reclaim there, so throwing imagery away would be pure loss.
+TEST(CanvasExtent, CropIsANoOpOnAnUnturnedFit) {
+    for (double deg : {0.0, 90.0, 180.0, 270.0}) {
+        const Canvas c = newRule(turnedFit(deg), kSat);
+        ASSERT_TRUE(c.ok) << deg << " deg";
+        const int longest = std::max(c.w, c.h);
+        const int shortest = std::min(c.w, c.h);
+        EXPECT_EQ(longest, kSat.width() + 1) << deg << " deg";
+        EXPECT_EQ(shortest, kSat.height() + 1) << deg << " deg";
+    }
+}
+
+// Turned, every canvas pixel is imagery -- which is the whole point, and is
+// what the old bounding-box rule could not say.
+TEST(CanvasExtent, TurnedCanvasHoldsNoPadding) {
+    for (double deg : {12.0, 30.0, 45.0, 67.0, 145.0, 200.0, 310.0}) {
+        const Canvas c = newRule(turnedFit(deg), kSat);
+        ASSERT_TRUE(c.ok) << deg << " deg";
+        EXPECT_TRUE(canvasIsAllImagery(c, kSat))
+            << deg << " deg: canvas " << c.w << " x " << c.h;
+        EXPECT_LT(std::max(c.w, c.h), kSat.width() + 1)
+            << deg << " deg: crop must be smaller than the bounding box";
+    }
+}
+
+// A pick near a corner is outside the inscribed rectangle, so the crop would
+// drop it -- and markers are drawn unclipped, leaving a pin on blank matte.
+TEST(CanvasExtent, KeptPicksAreNeverCroppedAway) {
+    const Canvas plain = newRule(turnedFit(35.0), kSat);
+    ASSERT_TRUE(plain.ok);
+    const QRectF corner(QPointF(6.0, 6.0), QPointF(24.0, 24.0));
+    ASSERT_FALSE(QRectF(0, 0, plain.w, plain.h)
+                     .contains(plain.x.map(corner.center())))
+        << "test is vacuous unless the crop would really have dropped it";
+
+    const Canvas kept = newRule(turnedFit(35.0), kSat, corner);
+    ASSERT_TRUE(kept.ok);
+    for (const QPointF& p : {corner.topLeft(), corner.bottomRight()}) {
+        EXPECT_TRUE(QRectF(0, 0, kept.w, kept.h).contains(kept.x.map(p)))
+            << "pick at " << p.x() << "," << p.y() << " fell off canvas "
+            << kept.w << " x " << kept.h;
+    }
+    EXPECT_NEAR(std::sqrt(std::abs(kept.x.determinant())), 1.0, 1e-9)
+        << "widening for a pick must not coarsen the imagery either";
 }

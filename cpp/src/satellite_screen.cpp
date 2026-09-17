@@ -5438,8 +5438,19 @@ QImage SatelliteScreen::renderAlignedSatellite(const Similarity2D& fit,
     if (sat_image_.isNull()) {
         return QImage();
     }
+    // The canvas is cropped to the turned image's inscribed rectangle, so hand
+    // it the picks it must not crop away — a marker is drawn whether or not it
+    // lands on imagery, and a pair placed near a corner before the view started
+    // turning would otherwise be left as a pin on blank matte.
+    QRectF keep;
+    for (const Correspondence& c : correspondences_) {
+        keep |= QRectF(c.sat_px, QSizeF(1.0, 1.0));
+    }
+    if (have_pending_sat_) {
+        keep |= QRectF(pending_sat_px_, QSizeF(1.0, 1.0));
+    }
     const AlignedCanvas canvas =
-        alignedCanvasFor(fit, sat_image_.size(), kAlignedSatMaxDim);
+        alignedCanvasFor(fit, sat_image_.size(), kAlignedSatMaxDim, keep);
     if (!canvas.valid) {
         return QImage();
     }

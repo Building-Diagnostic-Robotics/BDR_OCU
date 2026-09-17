@@ -1220,12 +1220,48 @@ instruction bar then read.
 - `applySatelliteView` holds the operator's viewpoint across the warp by
  carrying the anchor in original pixels — the one frame both canvases
  agree on — and correcting the zoom by the change in linear scale.
+- **The canvas is cropped to the turned image's inscribed rectangle**, not
+ sized to its bounding box, because the bounding box of a turned image is
+ mostly empty corners. One expression in `alignedCanvasFor`: scale the
+ bounding box about its centre by `min(side_u / lim_u, side_v / lim_v)`,
+ which satisfies both containment constraints by construction — a no-op at
+ 0° and 90°, exactly the largest inscribed rectangle at 45°. Two details
+ are load-bearing. The inset of `2 / px_per_m` applies **only when the crop
+ bit**: the crop lands tangent to the footprint and the sizing rounds up to
+ whole pixels, so without it the last row and column sit outside the
+ imagery, and applying it unconditionally would shave an unturned view for
+ nothing. And the `t < 1.0 - 1e-9` tolerance is not paranoia — at a quarter
+ turn `cos()` is 1e-17 rather than 0, so `t < 1.0` reads an exact fit as
+ having bitten. `canvas_extent_tests` pins both (`CropIsANoOpOnAnUnturnedFit`
+ covers 0/90/180/270, `TurnedCanvasHoldsNoPadding` checks every canvas
+ corner maps back onto the image).
+- `keep_image_px` is unioned back in after the crop — the pick positions,
+ in **original image pixels**. Markers are drawn unclipped, so a pick
+ cropped away becomes a numbered pin on blank matte, which is worse than an
+ empty corner. Being image-relative it scales with the fit exactly as the
+ footprint does, so it is **not** the fixed-metric union the sizing rule
+ bans; the header says so and `KeptPicksAreNeverCroppedAway` pins it. It may
+ push the extent back out and leave a corner empty, which is fine now that
+ the fill is transparent.
+- **This crop is a deliberate divergence from the parallel OCU** at
+ `a287113`, and is **not yet ported back**. Upstream still sizes to the full
+ bounding box. Both `alignment_geometry.{hpp,cpp}` and two tests differ:
+ `canvas_extent_tests` gains three cases, and
+ `aligned_canvas_tests.WideImageryCoarsensInsteadOfExploding` now asserts on
+ the **canvas** dimensions rather than the image's extent in canvas pixels —
+ those were equivalent only while the canvas *was* that extent. Treat these
+ files as a two-way diff until the port lands, and do not "restore" them.
 - The warp is **inline on the GUI thread**, guarded by `sameTransform` so
  a refresh that changed nothing does not repaint. Measured at
- **113–144 ms** for the worst realistic case (a z19 500 m-radius stitch,
- ~4580 px, into the 4096² `kAlignedSatMaxDim` canvas = 64 MB). That is 3–8
- warps per alignment session, so it is a hitch and not a freeze; if it
- ever needs to come down, lower the canvas cap before adding threading.
+ **~125 ms** for the worst realistic case (a z19 500 m-radius stitch,
+ ~4580 px), into a **3335² / 42 MB** canvas post-crop — down from 4096² /
+ 64 MB, and the crop is what stops `kAlignedSatMaxDim` binding, so the
+ canvas stays 1:1 with the source instead of being resampled 1.38× coarser.
+ That resampling was costing pick precision on exactly the largest sites.
+ Time is unchanged (the cost is sampling the source, not filling the
+ canvas); the win is precision and memory. That is 3–8 warps per alignment
+ session, so it is a hitch and not a freeze. **If the cap ever binds again,
+ the crop has regressed** — it is a tripwire now, not a working limit.
 - The robot glyph on the satellite pane is driven by `preview_fit_` and
  has exactly **one** writer, `updateSatelliteAlignmentView`.
  `refreshCorrespondenceMarkers` must not also set it — last writer wins
@@ -1256,6 +1292,13 @@ converted rather than copied.
 re-projection" above). `canvas_extent_tests` transcribes an extent rule
 this repo never shipped — it exists only so the upstream regression has
 something to fail against.
+
+**`alignment_geometry.*` is the one port that has deliberately diverged**
+and is owed a port back: this copy crops the canvas to the turned image's
+inscribed rectangle and takes `keep_image_px`, upstream does neither. The
+divergence and the two affected tests are described under "Live
+re-projection" above. Until it is ported, that file is a two-way diff, so
+the next sync from upstream must be read, not applied.
 
 The **outlier and re-projection surfaces are deliberately NOT ports.**
 Upstream shows both through a `QListWidget` of pairs sorted by studentised

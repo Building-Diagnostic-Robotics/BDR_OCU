@@ -169,13 +169,21 @@ TEST_F(AlignedCanvasTest, CanvasIsBoundedByTheImageDiagonal) {
 }
 
 // A far-flung fit must not blow the canvas budget.
+//
+// DIVERGES from upstream, which asserted this on the IMAGE's extent in canvas
+// pixels — equivalent back when the canvas was that extent. This copy crops the
+// canvas inside the turned footprint, so the image deliberately runs past the
+// canvas edges and that measurement now reports the image, not the budget. The
+// budget is the canvas, so that is what is asserted here.
 TEST_F(AlignedCanvasTest, WideImageryCoarsensInsteadOfExploding) {
     const Similarity2D tiny = fitFrom(pcd, 0.35, 0.2);  // imagery covers km
     const AlignedCanvas c3 = alignedCanvasFor(tiny, QSize(4000, 3000), kMaxDim);
     ASSERT_TRUE(c3.valid);
-    const QRectF b3 =
-        c3.transform.map(QPolygonF(QRectF(0, 0, 4000, 3000))).boundingRect();
-    EXPECT_LE(std::max(b3.width(), b3.height()), kMaxDim + 2)
-        << "coarse case: " << b3.width() << " x " << b3.height() << " px at "
+    EXPECT_LE(std::max(c3.width, c3.height), kMaxDim)
+        << "coarse case: " << c3.width << " x " << c3.height << " px at "
         << c3.metres_per_px << " m/px";
+    // And the crop is what keeps it there: a 4000x3000 image turned 0.2 rad has
+    // a 4516 px bounding box, so pre-crop this case had to be resampled to fit.
+    EXPECT_NEAR(std::sqrt(std::abs(c3.transform.determinant())), 1.0, 1e-9)
+        << "cap no longer binds, so canvas px still == original px";
 }
