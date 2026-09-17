@@ -1177,15 +1177,39 @@ void SatelliteScreen::devSeedDemoPlan() {
     applyModeVisibility();
 }
 
-void SatelliteScreen::devSeedDemoAlignment(bool review) {
+void SatelliteScreen::devSeedDemoAlignment(bool review, bool skewed) {
+    // The skewed seed's frame-to-frame transform, written out so the imagery
+    // and the picks are generated from the same numbers. Metres of cloud map
+    // to satellite pixels through a Y flip (northing up, pixels down) and a
+    // rotation, which is what the clean seed's axis-aligned pairs can never
+    // produce and why its re-projected canvas never turns.
+    constexpr double kSkewDeg = 22.0;
+    constexpr double kSkewPxPerM = 18.0;
+    const double skew_rad = kSkewDeg * M_PI / 180.0;
+    const double skew_cos = std::cos(skew_rad);
+    const double skew_sin = std::sin(skew_rad);
+    const auto satForMetres = [&](QPointF m) {
+        return QPointF(
+            450.0 + kSkewPxPerM * (skew_cos * m.x() + skew_sin * m.y()),
+            350.0 + kSkewPxPerM * (skew_sin * m.x() - skew_cos * m.y()));
+    };
+
     // Synthetic stand-ins so the picker's layout, markers and turn-taking can
     // be shot without a robot or a cached site.
     QImage sat(900, 700, QImage::Format_RGB32);
     sat.fill(QColor(0x2a, 0x33, 0x28));
     QPainter sp(&sat);
     sp.setPen(QPen(QColor(0x6b, 0x72, 0x64), 3));
-    sp.drawRect(240, 180, 380, 260);
-    sp.drawLine(0, 520, 900, 500);
+    if (skewed) {
+        sp.drawPolygon(QPolygonF({satForMetres({-10.0, 7.0}),
+                                  satForMetres({10.0, 7.0}),
+                                  satForMetres({10.0, -7.0}),
+                                  satForMetres({-10.0, -7.0})}));
+        sp.drawLine(satForMetres({-14.0, -9.5}), satForMetres({14.0, -9.5}));
+    } else {
+        sp.drawRect(240, 180, 380, 260);
+        sp.drawLine(0, 520, 900, 500);
+    }
     sp.end();
     sat_image_ = sat;
     site_manifest_.stitch_bounds = QRectF(0.25, 0.35, 0.0004, 0.0003);
@@ -1220,12 +1244,30 @@ void SatelliteScreen::devSeedDemoAlignment(bool review) {
     }
 
     correspondences_.clear();
-    const QVector<QPair<QPointF, QPointF>> pairs{
+    QVector<QPair<QPointF, QPointF>> pairs{
         {{240, 180}, {-10.0, 7.0}},
         {{620, 180}, {10.0, 7.0}},
         {{620, 440}, {10.0, -7.0}},
         {{240, 440}, {-10.0, -7.0}},
     };
+    if (skewed) {
+        // Six pairs, because the studentised test abstains below four and
+        // barely checks anything at four: the blunder has to sit among
+        // enough redundant equations to stand out instead of being absorbed
+        // into the fit. Two edge midpoints join the corners.
+        const QVector<QPointF> cloud{{-10.0, 7.0}, {10.0, 7.0}, {0.0, 7.0},
+                                     {10.0, -7.0}, {-10.0, -7.0},
+                                     {0.0, -7.0}};
+        pairs.clear();
+        for (const QPointF& m : cloud) {
+            pairs.append({satForMetres(m), m});
+        }
+        // The bad pick: ~60 px (3.3 m) along the building's right edge, as
+        // though the operator caught the wrong feature on that wall. Every
+        // other pair is exact, so this is the only thing the residuals and
+        // the outlier ring can be reporting.
+        pairs[3].first += QPointF(52.0, -30.0);
+    }
     for (const auto& pair : pairs) {
         correspondences_.append(Correspondence{pair.first, pair.second});
     }

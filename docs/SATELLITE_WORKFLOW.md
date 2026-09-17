@@ -209,10 +209,17 @@ still wins; the setback is not a safety system.
    confident about. Below 4 pairs nothing can be checked, so no ring is not
    the same as no mistake.
 
+   If a pick disagrees with the imagery's own ground scale, the map stops
+   turning and the bar says **Map held** — the pane keeps the last good
+   projection rather than swinging somewhere useless. Re-pick that pair and
+   it resumes.
+
 5. **Align** solves a 2D similarity (scale, rotation, optional reflection,
    translation) and commits it in the same click: an **Alignment
-   Successful / RMSE** card covers the point cloud, the robot's origin is
-   drawn on the satellite image, and Next enables. The origin becomes a
+   Successful** card covers the point cloud, the robot's origin is drawn on
+   the satellite image, and Next enables. The card's **Fit consistency** is
+   how well your picks agree with each other, not a survey accuracy — and
+   below 4 pairs it says the fit was never checked for a bad pick. The origin becomes a
    surveyed lat/lon anchor saved with the plan, and every ROI vertex
    exported at Send inherits that accuracy. Check the marker sits where the
    robot actually stood; if it does not, **Clear pairs** and pick again.

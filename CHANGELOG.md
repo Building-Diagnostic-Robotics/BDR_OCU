@@ -13,8 +13,8 @@ before pushing to `main` that triggers a release.
 ## Unreleased
 
 - Robot map is now clearly visible on the light-mode canvas
-- Satellite map rotates to match the point cloud as you pick pairs
-- A suspect pair is ringed and named; one bad pick can't drag the fit
+- Satellite map turns to match the cloud, and parks when a pick disagrees
+- A suspect pair is ringed; the fit card says when it wasn't checked
 - OCU update banner now appears within ~2 min of a release, not 5
 - Robot software check runs the moment you reach the Dashboard
 

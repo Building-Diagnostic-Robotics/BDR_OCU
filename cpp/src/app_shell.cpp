@@ -765,7 +765,8 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     // offscreen, saves a PNG, and exits — the agent-side visual feedback
     // loop for design iteration without a robot or an operator. Optional:
     // BDR_DEV_STAGE6_SHOT_DARK=1 (dark theme), BDR_DEV_STAGE6_SHOT_MODE=
-    // measured|measured_map|scan|correspond|review|roi|plan|plan_confirm
+    // measured|measured_map|scan|correspond|review|correspond_outlier|
+    // review_outlier|roi|plan|plan_confirm
     // (default: planning-only satellite trim). See docs/DEV_BYPASSES.md.
     if (!qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
         const QString shot_path =
@@ -932,12 +933,15 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     stage6_->devSeedDemoPlan();
                     stage6_->devSeedDemoAlignmentEmpty();
                 } else if (shot_mode == QStringLiteral("correspond") ||
-                           shot_mode == QStringLiteral("review")) {
+                           shot_mode == QStringLiteral("review") ||
+                           shot_mode == QStringLiteral("correspond_outlier") ||
+                           shot_mode == QStringLiteral("review_outlier")) {
                     stage6_->configureForScan(
                         SatelliteScreen::PlanMode::Satellite);
                     stage6_->devSeedDemoPlan();
                     stage6_->devSeedDemoAlignment(
-                        shot_mode == QStringLiteral("review"));
+                        shot_mode.startsWith(QStringLiteral("review")),
+                        shot_mode.endsWith(QStringLiteral("_outlier")));
                 } else if (shot_mode == QStringLiteral("roi")) {
                     stage6_->configureForScan(
                         SatelliteScreen::PlanMode::Satellite);

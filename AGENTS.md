@@ -1573,10 +1573,25 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  controller_status, not by the axis-state RPC's ack. The request being
  accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
- (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|run|plan|
- plan_confirm`, `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
+ (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|
+ correspond_outlier|review_outlier|roi|run|plan|plan_confirm`,
+ `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog
  to `<png>_dialog.png` / `_dialog_adv.png`. See docs/DEV_BYPASSES.md.
+ **`_STAGE` selects the app-shell stage, not the Stage 6 step**, and
+ 1-5 return before the `_MODE` switch is ever reached — a Stage 6 mode
+ shot must leave `_STAGE` unset or every PNG is silently Stage 2.
+- **The clean alignment seed cannot verify the re-projection.** Its four
+ pairs are a pure scale-and-translate, so the fit has no rotation to
+ apply and every pick is exact: the turned canvas, the residual spurs,
+ the outlier ring and the themed rotation matte all render as no-ops.
+ `correspond_outlier` / `review_outlier` are the fixture that exercises
+ them — `devSeedDemoAlignment(review, /*skewed=*/true)` puts a real 22°
+ rotation between the frames and one pick 3.3 m out. Six pairs, not
+ four, because the studentised test abstains below four and barely
+ checks anything at four. Keep the blunder well clear of
+ `kPickFloorM * outlier_sigma`; at 27σ it survives a sigma re-tune,
+ and the fixture is worthless the day it stops flagging.
 - **The canvases paint, they do not style, so no stylesheet reaches them.**
  `SatelliteMapWidget::setDarkMode` and `PanZoomImageWidget::setDarkMode`
  are plumbed from `SatelliteScreen::setDarkMode` and a new painted color

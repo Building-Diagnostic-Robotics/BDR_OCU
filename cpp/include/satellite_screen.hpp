@@ -109,8 +109,12 @@ public:
         It has no other render path, so this is how its theme gets verified. */
     void devRenderPrompt(const QString& png_path);
     /** Dev screenshot hook: fakes a collected map + site image and opens the
-        correspondence picker (or, with `review`, a solved alignment). */
-    void devSeedDemoAlignment(bool review);
+        correspondence picker (or, with `review`, a solved alignment).
+        `skewed` swaps in a seed the clean one cannot exercise: a real
+        rotation between the two frames plus one deliberately bad pick, so
+        the re-projection, the residual spurs and the outlier ring all have
+        something to show. */
+    void devSeedDemoAlignment(bool review, bool skewed = false);
     /** Dev shot only: step 2 before any capture (site + capture CTA). */
     void devSeedDemoAlignmentEmpty();
     /** Dev shot only: aligned, then step 3 with the demo polygon closed. */
