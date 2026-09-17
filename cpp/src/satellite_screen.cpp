@@ -4567,6 +4567,7 @@ void SatelliteScreen::setDarkMode(bool dark_mode) {
     dark_mode_ = dark_mode;
     applyTheme();
     restyleScanPage();
+    restyleOpenPrompts();
     // Re-render every dynamic surface against the new palette. Pills whose
     // color was the old palette's muted tone follow to the new muted tone;
     // semantic colors (accent/amber/red) are theme-independent.
@@ -5743,6 +5744,35 @@ void SatelliteScreen::updateAlignCardUi() {
 
 namespace {
 
+// The prompt chrome, resolved against the live palette. Split out of
+// makeSatPrompt because the modeless notices can outlive a theme toggle —
+// SatelliteScreen::restyleOpenPrompts re-runs it over anything still up.
+// The title and body carry object names rather than their own sheets so
+// this one call restyles the whole dialog.
+void applySatPromptStyle(QDialog* dialog) {
+    const UiThemeTokens t = appThemeTokens();
+    dialog->setStyleSheet(
+        QStringLiteral(
+            "#SatConfirmDialog { background-color: %1; "
+            "border: 1px solid %2; border-radius: 10px; }"
+            "QLabel { color: %3; font-family: 'Arimo'; "
+            "background: transparent; }"
+            "QLabel#SatPromptTitle { font-weight: 700; font-size: 20px; }"
+            "QLabel#SatPromptBody { font-size: 14px; color: %4; }"
+            "QPushButton { background-color: %5; border: none; "
+            "border-radius: 18px; padding: 8px 18px; color: %3; "
+            "font-family: 'Arimo'; font-weight: 600; font-size: 14px; "
+            "min-height: 36px; }"
+            "QPushButton:hover { background-color: %6; }"
+            // Brand fill, swapped label — white on #00BC7D is 2.5:1 in light.
+            "QPushButton#Accept { background-color: %7; color: %8; "
+            "font-weight: 700; }"
+            "QPushButton#Accept:hover { background-color: %9; }")
+            .arg(t.surface, t.surface_border, t.text, t.body, t.raised_border,
+                 t.neutral_hover, t.accent_green, t.on_accent,
+                 t.accent_green_hover));
+}
+
 // Same zinc chrome as Confirm ROI / Launch / Complete Mission. Heap so
 // the stop + revisit notices can show modeless (exec() nests a loop
 // under a live launch).
@@ -5755,34 +5785,18 @@ QDialog* makeSatPrompt(QWidget* parent, const QString& title,
     dialog->setMaximumWidth(560);
     dialog->setObjectName("SatConfirmDialog");
     dialog->setAttribute(Qt::WA_StyledBackground, true);
-    dialog->setStyleSheet(QStringLiteral(
-        "#SatConfirmDialog { background-color: #18181b; "
-        "border: 1px solid #27272a; border-radius: 10px; }"
-        "QLabel { color: #FAFAFA; font-family: 'Arimo'; "
-        "background: transparent; }"
-        "QPushButton { background-color: #3f3f47; border: none; "
-        "border-radius: 18px; padding: 8px 18px; color: #FAFAFA; "
-        "font-family: 'Arimo'; font-weight: 600; font-size: 14px; "
-        "min-height: 36px; }"
-        "QPushButton:hover { background-color: #4a4a52; }"
-        "QPushButton#Accept { background-color: #00BC7D; color: #FFFFFF; "
-        "font-weight: 700; }"
-        "QPushButton#Accept:hover { background-color: #00A86D; }"));
+    applySatPromptStyle(dialog);
     auto* layout = new QVBoxLayout(dialog);
     layout->setContentsMargins(24, 20, 24, 20);
     layout->setSpacing(12);
 
     auto* title_label = new QLabel(title, dialog);
-    title_label->setStyleSheet(QStringLiteral(
-        "font-family: 'Arimo'; font-weight: 700; font-size: 20px; "
-        "color: #FAFAFA; background: transparent;"));
+    title_label->setObjectName("SatPromptTitle");
     layout->addWidget(title_label);
 
     auto* body_label = new QLabel(body, dialog);
+    body_label->setObjectName("SatPromptBody");
     body_label->setWordWrap(true);
-    body_label->setStyleSheet(QStringLiteral(
-        "font-family: 'Arimo'; font-size: 14px; color: #D4D4D8; "
-        "background: transparent;"));
     layout->addWidget(body_label);
 
     auto* buttons = new QHBoxLayout;
@@ -5816,6 +5830,31 @@ bool SatelliteScreen::confirmDialog(const QString& title, const QString& body,
     const int rc = dialog->exec();
     delete dialog;
     return rc == QDialog::Accepted;
+}
+
+void SatelliteScreen::restyleOpenPrompts() {
+    for (QDialog* prompt :
+         findChildren<QDialog*>(QStringLiteral("SatConfirmDialog"))) {
+        applySatPromptStyle(prompt);
+    }
+}
+
+void SatelliteScreen::devRenderPrompt(const QString& png_path) {
+    QDialog* dialog = makeSatPrompt(
+        this, QStringLiteral("Collect Map from Robot"),
+        QStringLiteral(
+            "The robot will ARM ITS MOTORS, turn 360° in place, then drive a "
+            "short forward/back leg to resolve a GPS heading.\n\n"
+            "Confirm the area around the robot is clear."),
+        QStringLiteral("Collect Map"), QStringLiteral("Cancel"));
+    // Polish happens on show; a never-shown frameless dialog grabs without
+    // its stylesheet background.
+    dialog->setModal(false);
+    dialog->show();
+    QCoreApplication::processEvents();
+    dialog->grab().save(png_path);
+    dialog->close();
+    delete dialog;
 }
 
 void SatelliteScreen::onSendMission() { launchMissionFromEdgeReview(); }

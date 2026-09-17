@@ -839,6 +839,11 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                 MissionMetadataDialog metadata(this);
                 grab_dialog(&metadata, QStringLiteral("metadata"));
 
+                // The Stage 6 confirm chrome — one file-local helper behind
+                // every prompt on that stage, and the only dialog here with
+                // no other render path.
+                stage6_->devRenderPrompt(shot_sibling(QStringLiteral("prompt")));
+
                 QApplication::quit();
                 return;
             }

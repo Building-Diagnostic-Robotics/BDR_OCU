@@ -1596,11 +1596,32 @@ that is how frameless dialogs get the right theme without being handed it.
  per-element inside a builder needs a re-style hook on the theme toggle:
  `restyleScanPage()` for step 5, `applyPlaceholderStyle()` for
  `FPVCameraView`, `setDarkMode` on the painted widgets.
+- **A dialog with no render path is a dialog nobody verified.** Every
+ Stage 6 confirmation — Leave to Dashboard, Collect Map from Robot,
+ Confirm ROI, Edges Reviewed, Launch, Cancel / Complete Mission, and
+ the two modeless notices — is ONE file-local helper,
+ `makeSatPrompt` in `satellite_screen.cpp`. It shipped hardcoded dark
+ through the whole light-mode sweep because it is not a
+ `components/*_dialog.cpp` file and had no shot mode. Its chrome now
+ lives in `applySatPromptStyle(QDialog*)` off `appThemeTokens()`, and
+ `SatelliteScreen::restyleOpenPrompts()` (from `setDarkMode`) re-runs it
+ over any open prompt — the revisit and robot-stopped notices are
+ modeless and can outlive a toggle. The title and body labels carry
+ object names instead of their own sheets so that one call restyles
+ everything; do not put a `setStyleSheet` back on them.
+ Do NOT consolidate this into `BdrMessageBox`: those two notices need
+ `show()` (an `exec()` nests a loop in which the launch can die under
+ the operator) and `BdrMessageBox` is `ApplicationModal` with different
+ chrome. Destructive accepts ("Clear & Leave", "Cancel Mission") stay
+ brand green on purpose — `onRobotSweepFailed` swaps its accept between
+ "Launch anyway" and "Cancel launch" depending on which is primary, so
+ there is no safe blanket rule mapping accept to `danger`.
 
 ### Verifying
 
 `BDR_DEV_STAGE6_SHOT` with `_STAGE=1|2|3|4|5` and `_MODE=…|dialogs` renders
-every screen and the shared dialogs headlessly in both themes. Contrast
+every screen and the shared dialogs headlessly in both themes — `dialogs`
+also writes the Stage 6 confirm prompt to `<png>_prompt.png`. Contrast
 claims should be measured off those PNGs at the glyph core, not eyeballed —
 point-sampling a label hits antialiasing and reads far lighter than the
 text actually is.

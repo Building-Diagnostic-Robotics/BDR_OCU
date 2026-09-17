@@ -353,9 +353,13 @@ enumerates all sites.
       `<png>`, then `BdrProgressDialog`, `MissionFinalizeDialog`,
       `OfflineFinalizeDialog` and `MissionMetadataDialog` to
       `<png>_progress.png`, `_finalize.png`, `_offline.png` and
-      `_metadata.png`. The first two are reached from 16+ call sites and the
-      rest only from a live mission, so this is the only way to verify their
-      light theme.
+      `_metadata.png`, then the shared Stage 6 confirm prompt
+      (`makeSatPrompt` — the chrome behind Confirm ROI / Collect Map /
+      Leave to Dashboard / Complete Mission) to `<png>_prompt.png`
+      (`SatelliteScreen::devRenderPrompt`). The first two are reached from
+      16+ call sites and the rest only from a live mission, so this is the
+      only way to verify their light theme. The prompt was added after it
+      shipped dark-only in light mode precisely because it had no shot.
       Used by the AI-agent
       visual-verification loop during Stage 6 UI work. Env-gated only
       (same class as `BDR_DEV_START_AT_SCAN`); harmless in release when

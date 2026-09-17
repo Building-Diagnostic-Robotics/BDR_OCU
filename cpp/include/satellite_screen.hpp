@@ -100,6 +100,10 @@ public:
     void devFitRoi();
     /** Dev screenshot hook: renders the Save Plan confirmation to a PNG. */
     void devRenderPlanConfirm(const QString& png_path);
+    /** Dev screenshot hook: renders the shared Stage 6 confirm prompt (the
+        chrome behind Confirm ROI / Collect Map / Complete Mission) to a PNG.
+        It has no other render path, so this is how its theme gets verified. */
+    void devRenderPrompt(const QString& png_path);
     /** Dev screenshot hook: fakes a collected map + site image and opens the
         correspondence picker (or, with `review`, a solved alignment). */
     void devSeedDemoAlignment(bool review);
@@ -444,6 +448,12 @@ private:
     bool confirmDialog(const QString& title, const QString& body,
                        const QString& accept_label,
                        const QString& reject_label = QStringLiteral("Cancel"));
+    /**
+     * Re-resolves the prompt chrome against the current theme. The stop and
+     * revisit notices show modeless and can sit open for minutes while the
+     * operator drives, so a toggle has to be able to reach them.
+     */
+    void restyleOpenPrompts();
     void onRobotSweepFailed(int exit_code);
 
     // Core services.
