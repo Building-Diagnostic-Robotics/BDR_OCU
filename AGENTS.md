@@ -1037,10 +1037,13 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  bars, Scan Time; Telemetry: speed, X/Y, heading), the map framed as a
  card (`#SatCanvasStack[scan="true"]`) with the status pill above the tool
  stack and the 81 px control bar under it (Start Scan/Pause/Resume ·
- `mm:ss • swept/total intervals` · Cancel Scan · Emergency Stop), 380 px
+ `mm:ss • swept/total intervals` · Cancel Scan · Emergency Stop /
+ Clear E-Stop), 380 px
  right rail (Manual Override with the FPV — click = teleop, map click
- hands back; Scan Statistics: distance, avg quality, ETA, data copy;
- Motors: Disarm), and the 69 px footer (Edge Review back · Step 5 of 5 ·
+ hands back and does NOT resume autonomy; Scan Statistics: distance, avg
+ quality, ETA, data copy;
+ Motors: Arm / Disarm — Arm is CLOSED_LOOP only, see the E-Stop latch
+ rule below), and the 69 px footer (Edge Review back · Step 5 of 5 ·
  Complete Mission primary). The plan rail, log card and frame footer are
  hidden on this step. Scan Quality is
  `computeReprojectionQualityPercent` (odom trail vs `/coverage/
@@ -1240,6 +1243,22 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  itself — the full stack + Zenoh session takes 30-60 s and a 20 s
  auto-teardown killed a healthy launch in the field.
  Do not add a link gate to `end_button_`.
+- **Step 5's inline styles carry a palette role, and `restyleScanPage()` is
+ what makes the theme toggle reach them.** The page reproduces the Stage 5
+ frames 1:1, so its widgets are styled per-element inside
+ `buildScanLeftRail` / `buildScanRightRail` / `buildScanControlBar` /
+ `buildScanFooter` rather than by the screen's object-name QSS. Those
+ builders run once and the screen is reused across missions, so a sheet set
+ there would hold the boot palette forever. Every styled widget records a
+ role in the `satScanRole` / `satScanRoleArg` dynamic properties and
+ `restyleScanPage()` (called from `setDarkMode`) re-resolves them. A new
+ styled widget on step 5 needs a role, not a second patch site. Control-bar
+ fills stay in the local `scanActionPalette` table, NOT the shared
+ `danger_fill` / `warning_fill` tokens — the dialogs use a deeper amber and
+ red, and step 5 has to keep matching Figma in dark mode. Their labels are
+ tinted by `applyScanActionFg`, driven by a `ScanActionTint` event filter,
+ because Qt cannot restyle a child `QLabel` from the button's `:disabled`
+ pseudo-state and a white label on the disabled grey is unreadable in light.
 - **A disabled Start Scan must always say why, and the step-5 corner pill
  is the only place it can.** The rail is hidden on step 5, and a disabled
  button's tooltip is not a surface a field operator can reach. `scanBlockReason()`
@@ -1250,6 +1269,72 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  window is exactly where the operator used to read a hardcoded **"Ready"**
  next to a dead button. Do not re-add a default pill string that claims
  readiness, and do not collapse the two owners into one.
+ The **E-Stop latch is the one exception** to that ownership split:
+ `updateStatePill()` returns early while latched
+ (`estop_latch_policy::holdsStatusPill`) and `refreshScanRunUi()` paints
+ BOTH pills, because `/coverage/status` is 1 Hz and would otherwise
+ relabel the operator's E-STOP confirmation to `SWEEP` within a second.
+- **E-Stop is latched, and the latch IS the run state**
+ (`estop_latch_policy`, `ScanRunState::EmergencyStopped`). This is a
+ safety fix, not a UX preference — do not unpick any part of it:
+ - `onEstop()` sets the state through `onEmergencyStop()`. Because the
+ latch is a *state*, every gate that tests `== Running` is false while
+ it holds, which is what makes the fix total rather than a whack-a-mole
+ of individual call sites. Do not demote it back to a `bool` beside
+ `Running`.
+ - **Nothing auto-resumes autonomy, ever.** The old
+ `resume_after_override_` member latched "was running" when the operator
+ took manual control and called `beginStartScan()` when they released
+ it — so a **map click** re-armed CLOSED_LOOP and republished
+ `autonomy_enable=true`. Post-E-Stop that fired three times next to a
+ roof edge on 2026-09-16 and the robot had to be physically caught.
+ Releasing manual override now ends teleop and nothing else; the state
+ is `Paused`, so the primary button reads Resume and the operator arms
+ deliberately. `releaseResumesAutonomy()` is a constant `false` on
+ purpose — it documents the contract at the call site and a
+ `static_assert` pins it.
+ - `beginStartScan()` refuses outright on `!armingAllowed()`. It is the
+ single choke point for arming-with-autonomy, so the guard belongs there
+ even though the button is already disabled.
+ - **Clearing costs its own press and does not arm.** The E-Stop button
+ relabels to `Clear E-Stop` (matching the shipped Stage 5 control bar,
+ `PlannerScreen::scan_estop_latched_`); clearing lands on `Paused`, and
+ Resume is a second deliberate press. Do not move clearing onto the
+ primary button — one press must never both clear and arm.
+ - **Motors: Arm exists so E-Stop is not a dead end.** Arm was previously
+ folded into Start Scan, so the only way to re-power the wheels also
+ re-enabled autonomy — that dead end is what pushed the operator into
+ the defect above. `arm_button_` requests `kAxisClosedLoop` and touches
+ nothing else, deliberately does **not** consult `armingAllowed()`, and
+ stays enabled while latched. Teleoping away from an edge must always be
+ available.
+ - **Space is E-Stop, and it is stop-only.** `onEstopShortcut()` calls
+ `onEstop()` directly, never `onEstopButtonClicked()`: if the key toggled,
+ an operator mashing a panic key an even number of times would release the
+ stop they were applying. Clearing stays mouse-only.
+ (`estop_latch_policy_tests` makes that hazard executable.) Three details
+ are load-bearing:
+ - `Qt::ApplicationShortcut`, not a `keyPressEvent`. Qt matches shortcuts
+ before delivering the key to the focus widget, which is what stops a
+ clicked control-bar button from eating Space as a click on itself, and
+ it keeps the key alive while one of the screen's six modeless dialogs
+ holds focus. The legacy `PlannerScreen::keyPressEvent` (Space →
+ `onScanEmergencyStopClicked`, step-gated) is the weaker shape and
+ carries both defects — do not copy it back.
+ - The shortcut is **enabled only while `missionActive()`**, which is NOT
+ redundant with the handler's own guard: an application shortcut
+ swallows the key whether or not its slot acts, so an always-armed
+ shortcut would break Space on every checkbox and dialog button in the
+ app. `scanActionButton()` sets `Qt::NoFocus` for the between-missions
+ window the shortcut deliberately leaves uncovered.
+ - The handler **must** no-op when a `QLineEdit` / `QPlainTextEdit` has
+ focus. Without it, typing a space into the plan name or the address
+ search fires an E-Stop.
+ - **No `/coverage/abort` in the E-Stop path.** `autonomy_enable=false` is
+ already the full robot-side stop: `CoverageExecutionManager.set_autonomy`
+ publishes a stop, drops the installed route, and `tick()` returns at the
+ top of every later cycle. `abort` ends the run and closes the section as
+ partial, which would make a recoverable stop unrecoverable.
 - **The stop modal dwells three `/coverage/status` samples
  (`stop_prompt_policy::kStopDwellSamples`).** The executor latches a
  stop reason for as little as one 20 Hz tick (`degenerate_path` at the
@@ -1348,9 +1433,40 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
  (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|run|plan|
- plan_confirm`, `_STAGE=3|4|5`, `_TOGGLE` modifiers) — the agent-side
+ plan_confirm`, `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog
  to `<png>_dialog.png` / `_dialog_adv.png`. See docs/DEV_BYPASSES.md.
+- **The canvases paint, they do not style, so no stylesheet reaches them.**
+ `SatelliteMapWidget::setDarkMode` and `PanZoomImageWidget::setDarkMode`
+ are plumbed from `SatelliteScreen::setDarkMode` and a new painted color
+ needs to go through `satpal` (`cpp/include/satellite_palette.hpp`) or a
+ `dark_mode_` branch. `satpal` splits on one rule: **brand hues are fixed,
+ neutrals follow the theme.** `accent`/`danger`/`warning`/`info` mark up
+ the operator's geometry against satellite imagery, which is the same
+ photograph in either theme; `text`/`cardBg`/`border`/`chipBg` are chip
+ plates and label colors and are views over `uiThemeTokens`, so the zinc
+ ramp has exactly one definition. Chrome follows the theme **even over
+ imagery** — a near-black chip is the obvious choice against an aerial
+ photo, but the operator works in direct sun where the screen's black is
+ grey with glare, and light-on-dark is the harder read there.
+- **The point-cloud raster has to be re-inked for a light canvas.**
+ `renderTopDownAlphaDensity` draws every point at `kPointGray = 210` and
+ puts all the density information in the alpha channel, so it vanishes on
+ a white drafting surface — including in the step-2 picker, where the
+ operator places correspondences. `tintDensityRasterForLightCanvas` is the
+ light variant: a flat RGB rewrite that preserves alpha, so it does not
+ re-run PCL. `SatelliteMapWidget` caches it in `map_raster_painted_` and
+ keeps `map_raster_` pristine (tinting the tinted copy would compound);
+ `SatelliteScreen::updateCorrespondenceUi` applies it to the PCD pane only
+ — the satellite stitch is a photograph and must never be recolored.
+ `PanZoomImageWidget::setImage` deliberately keeps the current pan/zoom on
+ a **same-size** replacement, which is what makes the re-tint safe: a
+ theme flip half-way through picking pairs must not refit the view.
+- **The step-5 scan page's inline styles have a second theme seam beyond
+ `restyleScanPage()`**: `FPVCameraView`'s placeholder is transparent over
+ its host card, so its text is the only thing carrying contrast.
+ `FPVCameraView::setDarkMode` is called from both `SatelliteScreen` and
+ `PlannerScreen`.
 - **Save Plan in the office must keep requiring an ROI and must keep
  running the prefetch.** The imagery is the save's product; a satellite
  plan without cached tiles is not usable on the roof. In the field,
@@ -1436,6 +1552,58 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  `cliff-on-autonomy`. `feature/ocu-satellite-roi` has its own independent
  `roof_edge_clearance` implementation in `coverage_horizon_manager.py` —
  that one is the dead horizon-manager path, kept only for history.
+
+## Theming (light mode is a field requirement, not a preference)
+
+The operator runs this on a laptop on a roof in direct sun, where the
+screen's black is grey with glare. Light mode is the sunlight mode, so
+"readable in light mode" is a functional requirement and the reason the
+contrast bar is high: **AAA (7:1) for small body text**, AA for button
+labels, which are all ≥ 14 px bold.
+
+`cpp/include/ui_theme_constants.hpp` is the only palette. `uiThemeTokens
+(bool)` is the explicit form; `appThemeTokens()` / `appDarkMode()` read the
+`bdrDarkMode` property that `main.cpp` seeds on `QApplication` **before any
+widget is constructed** and `AppShellWindow::setDarkMode` keeps in sync —
+that is how frameless dialogs get the right theme without being handed it.
+
+### Decisions that are load-bearing
+
+- **Green buttons keep the brand fill and swap the label.** White on
+ `#00BC7D` is 2.5:1 and on `#009966` is 3.3:1. `on_accent` is `#FFFFFF`
+ in dark and `#18181B` in light. Do not "fix" a green button by
+ darkening the fill instead — the app is consistent on the label, and
+ mixing the two approaches is what made the Setup and Stage 6 buttons
+ diverge. `accent_text` is the separate token for green as *text* on a
+ surface, where the fill value is unusable.
+- **Fills and text colors are different roles and cannot share a value.**
+ `danger` / `warning` are text (they go *darker* in light mode, against a
+ light surface); `danger_fill` / `warning_fill` carry a white label (they
+ also go darker, for the opposite reason). One value fails one of them.
+- **In light mode `faint` IS `muted`.** Dark mode has four grey tiers;
+ light mode runs out of contrast headroom after three, and anything
+ lighter than `muted` on white drops under the bar. Hints, unit suffixes
+ and section headers get their hierarchy from size and weight instead.
+ Do not lighten `faint` to "get the tier back".
+- **Disabled needs two tokens.** `disabled_text` is a label ON a disabled
+ fill; `disabled_ghost` is a label on a disabled *transparent* control.
+ The same value cannot do both — with no fill under it, `disabled_text`
+ looks enabled. Qt cannot restyle a child `QLabel` from a parent's
+ `:disabled` pseudo-state, so composite buttons (step 5's control bar)
+ need the `applyScanActionFg` / `ScanActionTint` treatment instead.
+- **A sheet set in a constructor holds the boot palette forever.** Every
+ screen here is built once and reused across missions. Anything styled
+ per-element inside a builder needs a re-style hook on the theme toggle:
+ `restyleScanPage()` for step 5, `applyPlaceholderStyle()` for
+ `FPVCameraView`, `setDarkMode` on the painted widgets.
+
+### Verifying
+
+`BDR_DEV_STAGE6_SHOT` with `_STAGE=1|2|3|4|5` and `_MODE=…|dialogs` renders
+every screen and the shared dialogs headlessly in both themes. Contrast
+claims should be measured off those PNGs at the glyph core, not eyeballed —
+point-sampling a label hits antialiasing and reads far lighter than the
+text actually is.
 
 ## Docs worth reading
 

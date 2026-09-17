@@ -32,6 +32,7 @@
 #include "satellite_tile_service.hpp"
 #include <QListWidget>
 #include "settings_constants.hpp"
+#include "ui_theme_constants.hpp"
 #include "units_system.hpp"
 
 #include <QApplication>
@@ -217,7 +218,7 @@ constexpr const char* kEstopRedHover = "#C10007";
 constexpr const char* kAmber = "#F0B100";
 
 QString mutedColor(bool dark) {
-    return dark ? QStringLiteral("#9F9FA9") : QStringLiteral("#6B7280");
+    return uiThemeTokens(dark).muted;
 }
 
 QString textColor(bool dark) {
@@ -697,7 +698,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     scan_run_state_ = ScanRunState::Idle;
                     scan_autonomy_ran_ = false;
                     manual_override_ = false;
-                    resume_after_override_ = false;
                     scan_started_wall_ms_ = 0;
                     scan_elapsed_ms_ = 0;
                     scan_distance_m_ = 0.0;
@@ -811,6 +811,29 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         }
     });
     slow_timer_->start();
+
+    // Space = Emergency Stop, the reflex key. ApplicationShortcut because Qt
+    // matches shortcuts before delivering the key to the focused widget: that
+    // is what stops a focused control-bar button from swallowing Space as a
+    // click on itself, and it keeps the key alive while one of the screen's
+    // modeless dialogs (stop prompt, finalize progress) holds focus — which
+    // is precisely when the operator is most likely to reach for it. No
+    // auto-repeat: a held key must not become a stream of stops.
+    auto* estop_shortcut = new QShortcut(QKeySequence(Qt::Key_Space), this);
+    estop_shortcut->setContext(Qt::ApplicationShortcut);
+    estop_shortcut->setAutoRepeat(false);
+    connect(estop_shortcut, &QShortcut::activated, this,
+            &SatelliteScreen::onEstopShortcut);
+    // Enabled ONLY while a mission is live, and this is not the same as the
+    // handler's missionActive() guard: an application shortcut swallows the
+    // key whether or not its slot does anything, so leaving it armed would
+    // break Space on every checkbox and dialog button in the app. Off between
+    // missions, Space behaves normally everywhere and the control bar's
+    // Qt::NoFocus is what keeps it from re-clicking the last action. During a
+    // mission, swallowing Space is the point.
+    estop_shortcut->setEnabled(false);
+    connect(this, &SatelliteScreen::missionActiveChanged, estop_shortcut,
+            &QShortcut::setEnabled);
 
     setStatePill(QStringLiteral("NO MISSION"), QColor(mutedColor(true)));
     setBotPill(QStringLiteral("BOT —"), QColor(mutedColor(true)));
@@ -1624,46 +1647,150 @@ constexpr int kScanFooterCtaWidth = 278;
 constexpr int kScanActionChrome = 16 + 8 + 20 + 8 + 8 + 16;
 constexpr int kScanActionSafetyPad = 8;
 
-QLabel* scanText(QWidget* parent, const QString& text, const QString& style,
+// ---- Step-5 palette roles ---------------------------------------------------
+//
+// Step 5 reproduces the Stage 5 Figma frames 1:1, so — unlike the rest of the
+// screen — its widgets carry per-element inline sheets rather than
+// object-name QSS. An inline sheet set once inside a builder keeps the boot
+// palette for the life of the screen, and this screen is constructed once and
+// reused across missions, so a theme toggle would never reach it.
+//
+// Every styled widget therefore records the palette role it was built with in
+// a dynamic property, and `SatelliteScreen::restyleScanPage()` walks the page
+// on a theme flip and re-resolves each sheet from the role. Adding a new
+// styled widget means giving it a role, not remembering to patch a second
+// function.
+constexpr char kScanRoleProp[] = "satScanRole";
+constexpr char kScanRoleArgProp[] = "satScanRoleArg";
+
+/** Text roles: family/size/weight are fixed by the frame, only color moves. */
+QString scanTextStyle(const QString& role, const UiThemeTokens& t) {
+    const auto arimo = [](int px, int weight, const QString& color) {
+        return QStringLiteral("font-family: 'Arimo'; font-size: %1px; "
+                              "font-weight: %2; color: %3;")
+            .arg(px)
+            .arg(weight)
+            .arg(color);
+    };
+    const auto mono = [](int px, const QString& color) {
+        return QStringLiteral("font-family: 'Liberation Mono'; font-size: "
+                              "%1px; font-weight: 400; color: %2;")
+            .arg(px)
+            .arg(color);
+    };
+    if (role == QLatin1String("key")) return arimo(16, 400, t.muted);
+    if (role == QLatin1String("value")) return mono(16, t.text);
+    if (role == QLatin1String("rowKey")) return arimo(14, 400, t.muted);
+    if (role == QLatin1String("rowValue")) return mono(14, t.body);
+    if (role == QLatin1String("cardTitle")) return arimo(16, 700, t.text);
+    if (role == QLatin1String("pct")) return mono(14, t.text);
+    if (role == QLatin1String("axis")) return mono(16, t.muted);
+    if (role == QLatin1String("state")) return arimo(12, 600, t.muted);
+    if (role == QLatin1String("hint")) return arimo(12, 400, t.muted);
+    if (role == QLatin1String("summary")) return mono(14, t.muted);
+    if (role == QLatin1String("pillText")) return arimo(16, 700, t.body);
+    if (role == QLatin1String("backText")) return arimo(14, 500, t.body);
+    if (role == QLatin1String("stepText")) return mono(14, t.muted);
+    if (role == QLatin1String("onAccent")) return arimo(16, 700, t.on_accent);
+    return arimo(14, 400, t.text);
+}
+
+QLabel* scanText(QWidget* parent, const QString& text, const QString& role,
                  Qt::Alignment align = Qt::AlignLeft | Qt::AlignVCenter) {
     auto* label = new QLabel(text, parent);
     label->setAlignment(align);
     label->setAttribute(Qt::WA_TranslucentBackground, true);
     label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    label->setStyleSheet(style + QStringLiteral(" background: transparent;"));
+    label->setProperty(kScanRoleProp, QStringLiteral("text"));
+    label->setProperty(kScanRoleArgProp, role);
+    label->setStyleSheet(scanTextStyle(role, appThemeTokens()) +
+                         QStringLiteral(" background: transparent;"));
     return label;
 }
 
+/** Icon roles resolve to a tint; the pixmap is re-rendered on a theme flip. */
+QString scanIconColor(const QString& role, const UiThemeTokens& t) {
+    if (role == QLatin1String("accent")) return t.accent_text;
+    if (role == QLatin1String("onAccent")) return t.on_accent;
+    if (role == QLatin1String("onFill")) return QStringLiteral("#FFFFFF");
+    return t.muted;
+}
+
 QLabel* scanIcon(QWidget* parent, const QString& path, int size,
-                 const QString& color) {
+                 const QString& color_role) {
     auto* label = new QLabel(parent);
     label->setFixedSize(size, size);
     label->setAlignment(Qt::AlignCenter);
     label->setAttribute(Qt::WA_TranslucentBackground, true);
     label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     label->setStyleSheet(QStringLiteral("background: transparent;"));
-    label->setPixmap(loadTintedSvg(path, size, size, color));
+    label->setProperty(kScanRoleProp, QStringLiteral("icon"));
+    label->setProperty(kScanRoleArgProp,
+                       QStringList{path, QString::number(size), color_role});
+    label->setPixmap(loadTintedSvg(path, size, size,
+                                   scanIconColor(color_role,
+                                                 appThemeTokens())));
     return label;
 }
 
-const char* kScanKeyStyle =
-    "font-family: 'Arimo'; font-size: 16px; font-weight: 400; color: #9F9FA9;";
-const char* kScanValueStyle =
-    "font-family: 'Liberation Mono'; font-size: 16px; font-weight: 400; "
-    "color: #FFFFFF;";
-const char* kScanRowKeyStyle =
-    "font-family: 'Arimo'; font-size: 14px; font-weight: 400; color: #9F9FA9;";
-const char* kScanRowValueStyle =
-    "font-family: 'Liberation Mono'; font-size: 14px; font-weight: 400; "
-    "color: #D4D4D8;";
+QString scanSurfaceStyle(const QString& role, const UiThemeTokens& t) {
+    if (role == QLatin1String("railLeft")) {
+        return QStringLiteral("background: %1; border-right: 1px solid %2;")
+            .arg(t.surface, t.surface_border);
+    }
+    if (role == QLatin1String("railRight")) {
+        return QStringLiteral("background: %1; border-left: 1px solid %2;")
+            .arg(t.surface, t.surface_border);
+    }
+    if (role == QLatin1String("footer")) {
+        return QStringLiteral("background: %1;").arg(t.surface);
+    }
+    if (role == QLatin1String("pill")) {
+        return QStringLiteral("QWidget#SatScanStatusPill { background: %1; "
+                              "border: none; border-radius: 10px; }")
+            .arg(t.raised);
+    }
+    if (role == QLatin1String("backButton")) {
+        return QStringLiteral(
+                   "QPushButton { background: transparent; border: none; "
+                   "border-radius: 10px; }"
+                   "QPushButton:hover { background: %1; }")
+            .arg(t.hover_wash);
+    }
+    if (role == QLatin1String("disarm")) {
+        return QStringLiteral(
+                   "QPushButton { background: %1; border: none; "
+                   "border-radius: 8px; font-family: 'Arimo'; "
+                   "font-size: 14px; font-weight: 500; color: %2; }"
+                   "QPushButton:hover { background: %3; }"
+                   "QPushButton:disabled { background: %1; color: %4; }")
+            .arg(t.raised_border, t.text, t.neutral_hover, t.muted);
+    }
+    if (role == QLatin1String("endButton")) {
+        return QStringLiteral(
+                   "QPushButton { background: %1; border: none; "
+                   "border-radius: 10px; }"
+                   "QPushButton:hover { background: %2; }"
+                   "QPushButton:disabled { background: %3; }")
+            .arg(t.accent_green, t.accent_green_hover, t.raised_border);
+    }
+    // "card"
+    return QStringLiteral("background: %1; border: none; border-radius: 10px;")
+        .arg(t.raised);
+}
+
+QWidget* scanSurface(QWidget* parent, const QString& role) {
+    auto* w = new QWidget(parent);
+    w->setAttribute(Qt::WA_StyledBackground, true);
+    w->setProperty(kScanRoleProp, QStringLiteral("surface"));
+    w->setProperty(kScanRoleArgProp, role);
+    w->setStyleSheet(scanSurfaceStyle(role, appThemeTokens()));
+    return w;
+}
 
 QWidget* scanCardShell(QWidget* parent) {
-    auto* card = new QWidget(parent);
-    card->setAttribute(Qt::WA_StyledBackground, true);
-    card->setStyleSheet(QStringLiteral(
-        "background: #27272A; border: none; border-radius: 10px;"));
-    return card;
+    return scanSurface(parent, QStringLiteral("card"));
 }
 
 QWidget* scanCardHeader(QWidget* parent, const QString& icon,
@@ -1673,15 +1800,20 @@ QWidget* scanCardHeader(QWidget* parent, const QString& icon,
     auto* layout = new QHBoxLayout(row);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
-    layout->addWidget(scanIcon(row, icon, 16, QStringLiteral("#00D492")), 0,
-                      Qt::AlignVCenter);
     layout->addWidget(
-        scanText(row, title,
-                 QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
-                                "font-weight: 700; color: #FFFFFF;")),
-        0, Qt::AlignVCenter);
+        scanIcon(row, icon, 16, QStringLiteral("accent")), 0, Qt::AlignVCenter);
+    layout->addWidget(scanText(row, title, QStringLiteral("cardTitle")), 0,
+                      Qt::AlignVCenter);
     layout->addStretch(1);
     return row;
+}
+
+QString scanBarStyle(const QString& chunk, const UiThemeTokens& t) {
+    return QStringLiteral(
+               "QProgressBar { background: %1; border: none; "
+               "border-radius: 999px; }"
+               "QProgressBar::chunk { background: %2; border-radius: 999px; }")
+        .arg(t.raised_border, chunk);
 }
 
 QProgressBar* scanProgressBar(QWidget* parent, const QString& chunk) {
@@ -1690,12 +1822,9 @@ QProgressBar* scanProgressBar(QWidget* parent, const QString& chunk) {
     bar->setValue(0);
     bar->setTextVisible(false);
     bar->setFixedHeight(8);
-    bar->setStyleSheet(
-        QStringLiteral(
-            "QProgressBar { background: #3F3F47; border: none; "
-            "border-radius: 999px; }"
-            "QProgressBar::chunk { background: %1; border-radius: 999px; }")
-            .arg(chunk));
+    bar->setProperty(kScanRoleProp, QStringLiteral("bar"));
+    bar->setProperty(kScanRoleArgProp, chunk);
+    bar->setStyleSheet(scanBarStyle(chunk, appThemeTokens()));
     return bar;
 }
 
@@ -1708,9 +1837,9 @@ QWidget* scanKeyValueSection(QWidget* parent, const QString& key,
     auto* layout = new QVBoxLayout(section);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    layout->addWidget(scanText(section, key, QLatin1String(kScanKeyStyle)));
+    layout->addWidget(scanText(section, key, QStringLiteral("key")));
     auto* value_label =
-        scanText(section, value, QLatin1String(kScanValueStyle));
+        scanText(section, value, QStringLiteral("value"));
     layout->addWidget(value_label);
     if (out_value) {
         *out_value = value_label;
@@ -1726,10 +1855,10 @@ QWidget* scanKeyValueRow(QWidget* parent, const QString& key,
     auto* layout = new QHBoxLayout(row);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
-    layout->addWidget(scanText(row, key, QLatin1String(kScanRowKeyStyle)), 0,
+    layout->addWidget(scanText(row, key, QStringLiteral("rowKey")), 0,
                       Qt::AlignVCenter);
     layout->addStretch(1);
-    auto* value_label = scanText(row, value, QLatin1String(kScanRowValueStyle),
+    auto* value_label = scanText(row, value, QStringLiteral("rowValue"),
                                  Qt::AlignRight | Qt::AlignVCenter);
     layout->addWidget(value_label, 0, Qt::AlignVCenter);
     if (out_value) {
@@ -1738,34 +1867,155 @@ QWidget* scanKeyValueRow(QWidget* parent, const QString& key,
     return row;
 }
 
+/**
+ * Control-bar fills. These are the frame's own brand hues, not the shared
+ * `*_fill` tokens — the dialogs' amber and red are a different, deeper pair,
+ * and step 5 has to keep matching Figma in dark mode. Only the light column
+ * is new: amber keeps its hue and flips to a dark label (white on #FE9A00 is
+ * 2.2:1), red darkens so a white label clears the contrast bar, and green
+ * follows `on_accent` like every other primary in the app.
+ */
+struct ScanActionPalette {
+    QString fill;
+    QString hover;
+    QString fg;  // the icon/label tint that sits on `fill`
+};
+
+ScanActionPalette scanActionPalette(const QString& kind, bool dark) {
+    if (kind == QLatin1String("warning")) {
+        return dark ? ScanActionPalette{QStringLiteral("#FE9A00"),
+                                        QStringLiteral("#FFAA22"),
+                                        QStringLiteral("#FFFFFF")}
+                    : ScanActionPalette{QStringLiteral("#FE9A00"),
+                                        QStringLiteral("#FFAA22"),
+                                        QStringLiteral("#18181B")};
+    }
+    if (kind == QLatin1String("danger")) {
+        return dark ? ScanActionPalette{QStringLiteral("#DC2626"),
+                                        QStringLiteral("#EF4444"),
+                                        QStringLiteral("#FFFFFF")}
+                    : ScanActionPalette{QStringLiteral("#991B1B"),
+                                        QStringLiteral("#B91C1C"),
+                                        QStringLiteral("#FFFFFF")};
+    }
+    const UiThemeTokens t = uiThemeTokens(dark);
+    return {t.accent_green, t.accent_green_hover, t.on_accent};
+}
+
+QString scanActionStyle(const QString& kind, const UiThemeTokens& t,
+                        bool dark) {
+    const ScanActionPalette p = scanActionPalette(kind, dark);
+    return QStringLiteral(
+               "QPushButton { background: %1; border: none; "
+               "border-radius: 10px; }"
+               "QPushButton:hover { background: %2; }"
+               "QPushButton:disabled { background: %3; }")
+        .arg(p.fill, p.hover, t.raised_border);
+}
+
+/**
+ * Tints an action button's label and icon to sit on its current fill. The
+ * fill's disabled state is a QSS `:disabled` rule, but Qt cannot restyle a
+ * child QLabel from a parent's pseudo-state, so a white label stays white
+ * over the disabled grey — legible in dark mode, unreadable in light.
+ */
+void applyScanActionFg(QWidget* button, bool dark) {
+    const QString kind = button->property(kScanRoleArgProp).toString();
+    const QString fg = button->isEnabled()
+                           ? scanActionPalette(kind, dark).fg
+                           : uiThemeTokens(dark).muted;
+    const auto labels = button->findChildren<QLabel*>();
+    for (QLabel* label : labels) {
+        const QString role = label->property(kScanRoleProp).toString();
+        if (role == QLatin1String("actionText")) {
+            label->setStyleSheet(
+                QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
+                               "font-weight: 700; color: %1; "
+                               "background: transparent;")
+                    .arg(fg));
+        } else if (role == QLatin1String("actionIcon")) {
+            const QStringList spec =
+                label->property(kScanRoleArgProp).toStringList();
+            if (!spec.isEmpty()) {
+                label->setPixmap(loadTintedSvg(spec.at(0), 20, 20, fg));
+            }
+        }
+    }
+}
+
+/** Keeps the label/icon tint in step with the button's enabled state. */
+class ScanActionTint : public QObject {
+public:
+    explicit ScanActionTint(QPushButton* button) : QObject(button) {
+        button->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::EnabledChange) {
+            if (auto* button = qobject_cast<QWidget*>(watched)) {
+                applyScanActionFg(button, appDarkMode());
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
 /** 48 px pill action button with icon + bold label (control bar). */
 QPushButton* scanActionButton(QWidget* parent, const QString& icon,
-                              const QString& text, const QString& fill,
-                              const QString& hover, QLabel** out_icon,
-                              QLabel** out_text) {
+                              const QString& text, const QString& kind,
+                              QLabel** out_icon, QLabel** out_text) {
+    const bool dark = appDarkMode();
+    const UiThemeTokens t = appThemeTokens();
+    const ScanActionPalette palette = scanActionPalette(kind, dark);
+
     auto* button = new QPushButton(parent);
     button->setCursor(Qt::PointingHandCursor);
     button->setFlat(true);
     button->setFixedHeight(48);
     button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    button->setStyleSheet(
-        QStringLiteral(
-            "QPushButton { background: %1; border: none; border-radius: 10px; }"
-            "QPushButton:hover { background: %2; }"
-            "QPushButton:disabled { background: rgba(82,82,91,0.4); }")
-            .arg(fill, hover));
+    // Second lock behind the Space shortcut, for the three control-bar
+    // actions this helper builds (Start/Pause, Cancel Scan, Emergency Stop).
+    // A clicked QPushButton keeps keyboard focus and Qt treats Space on a
+    // focused button as a click, so between missions — where the E-Stop
+    // shortcut is gated off — Space would otherwise re-fire whichever action
+    // the operator last touched.
+    button->setFocusPolicy(Qt::NoFocus);
+    button->setProperty(kScanRoleProp, QStringLiteral("action"));
+    button->setProperty(kScanRoleArgProp, kind);
+    button->setStyleSheet(scanActionStyle(kind, t, dark));
+
     auto* layout = new QHBoxLayout(button);
     layout->setContentsMargins(16, 0, 16, 0);
     layout->setSpacing(8);
     layout->addStretch(1);
-    auto* icon_label = scanIcon(button, icon, 20, QStringLiteral("#FFFFFF"));
+    // The label and icon ride the button's fill, so they carry the fill's
+    // role rather than a palette role of their own.
+    auto* icon_label = new QLabel(button);
+    icon_label->setFixedSize(20, 20);
+    icon_label->setAlignment(Qt::AlignCenter);
+    icon_label->setAttribute(Qt::WA_TranslucentBackground, true);
+    icon_label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    icon_label->setStyleSheet(QStringLiteral("background: transparent;"));
+    icon_label->setProperty(kScanRoleProp, QStringLiteral("actionIcon"));
+    icon_label->setProperty(kScanRoleArgProp, QStringList{icon, kind});
+    icon_label->setPixmap(loadTintedSvg(icon, 20, 20, palette.fg));
     layout->addWidget(icon_label);
-    auto* text_label = scanText(
-        button, text,
+
+    auto* text_label = new QLabel(text, button);
+    text_label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    text_label->setAttribute(Qt::WA_TranslucentBackground, true);
+    text_label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    text_label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    text_label->setProperty(kScanRoleProp, QStringLiteral("actionText"));
+    text_label->setProperty(kScanRoleArgProp, kind);
+    text_label->setStyleSheet(
         QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
-                       "font-weight: 700; color: #FFFFFF;"));
+                       "font-weight: 700; color: %1; background: transparent;")
+            .arg(palette.fg));
     layout->addWidget(text_label);
     layout->addStretch(1);
+    new ScanActionTint(button);
     if (out_icon) *out_icon = icon_label;
     if (out_text) *out_text = text_label;
     return button;
@@ -1788,8 +2038,10 @@ QWidget* SatelliteScreen::buildScanLeftRail(QWidget* parent) {
     auto* rail = new QWidget(parent);
     rail->setFixedWidth(kScanLeftRailWidth);
     rail->setAttribute(Qt::WA_StyledBackground, true);
-    rail->setStyleSheet(QStringLiteral(
-        "background: #18181B; border-right: 1px solid #27272A;"));
+    rail->setProperty(kScanRoleProp, QStringLiteral("surface"));
+    rail->setProperty(kScanRoleArgProp, QStringLiteral("railLeft"));
+    rail->setStyleSheet(
+        scanSurfaceStyle(QStringLiteral("railLeft"), appThemeTokens()));
     auto* layout = new QVBoxLayout(rail);
     layout->setContentsMargins(16, 16, 17, 16);
     layout->setSpacing(16);
@@ -1811,7 +2063,7 @@ QWidget* SatelliteScreen::buildScanLeftRail(QWidget* parent) {
         section_layout->setContentsMargins(0, 0, 0, 0);
         section_layout->setSpacing(4);
         section_layout->addWidget(
-            scanText(section, key, QLatin1String(kScanKeyStyle)));
+            scanText(section, key, QStringLiteral("key")));
         auto* row = new QWidget(section);
         row->setFixedHeight(20);
         auto* row_layout = new QHBoxLayout(row);
@@ -1820,9 +2072,7 @@ QWidget* SatelliteScreen::buildScanLeftRail(QWidget* parent) {
         out_bar = scanProgressBar(row, chunk);
         row_layout->addWidget(out_bar, 1);
         out_value = scanText(
-            row, QStringLiteral("0.0%"),
-            QStringLiteral("font-family: 'Liberation Mono'; font-size: 14px; "
-                           "font-weight: 400; color: #FFFFFF;"));
+            row, QStringLiteral("0.0%"), QStringLiteral("pct"));
         row_layout->addWidget(out_value, 0, Qt::AlignVCenter);
         section_layout->addWidget(row);
         progress_layout->addWidget(section);
@@ -1856,18 +2106,16 @@ QWidget* SatelliteScreen::buildScanLeftRail(QWidget* parent) {
         pos_layout->setContentsMargins(0, 0, 0, 0);
         pos_layout->setSpacing(0);
         pos_layout->addWidget(scanText(pos, QStringLiteral("Position"),
-                                       QLatin1String(kScanKeyStyle)));
+                                       QStringLiteral("key")));
         const auto axis_row = [&](const QString& axis, QLabel*& out) {
             auto* row = new QWidget(pos);
             auto* row_layout = new QHBoxLayout(row);
             row_layout->setContentsMargins(0, 0, 0, 0);
             row_layout->setSpacing(6);
             row_layout->addWidget(scanText(
-                row, axis,
-                QStringLiteral("font-family: 'Liberation Mono'; font-size: "
-                               "16px; font-weight: 400; color: #A1A1AA;")));
+                row, axis, QStringLiteral("axis")));
             out = scanText(row, units::formatLength(0.0, 2),
-                           QLatin1String(kScanValueStyle));
+                           QStringLiteral("value"));
             row_layout->addWidget(out, 1, Qt::AlignLeft | Qt::AlignVCenter);
             pos_layout->addWidget(row);
         };
@@ -1887,8 +2135,10 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     auto* rail = new QWidget(parent);
     rail->setFixedWidth(kScanRightRailWidth);
     rail->setAttribute(Qt::WA_StyledBackground, true);
-    rail->setStyleSheet(QStringLiteral(
-        "background: #18181B; border-left: 1px solid #27272A;"));
+    rail->setProperty(kScanRoleProp, QStringLiteral("surface"));
+    rail->setProperty(kScanRoleArgProp, QStringLiteral("railRight"));
+    rail->setStyleSheet(
+        scanSurfaceStyle(QStringLiteral("railRight"), appThemeTokens()));
     auto* layout = new QVBoxLayout(rail);
     layout->setContentsMargins(17, 16, 16, 16);
     layout->setSpacing(16);
@@ -1923,15 +2173,13 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     override_content_layout->addWidget(scan_camera_view_);
     scan_override_label_ = scanText(
         override_content, QStringLiteral("Manual Override: Inactive"),
-        QStringLiteral("font-family: 'Arimo'; font-size: 12px; "
-                       "font-weight: 600; color: #9F9FA9;"));
+        QStringLiteral("state"));
     override_content_layout->addWidget(scan_override_label_);
     auto* hint = scanText(
         override_content,
         QStringLiteral("Click camera for manual teleop (W/A/S/D). "
                        "Click map to return to autonomy."),
-        QStringLiteral("font-family: 'Arimo'; font-size: 12px; "
-                       "font-weight: 400; color: #71717B;"));
+        QStringLiteral("hint"));
     hint->setWordWrap(true);
     override_content_layout->addWidget(hint);
     override_layout->addWidget(override_content);
@@ -1960,8 +2208,11 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
         &scan_copy_label_));
     layout->addWidget(stats);
 
-    // Motors: Disarm kept by operator request (Arm is folded into Start
-    // Scan). Same card language, one row.
+    // Motors: Arm beside Disarm. Arm used to be folded into Start Scan, which
+    // made E-Stop a dead end — the axes were IDLE and the only way to get
+    // them back also re-enabled autonomy, which is what the operator was
+    // pushed into on 2026-09-16. Arm requests CLOSED_LOOP only, so teleop
+    // works with the latch still held. One row, same card height.
     auto* motors = scanCardShell(rail);
     motors->setFixedHeight(96);
     auto* motors_layout = new QVBoxLayout(motors);
@@ -1970,26 +2221,42 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     motors_layout->addWidget(scanCardHeader(
         motors, QStringLiteral(":/assets/exploration/telemetry.svg"),
         QStringLiteral("Motors")));
-    disarm_button_ = new QPushButton(QStringLiteral("Disarm Motors"), motors);
-    disarm_button_->setCursor(Qt::PointingHandCursor);
-    disarm_button_->setFixedHeight(32);
-    disarm_button_->setStyleSheet(QStringLiteral(
-        "QPushButton { background: #3F3F47; border: none; border-radius: 8px;"
-        " font-family: 'Arimo'; font-size: 14px; font-weight: 500;"
-        " color: #E4E4E7; }"
-        "QPushButton:hover { background: #52525C; }"
-        "QPushButton:disabled { background: rgba(63,63,71,0.4);"
-        " color: rgba(228,228,231,0.4); }"));
+    auto* motors_row = new QWidget(motors);
+    auto* motors_row_layout = new QHBoxLayout(motors_row);
+    motors_row_layout->setContentsMargins(0, 0, 0, 0);
+    motors_row_layout->setSpacing(8);
+    auto motors_style = [](QPushButton* button) {
+        button->setCursor(Qt::PointingHandCursor);
+        button->setFixedHeight(32);
+        button->setProperty(kScanRoleProp, QStringLiteral("surface"));
+        button->setProperty(kScanRoleArgProp, QStringLiteral("disarm"));
+        button->setStyleSheet(
+            scanSurfaceStyle(QStringLiteral("disarm"), appThemeTokens()));
+    };
+    arm_button_ = new QPushButton(QStringLiteral("Arm Motors"), motors_row);
+    motors_style(arm_button_);
+    arm_button_->setToolTip(QStringLiteral(
+        "Power the wheels for manual driving. Does not start the scan."));
+    connect(arm_button_, &QPushButton::clicked, this, [this] {
+        // Deliberately does not touch autonomy, and deliberately does not
+        // consult armingAllowed(): arming for teleop is the operator's way
+        // out of a latched E-Stop.
+        ros_->requestAxisState(RosLink::kAxisClosedLoop);
+        appendLog(QStringLiteral("[cmd] arm (CLOSED_LOOP, autonomy untouched)"));
+        refreshScanRunUi();
+    });
+    disarm_button_ = new QPushButton(QStringLiteral("Disarm"), motors_row);
+    motors_style(disarm_button_);
     connect(disarm_button_, &QPushButton::clicked, this, [this] {
         setAutonomyEnabled(false);
         ros_->requestAxisState(RosLink::kAxisIdle);
-        if (scan_run_state_ == ScanRunState::Running) {
-            scan_run_state_ = ScanRunState::Paused;
-        }
+        scan_run_state_ = estop_latch_policy::pauseIfRunning(scan_run_state_);
         appendLog(QStringLiteral("[cmd] disarm (IDLE)"));
         refreshScanRunUi();
     });
-    motors_layout->addWidget(disarm_button_);
+    motors_row_layout->addWidget(arm_button_, 1);
+    motors_row_layout->addWidget(disarm_button_, 1);
+    motors_layout->addWidget(motors_row);
     layout->addWidget(motors);
     layout->addStretch(1);
     return rail;
@@ -2006,9 +2273,8 @@ QWidget* SatelliteScreen::buildScanControlBar(QWidget* parent) {
 
     scan_start_pause_button_ = scanActionButton(
         bar, QStringLiteral(":/assets/missionplanner/scan_play.svg"),
-        QStringLiteral("Start Scan"), QStringLiteral("#00BC7D"),
-        QStringLiteral("#0ACB8B"), &scan_start_pause_icon_,
-        &scan_start_pause_text_);
+        QStringLiteral("Start Scan"), QStringLiteral("accent"),
+        &scan_start_pause_icon_, &scan_start_pause_text_);
     {
         auto* shadow = new QGraphicsDropShadowEffect(scan_start_pause_button_);
         shadow->setBlurRadius(16);
@@ -2024,8 +2290,7 @@ QWidget* SatelliteScreen::buildScanControlBar(QWidget* parent) {
 
     scan_run_summary_label_ = scanText(
         bar, QStringLiteral("00:00 \u2022 0/0 intervals"),
-        QStringLiteral("font-family: 'Liberation Mono'; font-size: 14px; "
-                       "font-weight: 400; color: #9F9FA9;"));
+        QStringLiteral("summary"));
     // The summary is the only flexible item in the bar: at narrow widths it
     // gives way before the three action pills do.
     scan_run_summary_label_->setSizePolicy(QSizePolicy::Ignored,
@@ -2035,22 +2300,21 @@ QWidget* SatelliteScreen::buildScanControlBar(QWidget* parent) {
 
     scan_cancel_button_ = scanActionButton(
         bar, QStringLiteral(":/assets/missionplanner/scan_cancel.svg"),
-        QStringLiteral("Cancel Scan"), QStringLiteral("#FE9A00"),
-        QStringLiteral("#FFAA22"), nullptr, &scan_cancel_text_);
+        QStringLiteral("Cancel Scan"), QStringLiteral("warning"), nullptr,
+        &scan_cancel_text_);
     connect(scan_cancel_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onScanCancelClicked);
     setScanActionText(scan_cancel_button_, scan_cancel_text_,
                       QStringLiteral("Cancel Scan"));
     layout->addWidget(scan_cancel_button_);
 
-    QLabel* estop_text = nullptr;
     estop_button_ = scanActionButton(
         bar, QStringLiteral(":/assets/missionplanner/scan_emergency_stop.svg"),
-        QStringLiteral("Emergency Stop"), QStringLiteral("#DC2626"),
-        QStringLiteral("#EF4444"), nullptr, &estop_text);
+        QStringLiteral("Emergency Stop"), QStringLiteral("danger"), nullptr,
+        &estop_text_);
     connect(estop_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::onEstop);
-    setScanActionText(estop_button_, estop_text,
+            &SatelliteScreen::onEstopButtonClicked);
+    setScanActionText(estop_button_, estop_text_,
                       QStringLiteral("Emergency Stop"));
     layout->addWidget(estop_button_);
     return bar;
@@ -2065,23 +2329,22 @@ QWidget* SatelliteScreen::buildScanStatusPill(QWidget* parent) {
     pill->setAttribute(Qt::WA_StyledBackground, true);
     pill->setFixedHeight(40);
     pill->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    pill->setStyleSheet(QStringLiteral(
-        "QWidget#SatScanStatusPill { background: #27272A; border: none; "
-        "border-radius: 10px; }"));
+    pill->setProperty(kScanRoleProp, QStringLiteral("surface"));
+    pill->setProperty(kScanRoleArgProp, QStringLiteral("pill"));
+    pill->setStyleSheet(
+        scanSurfaceStyle(QStringLiteral("pill"), appThemeTokens()));
     auto* layout = new QHBoxLayout(pill);
     layout->setContentsMargins(16, 8, 16, 8);
     layout->setSpacing(8);
     scan_status_dot_ = scanIcon(
         pill, QStringLiteral(":/assets/missionplanner/status_dot.svg"), 8,
-        QStringLiteral("#71717B"));
+        QStringLiteral("muted"));
     layout->addWidget(scan_status_dot_, 0, Qt::AlignVCenter);
     // "Standby", not "Ready": before the director reports there is nothing
     // ready about the robot, and Start Scan is disabled. refreshScanRunUi()
     // overwrites this on the first paint of step 5.
     scan_status_text_ = scanText(
-        pill, QStringLiteral("Standby"),
-        QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
-                       "font-weight: 700; color: #D4D4D8;"));
+        pill, QStringLiteral("Standby"), QStringLiteral("pillText"));
     layout->addWidget(scan_status_text_, 0, Qt::AlignVCenter);
     return pill;
 }
@@ -2090,7 +2353,10 @@ QWidget* SatelliteScreen::buildScanFooter() {
     auto* footer = new QWidget(this);
     footer->setFixedHeight(69);
     footer->setAttribute(Qt::WA_StyledBackground, true);
-    footer->setStyleSheet(QStringLiteral("background: #18181B;"));
+    footer->setProperty(kScanRoleProp, QStringLiteral("surface"));
+    footer->setProperty(kScanRoleArgProp, QStringLiteral("footer"));
+    footer->setStyleSheet(
+        scanSurfaceStyle(QStringLiteral("footer"), appThemeTokens()));
     auto* layout = new QHBoxLayout(footer);
     layout->setContentsMargins(24, 0, 24, 0);
     layout->setSpacing(0);
@@ -2100,20 +2366,21 @@ QWidget* SatelliteScreen::buildScanFooter() {
     scan_footer_back_->setFlat(true);
     scan_footer_back_->setFixedHeight(44);
     scan_footer_back_->setFixedWidth(kScanFooterCtaWidth);
-    scan_footer_back_->setStyleSheet(QStringLiteral(
-        "QPushButton { background: transparent; border: none; "
-        "border-radius: 10px; }"
-        "QPushButton:hover { background: rgba(39,39,42,0.55); }"));
+    scan_footer_back_->setProperty(kScanRoleProp,
+                                   QStringLiteral("surface"));
+    scan_footer_back_->setProperty(kScanRoleArgProp,
+                                   QStringLiteral("backButton"));
+    scan_footer_back_->setStyleSheet(
+        scanSurfaceStyle(QStringLiteral("backButton"), appThemeTokens()));
     auto* back_layout = new QHBoxLayout(scan_footer_back_);
     back_layout->setContentsMargins(16, 0, 16, 0);
     back_layout->setSpacing(10);
     back_layout->addWidget(scanIcon(
         scan_footer_back_, QStringLiteral(":/assets/missionplanner/back.svg"),
-        16, QStringLiteral("#9F9FA9")));
+        16, QStringLiteral("muted")));
     back_layout->addWidget(scanText(
         scan_footer_back_, QStringLiteral("Edge Review"),
-        QStringLiteral("font-family: 'Arimo'; font-size: 14px; "
-                       "font-weight: 500; color: #D4D4D8;")));
+        QStringLiteral("backText")));
     back_layout->addStretch(1);
     connect(scan_footer_back_, &QPushButton::clicked, this,
             &SatelliteScreen::onFooterBackClicked);
@@ -2126,9 +2393,7 @@ QWidget* SatelliteScreen::buildScanFooter() {
     centre_layout->setSpacing(0);
     centre_layout->addStretch(1);
     scan_footer_step_label_ = scanText(
-        centre, QStringLiteral("Step 5 of 5"),
-        QStringLiteral("font-family: 'Liberation Mono'; font-size: 14px; "
-                       "font-weight: 400; color: #71717B;"));
+        centre, QStringLiteral("Step 5 of 5"), QStringLiteral("stepText"));
     centre_layout->addWidget(scan_footer_step_label_);
     centre_layout->addStretch(1);
     layout->addWidget(centre, 1);
@@ -2138,22 +2403,21 @@ QWidget* SatelliteScreen::buildScanFooter() {
     end_button_->setFlat(true);
     end_button_->setFixedHeight(44);
     end_button_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    end_button_->setStyleSheet(QStringLiteral(
-        "QPushButton { background: #00BC7D; border: none; border-radius: 10px; }"
-        "QPushButton:hover { background: #0ACB8B; }"
-        "QPushButton:disabled { background: #1F2937; }"));
+    end_button_->setProperty(kScanRoleProp, QStringLiteral("surface"));
+    end_button_->setProperty(kScanRoleArgProp, QStringLiteral("endButton"));
+    end_button_->setStyleSheet(
+        scanSurfaceStyle(QStringLiteral("endButton"), appThemeTokens()));
     auto* end_layout = new QHBoxLayout(end_button_);
     end_layout->setContentsMargins(16, 0, 16, 0);
     end_layout->setSpacing(10);
     end_layout->addStretch(1);
     end_button_text_ = scanText(
         end_button_, QStringLiteral("Complete Mission"),
-        QStringLiteral("font-family: 'Arimo'; font-size: 16px; "
-                       "font-weight: 700; color: #FFFFFF;"));
+        QStringLiteral("onAccent"));
     end_layout->addWidget(end_button_text_);
     end_layout->addWidget(scanIcon(
         end_button_, QStringLiteral(":/assets/missionplanner/next_arrow.svg"),
-        16, QStringLiteral("#FFFFFF")));
+        16, QStringLiteral("onAccent")));
     {
         QFont font(QStringLiteral("Arimo"));
         font.setBold(true);
@@ -3942,6 +4206,7 @@ void SatelliteScreen::applyTheme() {
                                 : QStringLiteral("#F1F5F9");
     const QString text = textColor(dark);
     const QString muted = mutedColor(dark);
+    const UiThemeTokens tok = uiThemeTokens(dark);
 
     // Every rule is scoped to an object name — no cascading bare selectors.
     // Named-token substitution (not QString::arg chains) so a missed
@@ -3967,21 +4232,23 @@ QLabel#SatBackLabel { background: transparent; font-size: 14px; color: @TEXT@; }
 #SatFooterBar {
     background-color: @SURFACE@; border-top: 1px solid @SURFACE_BORDER@;
 }
+/* White on the brand green is 3.3:1, so the label follows `on_accent`:
+   white in dark mode, near-black in light. The fill keeps the brand hue. */
 QPushButton#SatNextButton {
     background-color: #009966; border: none; border-radius: 10px;
-    font-family: 'Arimo'; font-weight: 700; font-size: 14px; color: #FFFFFF;
+    font-family: 'Arimo'; font-weight: 700; font-size: 14px; color: @ON_ACCENT@;
     padding: 0 24px;
 }
 QPushButton#SatNextButton:hover { background-color: #00A86D; }
 QPushButton#SatNextButton:disabled {
-    background-color: rgba(0, 153, 102, 0.40); color: rgba(255, 255, 255, 0.40);
+    background-color: rgba(0, 153, 102, 0.40); color: @DISABLED_TEXT@;
 }
 #SatRailScroll { background-color: @PAGE@; border: none; border-right: 1px solid @SURFACE_BORDER@; }
 /* Step 5: the map reads as a peer card to the Stage 5 rails (#18181B
    surface, 1 px #27272A ring, 12 px radius) — PlannerScreen's Scan variant
    of plannerPreviewContainer. */
 QStackedWidget#SatCanvasStack[scan="true"] {
-    background-color: #18181B; border: 1px solid #27272A; border-radius: 12px;
+    background-color: @SURFACE@; border: 1px solid @SURFACE_BORDER@; border-radius: 12px;
 }
 #SatRail { background-color: @PAGE@; }
 #SatCard {
@@ -4025,7 +4292,7 @@ QPushButton#SatToggle:checked {
 QPushButton#SatToggle:disabled { color: @MUTED@; background-color: transparent; }
 #SatCanvasTools { background: transparent; }
 QPushButton#SatCanvasTool {
-    background-color: rgba(24, 24, 27, 0.90); border: 1px solid #3f3f47; border-radius: 10px;
+    background-color: @OVERLAY_BG@; border: 1px solid @OVERLAY_BORDER@; border-radius: 10px;
     font-family: 'Arimo'; font-weight: 700; font-size: 16px; color: @TEXT@;
 }
 QPushButton#SatCanvasTool:hover { background-color: @BUTTON_HOVER@; }
@@ -4076,16 +4343,18 @@ QPlainTextEdit#SatLog {
 #SatCanvasPage { background-color: @PAGE@; }
 /* ---- Step 2 picker (Figma 235:2246 family; dark-only surfaces) ---- */
 #SatCorrBar {
-    background-color: rgba(39, 39, 42, 0.80); border-bottom: 1px solid #3f3f47;
+    background-color: @OVERLAY_BG@; border-bottom: 1px solid @OVERLAY_BORDER@;
 }
-QLabel#SatCorrText { background: transparent; font-family: 'Arimo'; font-size: 14px; }
+QLabel#SatCorrText {
+    background: transparent; font-family: 'Arimo'; font-size: 14px; color: @TEXT@;
+}
 QLabel#SatCorrLegend {
-    background: transparent; font-family: 'Arimo'; font-size: 14px; color: #9f9fa9;
+    background: transparent; font-family: 'Arimo'; font-size: 14px; color: @MUTED@;
 }
 QLabel#SatCorrPairsChip {
-    background-color: rgba(63, 63, 71, 0.40); border-radius: 4px; padding: 0 8px;
+    background-color: @RAISED@; border-radius: 4px; padding: 0 8px;
     font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 14px;
-    color: #9f9fa9;
+    color: @MUTED@;
 }
 QLabel#SatCorrPairsChip[satisfied="true"] {
     background-color: rgba(0, 188, 125, 0.10); color: #00d492;
@@ -4093,17 +4362,20 @@ QLabel#SatCorrPairsChip[satisfied="true"] {
 /* Footer ghost buttons (235:3115 / 235:3121): no border, icon + label. */
 QPushButton#SatGhostButton, QPushButton#SatGhostButtonMuted {
     background-color: transparent; border: none; border-radius: 10px;
-    font-family: 'Arimo'; font-weight: 500; font-size: 14px; color: #9f9fa9;
+    font-family: 'Arimo'; font-weight: 500; font-size: 14px; color: @MUTED@;
     padding: 0 16px;
 }
-QPushButton#SatGhostButtonMuted { color: #71717b; padding: 0 12px; }
+QPushButton#SatGhostButtonMuted { color: @FAINT@; padding: 0 12px; }
 QPushButton#SatGhostButton:hover, QPushButton#SatGhostButtonMuted:hover {
     background-color: @BUTTON_HOVER@;
 }
 QPushButton#SatGhostButton:disabled, QPushButton#SatGhostButtonMuted:disabled {
-    color: rgba(113, 113, 123, 0.40);
+    color: @DISABLED_GHOST@;
 }
-/* Align (235:3131): zinc primary, 40% opacity when disabled. */
+/* Align (235:3131): zinc primary, 40% opacity when disabled. The fill is
+   deliberately dark in BOTH themes — Align is the step's main verb but Next
+   already owns the green, so this is the "dark neutral primary" slot, which
+   reads as emphasis on a light page rather than as a disabled control. */
 QPushButton#SatAlignButton {
     background-color: #3f3f47; border: none; border-radius: 10px;
     font-family: 'Arimo'; font-weight: 700; font-size: 14px; color: #FFFFFF;
@@ -4111,23 +4383,23 @@ QPushButton#SatAlignButton {
 }
 QPushButton#SatAlignButton:hover { background-color: #52525c; }
 QPushButton#SatAlignButton:disabled {
-    background-color: rgba(63, 63, 71, 0.40); color: rgba(255, 255, 255, 0.40);
+    background-color: rgba(63, 63, 71, 0.40); color: @DISABLED_TEXT@;
 }
-#SatCorrSplit { background-color: #27272a; }
-#SatPcdPane { background-color: #0b0b0b; }
+#SatCorrSplit { background-color: @SURFACE_BORDER@; }
+#SatPcdPane { background-color: @PAGE@; }
 QLabel#SatPaneTag {
-    background-color: rgba(24, 24, 27, 0.90); border: 1px solid #3f3f47; border-radius: 4px;
+    background-color: @OVERLAY_BG@; border: 1px solid @OVERLAY_BORDER@; border-radius: 4px;
     font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px;
-    color: #d4d4d8; padding: 4px 10px; margin: 8px 12px;
+    color: @BODY@; padding: 4px 10px; margin: 8px 12px;
 }
 QLabel#SatPcdEmptyTitle {
-    background: transparent; font-family: 'Arimo'; font-size: 14px; color: #71717b;
+    background: transparent; font-family: 'Arimo'; font-size: 14px; color: @BODY@;
 }
 QLabel#SatPcdEmptyHint {
-    background: transparent; font-family: 'Arimo'; font-size: 12px; color: #52525c;
+    background: transparent; font-family: 'Arimo'; font-size: 12px; color: @MUTED@;
 }
 #SatAlignSuccess {
-    background-color: #18181b; border: 1px solid rgba(0, 188, 125, 0.50); border-radius: 14px;
+    background-color: @SURFACE@; border: 1px solid rgba(0, 188, 125, 0.50); border-radius: 14px;
 }
 QLabel#SatAlignSuccessTitle {
     background: transparent; font-family: 'Arimo'; font-weight: 600; font-size: 16px;
@@ -4135,25 +4407,25 @@ QLabel#SatAlignSuccessTitle {
 }
 QLabel#SatAlignSuccessRmse {
     background: transparent; font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace;
-    font-size: 14px; color: #9f9fa9;
+    font-size: 14px; color: @MUTED@;
 }
 
 /* ---- Step 3 ROI Definition rail (Figma 222:1284) ---- */
 QLabel#SatRoiTitle { background: transparent; font-size: 18px; font-weight: 600; color: @TEXT@; }
-QLabel#SatRoiBlurb { background: transparent; font-size: 12px; color: #71717b; line-height: 19px; }
-#SatRoiStats { background: #27272a; border: 1px solid #3f3f47; border-radius: 10px; }
+QLabel#SatRoiBlurb { background: transparent; font-size: 12px; color: @FAINT@; line-height: 19px; }
+#SatRoiStats { background: @RAISED@; border: 1px solid @RAISED_BORDER@; border-radius: 10px; }
 QLabel#SatRoiStatKey, QLabel#SatRoiStatValue {
     background: transparent; font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px;
 }
-QLabel#SatRoiStatKey { color: #9f9fa9; }
+QLabel#SatRoiStatKey { color: @MUTED@; }
 QLabel#SatRoiStatValue { color: @TEXT@; }
 QLabel#SatRoiStatValue[state="closed"] { color: #00d492; }
-QLabel#SatRoiStatValue[state="drawing"] { color: #fe9a00; }
-QLabel#SatRoiSection { background: transparent; font-size: 12px; color: #71717b; letter-spacing: 0.6px; }
-#SatRoiEdgeRow { background: #27272a; border-radius: 4px; }
-#SatRoiEdgeRow:hover { background: #3f3f47; }
+QLabel#SatRoiStatValue[state="drawing"] { color: @WARNING@; }
+QLabel#SatRoiSection { background: transparent; font-size: 12px; color: @FAINT@; letter-spacing: 0.6px; }
+#SatRoiEdgeRow { background: @RAISED@; border-radius: 4px; }
+#SatRoiEdgeRow:hover { background: @NEUTRAL_HOVER@; }
 #SatRoiEdgeRow[editing="true"] { background: rgba(0,153,102,0.25); border: 1px solid #00d492; }
-QLabel#SatRoiEdgeName { background: transparent; font-size: 12px; color: #9f9fa9; }
+QLabel#SatRoiEdgeName { background: transparent; font-size: 12px; color: @MUTED@; }
 QPushButton#SatRoiEdgeValue {
     background: transparent; border: none; padding: 0px;
     font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px; font-weight: 500;
@@ -4161,49 +4433,49 @@ QPushButton#SatRoiEdgeValue {
 }
 QPushButton#SatRoiEdgeValue:hover { color: #00d492; }
 #SatRoiEdgeRow[editing="true"] QPushButton#SatRoiEdgeValue { color: #00d492; }
-QLabel#SatRoiHint { background: transparent; font-size: 12px; color: #52525c; }
+QLabel#SatRoiHint { background: transparent; font-size: 12px; color: @MUTED@; }
 QPushButton#SatRoiClearButton {
-    background: #27272a; border: none; border-radius: 10px; padding: 8px 12px;
-    font-size: 14px; font-weight: 500; color: #9f9fa9;
+    background: @RAISED@; border: none; border-radius: 10px; padding: 8px 12px;
+    font-size: 14px; font-weight: 500; color: @MUTED@;
 }
-QPushButton#SatRoiClearButton:hover { background: #3f3f47; color: @TEXT@; }
-#SatRoiNote { background: rgba(39,39,42,0.6); border-radius: 10px; }
+QPushButton#SatRoiClearButton:hover { background: @NEUTRAL_HOVER@; color: @TEXT@; }
+#SatRoiNote { background: @RAISED@; border-radius: 10px; }
 
 /* ---- Scan Parameters (swath width / robot speed, both trims) ---- */
-QLabel#SatScanParamName { background: transparent; font-size: 12px; color: #9f9fa9; }
+QLabel#SatScanParamName { background: transparent; font-size: 12px; color: @MUTED@; }
 QLineEdit#SatScanParamEdit {
-    background: #27272a; border: 1px solid #3f3f47; border-radius: 4px; padding: 0 6px;
+    background: @INPUT_BG@; border: 1px solid @INPUT_BORDER@; border-radius: 4px; padding: 0 6px;
     font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px; font-weight: 500;
     color: @TEXT@; selection-background-color: #009966; selection-color: #ffffff;
 }
 QLineEdit#SatScanParamEdit:focus { border: 1px solid #00d492; color: #00d492; }
-QLineEdit#SatScanParamEdit:disabled { color: #52525c; }
-QLabel#SatScanParamUnit { background: transparent; font-size: 12px; color: #71717b; min-width: 28px; }
+QLineEdit#SatScanParamEdit:disabled { color: @DISABLED_GHOST@; }
+QLabel#SatScanParamUnit { background: transparent; font-size: 12px; color: @FAINT@; min-width: 28px; }
 
 /* ---- Step 1 floating search (Figma 238:4509) + layer chip (238:4531) ---- */
-#SatSearchBar { background: rgba(24,24,27,0.95); border: 1px solid #3f3f47; border-radius: 24px; }
+#SatSearchBar { background: @OVERLAY_BG@; border: 1px solid @OVERLAY_BORDER@; border-radius: 24px; }
 QLineEdit#SatSearchEdit {
     background: transparent; border: none; padding: 0px;
-    font-size: 14px; color: #ffffff; selection-background-color: #009966;
+    font-size: 14px; color: @TEXT@; selection-background-color: #009966;
 }
 QPushButton#SatSearchGo {
     background: transparent; border: none; padding: 0px 2px 0px 0px;
-    font-size: 12px; font-weight: 600; color: #00d492;
+    font-size: 12px; font-weight: 600; color: @ACCENT_TEXT@;
 }
-QPushButton#SatSearchGo:hover { color: #5ee9b5; }
+QPushButton#SatSearchGo:hover { color: @ACCENT@; }
 QListWidget#SatSearchPopup {
-    background: rgba(24,24,27,0.95); border: 1px solid #3f3f47; border-radius: 12px;
+    background: @OVERLAY_BG@; border: 1px solid @OVERLAY_BORDER@; border-radius: 12px;
     padding: 0px; outline: none;
 }
 QListWidget#SatSearchPopup::item {
-    height: 40px; padding: 0px 16px; font-size: 14px; color: #e4e4e7; border: none;
+    height: 40px; padding: 0px 16px; font-size: 14px; color: @TEXT@; border: none;
 }
 QListWidget#SatSearchPopup::item:hover,
-QListWidget#SatSearchPopup::item:selected { background: #27272a; color: #00d492; }
-#SatLayerChip { background: rgba(24,24,27,0.9); border: 1px solid #3f3f47; border-radius: 10px; }
+QListWidget#SatSearchPopup::item:selected { background: @NEUTRAL_HOVER@; color: @ACCENT_TEXT@; }
+#SatLayerChip { background: @OVERLAY_BG@; border: 1px solid @OVERLAY_BORDER@; border-radius: 10px; }
 QLabel#SatLayerChipText {
     background: transparent; font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace;
-    font-size: 12px; color: #9f9fa9;
+    font-size: 12px; color: @MUTED@;
 }
 )QSS");
     qss.replace(QStringLiteral("@PAGE@"), page_bg);
@@ -4217,6 +4489,19 @@ QLabel#SatLayerChipText {
     qss.replace(QStringLiteral("@INPUT_BORDER@"), input_border);
     qss.replace(QStringLiteral("@INPUT_BG@"), input_bg);
     qss.replace(QStringLiteral("@LOG_BG@"), log_bg);
+    qss.replace(QStringLiteral("@RAISED_BORDER@"), tok.raised_border);
+    qss.replace(QStringLiteral("@RAISED@"), tok.raised);
+    qss.replace(QStringLiteral("@NEUTRAL_HOVER@"), tok.neutral_hover);
+    qss.replace(QStringLiteral("@OVERLAY_BORDER@"), tok.overlay_border);
+    qss.replace(QStringLiteral("@OVERLAY_BG@"), tok.overlay_bg);
+    qss.replace(QStringLiteral("@ACCENT_TEXT@"), tok.accent_text);
+    qss.replace(QStringLiteral("@BODY@"), tok.body);
+    qss.replace(QStringLiteral("@FAINT@"), tok.faint);
+    qss.replace(QStringLiteral("@ON_ACCENT@"), tok.on_accent);
+    qss.replace(QStringLiteral("@DISABLED_TEXT@"), tok.disabled_text);
+    qss.replace(QStringLiteral("@DISABLED_GHOST@"), tok.disabled_ghost);
+    qss.replace(QStringLiteral("@WARNING@"), tok.warning);
+    qss.replace(QStringLiteral("@ACCENT@"), tok.accent);
     qss.replace(QStringLiteral("@ESTOP_TEXT@"),
                 dark ? QStringLiteral("#FF6467") : QStringLiteral("#E7000B"));
     setStyleSheet(qss);
@@ -4232,10 +4517,56 @@ QLabel#SatLayerChipText {
     update();
 }
 
+void SatelliteScreen::restyleScanPage() {
+    const UiThemeTokens t = uiThemeTokens(dark_mode_);
+    const auto restyle = [&](QWidget* root) {
+        if (!root) {
+            return;
+        }
+        QList<QWidget*> widgets = root->findChildren<QWidget*>();
+        widgets.prepend(root);
+        for (QWidget* w : widgets) {
+            const QString role = w->property(kScanRoleProp).toString();
+            if (role.isEmpty()) {
+                continue;
+            }
+            const QVariant arg = w->property(kScanRoleArgProp);
+            if (role == QLatin1String("text")) {
+                w->setStyleSheet(scanTextStyle(arg.toString(), t) +
+                                 QStringLiteral(" background: transparent;"));
+            } else if (role == QLatin1String("surface")) {
+                w->setStyleSheet(scanSurfaceStyle(arg.toString(), t));
+            } else if (role == QLatin1String("bar")) {
+                w->setStyleSheet(scanBarStyle(arg.toString(), t));
+            } else if (role == QLatin1String("action")) {
+                w->setStyleSheet(
+                    scanActionStyle(arg.toString(), t, dark_mode_));
+                // Covers the button's own label and icon, disabled included.
+                applyScanActionFg(w, dark_mode_);
+            } else if (role == QLatin1String("icon")) {
+                const QStringList spec = arg.toStringList();
+                auto* label = qobject_cast<QLabel*>(w);
+                if (!label || spec.size() < 3) {
+                    continue;
+                }
+                const int size = spec.at(1).toInt();
+                label->setPixmap(loadTintedSvg(
+                    spec.at(0), size, size, scanIconColor(spec.at(2), t)));
+            }
+        }
+    };
+    restyle(scan_left_rail_);
+    restyle(scan_right_rail_);
+    restyle(scan_control_bar_);
+    restyle(scan_footer_);
+    restyle(scan_status_pill_);
+}
+
 void SatelliteScreen::setDarkMode(bool dark_mode) {
     const QString old_muted = mutedColor(dark_mode_);
     dark_mode_ = dark_mode;
     applyTheme();
+    restyleScanPage();
     // Re-render every dynamic surface against the new palette. Pills whose
     // color was the old palette's muted tone follow to the new muted tone;
     // semantic colors (accent/amber/red) are theme-independent.
@@ -4249,6 +4580,23 @@ void SatelliteScreen::setDarkMode(bool dark_mode) {
     setMotorsChip(motors_text_, remap(motors_color_));
     setTopBatteryState(last_batt_pct_, last_batt_stale_);
     refreshCanvasToolIcons();
+    // The canvases and the alignment panes paint rather than style, so the
+    // sheet above cannot reach them.
+    if (map_) {
+        map_->setDarkMode(dark_mode_);
+    }
+    if (sat_pick_) {
+        sat_pick_->setDarkMode(dark_mode_);
+    }
+    if (pcd_pick_) {
+        pcd_pick_->setDarkMode(dark_mode_);
+    }
+    if (correspond_page_) {
+        updateCorrespondenceUi();  // re-inks the point-cloud raster
+    }
+    if (scan_camera_view_) {
+        scan_camera_view_->setDarkMode(dark_mode_);
+    }
     if (swath_slider_) {
         swath_slider_->setDarkMode(dark_mode_);
     }
@@ -5107,7 +5455,12 @@ void SatelliteScreen::updateCorrespondenceUi() {
     const bool can_pick = have_pcd && !sat_image_.isNull();
     const bool aligned = pcd_to_sat_.valid;
     sat_pick_->setImage(sat_image_);
-    pcd_pick_->setImage(pcd_image_);
+    // The satellite stitch is a photograph and is shown as captured; the
+    // point cloud is a render whose points are drawn light for a dark pane
+    // and have to be re-inked for a light one.
+    pcd_pick_->setImage(dark_mode_
+                            ? pcd_image_
+                            : tintDensityRasterForLightCanvas(pcd_image_));
     pcd_pane_stack_->setCurrentWidget(have_pcd ? pcd_pick_host_ : pcd_empty_);
 
     // Strict alternation: satellite first, then the matching map point. The
@@ -5162,8 +5515,8 @@ void SatelliteScreen::updateCorrespondenceUi() {
     const int required = minCorrespondences();
     const int pairs = correspondences_.size();
     const int sat_count = pairs + (have_pending_sat_ ? 1 : 0);
-    const QString muted = QStringLiteral("#71717b");
-    const QString text = QStringLiteral("#e4e4e7");
+    const QString muted = mutedColor(dark_mode_);
+    const QString text = textColor(dark_mode_);
 
     // Instruction (235:2385): prompt in light grey, requirement muted.
     corr_instruction_->setText(
@@ -5271,7 +5624,8 @@ void SatelliteScreen::onAlignClicked() {
             "the site and try again.");
         appendLog(QStringLiteral("[align] %1").arg(why));
         corr_instruction_->setText(
-            QStringLiteral("<span style='color:#FF6467'>%1</span>").arg(why));
+            QStringLiteral("<span style='color:%1'>%2</span>")
+                .arg(uiThemeTokens(dark_mode_).danger, why));
         return;
     }
     pcd_to_sat_ = fit->transform;
@@ -5801,6 +6155,11 @@ void SatelliteScreen::onScanStartPauseClicked() {
         case ScanRunState::Paused:
             beginStartScan();
             break;
+        case ScanRunState::EmergencyStopped:
+            // Unreachable: the button is disabled while latched. Clearing is
+            // the E-Stop button's job (onEstopButtonClicked), so that one
+            // press can never both clear and arm.
+            break;
         case ScanRunState::Completed:
             break;
     }
@@ -5808,6 +6167,16 @@ void SatelliteScreen::onScanStartPauseClicked() {
 
 void SatelliteScreen::beginStartScan() {
     if (!mission_->missionActive() || director_failed_) {
+        return;
+    }
+    // Defence in depth. The button is already disabled while latched and the
+    // override release no longer calls in here, but this is the single choke
+    // point for arming-with-autonomy, so it refuses outright: no future
+    // caller can re-arm a robot the operator stopped.
+    if (!estop_latch_policy::armingAllowed(scan_run_state_)) {
+        appendLog(QStringLiteral(
+            "[scan] refused — E-Stop is latched. Clear it first."));
+        refreshScanRunUi();
         return;
     }
     if (!directorReady()) {
@@ -6005,10 +6374,7 @@ void SatelliteScreen::setManualOverride(bool active) {
     }
     manual_override_ = active;
     if (active) {
-        resume_after_override_ = scan_run_state_ == ScanRunState::Running;
-        if (scan_run_state_ == ScanRunState::Running) {
-            scan_run_state_ = ScanRunState::Paused;
-        }
+        scan_run_state_ = estop_latch_policy::pauseIfRunning(scan_run_state_);
         setAutonomyEnabled(false);
         if (teleop_check_) {
             teleop_check_->setChecked(true);
@@ -6026,11 +6392,14 @@ void SatelliteScreen::setManualOverride(bool active) {
             teleop_timer_->stop();
         }
         ros_->publishTwist(0.0, 0.0);
-        if (resume_after_override_ &&
-            scan_run_state_ != ScanRunState::Completed) {
-            beginStartScan();
-        }
-        resume_after_override_ = false;
+        // Handing control back ends teleop and nothing else. This used to
+        // call beginStartScan() when the run had been Running, which re-armed
+        // CLOSED_LOOP and republished autonomy_enable=true — from a map
+        // click, and even after an E-Stop. The state is Paused here, so the
+        // primary button reads "Resume" and the operator arms deliberately.
+        static_assert(!estop_latch_policy::releaseResumesAutonomy(
+                          estop_latch_policy::RunState::Running),
+                      "releasing manual override must never resume autonomy");
     }
     refreshScanRunUi();
 }
@@ -6046,11 +6415,27 @@ void SatelliteScreen::refreshScanRunUi() {
     // moment later when the mission goes inactive.
     const bool commandable = active && !mission_->tearingDown();
 
+    if (arm_button_) {
+        // Stays live while the E-Stop is latched — that is the whole point of
+        // it. Only a teardown takes it away.
+        arm_button_->setEnabled(commandable);
+    }
     if (disarm_button_) {
         disarm_button_->setEnabled(commandable);
     }
     if (estop_button_) {
+        // Clearing stays available even when the director is unhappy or the
+        // link is degraded: the latch is an OCU-side interlock, so refusing to
+        // lift it on a stale status would strand the operator.
         estop_button_->setEnabled(commandable);
+        const bool latched = scan_run_state_ == ScanRunState::EmergencyStopped;
+        setScanActionText(estop_button_, estop_text_,
+                          latched ? QStringLiteral("Clear E-Stop")
+                                  : QStringLiteral("Emergency Stop"));
+        estop_button_->setToolTip(
+            latched ? QStringLiteral("Release the emergency stop. The robot "
+                                     "will not move until you press Resume.")
+                    : QString());
     }
     if (end_button_) {
         end_button_->setEnabled(commandable);
@@ -6072,6 +6457,12 @@ void SatelliteScreen::refreshScanRunUi() {
             label = QStringLiteral("Pause");
             icon = QStringLiteral(":/assets/missionplanner/scan_pause.svg");
             enable = !manual_override_;
+        } else if (scan_run_state_ == ScanRunState::EmergencyStopped) {
+            // Keeps its Resume meaning, disabled, so scanBlockReason()'s
+            // "E-Stop is holding" lands in the tooltip and the corner pill.
+            // Clearing happens on the E-Stop button.
+            label = QStringLiteral("Resume");
+            enable = false;
         } else if (scan_run_state_ == ScanRunState::Paused) {
             label = QStringLiteral("Resume");
             enable = ready && !manual_override_;
@@ -6095,10 +6486,18 @@ void SatelliteScreen::refreshScanRunUi() {
     // pill whenever a status message is fresh (it has the director's real
     // state); this owns it the rest of the time, which is exactly the boot /
     // link window where the operator is left guessing.
-    if (!status.fresh(kDirectorFreshMs)) {
+    // The latch is the one case where this owns the pill even though the
+    // director is talking: updateStatePill() bails out while latched, so if
+    // this did not paint, the pill would keep whatever state it held when the
+    // operator hit E-Stop.
+    if (!status.fresh(kDirectorFreshMs) ||
+        estop_latch_policy::holdsStatusPill(scan_run_state_)) {
         setScanStatusPill(block.label, block.color);
         if (scan_status_pill_) {
             scan_status_pill_->setToolTip(block.detail);
+        }
+        if (estop_latch_policy::holdsStatusPill(scan_run_state_)) {
+            setStatePill(block.label, block.color);
         }
     }
 
@@ -6723,12 +7122,66 @@ void SatelliteScreen::finishSshFallbackTeardown() {
     teardownThen([this] { finishCompleteMissionAndLeave(); });
 }
 
+void SatelliteScreen::onEstopShortcut() {
+    // An ApplicationShortcut outranks the focus widget, so without this guard
+    // typing a space into the plan name or the address search would fire an
+    // E-Stop instead of inserting the character. Same check the teleop
+    // eventFilter makes, widened to the log view.
+    QWidget* focus = QApplication::focusWidget();
+    if (qobject_cast<QLineEdit*>(focus) ||
+        qobject_cast<QPlainTextEdit*>(focus)) {
+        return;
+    }
+    // Nothing can move before the launch, and the shortcut is app-wide, so
+    // this also keeps Space inert on the Dashboard and the planning steps.
+    // missionActive() covers the pre-director window too: the robot self-arms
+    // at launch, so it can move before /coverage/status ever appears.
+    if (!mission_->missionActive()) {
+        return;
+    }
+    if (scan_run_state_ == ScanRunState::EmergencyStopped) {
+        // Stop-only. Deliberately NOT onEstopButtonClicked(): if Space
+        // toggled, two taps of a panic key would release the stop the
+        // operator just applied. Clearing is mouse-only, on the button.
+        appendLog(QStringLiteral(
+            "[E-STOP] space bar — already latched, holding"));
+        return;
+    }
+    appendLog(QStringLiteral("[E-STOP] space bar"));
+    onEstop();
+}
+
+void SatelliteScreen::onEstopButtonClicked() {
+    if (scan_run_state_ == ScanRunState::EmergencyStopped) {
+        // Clearing does not arm and does not re-enable autonomy: it lands on
+        // Paused, so the primary button becomes Resume and getting back to
+        // motion always costs a second deliberate press.
+        scan_run_state_ =
+            estop_latch_policy::clearEmergencyStop(scan_run_state_);
+        appendLog(QStringLiteral(
+            "[E-STOP] latch cleared by operator — press Resume to restart "
+            "autonomy"));
+        refreshScanRunUi();
+        return;
+    }
+    onEstop();
+}
+
 void SatelliteScreen::onEstop() {
+    // autonomy_enable=false is the full stop on the robot side: the executor
+    // publishes a stop, drops the installed route and returns at the top of
+    // every later tick. There is deliberately no /coverage/abort here — abort
+    // ends the run and closes the section as partial, so it would make the
+    // stop unrecoverable instead of resumable.
     setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
-    appendLog(
-        QStringLiteral("[E-STOP] autonomy disabled + axis IDLE requested"));
+    scan_run_state_ = estop_latch_policy::onEmergencyStop(scan_run_state_);
+    appendLog(QStringLiteral(
+        "[E-STOP] autonomy disabled + axis IDLE requested — latched"));
+    // Both pills: on step 5 the rail is hidden and the corner pill is the
+    // only surface the operator can read.
     setStatePill(QStringLiteral("E-STOP"), QColor(kEstopRed));
+    refreshScanRunUi();
 }
 
 // ---- Teleop -----------------------------------------------------------------
@@ -6997,6 +7450,13 @@ void SatelliteScreen::updateStatePill() {
     if (!status.valid) {
         return;
     }
+    // The latch outranks the director. /coverage/status is 1 Hz, so without
+    // this the E-STOP pill set by onEstop() is relabelled SWEEP/TRANSIT
+    // within a second and the operator loses the only confirmation that the
+    // stop is holding. refreshScanRunUi() paints both pills while latched.
+    if (estop_latch_policy::holdsStatusPill(scan_run_state_)) {
+        return;
+    }
     const QString state = status.state.toUpper();
     QColor color(mutedColor(dark_mode_));
     if (state == QLatin1String("TRANSIT") || state == QLatin1String("SWEEP") ||
@@ -7128,11 +7588,21 @@ SatelliteScreen::ScanBlock SatelliteScreen::scanBlockReason() const {
         out.color = QColor(kEstopRed);
         return out;
     }
+    // Ahead of manual override: if the operator is teleoping out of an
+    // E-Stop, the latch is the thing they need to know is still held.
+    if (scan_run_state_ == ScanRunState::EmergencyStopped) {
+        out.label = QStringLiteral("E-STOP");
+        out.detail = QStringLiteral(
+            "Emergency stop is holding. Press Arm Motors to drive by hand, or "
+            "Clear E-Stop and then Resume to continue the scan.");
+        out.color = QColor(kEstopRed);
+        return out;
+    }
     if (manual_override_) {
         out.label = QStringLiteral("Manual");
         out.detail = QStringLiteral(
             "You are driving manually. Click the map to hand control back to "
-            "the robot.");
+            "the robot, then press Resume.");
         return out;
     }
     if (start_scan_pending_) {

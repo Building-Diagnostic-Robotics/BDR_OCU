@@ -10,6 +10,8 @@
 
 #include "components/mission_metadata_dialog.hpp"
 
+#include "ui_theme_constants.hpp"
+
 #include "settings_constants.hpp"
 #include "units_system.hpp"
 
@@ -369,15 +371,16 @@ void MissionMetadataDialog::buildUi() {
 }
 
 void MissionMetadataDialog::applyStyle() {
-    setStyleSheet(R"(
+    const UiThemeTokens t = appThemeTokens();
+    setStyleSheet(QStringLiteral(R"(
         #MetadataContainer {
-            background-color: #18181b;
-            border: 1px solid #3f3f47;
+            background-color: %1;
+            border: 1px solid %2;
             border-radius: 10px;
         }
         #MetadataHeader {
-            background-color: #27272a;
-            border-bottom: 1px solid #3f3f47;
+            background-color: %3;
+            border-bottom: 1px solid %2;
             border-top-left-radius: 10px;
             border-top-right-radius: 10px;
         }
@@ -386,12 +389,12 @@ void MissionMetadataDialog::applyStyle() {
             border-radius: 10px;
         }
         QLabel#HeaderTitle {
-            color: #ffffff;
+            color: %4;
             font-size: 20px;
             font-weight: 700;
         }
         QLabel#HeaderSubtitle {
-            color: #9f9fa9;
+            color: %5;
             font-size: 14px;
         }
         QPushButton#HeaderCloseButton {
@@ -400,39 +403,39 @@ void MissionMetadataDialog::applyStyle() {
             padding: 0;
         }
         QPushButton#HeaderCloseButton:hover {
-            background-color: rgba(255, 255, 255, 0.04);
+            background-color: %6;
             border-radius: 4px;
         }
         #MetadataBody {
-            background-color: #18181b;
+            background-color: %1;
         }
         QLabel#FieldLabelText {
-            color: #d4d4d8;
+            color: %7;
             font-size: 14px;
             font-weight: 700;
         }
         QLineEdit#FieldInput {
-            background-color: #27272a;
-            border: 1px solid #3f3f47;
+            background-color: %3;
+            border: 1px solid %2;
             border-radius: 10px;
             padding: 10px 16px;
-            color: #f4f4f5;
+            color: %4;
             font-size: 16px;
             selection-background-color: rgba(0, 188, 125, 0.30);
         }
         QLineEdit#FieldInput:focus {
-            border: 1px solid #00bc7d;
+            border: 1px solid %8;
         }
         QLineEdit#FieldInput::placeholder {
-            color: #52525c;
+            color: %5;
         }
         QLabel#SlugPreview {
-            color: #71717b;
+            color: %5;
             font-size: 12px;
             padding-left: 4px;
         }
         #UnitSegmented {
-            background-color: #27272a;
+            background-color: %3;
             border-radius: 10px;
         }
         QPushButton#UnitButtonMetric, QPushButton#UnitButtonAnsi {
@@ -442,62 +445,67 @@ void MissionMetadataDialog::applyStyle() {
             border-radius: 8px;
         }
         QPushButton#UnitButtonMetric:checked, QPushButton#UnitButtonAnsi:checked {
-            background-color: #18181b;
+            background-color: %1;
         }
         QLabel#UnitPrimary {
-            color: #9f9fa9;
+            color: %7;
             font-size: 14px;
         }
         QLabel#UnitSecondary {
-            color: #71717b;
+            color: %5;
             font-size: 12px;
         }
         QPushButton#UnitButtonMetric:checked QLabel#UnitPrimary,
         QPushButton#UnitButtonAnsi:checked QLabel#UnitPrimary {
-            color: #00bc7d;
+            color: %8;
         }
         #InfoBanner {
             background-color: rgba(43, 127, 255, 0.10);
             border: 1px solid rgba(43, 127, 255, 0.20);
             border-radius: 10px;
-            color: #51a2ff;
+            color: %9;
             font-size: 12px;
             padding: 12px 17px;
         }
         #MetadataFooter {
-            background-color: #27272a;
-            border-top: 1px solid #3f3f47;
+            background-color: %3;
+            border-top: 1px solid %2;
             border-bottom-left-radius: 10px;
             border-bottom-right-radius: 10px;
         }
         QPushButton#CancelButton {
-            background-color: #3f3f47;
-            border: 1px solid #52525c;
+            background-color: %2;
+            border: 1px solid %10;
             border-radius: 10px;
-            color: #ffffff;
+            color: %4;
             font-size: 14px;
             padding: 0 18px;
         }
         QPushButton#CancelButton:hover {
-            background-color: #4a4a52;
+            background-color: %11;
         }
         QPushButton#ProceedButton {
-            background-color: #00bc7d;
+            background-color: %8;
             border: none;
             border-radius: 10px;
-            color: #ffffff;
+            color: %12;
             font-size: 14px;
             font-weight: 700;
             padding: 0 22px;
         }
         QPushButton#ProceedButton:hover {
-            background-color: #00a86d;
+            background-color: %13;
         }
         QPushButton#ProceedButton:disabled {
-            background-color: #3f3f47;
-            color: #71717b;
+            background-color: %2;
+            color: %5;
         }
-    )");
+    )")
+                      .arg(t.surface, t.raised_border, t.raised, t.text,
+                           t.muted, t.neutral_hover, t.body, t.accent_green,
+                           t.info)
+                      .arg(t.muted, t.neutral_hover, t.on_accent,
+                           t.accent_green_hover));
 }
 
 // ---------------------------------------------------------------------------

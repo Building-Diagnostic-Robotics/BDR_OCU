@@ -40,10 +40,18 @@ PanZoomImageWidget::PanZoomImageWidget(QWidget* parent) : QWidget(parent) {
 }
 
 void PanZoomImageWidget::setImage(const QImage& image) {
-    if (image_.size() != image.size()) {
-        user_adjusted_ = false;
-    }
+    // A same-size replacement is the same picture recolored — the light-mode
+    // point-cloud tint. The operator's pan and zoom have to survive it: they
+    // may be a third of the way through picking correspondences when the
+    // theme flips, and re-fitting would throw their framing away.
+    const bool same_frame =
+        !image_.isNull() && !image.isNull() && image_.size() == image.size();
     image_ = image;
+    if (same_frame && view_fitted_) {
+        update();
+        return;
+    }
+    user_adjusted_ = false;
     view_fitted_ = false;
     fitToView();
     update();
@@ -113,6 +121,14 @@ void PanZoomImageWidget::setCornerTag(const QString& tag) {
 
 void PanZoomImageWidget::setEmptyText(const QString& text) {
     empty_text_ = text;
+    update();
+}
+
+void PanZoomImageWidget::setDarkMode(bool dark_mode) {
+    if (dark_mode_ == dark_mode) {
+        return;
+    }
+    dark_mode_ = dark_mode;
     update();
 }
 
@@ -194,7 +210,10 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth_scaling_);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.fillRect(rect(), QColor(0x0b, 0x0b, 0x0b));
+    // Matte around the image. Stays a shade off the surface so the image's
+    // own edge is readable when it does not fill the pane.
+    painter.fillRect(rect(), dark_mode_ ? QColor(0x0b, 0x0b, 0x0b)
+                                        : QColor(0xE4, 0xE4, 0xE7));
 
     if (!view_fitted_ && !image_.isNull()) {
         fitToView();
@@ -206,7 +225,7 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
             QSizeF(image_.width() * scale_, image_.height() * scale_));
         painter.drawImage(dest, image_);
     } else if (!empty_text_.isEmpty()) {
-        painter.setPen(QColor(0x5d, 0x65, 0x6c));
+        painter.setPen(QColor(appThemeTokens().muted));
         painter.setFont(QFont(QStringLiteral("Arimo"), 11));
         painter.drawText(rect().adjusted(48, 0, -48, 0),
                          Qt::AlignCenter | Qt::TextWordWrap, empty_text_);
@@ -258,9 +277,13 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
     }
 
     if (dimmed_ || turn_ == Turn::Waiting) {
-        // Waiting is a hard dim: the pane must read as "not now" from
-        // across the roof, not as a slightly darker image.
-        painter.fillRect(rect(), QColor(0, 0, 0, turn_ == Turn::Waiting ? 175 : 140));
+        // Waiting is a hard veil: the pane must read as "not now" from
+        // across the roof, not as a slightly darker image. The veil takes
+        // the theme's own direction — a near-black pane beside a light UI
+        // reads as a dead feed rather than an inactive one.
+        const int alpha = turn_ == Turn::Waiting ? 175 : 140;
+        painter.fillRect(rect(), dark_mode_ ? QColor(0, 0, 0, alpha)
+                                            : QColor(255, 255, 255, alpha));
     }
 
     if (turn_ == Turn::Active && turn_accent_.isValid()) {
@@ -280,18 +303,19 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
     }
 
     if (!corner_tag_.isEmpty()) {
-        // Figma 235:2407: 12px mono, 10/4 padding, rgba(24,24,27,.9) chip
-        // with a #3f3f47 hairline, 12 px in and 8 px down from the corner.
+        // Figma 235:2407: 12px mono, 10/4 padding, chip on a hairline,
+        // 12 px in and 8 px down from the corner. The frame's plate colors
+        // are the dark-mode end of satpal's theme-following neutrals.
         QFont tag_font(QStringLiteral("Liberation Mono"));
         tag_font.setPixelSize(12);
         painter.setFont(tag_font);
         const QFontMetrics fm(tag_font);
         const QRectF chip(12, 8, fm.horizontalAdvance(corner_tag_) + 20,
                           fm.height() + 8);
-        painter.setPen(QPen(QColor(0x3f, 0x3f, 0x47), 1));
-        painter.setBrush(QColor(0x18, 0x18, 0x1b, 230));
+        painter.setPen(QPen(satpal::border(), 1));
+        painter.setBrush(satpal::chipBg());
         painter.drawRoundedRect(chip, 4, 4);
-        painter.setPen(QColor(0xd4, 0xd4, 0xd8));
+        painter.setPen(QColor(appThemeTokens().body));
         painter.drawText(chip, Qt::AlignCenter, corner_tag_);
 
         // Turn hint chip right after the tag: accent-filled when it is this
@@ -313,10 +337,10 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
                 painter.drawRoundedRect(hint, 4, 4);
                 painter.setPen(QColor(0x0b, 0x0b, 0x0b));
             } else {
-                painter.setPen(QPen(QColor(0x3f, 0x3f, 0x47), 1));
-                painter.setBrush(QColor(0x18, 0x18, 0x1b, 230));
+                painter.setPen(QPen(satpal::border(), 1));
+                painter.setBrush(satpal::chipBg());
                 painter.drawRoundedRect(hint, 4, 4);
-                painter.setPen(QColor(0x71, 0x71, 0x7b));
+                painter.setPen(QColor(appThemeTokens().muted));
             }
             painter.drawText(hint, Qt::AlignCenter, turn_hint_);
         }
@@ -330,8 +354,8 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
         const QFontMetrics fm(status_font);
         const double w = fm.horizontalAdvance(status_text_) + 28;
         const QRectF pill((width() - w) / 2.0, height() - 40, w, 28);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0, 0, 0, 190));
+        painter.setPen(QPen(satpal::border(), 1));
+        painter.setBrush(satpal::chipBg());
         painter.drawRoundedRect(pill, 14, 14);
         painter.setPen(satpal::text());
         painter.drawText(pill, Qt::AlignCenter, status_text_);

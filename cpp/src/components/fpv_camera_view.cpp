@@ -1,5 +1,6 @@
 #include "components/fpv_camera_view.hpp"
 
+#include "ui_theme_constants.hpp"
 #include "video_stream_widget.hpp"
 
 #include <QLabel>
@@ -29,15 +30,12 @@ FPVCameraView::FPVCameraView(QWidget* parent) : QWidget(parent) {
 
     placeholder_title_ = new QLabel(placeholder_);
     placeholder_title_->setAlignment(Qt::AlignCenter);
-    placeholder_title_->setStyleSheet(
-        QStringLiteral("font-family: 'Arimo'; font-size: 14px; font-weight: 700; color: #D4D4D8; "
-                       "background: transparent;"));
 
     placeholder_subtitle_ = new QLabel(placeholder_);
     placeholder_subtitle_->setAlignment(Qt::AlignCenter);
-    placeholder_subtitle_->setStyleSheet(
-        QStringLiteral("font-family: 'Arimo'; font-size: 12px; font-weight: 400; color: #9F9FA9; "
-                       "background: transparent;"));
+
+    dark_mode_ = appDarkMode();
+    applyPlaceholderStyle();
 
     placeholder_layout->addStretch(1);
     placeholder_layout->addWidget(placeholder_title_, 0, Qt::AlignCenter);
@@ -67,6 +65,30 @@ FPVCameraView::FPVCameraView(QWidget* parent) : QWidget(parent) {
                 showPlaceholder();
                 emit streamError(msg);
             });
+}
+
+void FPVCameraView::applyPlaceholderStyle() {
+    const UiThemeTokens t = uiThemeTokens(dark_mode_);
+    if (placeholder_title_) {
+        placeholder_title_->setStyleSheet(
+            QStringLiteral("font-family: 'Arimo'; font-size: 14px; "
+                           "font-weight: 700; color: %1; background: transparent;")
+                .arg(t.body));
+    }
+    if (placeholder_subtitle_) {
+        placeholder_subtitle_->setStyleSheet(
+            QStringLiteral("font-family: 'Arimo'; font-size: 12px; "
+                           "font-weight: 400; color: %1; background: transparent;")
+                .arg(t.muted));
+    }
+}
+
+void FPVCameraView::setDarkMode(bool dark_mode) {
+    if (dark_mode_ == dark_mode) {
+        return;
+    }
+    dark_mode_ = dark_mode;
+    applyPlaceholderStyle();
 }
 
 void FPVCameraView::setPlaceholderText(const QString& title, const QString& subtitle) {

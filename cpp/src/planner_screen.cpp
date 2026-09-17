@@ -952,6 +952,9 @@ void PlannerScreen::setDarkMode(bool dark_mode) {
     if (slider_coverage_path_spacing_) {
         slider_coverage_path_spacing_->setDarkMode(dark_mode_);
     }
+    if (scan_camera_view_) {
+        scan_camera_view_->setDarkMode(dark_mode_);
+    }
     if (slider_coverage_headland_) {
         slider_coverage_headland_->setDarkMode(dark_mode_);
     }

@@ -45,6 +45,8 @@
 #include "cloud_upload_manager.hpp"
 #include "launch_env.hpp"
 #include "components/bdr_message_box.hpp"
+#include "components/bdr_progress_dialog.hpp"
+#include "components/mission_finalize_dialog.hpp"
 #include "components/mission_metadata_dialog.hpp"
 #include "components/offline_finalize_dialog.hpp"
 #include "components/rollback_banner.hpp"
@@ -773,7 +775,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
             QStringLiteral("1");
         const QString shot_mode =
             qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_MODE").trimmed();
-        // BDR_DEV_STAGE6_SHOT_STAGE=3|4|5 renders another stage instead —
+        // BDR_DEV_STAGE6_SHOT_STAGE=1|2|3|4|5 renders another stage instead —
         // used for side-by-side design-language comparison shots.
         const int shot_stage =
             qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_STAGE").trimmed().toInt();
@@ -781,6 +783,65 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                                        shot_stage, shot_path]() {
             resize(1440, 860);
             setDarkMode(shot_dark);
+            // BDR_REWIRE: dev-only shared-dialog shots. Writes the message
+            // box to <shot> and the progress dialog to <shot>_progress.png.
+            // These two have no other render path, so this is how the light
+            // theme gets verified. See docs/DEV_BYPASSES.md.
+            if (shot_mode == QStringLiteral("dialogs")) {
+                BdrMessageBox box(this);
+                box.setTitle(QStringLiteral("Discard this scan?"));
+                box.setText(QStringLiteral(
+                    "The sweep has not been saved. Discarding returns the "
+                    "plan to PLANNED so it can be re-run."));
+                box.setInformativeText(QStringLiteral(
+                    "Data already written to disk is not removed."));
+                box.addButton(QStringLiteral("Cancel"));
+                box.addButton(QStringLiteral("Discard"), true);
+                box.show();
+                QCoreApplication::processEvents();
+                box.grab().save(shot_path);
+
+                BdrProgressDialog progress(this);
+                progress.setTitle(QStringLiteral("Finalizing mission"));
+                progress.setLabelText(
+                    QStringLiteral("Waiting for motors to disarm…"));
+                progress.show();
+                QCoreApplication::processEvents();
+                QString progress_path = shot_path;
+                progress_path.replace(QStringLiteral(".png"),
+                                      QStringLiteral("_progress.png"));
+                progress.grab().save(progress_path);
+
+                const auto shot_sibling = [&shot_path](const QString& suffix) {
+                    QString p = shot_path;
+                    p.replace(QStringLiteral(".png"),
+                              QStringLiteral("_%1.png").arg(suffix));
+                    return p;
+                };
+                const auto grab_dialog = [&](QWidget* w, const QString& sfx) {
+                    w->show();
+                    QCoreApplication::processEvents();
+                    w->grab().save(shot_sibling(sfx));
+                    w->hide();
+                };
+
+                MissionFinalizeDialog finalize(this);
+                finalize.setPhase(QStringLiteral("Saving coverage map"));
+                finalize.setDetail(QStringLiteral(
+                    "Waiting for the robot to finish writing the section."));
+                finalize.setAbortAvailable(true);
+                finalize.setSkipCopyAvailable(true);
+                grab_dialog(&finalize, QStringLiteral("finalize"));
+
+                OfflineFinalizeDialog offline(nullptr, this);
+                grab_dialog(&offline, QStringLiteral("offline"));
+
+                MissionMetadataDialog metadata(this);
+                grab_dialog(&metadata, QStringLiteral("metadata"));
+
+                QApplication::quit();
+                return;
+            }
             if (shot_mode == QStringLiteral("scan_setup")) {
                 // Scan Setup modal with in-memory demo plans (2 PLANNED,
                 // 3 COMPLETED) — never touches the on-disk JobStore.
@@ -812,6 +873,13 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                 dialog->grab().save(open_path);
                 dialog->deleteLater();
                 QApplication::quit();
+                return;
+            }
+            if (shot_stage == 1) {
+                return;  // Setup is where the shell already starts.
+            }
+            if (shot_stage == 2) {
+                goToStage2();
                 return;
             }
             if (shot_stage == 3) {
@@ -1226,6 +1294,7 @@ void AppShellWindow::applyBannerHostTheme(QWidget* host) {
 
 void AppShellWindow::setDarkMode(bool dark_mode) {
     dark_mode_ = dark_mode;
+    setAppDarkMode(dark_mode_);
     if (update_banner_) {
         update_banner_->setDarkMode(dark_mode_);
     }

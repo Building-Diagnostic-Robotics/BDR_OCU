@@ -55,6 +55,14 @@ public:
     void setCornerTag(const QString& tag);
     /** Shown centred when no image is loaded. */
     void setEmptyText(const QString& text);
+    /**
+     * Themes the pane's own chrome — backdrop, corner tag, hint and status
+     * chips. The pane paints rather than styles, so a stylesheet cannot
+     * reach it. The *image* is the caller's business: a satellite stitch is
+     * a photograph and must not be recolored, while the point-cloud raster
+     * has to be re-tinted, so `SatelliteScreen` owns that.
+     */
+    void setDarkMode(bool dark_mode);
     void setMarkers(const QVector<QPointF>& image_points,
                     const QVector<int>& numbers);
     void setPendingMarker(const QPointF& image_pt, bool visible);
@@ -82,6 +90,7 @@ private:
     void zoomAt(const QPointF& screen_pos, double factor);
 
     QImage image_;
+    bool dark_mode_ = true;
     double scale_ = 1.0;
     QPointF offset_;
     bool view_fitted_ = false;

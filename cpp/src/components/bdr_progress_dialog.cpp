@@ -5,6 +5,8 @@
 
 #include "components/bdr_progress_dialog.hpp"
 
+#include "ui_theme_constants.hpp"
+
 #include <QHBoxLayout>
 #include <QTimer>
 #include <QLabel>
@@ -84,56 +86,59 @@ void BdrProgressDialog::buildUi() {
 }
 
 void BdrProgressDialog::applyStyle() {
-    setStyleSheet(R"(
+    const UiThemeTokens t = appThemeTokens();
+    setStyleSheet(QStringLiteral(R"(
         #BdrProgressDialogContainer {
-            background-color: #121212;
-            border: 1px solid #333333;
+            background-color: %1;
+            border: 1px solid %2;
             border-radius: 8px;
         }
         #BdrProgressDialogTopBar {
-            background-color: #121212;
-            border-bottom: 1px solid #333333;
+            background-color: %1;
+            border-bottom: 1px solid %2;
             border-top-left-radius: 8px;
             border-top-right-radius: 8px;
         }
         #BdrProgressDialogTitle {
-            color: #e2e8f0;
+            color: %3;
             font-size: 16px;
             font-weight: 600;
         }
         #BdrProgressDialogClose {
             background: transparent;
-            color: #94a3b8;
+            color: %4;
             font-size: 20px;
             border: none;
         }
         #BdrProgressDialogClose:hover {
-            color: #e2e8f0;
-            background: #1e1e1e;
+            color: %3;
+            background: %5;
             border-radius: 4px;
         }
         #BdrProgressDialogContent {
-            background-color: #121212;
+            background-color: %1;
             border-bottom-left-radius: 8px;
             border-bottom-right-radius: 8px;
         }
         #BdrProgressDialogStatus {
-            color: #e2e8f0;
+            color: %3;
             font-size: 18px;
             font-weight: bold;
             line-height: 1.5;
         }
         #BdrProgressDialogProgressBar {
-            background-color: #1e1e1e;
-            border: 1px solid #333333;
+            background-color: %5;
+            border: 1px solid %6;
             border-radius: 4px;
             height: 8px;
         }
         #BdrProgressDialogProgressBar::chunk {
-            background-color: #059669;
+            background-color: %7;
             border-radius: 3px;
         }
-    )");
+    )")
+                      .arg(t.surface, t.surface_border, t.text, t.muted,
+                           t.raised, t.raised_border, t.accent_green));
 }
 
 void BdrProgressDialog::setTitle(const QString& title) {

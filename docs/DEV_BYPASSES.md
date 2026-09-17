@@ -323,10 +323,13 @@ enumerates all sites.
 - [ ] `BDR_DEV_STAGE6_SHOT=<png path>` — jumps to the Stage 6 planning
       screen on startup, renders offscreen, saves a PNG, and exits.
       Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
-      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|run|plan|plan_confirm|scan_setup`,
-      `BDR_DEV_STAGE6_SHOT_STAGE=3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`,
+      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|run|plan|plan_confirm|scan_setup|dialogs`,
+      `BDR_DEV_STAGE6_SHOT_STAGE=1|2|3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`,
       `BDR_DEV_STAGE6_SHOT_FIT=1` (`plan` only: `fitToRoi()` after seeding,
       lands past the fetch ceiling to exercise scaled-tile overzoom).
+      `_STAGE=1` is Setup (where the shell already starts) and `=2` is the
+      preflight screen — both exist so the light theme can be verified on
+      the two screens an operator sees before any robot is reachable.
       `correspond`/`review` call `SatelliteScreen::devSeedDemoAlignment()`,
       which fakes a collected robot map and a stitched site image so the
       picker can be shot without a robot or cached imagery (`correspond` =
@@ -345,7 +348,14 @@ enumerates all sites.
       Start New Scan modal with in-memory demo plans (2 PLANNED, 3
       COMPLETED; the on-disk JobStore is untouched) to `<png>` and, with
       the COMPLETED disclosure expanded, `<png>_open.png`
-      (`ScanSetupDialog::devSetCompletedOpen`).
+      (`ScanSetupDialog::devSetCompletedOpen`). `dialogs` renders the
+      frameless dialogs that have no other render path — `BdrMessageBox` to
+      `<png>`, then `BdrProgressDialog`, `MissionFinalizeDialog`,
+      `OfflineFinalizeDialog` and `MissionMetadataDialog` to
+      `<png>_progress.png`, `_finalize.png`, `_offline.png` and
+      `_metadata.png`. The first two are reached from 16+ call sites and the
+      rest only from a live mission, so this is the only way to verify their
+      light theme.
       Used by the AI-agent
       visual-verification loop during Stage 6 UI work. Env-gated only
       (same class as `BDR_DEV_START_AT_SCAN`); harmless in release when

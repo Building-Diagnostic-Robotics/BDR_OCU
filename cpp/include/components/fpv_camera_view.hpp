@@ -28,6 +28,14 @@ public:
     /** Configure the text shown while the stream is not yet active. */
     void setPlaceholderText(const QString& title, const QString& subtitle);
 
+    /**
+     * The placeholder is transparent over whatever card hosts it, so its
+     * text is the only thing carrying contrast. The view is built once and
+     * reused across missions, which means the constructor's colors would
+     * otherwise hold the boot palette forever.
+     */
+    void setDarkMode(bool dark_mode);
+
     /** Start receiving on the given UDP port (forwards to VideoStreamWidget). */
     void startStream(int port);
     /** Stop the stream and revert to the placeholder. */
@@ -48,6 +56,9 @@ signals:
 private:
     void showPlaceholder();
     void showStream();
+    void applyPlaceholderStyle();
+
+    bool dark_mode_ = true;
 
     QStackedWidget* media_stack_ = nullptr;
     QWidget* placeholder_ = nullptr;

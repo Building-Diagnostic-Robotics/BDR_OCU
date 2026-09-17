@@ -274,6 +274,37 @@ accepts building, operator and units. That push is the arming gate; a failed
 push must not let a scan start, because the data would land in an unlabelled
 folder.
 
+### Stopping mid-scan: E-Stop, teleop, resume
+
+**Emergency Stop** — the button, or the **space bar** — drops autonomy and
+requests IDLE on both axes, and then it **latches**. Space works from any step
+while the mission is live, including while a prompt is on screen, and it is
+stop-only: pressing it again just re-stops, so mashing it can never release the
+stop. Clearing is only ever the button. While it holds, the button itself reads **Clear E-Stop**, the
+corner pill stays red on E-STOP no matter what the robot reports, and nothing
+— no map click, no other button — can put the robot back into autonomy.
+
+To drive away from a hazard, press **Arm Motors** in the Motors card. That
+powers the wheels for manual driving only; it does not lift the latch and does
+not restart the scan. Clicking the camera view enters teleop, clicking the map
+leaves it.
+
+To continue the scan, press **Clear E-Stop** and then **Resume** — two
+deliberate presses. Clearing on its own never moves the robot.
+
+Resuming replans from where the robot is standing rather than picking the old
+route back up, because dropping autonomy also drops the route the robot was
+following. Coverage already swept is not lost; it lives in the robot's map, not
+in the route. This is why E-Stop does not call `/coverage/abort`: abort would
+end the run and close the section as partial.
+
+Historical note, worth knowing because it is the reason the latch exists: an
+earlier build treated "hand control back" as "resume the scan". Releasing
+manual control — which the operator does by clicking the map — re-armed the
+motors and re-enabled autonomy, *including after an Emergency Stop*. On
+2026-09-16 that put a robot back under power three times beside a roof edge
+and it had to be physically caught.
+
 ## Completing the mission
 
 **Complete Mission** disables autonomy, waits for both axes to actually

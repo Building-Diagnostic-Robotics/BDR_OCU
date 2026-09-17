@@ -294,6 +294,31 @@ QImage renderTopDownAlphaDensity(const QString& pcd_path, QRectF* bounds_out,
     return image;
 }
 
+QImage tintDensityRasterForLightCanvas(const QImage& raster) {
+    if (raster.isNull()) {
+        return raster;
+    }
+    // Dark enough to read as ink on white at the renderer's lowest alpha
+    // (120), without going pure black — the cloud is survey data, not a
+    // hard-edged drawing, and full black makes the sparse returns look like
+    // noise speckle.
+    constexpr int kLightCanvasPointGray = 52;
+
+    QImage out = raster.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < out.height(); ++y) {
+        QRgb* row = reinterpret_cast<QRgb*>(out.scanLine(y));
+        for (int x = 0; x < out.width(); ++x) {
+            const int alpha = qAlpha(row[x]);
+            if (alpha == 0) {
+                continue;
+            }
+            row[x] = qRgba(kLightCanvasPointGray, kLightCanvasPointGray,
+                           kLightCanvasPointGray, alpha);
+        }
+    }
+    return out;
+}
+
 // ---- Runner -----------------------------------------------------------------
 
 MapCaptureRunner::MapCaptureRunner(QObject* parent) : QObject(parent) {

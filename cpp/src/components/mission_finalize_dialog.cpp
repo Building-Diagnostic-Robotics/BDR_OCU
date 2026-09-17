@@ -1,5 +1,7 @@
 #include "components/mission_finalize_dialog.hpp"
 
+#include "ui_theme_constants.hpp"
+
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QProgressBar>
@@ -17,40 +19,46 @@ MissionFinalizeDialog::MissionFinalizeDialog(QWidget* parent)
     setObjectName("MissionFinalizeDialog");
     setAttribute(Qt::WA_StyledBackground, true);
     setFixedWidth(520);
+    const UiThemeTokens t = appThemeTokens();
     setStyleSheet(QStringLiteral(R"CSS(
         #MissionFinalizeDialog {
-            background: #18181B; border: 1px solid #3F3F46; border-radius: 14px;
+            background: %1; border: 1px solid %2; border-radius: 14px;
         }
         QLabel#FinalizeHeader {
-            color: #F4F4F5; font-family: 'Arimo'; font-size: 20px;
+            color: %3; font-family: 'Arimo'; font-size: 20px;
             font-weight: 700; background: transparent;
         }
         QLabel#FinalizePhase {
-            color: #E4E4E7; font-family: 'Arimo'; font-size: 15px;
+            color: %4; font-family: 'Arimo'; font-size: 15px;
             font-weight: 600; background: transparent;
         }
         QLabel#FinalizeDetail {
-            color: #A1A1AA; font-family: 'Arimo'; font-size: 13px;
+            color: %5; font-family: 'Arimo'; font-size: 13px;
             background: transparent;
         }
-        QLabel#FinalizeDetail[error="true"] { color: #FCA5A5; }
+        QLabel#FinalizeDetail[error="true"] { color: %6; }
         QProgressBar#FinalizeBusy {
-            background: #27272A; border: none; border-radius: 3px; max-height: 6px;
+            background: %7; border: none; border-radius: 3px; max-height: 6px;
         }
-        QProgressBar#FinalizeBusy::chunk { background: #00BC7D; border-radius: 3px; }
+        QProgressBar#FinalizeBusy::chunk { background: %8; border-radius: 3px; }
         QPushButton {
-            background: #3F3F47; border: none; border-radius: 8px; color: #F4F4F5;
+            background: %2; border: none; border-radius: 8px; color: %3;
             font-family: 'Arimo'; font-size: 14px; font-weight: 600;
             min-height: 40px; padding: 0 18px;
         }
-        QPushButton:hover { background: #4A4A52; }
-        QPushButton#FinalizeSkip { background: #B45309; }
-        QPushButton#FinalizeSkip:hover { background: #D97706; }
-        QPushButton#FinalizeAbort { background: #B91C1C; }
-        QPushButton#FinalizeAbort:hover { background: #DC2626; }
-        QPushButton#FinalizeClose { background: #00BC7D; color: #FFFFFF; font-weight: 700; }
-        QPushButton#FinalizeClose:hover { background: #00A86D; }
-    )CSS"));
+        QPushButton:hover { background: %9; }
+        QPushButton#FinalizeSkip { background: %10; color: #FFFFFF; }
+        QPushButton#FinalizeSkip:hover { background: %11; }
+        QPushButton#FinalizeAbort { background: %12; color: #FFFFFF; }
+        QPushButton#FinalizeAbort:hover { background: %13; }
+        QPushButton#FinalizeClose { background: %8; color: %14; font-weight: 700; }
+        QPushButton#FinalizeClose:hover { background: %15; }
+    )CSS")
+                      .arg(t.surface, t.raised_border, t.text, t.body, t.muted,
+                           t.danger, t.raised, t.accent_green, t.neutral_hover)
+                      .arg(t.warning_fill, t.warning_fill_hover, t.danger_fill,
+                           t.danger_fill_hover, t.on_accent,
+                           t.accent_green_hover));
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(28, 24, 28, 24);

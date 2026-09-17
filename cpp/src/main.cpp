@@ -27,6 +27,7 @@
 #include "app_shell.hpp"
 #include "dev_flags.hpp"
 #include "settings_constants.hpp"
+#include "ui_theme_constants.hpp"
 #include "update/update_lockfile.hpp"
 #include "update/update_log.hpp"
 #include "update/update_settings.hpp"
@@ -284,6 +285,15 @@ int main(int argc, char* argv[])
     
     // Use Fusion style for modern look
     app.setStyle(QStyleFactory::create("Fusion"));
+
+    // Seed the process-wide theme before any widget is constructed, so
+    // dialogs raised outside AppShellWindow still style themselves correctly.
+    {
+        QSettings theme_settings(QString::fromLatin1(f2c_cpp::kSettingsOrgName),
+                                 QString::fromLatin1(f2c_cpp::kSettingsAppName));
+        f2c_cpp::setAppDarkMode(
+            theme_settings.value("ui/dark_mode", false).toBool());
+    }
     
     // Set default font
     QFont font("Segoe UI", 10);
@@ -445,7 +455,21 @@ int main(int argc, char* argv[])
         shell.showRolledBackBanner();
     }
 
-    shell.show();
+    // The OCU owns the whole laptop screen in the field, and the staged
+    // layouts are sized for it — the step-5 rails and the Stage 6 canvas
+    // tools start crowding below about 1400 px wide. `showMaximized` rather
+    // than `showFullScreen`: it stays inside the work area, and it leaves
+    // `isMaximized()` true, which is the state the frameless window's own
+    // maximize button toggles against. The constructor's `resize()` is
+    // still the restore-down size.
+    //
+    // The dev screenshot hook resizes to an exact Figma frame (1440x860)
+    // and compares pixels, so it has to keep a normal window.
+    if (qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
+        shell.showMaximized();
+    } else {
+        shell.show();
+    }
 
     int exit_code = app.exec();
 

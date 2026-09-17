@@ -1,5 +1,7 @@
 #include "components/offline_finalize_dialog.hpp"
 
+#include "ui_theme_constants.hpp"
+
 #include <QDateTime>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -92,42 +94,43 @@ void OfflineFinalizeDialog::buildUi() {
 }
 
 void OfflineFinalizeDialog::applyStyle() {
+    const UiThemeTokens t = appThemeTokens();
     setStyleSheet(QStringLiteral(R"CSS(
         OfflineFinalizeDialog {
-            background: #18181B;
-            border: 1px solid #3F3F46;
+            background: %1;
+            border: 1px solid %2;
             border-radius: 14px;
         }
         QLabel#OfflineFinalizeHeader {
-            color: #F4F4F5;
+            color: %3;
             font-family: 'Arimo';
             font-size: 20px;
             font-weight: 700;
             background: transparent;
         }
         QLabel#OfflineFinalizeBody {
-            color: #D4D4D8;
+            color: %4;
             font-family: 'Arimo';
             font-size: 14px;
             font-weight: 400;
             background: transparent;
         }
         QLabel#OfflineFinalizeStatus {
-            color: #FCA5A5;
+            color: %5;
             font-family: 'Arimo';
             font-size: 13px;
             font-weight: 600;
             background: transparent;
         }
         QLabel#OfflineFinalizeCountdown {
-            color: #FBBF24;
+            color: %6;
             font-family: 'Arimo';
             font-size: 13px;
             font-weight: 600;
             background: transparent;
         }
         QPushButton#OfflineFinalizeWait {
-            background: #2563EB;
+            background: %7;
             border: none;
             border-radius: 8px;
             color: #FFFFFF;
@@ -136,33 +139,37 @@ void OfflineFinalizeDialog::applyStyle() {
             font-weight: 700;
             padding: 0 18px;
         }
-        QPushButton#OfflineFinalizeWait:hover { background: #3B82F6; }
+        QPushButton#OfflineFinalizeWait:hover { background: %8; }
         QPushButton#OfflineFinalizeSsh {
-            background: #B45309;
+            background: %9;
             border: none;
             border-radius: 8px;
-            color: #FFFBEB;
+            color: #FFFFFF;
             font-family: 'Arimo';
             font-size: 14px;
             font-weight: 700;
             padding: 0 18px;
         }
-        QPushButton#OfflineFinalizeSsh:hover { background: #D97706; }
+        QPushButton#OfflineFinalizeSsh:hover { background: %10; }
         QPushButton#OfflineFinalizeCancel {
             background: transparent;
-            border: 1px solid #52525B;
+            border: 1px solid %2;
             border-radius: 8px;
-            color: #D4D4D8;
+            color: %4;
             font-family: 'Arimo';
             font-size: 14px;
             font-weight: 600;
             padding: 0 18px;
         }
         QPushButton#OfflineFinalizeCancel:hover {
-            background: rgba(82,82,91,0.3);
-            border-color: #71717A;
+            background: %11;
+            border-color: %12;
         }
-    )CSS"));
+    )CSS")
+                      .arg(t.surface, t.raised_border, t.text, t.body,
+                           t.danger, t.warning, t.info_fill, t.info_fill_hover,
+                           t.warning_fill)
+                      .arg(t.warning_fill_hover, t.neutral_hover, t.muted));
 }
 
 void OfflineFinalizeDialog::showEvent(QShowEvent* event) {

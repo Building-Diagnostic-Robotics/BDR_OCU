@@ -1,5 +1,6 @@
 #include "satellite_map_widget.hpp"
 
+#include "satellite_map_capture.hpp"
 #include "satellite_palette.hpp"
 #include "satellite_tile_service.hpp"
 #include "units_system.hpp"
@@ -37,6 +38,40 @@ constexpr const char* kAttribution =
 double compassFromEnuVector(const QPointF& enu) {
     return std::fmod(std::atan2(enu.x(), enu.y()) / geo::kDegToRad + 360.0,
                      360.0);
+}
+
+/**
+ * Ink for an annotation chip — the edge-dimension plates and the ruler's
+ * length label.
+ *
+ * Amber and green stay put as rings and strokes (they are brand hues marking
+ * up the operator's geometry), but the same hue cannot be the chip's *text*
+ * in both themes: `#f59e0b` on a light plate is 2.1:1. So the plate inverts
+ * and the label moves to the deep end of the same hue, which keeps the
+ * colour coding intact while staying readable in sun.
+ */
+struct ChipInk {
+    QColor plate;
+    QColor stroke;
+    QColor text;
+};
+
+ChipInk amberChip(bool dark) {
+    return dark ? ChipInk{QColor(0x1c, 0x1a, 0x12, 230),
+                          QColor(0xf5, 0x9e, 0x0b),
+                          QColor(0xf5, 0x9e, 0x0b)}
+                : ChipInk{QColor(0xFF, 0xFB, 0xEB, 242),
+                          QColor(0xB4, 0x53, 0x09),
+                          QColor(0x92, 0x40, 0x0E)};
+}
+
+ChipInk greenChip(bool dark) {
+    return dark ? ChipInk{QColor(0x00, 0x99, 0x66, 70),
+                          QColor(0x00, 0xd4, 0x92),
+                          QColor(0x00, 0xd4, 0x92)}
+                : ChipInk{QColor(0xEC, 0xFD, 0xF5, 242),
+                          QColor(0x00, 0xA8, 0x6D),
+                          QColor(0x06, 0x5F, 0x46)};
 }
 
 }  // namespace
@@ -860,7 +895,10 @@ void SatelliteMapWidget::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    painter.fillRect(rect(), QColor(0x0b, 0x0b, 0x0b));
+    // Backdrop behind the tiles: visible only before they land and past the
+    // edge of the cached area, so it reads as "nothing here yet".
+    painter.fillRect(rect(), dark_mode_ ? QColor(0x0b, 0x0b, 0x0b)
+                                        : QColor(0xE4, 0xE4, 0xE7));
 
     paintTiles(painter);
     if (mission_anchor_.valid) {
@@ -939,10 +977,11 @@ void SatelliteMapWidget::paintInteraction(QPainter& painter) {
         const QRectF box(mid.x() - fm.horizontalAdvance(label) / 2.0 - 6,
                          mid.y() - fm.height() / 2.0 - 3 - 14,
                          fm.horizontalAdvance(label) + 12, fm.height() + 6);
+        const ChipInk ink = amberChip(dark_mode_);
         painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0, 0, 0, 190));
+        painter.setBrush(ink.plate);
         painter.drawRoundedRect(box, 5, 5);
-        painter.setPen(ruler);
+        painter.setPen(ink.text);
         painter.drawText(box, Qt::AlignCenter, label);
         painter.setBrush(Qt::NoBrush);
     }
@@ -1019,14 +1058,19 @@ void SatelliteMapWidget::paintTiles(QPainter& painter) {
                 // dark asphalt without obscuring what's underneath.
                 painter.save();
                 painter.setPen(Qt::NoPen);
-                QBrush hatch(QColor(255, 255, 255, 28), Qt::BDiagPattern);
+                QBrush hatch(dark_mode_ ? QColor(255, 255, 255, 28)
+                                        : QColor(0, 0, 0, 30),
+                             Qt::BDiagPattern);
                 painter.setBrush(hatch);
                 painter.drawRect(dest_rect);
                 painter.restore();
             }
             if (!drew_fallback) {
-                painter.fillRect(dest_rect, QColor(0x14, 0x17, 0x1b));
-                painter.setPen(QColor(0x22, 0x27, 0x2d));
+                painter.fillRect(dest_rect,
+                                 dark_mode_ ? QColor(0x14, 0x17, 0x1b)
+                                            : QColor(0xE9, 0xE9, 0xEC));
+                painter.setPen(dark_mode_ ? QColor(0x22, 0x27, 0x2d)
+                                          : QColor(0xDC, 0xDC, 0xE0));
                 painter.drawRect(dest_rect.adjusted(0, 0, -1, -1));
             }
             tiles_->fetch(tile_z, wrapped, ty);
@@ -1039,13 +1083,32 @@ void SatelliteMapWidget::setMapRaster(const QImage& image,
                                       const QRectF& bounds_m) {
     map_raster_ = image;
     map_raster_m_ = bounds_m;
+    refreshMapRasterTint();
     zoom_ = qBound(minZoomNow(), zoom_, maxZoomNow());
     update();
 }
 
 void SatelliteMapWidget::clearMapRaster() {
     map_raster_ = QImage();
+    map_raster_painted_ = QImage();
     map_raster_m_ = QRectF();
+    update();
+}
+
+void SatelliteMapWidget::refreshMapRasterTint() {
+    // The renderer draws the cloud light for a dark canvas. Keep the
+    // original so a toggle back does not compound the recolor.
+    map_raster_painted_ = dark_mode_
+                              ? map_raster_
+                              : tintDensityRasterForLightCanvas(map_raster_);
+}
+
+void SatelliteMapWidget::setDarkMode(bool dark_mode) {
+    if (dark_mode_ == dark_mode) {
+        return;
+    }
+    dark_mode_ = dark_mode;
+    refreshMapRasterTint();
     update();
 }
 
@@ -1061,14 +1124,17 @@ void SatelliteMapWidget::paintMapRaster(QPainter& painter) {
         origin, map_raster_m_.left(), map_raster_m_.bottom()));
     const QPointF se = screenFromGeo(geo::geoFromEnu(
         origin, map_raster_m_.right(), map_raster_m_.top()));
-    painter.drawImage(QRectF(nw, se).normalized(), map_raster_);
+    painter.drawImage(QRectF(nw, se).normalized(), map_raster_painted_);
 }
 
 void SatelliteMapWidget::paintGrid(QPainter& painter) {
     // Measured (CAD) canvas: adaptive metric grid on a dark drafting
     // surface. Minor lines pick the smallest step that stays >= 24 px on
     // screen; major lines every 5 minors carry meter labels.
-    painter.fillRect(rect(), QColor(0x10, 0x10, 0x14));
+    // Drafting surface. Light mode is near-white like a CAD sheet, which is
+    // also the best case in direct sun; the grid lines carry the structure.
+    painter.fillRect(rect(), dark_mode_ ? QColor(0x10, 0x10, 0x14)
+                                        : QColor(0xFC, 0xFC, 0xFD));
     // Under the grid, not over it: the grid lines are what the operator
     // measures against, and the cloud's transparent gaps let them read
     // through anyway.
@@ -1098,8 +1164,13 @@ void SatelliteMapWidget::paintGrid(QPainter& painter) {
     const double n_max = std::max(enu_tl.y(), enu_br.y());
 
     painter.setRenderHint(QPainter::Antialiasing, false);
-    const QColor minor_color(255, 255, 255, 13);
-    const QColor major_color(255, 255, 255, 26);
+    // Ink on paper in light mode. The alphas are a touch higher than the
+    // dark-mode pair: the same opacity over white reads fainter than over
+    // near-black.
+    const QColor minor_color = dark_mode_ ? QColor(255, 255, 255, 13)
+                                          : QColor(0, 0, 0, 20);
+    const QColor major_color = dark_mode_ ? QColor(255, 255, 255, 26)
+                                          : QColor(0, 0, 0, 42);
     for (double e = std::floor(e_min / minor_m) * minor_m; e <= e_max;
          e += minor_m) {
         const bool major =
@@ -1297,19 +1368,19 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
         }
         const bool pinned = polygon_.lockedLength(i) > 0.0;
         const bool hot = i == dim_hover_edge_;
+        const ChipInk ink = hot ? greenChip(dark_mode_) : amberChip(dark_mode_);
         if (hot) {
-            painter.setPen(QPen(QColor(0x00, 0xd4, 0x92), 1.5));
-            painter.setBrush(QColor(0x00, 0x99, 0x66, 70));
+            painter.setPen(QPen(ink.stroke, 1.5));
         } else {
             // A pinned edge keeps a solid ring: the operator has to see which
             // dimensions are holding before a vertex drag slides on an arc.
-            QColor ring(0xf5, 0x9e, 0x0b);
+            QColor ring = ink.stroke;
             ring.setAlphaF(pinned ? 1.0 : 0.4);
             painter.setPen(QPen(ring, pinned ? 1.5 : 1.0));
-            painter.setBrush(QColor(0x1c, 0x1a, 0x12, 230));
         }
+        painter.setBrush(ink.plate);
         painter.drawRoundedRect(box, 6, 6);
-        painter.setPen(hot ? QColor(0x00, 0xd4, 0x92) : QColor(0xf5, 0x9e, 0x0b));
+        painter.setPen(ink.text);
         painter.drawText(box, Qt::AlignCenter, text);
     }
 }
@@ -1571,16 +1642,16 @@ void SatelliteMapWidget::paintChrome(QPainter& painter) {
     const double inner_w = std::max(bar_px, label_fm.horizontalAdvance(label));
     const QRectF chip(12, height() - 12 - 46, inner_w + 24, 46);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(QPen(QColor(0x3f, 0x3f, 0x47), 1));
-    painter.setBrush(QColor(24, 24, 27, 230));
+    painter.setPen(QPen(satpal::border(), 1));
+    painter.setBrush(satpal::chipBg());
     painter.drawRoundedRect(chip, 8, 8);
     const QPointF base(chip.left() + 12 + (inner_w - bar_px) / 2.0,
                        chip.top() + 14);
-    painter.setPen(QPen(QColor(0xe4, 0xe4, 0xe7), 2));
+    painter.setPen(QPen(satpal::text(), 2));
     painter.drawLine(base, base + QPointF(bar_px, 0));
     painter.drawLine(base + QPointF(0, -5), base + QPointF(0, 5));
     painter.drawLine(base + QPointF(bar_px, -5), base + QPointF(bar_px, 5));
-    painter.setPen(QColor(0xe4, 0xe4, 0xe7));
+    painter.setPen(satpal::text());
     painter.drawText(QRectF(chip.left(), chip.top() + 22, chip.width(), 18),
                      Qt::AlignCenter, label);
 
@@ -1596,8 +1667,9 @@ void SatelliteMapWidget::paintChrome(QPainter& painter) {
     const int text_w = fm.horizontalAdvance(attribution) + 12;
     const int text_h = fm.height() + 4;
     const QRect attr_rect(width() - text_w, height() - text_h, text_w, text_h);
-    painter.fillRect(attr_rect, QColor(0, 0, 0, 150));
-    painter.setPen(QColor(220, 220, 220));
+    painter.fillRect(attr_rect, dark_mode_ ? QColor(0, 0, 0, 150)
+                                           : QColor(255, 255, 255, 190));
+    painter.setPen(dark_mode_ ? QColor(220, 220, 220) : QColor(0x52, 0x52, 0x5B));
     painter.drawText(attr_rect, Qt::AlignCenter, attribution);
 }
 

@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "estop_latch_policy.hpp"
 #include "satellite_job_model.hpp"
 #include "satellite_map_capture.hpp"
 #include "satellite_tile_service.hpp"
@@ -196,6 +197,13 @@ private:
     QWidget* buildScanRightRail(QWidget* parent);
     QWidget* buildScanControlBar(QWidget* parent);
     QWidget* buildScanStatusPill(QWidget* parent);
+    /**
+     * Re-resolves step 5's per-element inline sheets against the current
+     * theme. The page reproduces the Stage 5 frames 1:1 and styles widgets
+     * in its builders, which run once; without this a theme toggle leaves
+     * the whole scan page on the boot palette.
+     */
+    void restyleScanPage();
     QWidget* buildScanFooter();
     /** Odom-driven telemetry: speed, position, heading, distance. */
     void updateScanTelemetry();
@@ -394,6 +402,12 @@ private:
     void offerForceStop();
     /** True only in genuine Disconnected — Reconnecting does not count. */
     bool isRobotLinkUnreachable() const;
+    /** The control-bar button: latches the stop, or clears an existing latch.
+        Clearing lands on Paused and does not arm — Resume is a second press. */
+    void onEstopButtonClicked();
+    /** Space bar. Stop-only: it can latch but never clear, so mashing the key
+        can never release a stop the operator just applied. */
+    void onEstopShortcut();
     void onEstop();
 
     void publishTeleopTick();
@@ -644,6 +658,10 @@ private:
     QProgressBar* coverage_bar_ = nullptr;
     QLabel* segment_label_ = nullptr;
     QPushButton* end_button_ = nullptr;
+    // Arm requests CLOSED_LOOP and nothing else, so the operator can teleop
+    // out of an E-Stop without the latch being lifted. Start Scan still owns
+    // arming-with-autonomy.
+    QPushButton* arm_button_ = nullptr;
     QPushButton* disarm_button_ = nullptr;
     QPushButton* estop_button_ = nullptr;
     QPushButton* scan_start_pause_button_ = nullptr;
@@ -651,6 +669,10 @@ private:
     QLabel* scan_start_pause_text_ = nullptr;
     QPushButton* scan_cancel_button_ = nullptr;
     QLabel* scan_cancel_text_ = nullptr;
+    // Relabelled to "Clear E-Stop" while latched, matching the shipped
+    // Stage 5 control bar: the operator clears the stop on the same button
+    // they set it with, and the primary button keeps its Resume meaning.
+    QLabel* estop_text_ = nullptr;
     QLabel* scan_run_summary_label_ = nullptr;
     QLabel* scan_elapsed_label_ = nullptr;
     QLabel* scan_coverage_label_ = nullptr;
@@ -689,11 +711,15 @@ private:
     qint64 last_quality_ms_ = 0;
     QFutureWatcher<double>* scan_quality_watcher_ = nullptr;
 
-    enum class ScanRunState { Idle, Running, Paused, Completed };
+    // The run state carries the E-Stop latch as EmergencyStopped, which is
+    // only left through estop_latch_policy::clearEmergencyStop. Every gate
+    // below that tests for Running is therefore false while latched, so no
+    // path can resume a stopped robot. Transitions live in the policy header
+    // so they are unit-testable without a QWidget.
+    using ScanRunState = estop_latch_policy::RunState;
     ScanRunState scan_run_state_ = ScanRunState::Idle;
     bool scan_autonomy_ran_ = false;
     bool manual_override_ = false;
-    bool resume_after_override_ = false;
     bool revisit_prompt_open_ = false;
     bool stop_prompt_open_ = false;
     QString stop_prompt_key_;   // last (state|stop|stale) explained

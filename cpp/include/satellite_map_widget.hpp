@@ -166,6 +166,15 @@ public:
     void setMapRaster(const QImage& image, const QRectF& bounds_m);
     void clearMapRaster();
 
+    /**
+     * The canvas paints rather than styles, so the theme cannot reach it
+     * through a stylesheet — this stores the flag and repaints. It also
+     * re-tints the cached point-cloud raster, whose points are drawn light
+     * for a dark canvas and would vanish on a light one.
+     */
+    void setDarkMode(bool dark_mode);
+    bool darkMode() const { return dark_mode_; }
+
     static constexpr int kMinZoom = 3;
     /** Highest level tiles are ever requested at (Esri's native ceiling). */
     static constexpr int kMaxZoom = 20;
@@ -252,6 +261,7 @@ private:
     QPointF screenFromBody(const QPointF& body) const;
     double metersPerPixelNow() const;
     void paintMapRaster(QPainter& painter);
+    void refreshMapRasterTint();
 
     // Overlay geometry in screen space.
     QVector<QPointF> roiCornerScreenPoints() const;
@@ -339,7 +349,9 @@ private:
     QVector<QPointF> trail_;  // body-frame breadcrumbs
 
     QImage map_raster_;      // collected robot map, top-down
+    QImage map_raster_painted_;  // map_raster_, tinted for the live canvas
     QRectF map_raster_m_;    // its extent in robot_init metres
+    bool dark_mode_ = true;
 
     Drag drag_ = Drag::None;
     int drag_corner_ = -1;

@@ -59,6 +59,20 @@ QImage renderTopDownAlphaDensity(const QString& pcd_path, QRectF* bounds_out,
                                  QString* error);
 
 /**
+ * Recolors a raster from `renderTopDownAlphaDensity` for a light canvas.
+ *
+ * The renderer draws every point in one grey and puts all the density
+ * information in the alpha channel, which is what makes this cheap: only the
+ * RGB triplet changes, so the density shading survives untouched. Light grey
+ * points are near-invisible on a white drafting surface, and this is the
+ * raster the operator picks alignment correspondences on, so legibility here
+ * is not cosmetic. Re-rasterising instead would mean re-running PCL over
+ * millions of points; this is a single pass over ~1 MP and only runs on a
+ * theme flip.
+ */
+QImage tintDensityRasterForLightCanvas(const QImage& raster);
+
+/**
  * Async driver for one map-collection run. Stages: SSH launch + manifest
  * poll -> scp PCD -> scp pose -> off-thread re-origin + raster.
  *

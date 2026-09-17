@@ -5,6 +5,8 @@
 
 #include "components/bdr_message_box.hpp"
 
+#include "ui_theme_constants.hpp"
+
 #include <QFile>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -153,21 +155,22 @@ void BdrMessageBox::buildUi() {
 }
 
 void BdrMessageBox::applyStyle() {
-    setStyleSheet(R"(
+    const UiThemeTokens t = appThemeTokens();
+    setStyleSheet(QStringLiteral(R"(
         #BdrMessageBoxContainer {
-            background-color: #121212;
-            border: 1px solid #333333;
+            background-color: %1;
+            border: 1px solid %2;
             border-radius: 8px;
         }
         #BdrMessageBoxTopBar {
-            background-color: #121212;
-            border-bottom: 1px solid #333333;
+            background-color: %1;
+            border-bottom: 1px solid %2;
             border-top-left-radius: 8px;
             border-top-right-radius: 8px;
         }
         #BdrMessageBoxTitle {
             background: transparent;
-            color: #e2e8f0;
+            color: %3;
             font-size: 16px;
             font-weight: 600;
         }
@@ -176,48 +179,53 @@ void BdrMessageBox::applyStyle() {
         }
         #BdrMessageBoxClose {
             background: transparent;
-            color: #94a3b8;
+            color: %4;
             font-size: 20px;
             border: none;
         }
         #BdrMessageBoxClose:hover {
-            color: #e2e8f0;
-            background: #1e1e1e;
+            color: %3;
+            background: %5;
             border-radius: 4px;
         }
         #BdrMessageBoxContent {
-            background-color: #121212;
+            background-color: %1;
         }
         #BdrMessageBoxText {
             background: transparent;
-            color: #e2e8f0;
+            color: %3;
             font-size: 14px;
             line-height: 1.5;
         }
         #BdrMessageBoxButtonBox {
-            background-color: #121212;
+            background-color: %1;
             border-bottom-left-radius: 8px;
             border-bottom-right-radius: 8px;
         }
         #BdrMessageBoxButtonBox QPushButton {
-            background-color: #1e1e1e;
-            color: #ffffff;
-            border: 1px solid #444444;
+            background-color: %5;
+            color: %3;
+            border: 1px solid %6;
             border-radius: 4px;
             padding: 8px 16px;
             font-size: 14px;
         }
         #BdrMessageBoxButtonBox QPushButton:hover {
-            background-color: #2a2a2a;
+            background-color: %7;
         }
         #BdrMessageBoxButtonBox QPushButton[primary="true"] {
-            background-color: #059669;
+            background-color: %8;
+            color: %9;
             border: none;
         }
         #BdrMessageBoxButtonBox QPushButton[primary="true"]:hover {
-            background-color: #047857;
+            background-color: %10;
         }
-    )");
+    )")
+                      .arg(t.surface, t.surface_border, t.text, t.muted,
+                           t.raised, t.raised_border, t.neutral_hover,
+                           t.accent_green, t.on_accent)
+                      .arg(t.accent_green_hover));
 }
 
 void BdrMessageBox::setTitle(const QString& title) {

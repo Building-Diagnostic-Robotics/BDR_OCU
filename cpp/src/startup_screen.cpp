@@ -2,6 +2,7 @@
 #include "dev_flags.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
+#include "ui_theme_constants.hpp"
 
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -671,12 +672,12 @@ void StartupScreen::applyLocalStyle() {
         }
         #DiagSubtitle {
             font-size: 16px;
-            color: #71717B;
+            color: #52525B;
         }
         #DiagHeaderIcon {
             border: 2px solid #E4E4E7;
             border-radius: 4px;
-            color: #9F9FA9;
+            color: #52525B;
             font-size: 12px;
         }
 
@@ -706,7 +707,7 @@ void StartupScreen::applyLocalStyle() {
         }
         #ChecklistText {
             font-size: 16px;
-            color: #71717B;
+            color: #52525B;
         }
 
         #PreDiagComponentsCard {
@@ -729,7 +730,7 @@ void StartupScreen::applyLocalStyle() {
         }
         #PreDiagComponentText {
             font-size: 14px;
-            color: #71717B;
+            color: #52525B;
         }
 
         #PreDiagImportantCard {
@@ -783,18 +784,21 @@ void StartupScreen::applyLocalStyle() {
             color: #065F46;
             line-height: 20px;
         }
+        /* White on the brand green is 2.5:1. The fill keeps the brand hue
+           and the label goes dark — the app-wide `on_accent` rule for light
+           mode. The dark override below restores white. */
         #DiagStartButton {
             background: #00BC7D;
             border: none;
             border-radius: 10px;
             padding: 12px 16px;
-            color: #FFFFFF;
+            color: #18181B;
             font-weight: 700;
             font-size: 16px;
         }
         #DiagStartButton:disabled {
             background: #E4E4E7;
-            color: #9F9FA9;
+            color: #5F5F6A;
         }
 
         /* Live results */
@@ -821,7 +825,7 @@ void StartupScreen::applyLocalStyle() {
         #LiveResultsCardIcon {
             background: #F4F4F5;
             border-radius: 10px;
-            color: #9F9FA9;
+            color: #52525B;
             font-weight: 700;
         }
         #LiveResultsCardTitle {
@@ -831,20 +835,20 @@ void StartupScreen::applyLocalStyle() {
         }
         #LiveResultsCardSubtitle {
             font-size: 13px;
-            color: #71717B;
+            color: #52525B;
             font-weight: 400;
         }
         #LiveResultsBadgeIcon {
             border-radius: 10px;
-            border: 1px solid #9F9FA9;
-            color: #9F9FA9;
+            border: 1px solid #71717B;
+            color: #52525B;
             font-size: 12px;
             font-weight: 700;
         }
         #LiveResultsStatusText {
             font-size: 16px;
             font-weight: 700;
-            color: #9F9FA9;
+            color: #52525B;
         }
         #LiveResultsOverallCard {
             background: #FAFAFA;
@@ -882,7 +886,7 @@ void StartupScreen::applyLocalStyle() {
         #LiveResultsLog {
             background: #FFFFFF;
             border: none;
-            color: #71717B;
+            color: #52525B;
             font-family: "Liberation Mono";
             font-size: 12px;
         }
@@ -897,10 +901,10 @@ void StartupScreen::applyLocalStyle() {
         #LiveResultsSection[active="false"] #LiveResultsCardTitle,
         #LiveResultsSection[active="false"] #LiveResultsSectionTitle,
         #LiveResultsSection[active="false"] #LiveResultsOverallTitle {
-            color: #9F9FA9;
+            color: #52525B;
         }
         #LiveResultsSection[active="false"] #LiveResultsCardIcon {
-            color: #9F9FA9;
+            color: #52525B;
         }
 
         /* Footer */
@@ -913,7 +917,7 @@ void StartupScreen::applyLocalStyle() {
             border: 2px solid #E4E4E7;
             border-radius: 4px;
             padding: 8px 14px;
-            color: #9F9FA9;
+            color: #52525B;
             font-weight: 700;
             font-size: 16px;
         }
@@ -927,16 +931,22 @@ void StartupScreen::applyLocalStyle() {
             background: #E4E4E7;
             border-radius: 4px;
             padding: 8px 18px;
-            color: #9F9FA9;
+            color: #5F5F6A;
             font-weight: 700;
             font-size: 16px;
         }
         #DiagLaunchButton:enabled {
             background: #00BC7D;
-            color: #FFFFFF;
+            color: #18181B;
         }
 
         /* Dark mode overrides */
+        #StartupScreenRoot[theme="dark"] #DiagStartButton {
+            color: #FFFFFF;
+        }
+        #StartupScreenRoot[theme="dark"] #DiagLaunchButton:enabled {
+            color: #FFFFFF;
+        }
         #StartupScreenRoot[theme="dark"] {
             background-color: #09090B;
             color: #FFFFFF;
@@ -1503,45 +1513,56 @@ void StartupScreen::applyStatusBadge(QLabel* icon, QLabel* text, const QString& 
         s = "NOT READY";
     }
 
+    // Status ink. The original palette was picked against a dark backdrop:
+    // #2ECC71 is 2.1:1 on white and #FFB020 is 1.9:1. These six words are
+    // the most safety-relevant text on the preflight screen, so light mode
+    // takes the deep end of each hue rather than the Figma value.
+    const UiThemeTokens t = uiThemeTokens(dark_mode_);
+    const QString kNeutral = t.muted;
+    const QString kPass =
+        dark_mode_ ? QStringLiteral("#2ECC71") : QStringLiteral("#166534");
+    const QString kWarn = dark_mode_ ? QStringLiteral("#FFB020") : t.warning;
+    const QString kFail = dark_mode_ ? QStringLiteral("#E74C3C") : t.danger;
+
     QString display = s;
-    QString color = "#9F9FA9";
+    QString color = kNeutral;
     QString glyph = " ";
 
     if (s.isEmpty() || s == "-" || s == "NOT_RUN") {
         display = "PENDING";
         glyph = " ";
-        color = "#9F9FA9";
+        color = kNeutral;
     } else if (s == "PASS") {
         glyph = "✓";
-        color = "#2ECC71";
+        color = kPass;
     } else if (s == "WARN") {
         glyph = "!";
-        color = "#FFB020";
+        color = kWarn;
     } else if (s == "FAIL") {
         glyph = "×";
-        color = "#E74C3C";
+        color = kFail;
     } else if (s == "READY") {
         glyph = "✓";
-        color = "#2ECC71";
+        color = kPass;
         display = "READY";
     } else if (s == "NOT READY") {
         glyph = "×";
-        color = "#E74C3C";
+        color = kFail;
         display = "NOT READY";
     } else if (s == "WARNING") {
         glyph = "!";
-        color = "#FFB020";
+        color = kWarn;
         display = "WARNING";
     } else if (s == "RUNNING" || s == "INITIALIZING" || s == "PENDING") {
         glyph = " ";
-        color = "#9F9FA9";
+        color = kNeutral;
         display = (s == "RUNNING") ? "RUNNING..." : s;
     } else if (s == "SKIP") {
         glyph = " ";
-        color = "#9F9FA9";
+        color = kNeutral;
     } else {
         glyph = " ";
-        color = "#9F9FA9";
+        color = kNeutral;
     }
 
     text->setText(display.isEmpty() ? "-" : display);

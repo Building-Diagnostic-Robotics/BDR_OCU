@@ -2,6 +2,7 @@
 
 #include "satellite_geo_math.hpp"
 #include "satellite_tile_service.hpp"
+#include "ui_theme_constants.hpp"
 #include "units_system.hpp"
 
 #include <QCheckBox>
@@ -299,89 +300,93 @@ void SatellitePlanConfirmDialog::buildUi(const Job& job,
 }
 
 void SatellitePlanConfirmDialog::applyStyle() {
+    const UiThemeTokens t = appThemeTokens();
     setStyleSheet(QStringLiteral(R"CSS(
         #PlanConfirmPanel {
-            background: #18181B; border: 1px solid #3F3F46; border-radius: 14px;
+            background: %1; border: 1px solid %2; border-radius: 14px;
         }
         QLabel { background: transparent; }
         #PlanConfirmHeader {
-            color: #F4F4F5; font-family: 'Arimo'; font-size: 20px; font-weight: 700;
+            color: %3; font-family: 'Arimo'; font-size: 20px; font-weight: 700;
         }
         #PlanConfirmBody {
-            color: #D4D4D8; font-family: 'Arimo'; font-size: 14px;
+            color: %4; font-family: 'Arimo'; font-size: 14px;
         }
         #PlanConfirmSection {
-            color: #9F9FA9; font-family: 'Arimo'; font-size: 11px; font-weight: 700;
+            color: %5; font-family: 'Arimo'; font-size: 11px; font-weight: 700;
             letter-spacing: 0.5px;
         }
         #PlanConfirmRow {
-            color: #F4F4F5; font-family: 'Arimo'; font-size: 13px;
+            color: %3; font-family: 'Arimo'; font-size: 13px;
         }
         #PlanConfirmRoofEdge {
-            color: #FF6467; font-family: 'Arimo'; font-size: 13px;
+            color: %6; font-family: 'Arimo'; font-size: 13px;
         }
         #PlanConfirmMuted {
-            color: #9F9FA9; font-family: 'Arimo'; font-size: 13px;
+            color: %5; font-family: 'Arimo'; font-size: 13px;
         }
         #PlanConfirmThumb {
-            background: #0b0b0b; border: 1px solid #3F3F46; border-radius: 10px;
-            color: #52525C; font-family: 'Arimo'; font-size: 13px;
+            background: %7; border: 1px solid %2; border-radius: 10px;
+            color: %5; font-family: 'Arimo'; font-size: 13px;
         }
         #PlanConfirmAdvancedToggle {
-            background: transparent; border: none; color: #9F9FA9;
+            background: transparent; border: none; color: %5;
             font-family: 'Arimo'; font-size: 13px; padding: 2px 0;
         }
-        #PlanConfirmAdvancedToggle:hover { color: #F4F4F5; }
+        #PlanConfirmAdvancedToggle:hover { color: %3; }
         #PlanConfirmAdvanced {
-            background: #27272A; border: 1px solid #3F3F46; border-radius: 10px;
+            background: %7; border: 1px solid %2; border-radius: 10px;
         }
         #PlanConfirmAdvanced QLabel {
-            color: #D4D4D8; font-family: 'Arimo'; font-size: 13px;
+            color: %4; font-family: 'Arimo'; font-size: 13px;
         }
         #PlanConfirmAdvanced QSpinBox, #PlanConfirmAdvanced QComboBox {
-            background: #18181B; border: 1px solid #3F3F46; border-radius: 8px;
-            padding: 4px 10px; color: #F4F4F5; font-family: 'Arimo'; font-size: 13px;
+            background: %1; border: 1px solid %2; border-radius: 8px;
+            padding: 4px 10px; color: %3; font-family: 'Arimo'; font-size: 13px;
         }
         #PlanConfirmAdvanced QComboBox QAbstractItemView {
-            background: #18181B; color: #F4F4F5; border: 1px solid #3F3F46;
+            background: %1; color: %3; border: 1px solid %2;
             selection-background-color: rgba(0, 188, 125, 0.30);
         }
         #PlanConfirmAdvanced QCheckBox {
-            color: #F4F4F5; font-family: 'Arimo'; font-size: 13px;
+            color: %3; font-family: 'Arimo'; font-size: 13px;
         }
         #PlanConfirmAdvanced QCheckBox::indicator {
-            width: 16px; height: 16px; border: 1px solid #3F3F46; border-radius: 4px;
-            background: #18181B;
+            width: 16px; height: 16px; border: 1px solid %2; border-radius: 4px;
+            background: %1;
         }
         #PlanConfirmAdvanced QCheckBox::indicator:checked {
-            background: #00BC7D; border-color: #00BC7D;
+            background: %8; border-color: %8;
         }
         #PlanConfirmProgress {
-            background: #27272A; border: none; border-radius: 4px;
+            background: %7; border: none; border-radius: 4px;
         }
-        #PlanConfirmProgress::chunk { background: #00BC7D; border-radius: 4px; }
+        #PlanConfirmProgress::chunk { background: %8; border-radius: 4px; }
         #PlanConfirmStatus {
-            color: #D4D4D8; font-family: 'Arimo'; font-size: 13px;
+            color: %4; font-family: 'Arimo'; font-size: 13px;
         }
         QPushButton#PlanConfirmPrimary {
-            background: #00BC7D; border: none; border-radius: 10px; padding: 0 22px;
-            min-height: 40px; color: #FFFFFF; font-family: 'Arimo'; font-size: 14px;
+            background: %8; border: none; border-radius: 10px; padding: 0 22px;
+            min-height: 40px; color: %9; font-family: 'Arimo'; font-size: 14px;
             font-weight: 700;
         }
-        QPushButton#PlanConfirmPrimary:hover { background: #00A86D; }
-        QPushButton#PlanConfirmPrimary:disabled { background: #3F3F46; color: #9F9FA9; }
+        QPushButton#PlanConfirmPrimary:hover { background: %10; }
+        QPushButton#PlanConfirmPrimary:disabled { background: %2; color: %5; }
         QPushButton#PlanConfirmSecondary {
-            background: #27272A; border: 1px solid #3F3F46; border-radius: 10px;
-            padding: 0 18px; min-height: 40px; color: #F4F4F5;
+            background: %7; border: 1px solid %2; border-radius: 10px;
+            padding: 0 18px; min-height: 40px; color: %3;
             font-family: 'Arimo'; font-size: 14px; font-weight: 600;
         }
-        QPushButton#PlanConfirmSecondary:hover { background: #3F3F46; }
+        QPushButton#PlanConfirmSecondary:hover { background: %11; }
         QPushButton#PlanConfirmLink {
-            background: transparent; border: none; color: #9F9FA9;
+            background: transparent; border: none; color: %5;
             font-family: 'Arimo'; font-size: 13px; text-decoration: underline;
         }
-        QPushButton#PlanConfirmLink:hover { color: #F4F4F5; }
-    )CSS"));
+        QPushButton#PlanConfirmLink:hover { color: %3; }
+    )CSS")
+                      .arg(t.surface, t.raised_border, t.text, t.body, t.muted,
+                           t.danger, t.raised, t.accent_green, t.on_accent)
+                      .arg(t.accent_green_hover, t.neutral_hover));
 }
 
 void SatellitePlanConfirmDialog::devSetAdvancedOpen(bool open) {

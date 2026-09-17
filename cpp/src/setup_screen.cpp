@@ -458,7 +458,21 @@ void SetupScreen::applyLocalStyle() {
             color: #ef4444;
         }
         #SetupScreenRoot[theme="light"] #SetupSubtitle {
-            color: #6B7280;
+            color: #4A5565;
+        }
+        /* White on the brand green is 3.4:1. The fill keeps the brand hue
+           and the label goes dark instead — the app-wide `on_accent` rule
+           for light mode. */
+        #SetupScreenRoot[theme="light"] #SetupLoginButton {
+            color: #18181B;
+        }
+        /* Disabled reads as unfilled rather than as faded-white-on-faded-
+           green, which measured 1.2:1 and left the operator unable to tell
+           what the button said. */
+        #SetupScreenRoot[theme="light"] #SetupLoginButton:disabled {
+            background-color: #DCFCE7;
+            border: 1px solid #A7E8BF;
+            color: #166534;
         }
         #SetupScreenRoot[theme="light"] #SetupLineEdit {
             color: #1F2937;
@@ -468,7 +482,7 @@ void SetupScreen::applyLocalStyle() {
         }
         #SetupScreenRoot[theme="light"] #SetupViewButton {
             border-color: rgba(22, 163, 74, 0.6);
-            color: #16a34a;
+            color: #166534;
         }
         #SetupScreenRoot[theme="light"] #SetupViewButton:checked {
             background-color: rgba(22, 163, 74, 0.12);

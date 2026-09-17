@@ -2,16 +2,17 @@
  * @file scan_setup_dialog.cpp
  * @brief Implementation of the Start New Scan mode/plan selector.
  *
- * Visual vocabulary lifted from mission_metadata_dialog.cpp (dark-only zinc
- * palette: #18181b surface, #27272a inputs, #3f3f47 secondary, #00BC7D
- * accent) and dashboard_screen.cpp's makeActionButton (2px brand border
- * cards, tinted stroke SVG icons, Arimo 700 18 / 400 14).
+ * Visual vocabulary lifted from mission_metadata_dialog.cpp (zinc palette,
+ * sourced from ui_theme_constants.hpp) and dashboard_screen.cpp's
+ * makeActionButton (2px brand border cards, tinted stroke SVG icons,
+ * Arimo 700 18 / 400 14).
  */
 
 #include "components/scan_setup_dialog.hpp"
 
 #include "components/bdr_message_box.hpp"
 #include "satellite_tile_service.hpp"
+#include "ui_theme_constants.hpp"
 
 #include <QDate>
 #include <QEvent>
@@ -40,11 +41,23 @@ constexpr int kPlanRowHeight = 64;
 constexpr int kPlanListMaxVisible = 4;
 constexpr int kModeCardHeight = 150;
 
+// Brand hues for the two plan modes. These are borders, icon tints and chip
+// fills, so they stay vivid in both themes. `brandText` is the variant to use
+// when the same hue has to carry a label directly on a surface — neither hue
+// is legible as text on white.
 constexpr const char* kAccentGreen = "#00BC7D";
 constexpr const char* kAccentBlue = "#2B7FFF";
-constexpr const char* kMuted = "#9F9FA9";
-constexpr const char* kMutedBorder = "#3f3f47";
-constexpr const char* kDanger = "#EF4444";
+
+QString brandText(const QString& brand) {
+    const UiThemeTokens t = appThemeTokens();
+    if (brand == QLatin1String(kAccentBlue)) {
+        return t.info;
+    }
+    if (brand == QLatin1String(kAccentGreen)) {
+        return t.accent_text;
+    }
+    return t.muted;
+}
 
 /** Same stroke-retint approach as dashboard_screen.cpp's loadSvgPixmap. */
 QPixmap tintedSvg(const QString& resource_path, int w, int h,
@@ -166,8 +179,9 @@ void ScanSetupDialog::applyImageryReachable(bool reachable) {
     satellite_card_->setEnabled(reachable);
     satellite_card_->setCursor(reachable ? Qt::PointingHandCursor
                                          : Qt::ForbiddenCursor);
+    const UiThemeTokens t = appThemeTokens();
     const QString brand = reachable ? QString::fromLatin1(kAccentBlue)
-                                    : QString::fromLatin1(kMutedBorder);
+                                    : t.raised_border;
     satellite_card_->setStyleSheet(QStringLiteral(
         "#SetupCardSatellite {"
         "  background: transparent;"
@@ -175,13 +189,13 @@ void ScanSetupDialog::applyImageryReachable(bool reachable) {
         "  border-radius: 10px;"
         "  text-align: left;"
         "}"
-        "#SetupCardSatellite:hover:enabled { background: rgba(255,255,255,0.03); }"
+        "#SetupCardSatellite:hover:enabled { background: %2; }"
         "#SetupCardSatellite:focus { outline: none; }")
-        .arg(brand));
+        .arg(brand, t.hover_wash));
     satellite_title_->setStyleSheet(QStringLiteral(
         "font-family: 'Arimo'; font-weight: 700; font-size: 18px; "
         "line-height: 28px; color: %1; background: transparent;")
-        .arg(brand));
+        .arg(brandText(brand)));
     satellite_description_->setText(
         reachable ? satellite_description_text_
                   : (probe_answered_
@@ -515,14 +529,13 @@ QWidget* ScanSetupDialog::buildPlanRow(const Job& job, QWidget* parent) {
     trash->setFlat(true);
     trash->setToolTip(QStringLiteral("Delete plan"));
     trash->setIconSize(QSize(18, 18));
+    const UiThemeTokens t = appThemeTokens();
     const QString trash_svg = QStringLiteral(":/assets/scansetup/delete.svg");
-    trash->setIcon(QIcon(tintedSvg(trash_svg, 18, 18, QLatin1String(kMuted))));
+    trash->setIcon(QIcon(tintedSvg(trash_svg, 18, 18, t.muted)));
     // Qt styles pick QIcon::Active on focus, not hover, so the red tint is
     // swapped in explicitly on enter/leave.
-    trash->setProperty("iconRest", tintedSvg(trash_svg, 18, 18,
-                                             QLatin1String(kMuted)));
-    trash->setProperty("iconHot", tintedSvg(trash_svg, 18, 18,
-                                            QLatin1String(kDanger)));
+    trash->setProperty("iconRest", tintedSvg(trash_svg, 18, 18, t.muted));
+    trash->setProperty("iconHot", tintedSvg(trash_svg, 18, 18, t.danger));
     trash->installEventFilter(this);
     layout->addWidget(trash, 0, Qt::AlignVCenter);
     connect(trash, &QPushButton::clicked, this,
@@ -547,6 +560,7 @@ QPushButton* ScanSetupDialog::buildModeCard(
     card->setCursor(Qt::PointingHandCursor);
     card->setFlat(true);
     card->setFixedHeight(kModeCardHeight);
+    const UiThemeTokens t = appThemeTokens();
     card->setStyleSheet(QStringLiteral(
         "#%1 {"
         "  background: transparent;"
@@ -554,9 +568,9 @@ QPushButton* ScanSetupDialog::buildModeCard(
         "  border-radius: 10px;"
         "  text-align: left;"
         "}"
-        "#%1:hover:enabled { background: rgba(255,255,255,0.03); }"
+        "#%1:hover:enabled { background: %3; }"
         "#%1:focus { outline: none; }")
-        .arg(object_name, brand_color));
+        .arg(object_name, brand_color, t.hover_wash));
 
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(20, 18, 20, 18);
@@ -574,7 +588,7 @@ QPushButton* ScanSetupDialog::buildModeCard(
     title_label->setStyleSheet(QStringLiteral(
         "font-family: 'Arimo'; font-weight: 700; font-size: 18px; "
         "line-height: 28px; color: %1; background: transparent;")
-        .arg(brand_color));
+        .arg(brandText(brand_color)));
     title_label->setAlignment(Qt::AlignCenter);
     layout->addWidget(title_label, 0, Qt::AlignCenter);
 
@@ -582,7 +596,7 @@ QPushButton* ScanSetupDialog::buildModeCard(
     description_label->setObjectName("SetupCardDescription");
     description_label->setStyleSheet(QStringLiteral(
         "font-family: 'Arimo'; font-size: 14px; line-height: 20px; "
-        "color: %1; background: transparent;").arg(QLatin1String(kMuted)));
+        "color: %1; background: transparent;").arg(t.muted));
     description_label->setAlignment(Qt::AlignCenter);
     description_label->setWordWrap(true);
     layout->addWidget(description_label, 0, Qt::AlignCenter);
@@ -591,37 +605,36 @@ QPushButton* ScanSetupDialog::buildModeCard(
 }
 
 void ScanSetupDialog::applyStyle() {
-    // Zinc palette from mission_metadata_dialog.cpp — dark-only by design,
-    // independent of the global theme toggle.
+    const UiThemeTokens t = appThemeTokens();
     setStyleSheet(QStringLiteral(R"(
         #ScanSetupDialog {
-            background-color: #18181b;
-            border: 1px solid #27272a;
+            background-color: %1;
+            border: 1px solid %2;
             border-radius: 10px;
         }
         QLabel { background: transparent; }
         #SetupTitle {
             font-family: 'Arimo'; font-weight: 700; font-size: 20px;
-            color: #FAFAFA;
+            color: %3;
         }
         #SetupSubtitle {
-            font-family: 'Arimo'; font-size: 14px; color: #9F9FA9;
+            font-family: 'Arimo'; font-size: 14px; color: %4;
         }
         #SetupClose {
             background: transparent; border: none; border-radius: 4px;
         }
-        #SetupClose:hover { background-color: rgba(255, 255, 255, 0.04); }
+        #SetupClose:hover { background-color: %5; }
         #SetupSectionLabel {
             font-family: 'Arimo'; font-weight: 700; font-size: 11px;
-            letter-spacing: 0.5px; color: #9F9FA9;
+            letter-spacing: 0.5px; color: %4;
         }
         #SetupPlanRow {
-            background-color: #27272a;
+            background-color: %6;
             border: 1px solid transparent;
             border-radius: 10px;
             text-align: left;
         }
-        #SetupPlanRow:hover { border-color: #00BC7D; }
+        #SetupPlanRow:hover { border-color: %7; }
         #SetupPlanRow:focus { outline: none; }
         #SetupPlanDelete {
             background: transparent; border: none; border-radius: 6px;
@@ -633,48 +646,51 @@ void ScanSetupDialog::applyStyle() {
         }
         #SetupSectionToggle:focus { outline: none; }
         #SetupSectionChevron {
-            font-family: 'Arimo'; font-size: 12px; color: #9F9FA9;
+            font-family: 'Arimo'; font-size: 12px; color: %4;
         }
         #SetupPlanScroll, #SetupPlanScroll > QWidget > QWidget { background: transparent; }
         #SetupPlanScroll QScrollBar:vertical {
             background: transparent; width: 6px; margin: 0;
         }
         #SetupPlanScroll QScrollBar::handle:vertical {
-            background: #3F3F46; border-radius: 3px; min-height: 24px;
+            background: %8; border-radius: 3px; min-height: 24px;
         }
-        #SetupPlanScroll QScrollBar::handle:vertical:hover { background: #52525B; }
+        #SetupPlanScroll QScrollBar::handle:vertical:hover { background: %4; }
         #SetupPlanScroll QScrollBar::add-line:vertical,
         #SetupPlanScroll QScrollBar::sub-line:vertical { height: 0; }
         #SetupPlanScroll QScrollBar::add-page:vertical,
         #SetupPlanScroll QScrollBar::sub-page:vertical { background: transparent; }
         #SetupPlanName {
             font-family: 'Arimo'; font-weight: 600; font-size: 14px;
-            color: #FAFAFA;
+            color: %3;
         }
         #SetupPlanDetail {
-            font-family: 'Arimo'; font-size: 12px; color: #9F9FA9;
+            font-family: 'Arimo'; font-size: 12px; color: %4;
         }
         #SetupPlanStatusPlanned {
             font-family: 'Arimo'; font-weight: 700; font-size: 10px;
-            letter-spacing: 0.5px; color: #00BC7D;
+            letter-spacing: 0.5px; color: %9;
         }
         #SetupPlanStatusRun {
             font-family: 'Arimo'; font-weight: 700; font-size: 10px;
-            letter-spacing: 0.5px; color: #9F9FA9;
+            letter-spacing: 0.5px; color: %4;
         }
-        #SetupDividerLine { background-color: #27272a; border: none; }
+        #SetupDividerLine { background-color: %2; border: none; }
         #SetupDividerLabel {
-            font-family: 'Arimo'; font-size: 12px; color: #9F9FA9;
+            font-family: 'Arimo'; font-size: 12px; color: %4;
         }
         #SetupCancel {
             font-family: 'Arimo'; font-weight: 600; font-size: 14px;
-            color: #FAFAFA;
-            background-color: #3f3f47;
+            color: %3;
+            background-color: %8;
             border: none; border-radius: 10px;
             padding: 0 24px;
         }
-        #SetupCancel:hover { background-color: #4a4a52; }
-    )"));
+        #SetupCancel:hover { background-color: %5; }
+    )")
+                      .arg(t.surface, t.surface_border, t.text, t.muted,
+                           t.neutral_hover, t.raised, t.accent_green,
+                           t.raised_border, t.accent_text));
 }
 
 }  // namespace f2c_cpp
