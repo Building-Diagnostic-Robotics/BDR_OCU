@@ -781,7 +781,13 @@ AppShellWindow::AppShellWindow(QWidget* parent)
             qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_STAGE").trimmed().toInt();
         QTimer::singleShot(300, this, [this, shot_dark, shot_mode,
                                        shot_stage, shot_path]() {
-            resize(1440, 860);
+            // The Figma frames are 1920x1080 and every staged constant is a
+            // frame px value unscaled, so the shot has to be that size or it
+            // hands the layout less vertical budget than the field ever will.
+            // Step 5's right rail needs ~905 px; at the old 860 it squeezed
+            // the Manual Override and Scan Statistics cards into each other
+            // and the shot invited a "fix" to a layout that was fine.
+            resize(1920, 1080);
             setDarkMode(shot_dark);
             // BDR_REWIRE: dev-only shared-dialog shots. Writes the message
             // box to <shot> and the progress dialog to <shot>_progress.png.

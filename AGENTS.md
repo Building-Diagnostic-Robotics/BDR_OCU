@@ -1665,7 +1665,12 @@ that is how frameless dialogs get the right theme without being handed it.
 
 `BDR_DEV_STAGE6_SHOT` with `_STAGE=1|2|3|4|5` and `_MODE=…|dialogs` renders
 every screen and the shared dialogs headlessly in both themes — `dialogs`
-also writes the Stage 6 confirm prompt to `<png>_prompt.png`. Contrast
+also writes the Stage 6 confirm prompt to `<png>_prompt.png`. The shot pins
+the window to **1920x1080**, the Figma frame size and the field laptop's
+panel; do not shrink it. The staged constants are frame px unscaled, so a
+shorter shot gives the layout less vertical budget than it will ever have
+and manufactures phantom clipping — at 860 px step 5's right rail squeezed
+the Manual Override and Scan Statistics cards together. Contrast
 claims should be measured off those PNGs at the glyph core, not eyeballed —
 point-sampling a label hits antialiasing and reads far lighter than the
 text actually is.

@@ -463,8 +463,9 @@ int main(int argc, char* argv[])
     // maximize button toggles against. The constructor's `resize()` is
     // still the restore-down size.
     //
-    // The dev screenshot hook resizes to an exact Figma frame (1440x860)
-    // and compares pixels, so it has to keep a normal window.
+    // The dev screenshot hook pins the window to the Figma frame size and
+    // compares pixels, so it has to keep a normal window — maximizing would
+    // hand it whatever the build machine's screen happens to be.
     if (qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
         shell.showMaximized();
     } else {
