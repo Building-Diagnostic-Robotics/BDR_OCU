@@ -186,12 +186,48 @@ void PanZoomImageWidget::setRobotPose(const QPointF& origin_px,
     update();
 }
 
+void PanZoomImageWidget::setResidualLines(const QVector<QLineF>& lines) {
+    residual_lines_ = lines;
+    update();
+}
+
+void PanZoomImageWidget::setFlaggedMarker(int number) {
+    if (flagged_number_ == number) {
+        return;
+    }
+    flagged_number_ = number;
+    update();
+}
+
 void PanZoomImageWidget::clearOverlays() {
     markers_.clear();
     marker_numbers_.clear();
+    residual_lines_.clear();
+    flagged_number_ = -1;
     pending_visible_ = false;
     robot_visible_ = false;
     status_text_.clear();
+    update();
+}
+
+QPointF PanZoomImageWidget::viewCenterImagePt() const {
+    return screenToImage(QPointF(width() * 0.5, height() * 0.5));
+}
+
+void PanZoomImageWidget::setView(const QPointF& image_center, double scale) {
+    if (image_.isNull() || width() <= 0 || height() <= 0) {
+        return;
+    }
+    scale_ = std::clamp(scale, 0.02, 40.0);
+    // `offset_` is the pre-rotation frame, but the rotation pivots on the pane
+    // centre, so a point placed there pre-rotation is still there afterwards —
+    // the bearing needs no correction for this one case.
+    offset_ = QPointF(width() * 0.5 - image_center.x() * scale_,
+                      height() * 0.5 - image_center.y() * scale_);
+    view_fitted_ = true;
+    // Same contract as pan and zoom: this IS a framing, so a later resize must
+    // not re-fit over it.
+    user_adjusted_ = true;
     update();
 }
 
@@ -335,9 +371,42 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
                          Qt::AlignCenter | Qt::TextWordWrap, empty_text_);
     }
 
+    // Under the markers: a spur is about a pair the operator is being asked to
+    // look at, and it must not cover the numbered disc that identifies it.
+    if (!residual_lines_.isEmpty()) {
+        painter.setBrush(Qt::NoBrush);
+        for (const QLineF& line : residual_lines_) {
+            const QPointF a = imageToScreen(line.p1());
+            const QPointF b = imageToScreen(line.p2());
+            // Sub-pixel spurs are noise; only draw a miss worth looking at.
+            if (QLineF(a, b).length() < 2.0) {
+                continue;
+            }
+            painter.setPen(QPen(satpal::danger(), 1.6));
+            painter.drawLine(a, b);
+            painter.setPen(QPen(satpal::danger(), 1.2));
+            painter.drawEllipse(b, 3.0, 3.0);
+        }
+    }
+
     auto drawMarker = [&](const QPointF& img_pt, int number, bool pending) {
         const QPointF sp = imageToScreen(img_pt);
         const QColor color = markerColor(number);
+        if (!pending && number == flagged_number_) {
+            // Advisory ring outside the disc, in the warning hue rather than
+            // the pair's own colour: the colour is how the operator matches
+            // the pair across panes, so it cannot double as a verdict. It
+            // lands on the imagery, whose colour is whatever the roof is, so
+            // it carries a matte halo — two of the eight marker colours are
+            // themselves amber and a tan roof would swallow it outright.
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(dark_mode_ ? QColor(0, 0, 0, 160)
+                                           : QColor(255, 255, 255, 190),
+                                4.0));
+            painter.drawEllipse(sp, 15, 15);
+            painter.setPen(QPen(satpal::warning(), 2.0));
+            painter.drawEllipse(sp, 15, 15);
+        }
         painter.setPen(QPen(color, pending ? 2.0 : 2.4));
         painter.setBrush(
             pending ? QColor(color.red(), color.green(), color.blue(), 40)

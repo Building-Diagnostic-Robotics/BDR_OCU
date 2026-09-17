@@ -12,6 +12,7 @@
 
 #include "satellite_screen.hpp"
 
+#include "alignment_geometry.hpp"
 #include "async_process.hpp"
 #include "link_health_monitor.hpp"
 #include "mission_finalize_policy.hpp"
@@ -118,6 +119,48 @@ constexpr double kPickScreenPx = 1.5;
 // sigma -> 0 and steamroll every other pair, when in truth no amount of zoom
 // localises a roof corner in satellite imagery to a centimetre.
 constexpr double kPickFloorM = 0.12;
+// A fitted scale this far from the imagery's own is not pick noise — across a
+// site of this size Mercator scale varies by ~5e-5 — so the fit is wrong and
+// must not be allowed to re-project the view. See plausibleForProjection.
+constexpr double kScaleRejectFrac = 0.10;
+// Removing one pair has to cut the weighted RMSE by more than this for that
+// pair to be called an outlier rather than the set simply being loose.
+constexpr double kOutlierImprovementFrac = 0.5;
+// Ceiling on the re-projected satellite canvas. Imagery much wider than the
+// cloud would otherwise allocate hundreds of megapixels.
+constexpr int kAlignedSatMaxDim = 4096;
+
+/**
+ * The blunder worth naming: of the pairs the studentised test flagged, the one
+ * furthest outside its own expected noise. -1 when none was flagged — which is
+ * the normal, healthy answer, not a fallback.
+ */
+int worstOutlierIndex(const RobustFit& robust) {
+    int worst = -1;
+    double worst_score = 0.0;
+    for (int index : robust.outliers) {
+        if (index >= 0 && index < robust.studentized.size() &&
+            robust.studentized[index] > worst_score) {
+            worst_score = robust.studentized[index];
+            worst = index;
+        }
+    }
+    return worst;
+}
+
+/** True when two fits are the same transform, to skip a needless re-warp. */
+bool sameTransform(const Similarity2D& a, const Similarity2D& b) {
+    if (a.valid != b.valid) {
+        return false;
+    }
+    if (!a.valid) {
+        return true;
+    }
+    constexpr double kEps = 1e-12;
+    return std::abs(a.a00 - b.a00) < kEps && std::abs(a.a01 - b.a01) < kEps &&
+           std::abs(a.a10 - b.a10) < kEps && std::abs(a.a11 - b.a11) < kEps &&
+           std::abs(a.tx - b.tx) < kEps && std::abs(a.ty - b.ty) < kEps;
+}
 
 /**
  * Per-step operator-facing strings. `arrive` is what the footer promises
@@ -2215,6 +2258,10 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
                        "Click map to return to autonomy."),
         QStringLiteral("hint"));
     hint->setWordWrap(true);
+    // scanText pins every label to Fixed vertically, which stops the layout
+    // honouring a wrapped label's height-for-width — at the step's type scale
+    // this hint runs to two lines and the second was clipped by the card.
+    hint->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
     override_content_layout->addWidget(hint);
     override_layout->addWidget(override_content);
     layout->addWidget(override);
@@ -5315,6 +5362,218 @@ QVector<double> SatelliteScreen::correspondenceSigmas(double px_per_m) const {
     return sigmas;
 }
 
+void SatelliteScreen::invalidateAlignmentResiduals() {
+    corr_residuals_m_.clear();
+    corr_studentized_.clear();
+    corr_weakly_checked_.clear();
+    corr_outlier_index_ = -1;
+}
+
+void SatelliteScreen::resetSatelliteView() {
+    sat_view_xform_ = QTransform();
+    sat_view_fit_ = Similarity2D{};
+    preview_fit_ = Similarity2D{};
+    if (sat_pick_) {
+        sat_pick_->setResidualLines(QVector<QLineF>());
+        sat_pick_->setFlaggedMarker(-1);
+        sat_pick_->setRobotPose(QPointF(), 0.0, false);
+    }
+}
+
+QImage SatelliteScreen::renderAlignedSatellite(const Similarity2D& fit,
+                                               QTransform* out_xform) const {
+    if (sat_image_.isNull()) {
+        return QImage();
+    }
+    const AlignedCanvas canvas =
+        alignedCanvasFor(fit, sat_image_.size(), kAlignedSatMaxDim);
+    if (!canvas.valid) {
+        return QImage();
+    }
+    QImage out(canvas.width, canvas.height,
+               QImage::Format_ARGB32_Premultiplied);
+    // The rotation leaves padding in the canvas corners. It follows the theme
+    // for the same reason the rest of the pane's chrome does: a near-black
+    // margin beside a light UI reads as a dead feed.
+    out.fill(dark_mode_ ? QColor(0x0b, 0x0b, 0x0b) : QColor(0xE4, 0xE4, 0xE7));
+    {
+        QPainter painter(&out);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter.setTransform(canvas.transform);
+        painter.drawImage(0, 0, sat_image_);
+    }
+    if (out_xform) {
+        *out_xform = canvas.transform;
+    }
+    return out;
+}
+
+void SatelliteScreen::applySatelliteView(const QImage& image,
+                                         const QTransform& xform) {
+    if (!sat_pick_) {
+        sat_view_xform_ = xform;
+        return;
+    }
+    // Hold the operator's viewpoint across the re-projection. The anchor is
+    // carried in ORIGINAL satellite pixels — the one frame the old and new
+    // canvases agree on — and the zoom is corrected by the change in the
+    // transforms' linear scale so a feature keeps its on-screen size.
+    const bool had_view = sat_pick_->hasImage() && sat_pick_->width() > 0 &&
+                          sat_pick_->height() > 0;
+    QPointF anchor_orig;
+    double screen_px_per_orig_px = 0.0;
+    if (had_view) {
+        bool ok = false;
+        const QTransform inv = sat_view_xform_.inverted(&ok);
+        if (ok) {
+            anchor_orig = inv.map(sat_pick_->viewCenterImagePt());
+            screen_px_per_orig_px =
+                sat_pick_->scale() *
+                std::sqrt(std::abs(sat_view_xform_.determinant()));
+        }
+    }
+    sat_view_xform_ = xform;
+    sat_pick_->setImage(image);
+    if (screen_px_per_orig_px > 0.0) {
+        const double s_new = std::sqrt(std::abs(xform.determinant()));
+        if (s_new > 1e-12) {
+            sat_pick_->setView(xform.map(anchor_orig),
+                               screen_px_per_orig_px / s_new);
+        }
+    }
+}
+
+bool SatelliteScreen::plausibleForProjection(const Similarity2D& fit) const {
+    if (!fit.valid) {
+        return false;
+    }
+    const double px_per_m = fit.scalePxPerM();
+    if (!(px_per_m > 1e-9) || !std::isfinite(px_per_m)) {
+        return false;
+    }
+    // When the imagery's own ground scale is known, a fit that disagrees with
+    // it is provably wrong — no operator judgement needed — and must not be
+    // allowed to move the view the next pick is made in.
+    if (site_manifest_.res_m > 0.0) {
+        const double expected = 1.0 / site_manifest_.res_m;
+        return std::abs(px_per_m - expected) / expected <= kScaleRejectFrac;
+    }
+    return true;
+}
+
+void SatelliteScreen::updateSatelliteAlignmentView() {
+    preview_fit_ = Similarity2D{};
+    invalidateAlignmentResiduals();
+
+    // Two pairs determine a similarity exactly, so the imagery can be put into
+    // the robot frame from the second pick onward; it then tightens with every
+    // increment rather than arriving all at once at Align.
+    const bool can_fit = correspondences_.size() >= 2 && !sat_image_.isNull() &&
+                         !pcd_image_.isNull() && pcd_bounds_m_.width() > 0.0 &&
+                         pcd_bounds_m_.height() > 0.0;
+    if (can_fit) {
+        QVector<QPointF> pcd;
+        QVector<QPointF> sat;
+        pcd.reserve(correspondences_.size());
+        sat.reserve(correspondences_.size());
+        for (const Correspondence& c : correspondences_) {
+            pcd.append(c.pcd_m);
+            sat.append(c.sat_px);
+        }
+        double px_per_m = (site_manifest_.res_m > 0.0)
+                              ? (1.0 / site_manifest_.res_m)
+                              : 0.0;
+        if (px_per_m <= 0.0) {
+            const auto seed = estimateSimilarity2D(pcd, sat);
+            if (seed && seed->transform.valid) {
+                px_per_m = seed->transform.scalePxPerM();
+            }
+        }
+        const auto robust =
+            fitSimilarityRobust(pcd, sat, correspondenceSigmas(px_per_m));
+        if (robust && robust->fit.transform.valid) {
+            preview_fit_ = robust->fit.transform;
+            corr_residuals_m_ = robust->fit.residuals_m;
+            corr_studentized_ = robust->studentized;
+            corr_weakly_checked_ = robust->weakly_checked;
+            corr_outlier_index_ = worstOutlierIndex(*robust);
+        }
+    }
+
+    if (!preview_fit_.valid) {
+        // No fit yet, or it collapsed: show the imagery as captured. The
+        // widget draws its own matte around it, so nothing here is themed.
+        if (sat_view_fit_.valid) {
+            sat_view_fit_ = Similarity2D{};
+            applySatelliteView(sat_image_, QTransform());
+        } else {
+            sat_view_xform_ = QTransform();
+            if (sat_pick_) {
+                sat_pick_->setImage(sat_image_);
+            }
+        }
+    } else {
+        // An implausible fit HOLDS the last good projection rather than
+        // swinging the imagery somewhere useless — but it still has to be
+        // repainted on a theme toggle, so the held fit is what gets re-warped
+        // rather than skipping the block outright. Invalid means no good
+        // projection was ever established; the unprojected pane is then right.
+        const Similarity2D want = plausibleForProjection(preview_fit_)
+                                      ? preview_fit_
+                                      : sat_view_fit_;
+        // Only re-warp when the fit actually moved, or the palette under its
+        // padding did: updateCorrespondenceUi runs on refreshes that changed
+        // neither, and this is a multi-megapixel blit.
+        if (want.valid && (!sameTransform(sat_view_fit_, want) ||
+                           sat_view_dark_ != dark_mode_)) {
+            QTransform xform;
+            const QImage aligned = renderAlignedSatellite(want, &xform);
+            if (!aligned.isNull()) {
+                sat_view_fit_ = want;
+                sat_view_dark_ = dark_mode_;
+                applySatelliteView(aligned, xform);
+            }
+        }
+    }
+
+    if (!sat_pick_) {
+        return;
+    }
+    // Clicked point -> where this fit puts the matching cloud point, both
+    // carried into whatever frame the pane is currently showing. Two short
+    // spurs, not an overlay of the cloud.
+    QVector<QLineF> residuals;
+    if (preview_fit_.valid) {
+        residuals.reserve(correspondences_.size());
+        for (const Correspondence& c : correspondences_) {
+            residuals.append(
+                QLineF(sat_view_xform_.map(c.sat_px),
+                       sat_view_xform_.map(preview_fit_.apply(c.pcd_m))));
+        }
+    }
+    sat_pick_->setResidualLines(residuals);
+    // Markers are numbered from 1; the diagnostics index from 0.
+    sat_pick_->setFlaggedMarker(corr_outlier_index_ >= 0
+                                    ? corr_outlier_index_ + 1
+                                    : -1);
+    pcd_pick_->setFlaggedMarker(corr_outlier_index_ >= 0
+                                    ? corr_outlier_index_ + 1
+                                    : -1);
+    // Where the fit puts robot_init, live. The solved anchor and this agree
+    // once Align has run — both are the robust fit over the same picks — so
+    // the glyph has one owner rather than two writers racing.
+    if (preview_fit_.valid) {
+        const QPointF origin = sat_view_xform_.map(preview_fit_.apply(
+            QPointF(0.0, 0.0)));
+        const QPointF ahead =
+            sat_view_xform_.map(preview_fit_.apply(QPointF(1.0, 0.0)));
+        const QPointF dir = ahead - origin;
+        sat_pick_->setRobotPose(origin, std::atan2(dir.y(), dir.x()), true);
+    } else {
+        sat_pick_->setRobotPose(QPointF(), 0.0, false);
+    }
+}
+
 QString SatelliteScreen::loadSiteImage() {
     if (current_job_id_.isEmpty()) {
         return QStringLiteral(
@@ -5402,6 +5661,10 @@ void SatelliteScreen::onMapCaptured(const MapCapture& capture) {
     have_pending_sat_ = false;
     pcd_to_sat_ = Similarity2D{};
     align_rmse_m_ = 0.0;
+    invalidateAlignmentResiduals();
+    // A new cloud invalidates the frame the pane was projected into, and the
+    // measured path below never opens the picker to re-derive it.
+    resetSatelliteView();
 
     geo::GeoPose marker;
     const bool measured = plan_mode_ == PlanMode::Measured;
@@ -5472,16 +5735,37 @@ void SatelliteScreen::onSatellitePicked(QPointF image_pt) {
     if (have_pending_sat_) {
         return;
     }
-    pending_sat_px_ = image_pt;
+    // The pane may be showing the imagery re-projected into the robot frame.
+    // Correspondences are stored in ORIGINAL satellite pixels, so that every
+    // pair stays in one frame as the projection moves under them.
+    bool ok = false;
+    const QTransform inv = sat_view_xform_.inverted(&ok);
+    const QPointF original = ok ? inv.map(image_pt) : image_pt;
+    // Rotating the imagery leaves padding in the canvas corners. The widget
+    // only bounds-checks against the canvas, so a click out there would be
+    // stored as an off-image pixel and silently poison the fit.
+    if (sat_image_.isNull() || original.x() < 0.0 || original.y() < 0.0 ||
+        original.x() >= sat_image_.width() ||
+        original.y() >= sat_image_.height()) {
+        sat_pick_->setStatusText(QStringLiteral(
+            "That is outside the imagery — pick a feature on the map itself"));
+        return;
+    }
+    pending_sat_px_ = original;
     // Precision is set by the view the pick was made in, so it has to be read
     // now — the operator is free to zoom between the two halves of a pair.
-    // The pane shows the stitch unprojected here, so screen px per displayed
-    // px IS screen px per original px; the parallel OCU additionally divides
-    // by its re-projected canvas scale, which this screen has no equivalent
-    // of until the aligned preview lands.
+    // scale() is screen px per CANVAS px; sigma_sat_px is in ORIGINAL px, so it
+    // has to go through the projection's own linear scale as well. These differ
+    // only when the canvas was coarsened, but conflating them silently
+    // mis-weights exactly the picks that are least trustworthy.
     const double view_scale = sat_pick_ ? sat_pick_->scale() : 1.0;
-    pending_sat_sigma_px_ =
-        (view_scale > 1e-9) ? (kPickScreenPx / view_scale) : kPickScreenPx;
+    const double canvas_per_orig =
+        std::sqrt(std::abs(sat_view_xform_.determinant()));
+    const double screen_per_orig =
+        view_scale * ((canvas_per_orig > 1e-12) ? canvas_per_orig : 1.0);
+    pending_sat_sigma_px_ = (screen_per_orig > 1e-9)
+                                ? (kPickScreenPx / screen_per_orig)
+                                : kPickScreenPx;
     have_pending_sat_ = true;
     updateCorrespondenceUi();
 }
@@ -5554,6 +5838,8 @@ void SatelliteScreen::resetAlignmentSession() {
     pcd_to_sat_ = Similarity2D{};
     align_rmse_m_ = 0.0;
     alignment_confirmed_ = false;
+    invalidateAlignmentResiduals();
+    resetSatelliteView();
     if (sat_pick_) {
         sat_pick_->clearOverlays();
         sat_pick_->setImage(QImage());
@@ -5569,30 +5855,29 @@ void SatelliteScreen::refreshCorrespondenceMarkers() {
     QVector<QPointF> pcd_points;
     QVector<int> numbers;
     for (int i = 0; i < correspondences_.size(); ++i) {
-        sat_points.append(correspondences_[i].sat_px);
+        // Stored in original satellite pixels; drawn in whatever frame the
+        // pane is currently projecting.
+        sat_points.append(sat_view_xform_.map(correspondences_[i].sat_px));
         pcd_points.append(worldToPcdImage(pcd_bounds_m_, pcd_image_.size(),
                                           correspondences_[i].pcd_m));
         numbers.append(i + 1);
     }
     sat_pick_->setMarkers(sat_points, numbers);
     pcd_pick_->setMarkers(pcd_points, numbers);
-    sat_pick_->setPendingMarker(pending_sat_px_, have_pending_sat_);
-    // A solved fit draws the robot's origin on the satellite pane — the
-    // in-place check that the frame replaces the old review page with.
-    if (pcd_to_sat_.valid) {
-        const QPointF origin_px = pcd_to_sat_.apply(QPointF(0.0, 0.0));
-        const QPointF dir = pcd_to_sat_.apply(QPointF(1.0, 0.0)) - origin_px;
-        sat_pick_->setRobotPose(origin_px, std::atan2(dir.y(), dir.x()), true);
-    } else {
-        sat_pick_->setRobotPose(QPointF(), 0.0, false);
-    }
+    sat_pick_->setPendingMarker(sat_view_xform_.map(pending_sat_px_),
+                               have_pending_sat_);
+    // The robot glyph belongs to updateSatelliteAlignmentView, which owns the
+    // pane's frame and runs just before this — two writers would race.
 }
 
 void SatelliteScreen::updateCorrespondenceUi() {
     const bool have_pcd = !pcd_image_.isNull();
     const bool can_pick = have_pcd && !sat_image_.isNull();
     const bool aligned = pcd_to_sat_.valid;
-    sat_pick_->setImage(sat_image_);
+    // Owns the satellite pane's image, sat_view_xform_ and every residual
+    // diagnostic, so it runs before the markers and the instruction bar below
+    // read any of them.
+    updateSatelliteAlignmentView();
     // The satellite stitch is a photograph and is shown as captured; the
     // point cloud is a render whose points are drawn light for a dark pane
     // and have to be re-inked for a light one.
@@ -5664,16 +5949,32 @@ void SatelliteScreen::updateCorrespondenceUi() {
             : (required < 4 ? QStringLiteral(" — 4+ to check for a bad pick")
                             : QString());
 
+    // The ringed pair, named. Advisory: it is the operator's call whether a
+    // pair is worth re-picking, and a fit is never blocked on this — but a ring
+    // with nothing explaining it is just an unexplained mark on the imagery,
+    // and this bar is the only text surface the picker has.
+    QString advisory;
+    if (corr_outlier_index_ >= 0 &&
+        corr_outlier_index_ < corr_studentized_.size()) {
+        advisory =
+            QStringLiteral(
+                " <span style='color:%1'>· Pair %2 is %3σ off its own expected "
+                "precision — worth re-picking</span>")
+                .arg(uiThemeTokens(dark_mode_).warning)
+                .arg(corr_outlier_index_ + 1)
+                .arg(corr_studentized_[corr_outlier_index_], 0, 'f', 1);
+    }
+
     // Instruction (235:2385): prompt in light grey, requirement muted.
     corr_instruction_->setText(
         have_pcd
             ? QStringLiteral(
                   "<span style='color:%1'>Click matching features on both "
                   "views to create correspondence pairs</span> "
-                  "<span style='color:%2'>(min %3 pairs required%4)</span>")
+                  "<span style='color:%2'>(min %3 pairs required%4)</span>%5")
                   .arg(text, muted)
                   .arg(required)
-                  .arg(requirement_note)
+                  .arg(requirement_note, advisory)
             : QStringLiteral(
                   "<span style='color:%1'>Capture a point cloud from the "
                   "robot</span> <span style='color:%2'>— then click matching "
@@ -5775,7 +6076,8 @@ void SatelliteScreen::onAlignClicked() {
             px_per_m = seed->transform.scalePxPerM();
         }
     }
-    const auto fit = fitSimilarityRobust(pcd, sat, correspondenceSigmas(px_per_m));
+    const QVector<double> sigmas = correspondenceSigmas(px_per_m);
+    const auto fit = fitSimilarityRobust(pcd, sat, sigmas);
     if (!fit || !fit->fit.transform.valid) {
         const QString why = QStringLiteral(
             "Could not estimate a 2D transform. Spread the points around "
@@ -5798,16 +6100,43 @@ void SatelliteScreen::onAlignClicked() {
                            : QStringLiteral("scale, rotation"))
                   .arg(units::formatLength(align_rmse_m_, 3))
                   .arg(pcd_to_sat_.scalePxPerM(), 0, 'f', 2));
-    // The robust pass also reports which pairs disagree with the rest. Stage 6
-    // has no surface for that yet (the Figma correspondence frames carry no
-    // per-pair markers), so it goes to the mission log, where it is at least
-    // recoverable when an operator asks why a fit looked off.
+    // The robust pass also reports which pairs disagree with the rest. The pane
+    // rings the worst one and the instruction bar names it; the log carries the
+    // numbers behind that, so an operator asking later why a fit looked off has
+    // something to read.
     for (int index : fit->outliers) {
         appendLog(QStringLiteral("[align] pair %1 is %2 sigma off its own "
                                  "expected precision (residual %3)")
                       .arg(index + 1)
                       .arg(fit->studentized[index], 0, 'f', 1)
                       .arg(units::formatLength(fit->fit.residuals_m[index], 3)));
+    }
+    const int worst = worstOutlierIndex(*fit);
+    if (worst >= 0) {
+        // Leave-one-out, on the weights the IRLS actually settled on: a single
+        // bad pick drags the fit toward itself, which shrinks its own residual
+        // and inflates everyone else's, so the largest residual is not reliably
+        // the culprit. Refitting without each pair is. The studentised test
+        // decides WHETHER a pair is a blunder; this says what dropping it is
+        // worth, which is what tells the operator if a re-pick is worth doing.
+        QVector<double> weights;
+        weights.reserve(correspondences_.size());
+        for (int i = 0; i < correspondences_.size(); ++i) {
+            const double sigma = sigmas[i];
+            const double rho =
+                (i < fit->robust_weight.size()) ? fit->robust_weight[i] : 1.0;
+            weights.append((sigma > 1e-9) ? rho / (sigma * sigma) : rho);
+        }
+        const OutlierReport dropped = leaveOneOutOutlier(
+            pcd, sat, weights, kOutlierImprovementFrac);
+        if (dropped.valid) {
+            appendLog(
+                QStringLiteral("[align] dropping pair %1 would take the fit "
+                               "from %2 to %3")
+                    .arg(dropped.worst_index + 1)
+                    .arg(units::formatLength(dropped.full_rmse_m, 3),
+                         units::formatLength(dropped.best_rmse_without_m, 3)));
+        }
     }
     for (int index : fit->weakly_checked) {
         appendLog(QStringLiteral("[align] pair %1 carries too much leverage to "

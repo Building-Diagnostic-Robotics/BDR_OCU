@@ -61,6 +61,15 @@ public:
     double bearingDeg() const { return bearing_deg_; }
     void setBearingDeg(double degrees);
 
+    /** Image pixel currently under the centre of the pane. */
+    QPointF viewCenterImagePt() const;
+    /**
+     * Put `image_center` at the pane centre at `scale` screen px per image px.
+     * Used to carry the operator's framing across a re-projection, where the
+     * image is replaced by a differently-sized canvas of the same ground.
+     */
+    void setView(const QPointF& image_center, double scale);
+
     void setPickEnabled(bool enabled);
     /** Greys the pane out and refuses picks — used for "not your turn". */
     void setDimmed(bool dimmed);
@@ -92,6 +101,17 @@ public:
     void setMarkers(const QVector<QPointF>& image_points,
                     const QVector<int>& numbers);
     void setPendingMarker(const QPointF& image_pt, bool visible);
+    /**
+     * Clicked-point -> fitted-point spurs, in image pixels. Each is one pair's
+     * miss under the current fit, so the operator can see WHERE the alignment
+     * disagrees rather than only that its RMSE is large.
+     */
+    void setResidualLines(const QVector<QLineF>& lines);
+    /**
+     * Marker number to ring as suspect, or -1 for none. Advisory only: the
+     * pane draws attention to it and nothing is blocked or removed.
+     */
+    void setFlaggedMarker(int number);
     /** Robot glyph at an image pixel, arrow along `heading_rad`. */
     void setRobotPose(const QPointF& origin_px, double heading_rad,
                       bool visible);
@@ -162,6 +182,8 @@ private:
     QString empty_text_ = QStringLiteral("No image loaded");
     QVector<QPointF> markers_;
     QVector<int> marker_numbers_;
+    QVector<QLineF> residual_lines_;
+    int flagged_number_ = -1;
     QPointF pending_marker_;
     bool pending_visible_ = false;
     QPointF robot_origin_;

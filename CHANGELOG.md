@@ -12,11 +12,11 @@ before pushing to `main` that triggers a release.
 
 ## Unreleased
 
-- Alignment weights each pick by the zoom it was made at
-- One mispicked pair no longer drags the whole alignment
+- Satellite map rotates to match the point cloud as you pick pairs
+- A suspect pair is ringed and named so you know what to re-pick
+- Alignment weights picks by zoom; one bad pair can't drag the fit
 - OCU update banner now appears within ~2 min of a release, not 5
 - Robot software check runs the moment you reach the Dashboard
-- "Later" on the robot banner now snoozes 1 h instead of 4 h
 
 ## 2026-09-17 — OTA e9b2b52
 

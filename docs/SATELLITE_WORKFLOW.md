@@ -193,6 +193,22 @@ still wins; the setback is not a safety system.
    picks and wants the redundancy. Spread the picks around the site — four
    points clustered in one corner solve badly regardless of count.
 
+   From the **second pair on, the satellite image turns to line up with the
+   point cloud** and keeps correcting itself as you add pairs, so each new
+   feature is picked against imagery that already roughly agrees. Short red
+   spurs show where the current fit misses each pair. Your zoom and framing
+   survive each correction; a black (or grey, in light mode) margin around
+   the imagery is the rotated picture's padding and cannot be picked in. If
+   two early picks disagree badly the image stops turning rather than
+   swinging somewhere useless — keep picking and it recovers.
+
+   Once the fit can be checked (**4 pairs or more**), a suspect pair is
+   **ringed in amber in both panes** and named in the instruction bar with
+   how far off it is. That is advice, not a block: you can Align anyway.
+   Ctrl+Z back to it and re-pick if the ring is on a feature you are not
+   confident about. Below 4 pairs nothing can be checked, so no ring is not
+   the same as no mistake.
+
 5. **Align** solves a 2D similarity (scale, rotation, optional reflection,
    translation) and commits it in the same click: an **Alignment
    Successful / RMSE** card covers the point cloud, the robot's origin is

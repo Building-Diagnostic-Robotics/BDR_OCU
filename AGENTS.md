@@ -1115,7 +1115,9 @@ across plans or visits. A cancelled Back keeps everything.
  `site.jpg` left, top-down raster right), strictly alternating
  satellite-then-map so a pair can never half-form on the wrong side.
  Neither pane picks until both images exist.
-3. **Align** runs `estimateSimilarity2D(pcd_m, sat_px)`. Minimum pairs is
+3. **Align** runs `fitSimilarityRobust` (see the robust paragraph below;
+ `estimateSimilarity2D` survives only as the unweighted seed that
+ bootstraps a px/m when the manifest has no `res_m`). Minimum pairs is
  **3 with a GPS seed, 5 without** (`SatelliteScreen::minCorrespondences`) —
  the seed independently pins position and usually heading, so the fit only
  has to find scale.
@@ -1143,12 +1145,74 @@ the manifest's `res_m` is the honest source, and only when it is missing
 is a scale bootstrapped from an unweighted seed fit.
 
 The robust pass also reports `outliers`, `weakly_checked`, `studentized`
-and `min_detectable_m`. **None of that has a UI surface yet** — the Figma
-correspondence frames carry no per-pair markers — so it goes to the
-mission log. Do not read the absence of a warning as an all-clear below
-4 pairs: both the studentised test and `leaveOneOutOutlier` abstain
-there, which is why the 3-pair GPS-seeded minimum is annotated
-"4+ to check for a bad pick" in the instruction bar.
+and `min_detectable_m`. `worstOutlierIndex` reduces that to the one pair
+worth naming, and it surfaces **three ways, all advisory** — nothing is
+blocked, removed or reweighted by the operator's attention: an amber
+`setFlaggedMarker` ring on that pair in BOTH panes, a
+`· Pair N is Xσ off its own expected precision — worth re-picking` clause
+appended to the `#SatCorrBar` instruction, and the numbers in the mission
+log. `leaveOneOutOutlier` runs only when a pair was flagged, on the
+weights the IRLS settled on, and only to log what dropping it would be
+worth. Do not read the absence of a warning as an all-clear below 4
+pairs: both the studentised test and `leaveOneOutOutlier` abstain there,
+which is why the 3-pair GPS-seeded minimum is annotated "4+ to check for
+a bad pick" in the instruction bar.
+
+The ring carries a matte halo under the amber stroke. Two of the eight
+marker colours are themselves amber and the ring lands on the imagery, so
+without it a tan roof or pair 3 swallows the mark.
+
+### Live re-projection (step 2 satellite pane only)
+
+From the **second** pick onward the satellite pane shows the stitch
+re-projected into the robot frame, so the operator places each new pair
+against imagery that already agrees with the cloud, and the agreement
+tightens with every increment instead of arriving all at once at Align.
+`updateSatelliteAlignmentView()` owns it and runs first inside
+`updateCorrespondenceUi()`, because it writes the pane's image,
+`sat_view_xform_` and every residual diagnostic the markers and the
+instruction bar then read.
+
+- **Correspondences are stored in ORIGINAL satellite pixels**, never
+ canvas pixels, so a pair keeps its meaning as the projection moves under
+ it. `sat_view_xform_` maps them out for drawing and `onSatellitePicked`
+ runs a click backwards through its inverse. That handler must also
+ bounds-check the result against `sat_image_`: rotating the imagery
+ leaves padding in the canvas corners, the widget only checks the canvas,
+ and a click out there would be stored as an off-image pixel and silently
+ poison the fit.
+- `sigma_sat_px` is in original pixels but `PanZoomImageWidget::scale()`
+ is screen px per CANVAS px, so the pick sigma divides by
+ `sqrt(|determinant|)` of `sat_view_xform_` as well. They differ only
+ when the canvas hit `kAlignedSatMaxDim`, but conflating them
+ mis-weights exactly the picks that are least trustworthy.
+- **`plausibleForProjection` is a guard, not a nicety.** Two pairs fit a
+ similarity exactly, so an early mismatched pick yields a *confident*
+ nonsense transform; swinging the imagery by it would wreck the view the
+ next pick is made in. A fit whose scale is more than
+ `kScaleRejectFrac` from the manifest's own `res_m` holds the last good
+ projection instead. With no `res_m` there is nothing to check against
+ and the fit is allowed through.
+- `applySatelliteView` holds the operator's viewpoint across the warp by
+ carrying the anchor in original pixels — the one frame both canvases
+ agree on — and correcting the zoom by the change in linear scale.
+- The warp is **inline on the GUI thread**, guarded by `sameTransform` so
+ a refresh that changed nothing does not repaint. Measured at
+ **113–144 ms** for the worst realistic case (a z19 500 m-radius stitch,
+ ~4580 px, into the 4096² `kAlignedSatMaxDim` canvas = 64 MB). That is 3–8
+ warps per alignment session, so it is a hitch and not a freeze; if it
+ ever needs to come down, lower the canvas cap before adding threading.
+- The robot glyph on the satellite pane is driven by `preview_fit_` and
+ has exactly **one** writer, `updateSatelliteAlignmentView`.
+ `refreshCorrespondenceMarkers` must not also set it — last writer wins
+ and the two disagree by the view transform.
+- **This is step 2 only.** Step 3's ROI canvas is `SatelliteMapWidget`
+ painting north-up Esri tiles, and it stays that way: the exported
+ vertices are already robot-frame-correct because `applyAlignmentAnchor`
+ turns the fit into a geo anchor, so rotating that canvas would change
+ nothing about where the ROI lands. The legacy needed a calibrated ROI
+ canvas (`sat_grid_->setCalibratedImage(sat_image_, pcd_to_sat_)`) only
+ because it had no anchor to export through.
 
 ### Porting from the parallel OCU
 
@@ -1164,12 +1228,21 @@ GoogleTest, so `similarity_2d_tests`, `robust_fit_tests`,
 `canvas_extent_tests`, `aligned_canvas_tests` and `pick_loop_tests` are
 converted rather than copied.
 
-`alignedCanvasFor` is ported but **has no consumer here yet**: the live
-re-projected satellite preview is a later increment. Its tests are what
-keep it honest in the meantime, so do not delete it as dead code.
-`canvas_extent_tests` transcribes an extent rule this repo never shipped
-— it exists only so the upstream regression has something to fail
-against.
+`alignedCanvasFor` is consumed by `renderAlignedSatellite` (see "Live
+re-projection" above). `canvas_extent_tests` transcribes an extent rule
+this repo never shipped — it exists only so the upstream regression has
+something to fail against.
+
+The **outlier and re-projection surfaces are deliberately NOT ports.**
+Upstream shows both through a `QListWidget` of pairs sorted by studentised
+residual, with `← OUTLIER` / `← can't be checked (isolated)` suffixes and a
+Delete-selected button; the Figma correspondence frames here have no list,
+so the same information became the pane ring plus one instruction-bar
+clause. The *policy* is upstream's (`worstOutlierIndex`, the leave-one-out
+call, `plausibleForProjection`, `kScaleRejectFrac`,
+`kOutlierImprovementFrac`, `kAlignedSatMaxDim`) and should stay identical;
+only the presentation diverges. Upstream's `preview_rmse_m_` has no
+counterpart because there is no status label to put it in.
 
 ### Offline imagery (office prefetch)
 

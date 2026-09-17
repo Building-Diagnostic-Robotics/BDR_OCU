@@ -41,6 +41,7 @@
 #include <QImage>
 #include <QRectF>
 #include <QSet>
+#include <QTransform>
 #include <QWidget>
 
 class QCheckBox;
@@ -325,6 +326,35 @@ private:
     void resetAlignmentSession();
     void refreshCorrespondenceMarkers();
     void updateCorrespondenceUi();
+    /**
+     * Re-solves the provisional fit from the current picks and puts the
+     * satellite pane into the robot frame under it, so the operator picks the
+     * next pair against imagery that already agrees with the cloud. Owns the
+     * pane's image, `sat_view_xform_` and every residual diagnostic below, so
+     * it runs before anything that reads them.
+     */
+    void updateSatelliteAlignmentView();
+    /** Drops the per-pair diagnostics — their evidence changed. */
+    void invalidateAlignmentResiduals();
+    /** Returns the pane to unprojected imagery and clears its fit overlays. */
+    void resetSatelliteView();
+    /**
+     * The stitch re-projected into the robot frame through `fit`, plus the
+     * original-pixel -> canvas-pixel transform it was drawn with. Geometry
+     * lives in alignment_geometry so it can be tested without a widget; this
+     * is only the paint.
+     */
+    QImage renderAlignedSatellite(const Similarity2D& fit,
+                                  QTransform* out_xform) const;
+    /** Swaps the pane's image while holding the operator's viewpoint. */
+    void applySatelliteView(const QImage& image, const QTransform& xform);
+    /**
+     * Whether a fit may move the view. Two pairs fit a similarity exactly, so
+     * an early mismatched pick produces a confident nonsense transform;
+     * checking its scale against the imagery's own catches that without
+     * needing operator judgement.
+     */
+    bool plausibleForProjection(const Similarity2D& fit) const;
     void updateAlignCardUi();
     /** Loads the job's stitched site.jpg + manifest for picking. Empty on ok. */
     QString loadSiteImage();
@@ -681,6 +711,37 @@ private:
     bool have_pending_sat_ = false;
     Similarity2D pcd_to_sat_;
     double align_rmse_m_ = 0.0;
+    /**
+     * Fit over the picks as they stand, re-solved on every change. Two pairs
+     * determine a similarity, so this exists well before Align does and is
+     * what drives the live re-projection. Distinct from `pcd_to_sat_`, which
+     * is only written by Align and is what the anchor and Send read.
+     */
+    Similarity2D preview_fit_;
+    /** Per-pair miss under `preview_fit_`, in PCD metres, in pick order. */
+    QVector<double> corr_residuals_m_;
+    /** Per-pair leverage-corrected residual over its own expected precision. */
+    QVector<double> corr_studentized_;
+    /** Pairs whose residual is suppressed by leverage — unverifiable, not clean. */
+    QVector<int> corr_weakly_checked_;
+    /** Pair worth re-picking, or -1. Advisory: nothing is blocked by it. */
+    int corr_outlier_index_ = -1;
+    /**
+     * Original satellite pixels -> the canvas the pane is currently showing.
+     * Identity while the imagery is unprojected. Correspondences are stored in
+     * ORIGINAL pixels, so this is what maps them for drawing and what a click
+     * has to be run backwards through.
+     */
+    QTransform sat_view_xform_;
+    /** Fit the pane's current canvas was warped by, to skip a needless re-warp. */
+    Similarity2D sat_view_fit_;
+    /**
+     * Theme the current canvas was painted in. The rotation leaves padding in
+     * its corners which follows the palette, and the fit does not change on a
+     * theme toggle — so without this the `sameTransform` skip would leave a
+     * dark margin around a light-mode pane.
+     */
+    bool sat_view_dark_ = true;
     /**
      * The fit became the robot anchor (applyAlignmentAnchor ran). Distinct
      * from `pcd_to_sat_.valid`, which only means the solve converged: the
