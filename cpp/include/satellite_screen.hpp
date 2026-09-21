@@ -180,8 +180,9 @@ private:
         which is what lets planning run 1 -> 3 -> 4. */
     bool stepAvailable(Step step) const;
     /** Field satellite step 2. Measured alignment and every other step
-        stay on the map page. */
-    bool correspondPickerWanted() const;
+        stay on the map page. Takes the step explicitly so a caller that
+        snapshotted `selected_step_` cannot disagree with the live member. */
+    bool correspondPickerWanted(Step step) const;
     /**
      * Whether this step's own work is done. Reads the same expressions the
      * buttons already gate on; there is deliberately no stored duplicate of
@@ -515,6 +516,9 @@ private:
     JobStore job_store_;
     QVector<Job> jobs_;
     QString current_job_id_;
+    /** Job the picker's site image was loaded for. The page can already be
+        the picker on entry, so a page switch is not what decides a reload. */
+    QString correspond_content_job_id_;
 
     // Top bar.
     QLabel* lbl_title_ = nullptr;

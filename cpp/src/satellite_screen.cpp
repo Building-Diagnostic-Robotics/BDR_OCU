@@ -1327,6 +1327,9 @@ void SatelliteScreen::devSeedDemoAlignmentEmpty() {
 }
 
 void SatelliteScreen::devApplyComputedStep() {
+    // BDR_REWIRE: dev shot only. Assigns the step the way Start Scan does
+    // (computeStep, not setSelectedStep) so the canvas-page derivation has
+    // a headless tripwire. See docs/DEV_BYPASSES.md.
     selected_step_ = computeStep();
     applyModeVisibility();
 }
@@ -2782,8 +2785,8 @@ SatelliteScreen::Step SatelliteScreen::nextAvailableStep(Step step) const {
     return step;
 }
 
-bool SatelliteScreen::correspondPickerWanted() const {
-    return !planning_only_ && selected_step_ == Step::Alignment &&
+bool SatelliteScreen::correspondPickerWanted(Step step) const {
+    return !planning_only_ && step == Step::Alignment &&
            plan_mode_ == PlanMode::Satellite;
 }
 
@@ -2797,18 +2800,23 @@ void SatelliteScreen::syncCanvasPage() {
     // clamp assign selected_step_ directly, and the screen outlives a mission
     // so the stack otherwise keeps the previous visit's page.
     QWidget* const want =
-        correspondPickerWanted() ? correspond_page_ : map_page_;
-    if (canvas_stack_->currentWidget() == want) {
+        correspondPickerWanted(selected_step_) ? correspond_page_ : map_page_;
+    const bool switching = canvas_stack_->currentWidget() != want;
+    if (switching) {
+        canvas_stack_->setCurrentWidget(want);
+    }
+    // A page that already matches still needs a load when the job changed:
+    // resetAlignmentSession blanks the pane, and reopening the same plan
+    // never switches the page. Skip when neither happened — this runs on
+    // every vertex drag.
+    if (want != correspond_page_ ||
+        (!switching && correspond_content_job_id_ == current_job_id_)) {
         return;
     }
-    // Switch before the load. refreshCorrespondPageContent ends in
-    // refreshStepUi, which re-enters here; the page has to already match or
-    // the load recurses. A guard that skipped that re-entry would also skip
-    // a clamp that moved the step, and the page would stay on the picker.
-    canvas_stack_->setCurrentWidget(want);
-    if (want == correspond_page_) {
-        refreshCorrespondPageContent();
-    }
+    // Before the load. It ends in refreshStepUi, which re-enters here; the
+    // id has to already match or this fetches again until the stack blows.
+    correspond_content_job_id_ = current_job_id_;
+    refreshCorrespondPageContent();
 }
 
 void SatelliteScreen::setSelectedStep(Step step) {
@@ -2966,7 +2974,7 @@ void SatelliteScreen::refreshStepUi() {
         // Clear pairs / Align belong to the satellite picker, and only once
         // there is a cloud to pick against (frames 219:291 vs 234:1954).
         const bool picker_actions =
-            correspondPickerWanted() && !pcd_image_.isNull();
+            correspondPickerWanted(selected_step_) && !pcd_image_.isNull();
         clear_pairs_button_->setVisible(picker_actions);
         // Aligned (235:3146): the footer drops Align; Clear pairs stays as
         // the way back to re-pick.
@@ -3077,7 +3085,7 @@ void SatelliteScreen::applyStepVisibility() {
     // Satellite alignment is the full-width picker: no rail at all. The
     // measured variant keeps the rail card (capture + status), since its
     // canvas stays the grid and the point cloud lands straight on it.
-    const bool picker_step = correspondPickerWanted();
+    const bool picker_step = correspondPickerWanted(step);
     const bool scan_step = !planning_only_ && step == Step::AutonomousScan;
     if (rail_scroll_) {
         rail_scroll_->setVisible(!picker_step && !locate_step && !scan_step);
@@ -5809,7 +5817,7 @@ void SatelliteScreen::showCorrespondPage() {
     // already the current step — a capture landing on an open step 2, where
     // the page already matches and the sync would no-op. Selecting the step
     // first covers a caller that got here from somewhere else.
-    if (!correspondPickerWanted()) {
+    if (!correspondPickerWanted(selected_step_)) {
         setSelectedStep(Step::Alignment);
         return;
     }
@@ -5933,6 +5941,10 @@ void SatelliteScreen::resetAlignmentSession() {
         updateCorrespondenceUi();  // also drops both panes' turn highlight
     }
     setAlignStatus(QString());
+    // After the refresh above. It re-enters syncCanvasPage while
+    // current_job_id_ is still the plan being left; clearing first would
+    // load that plan's image for a session we are throwing away.
+    correspond_content_job_id_.clear();
 }
 
 void SatelliteScreen::refreshCorrespondenceMarkers() {

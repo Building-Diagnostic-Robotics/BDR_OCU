@@ -1086,7 +1086,9 @@ effect of `setSelectedStep`. The load tolerates a missing site image
 (shows why in the pane) and a missing cloud (empty state).
 `showCorrespondPage()` only repaints a picker that is already the step —
 a capture landing, where the page already matches and the sync would
-no-op. The measured variant keeps the rail's `align_card_`.
+no-op. The site image is keyed to the job
+(`correspond_content_job_id_`), so reopening a plan on a picker that is
+already showing still loads. The measured variant keeps the rail's `align_card_`.
 `setAlignStatus()` is the one writer for capture progress/errors — it feeds
 the rail label, the empty-state title/hint and both capture button labels.
 The top-bar title is `Satellite ROI Setup — <plan name>` (`refreshTitle()`,
@@ -1344,8 +1346,11 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  directly and the screen is reused across missions, so a navigation
  handler must not be the only place that switches `canvas_stack_`.
  `showCorrespondPage()` repaints an already-open picker and does not
- own the page. Switch the page before loading it — the load ends in
- `refreshStepUi()` and would recurse otherwise.
+ own the page. The site image reloads when the job changes, not only
+ when the page switches: `correspond_content_job_id_` is set before the
+ load so the `refreshStepUi()` re-entry terminates.
+ `resetAlignmentSession()` clears that id after its own refresh — before
+ it, the clear reloads the plan being left.
 - **Link budget is the constraint, not the OCU.** The Microhard link
  measured ~0.5 Mbit/s of TCP headroom with the stack up (iperf3,
  2026-09-13). Zenoh maps DDS RELIABLE to *blocking* congestion control:
