@@ -1079,9 +1079,14 @@ while a cloud exists, Align hidden once aligned. Undo has no button (the
 frame has none) — it is `QKeySequence::Undo` on the page. Icons are the
 Figma exports under `:/assets/satellite/{align_info,align,align_success,
 clear_pairs,footer_back,footer_next,scan_frame,refresh}.svg`.
-`setSelectedStep(Alignment)` routes through `showCorrespondPage()`, which
-tolerates a missing site image (shows why in the pane) and a missing cloud
-(empty state). The measured variant keeps the rail's `align_card_`.
+`refreshStepUi()` derives the canvas page (`syncCanvasPage`): field
+satellite step 2 is `correspond_page_`, every other step is `map_page_`.
+Entry points assign `selected_step_` directly, so the page is not a side
+effect of `setSelectedStep`. The load tolerates a missing site image
+(shows why in the pane) and a missing cloud (empty state).
+`showCorrespondPage()` only repaints a picker that is already the step —
+a capture landing, where the page already matches and the sync would
+no-op. The measured variant keeps the rail's `align_card_`.
 `setAlignStatus()` is the one writer for capture progress/errors — it feeds
 the rail label, the empty-state title/hint and both capture button labels.
 The top-bar title is `Satellite ROI Setup — <plan name>` (`refreshTitle()`,
@@ -1332,6 +1337,15 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 
 ### Rules for agents touching Stage 6
 
+- **The canvas page follows `selected_step_`.** `syncCanvasPage()` runs at
+ the end of `refreshStepUi()`: field satellite step 2 shows
+ `correspond_page_`, every other step shows `map_page_`.
+ `configureForScan`, `newJob`, and the trim clamp assign the step
+ directly and the screen is reused across missions, so a navigation
+ handler must not be the only place that switches `canvas_stack_`.
+ `showCorrespondPage()` repaints an already-open picker and does not
+ own the page. Switch the page before loading it — the load ends in
+ `refreshStepUi()` and would recurse otherwise.
 - **Link budget is the constraint, not the OCU.** The Microhard link
  measured ~0.5 Mbit/s of TCP headroom with the stack up (iperf3,
  2026-09-13). Zenoh maps DDS RELIABLE to *blocking* congestion control:
@@ -1617,7 +1631,8 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
  (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|
- correspond_outlier|review_outlier|roi|run|plan|plan_confirm`,
+ correspond_outlier|review_outlier|roi|run|plan|plan_confirm|revisit_align|
+ revisit_search`,
  `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog
  to `<png>_dialog.png` / `_dialog_adv.png`. See docs/DEV_BYPASSES.md.

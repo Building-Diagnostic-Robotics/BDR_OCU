@@ -121,6 +121,10 @@ public:
     void devSeedDemoRoiStep();
     /** Dev shot only: step 5 (Stage 5 scan page) with no mission active. */
     void devSeedDemoScanStep();
+    /** Dev shot only: assign `selected_step_` from `computeStep()`, the
+        Start Scan entry. Navigation goes through `setSelectedStep` and
+        never exercises that path. */
+    void devApplyComputedStep();
 
     /** Mirrors the Dashboard MQTT battery sample onto the top-bar pill
         (same contract as ExplorationScreen/PlannerScreen). */
@@ -175,6 +179,9 @@ private:
         robot-dependent steps are unavailable rather than merely incomplete —
         which is what lets planning run 1 -> 3 -> 4. */
     bool stepAvailable(Step step) const;
+    /** Field satellite step 2. Measured alignment and every other step
+        stay on the map page. */
+    bool correspondPickerWanted() const;
     /**
      * Whether this step's own work is done. Reads the same expressions the
      * buttons already gate on; there is deliberately no stored duplicate of
@@ -190,7 +197,8 @@ private:
     /** Next available step after `step`, or `step` itself if there is none. */
     Step nextAvailableStep(Step step) const;
     void setSelectedStep(Step step);
-    /** Re-renders the step chips, the footer action, and rail visibility. */
+    /** Re-renders the step chips and the footer, then puts the canvas on
+        the page `selected_step_` implies. */
     void refreshStepUi();
 
     QWidget* buildTopBar();
@@ -298,6 +306,12 @@ private:
     void onCollectMap();
     void onMapCaptured(const MapCapture& capture);
     void showCorrespondPage();
+    /** Site image (or why it cannot load) plus a pane repaint. Does not
+        switch the canvas page. */
+    void refreshCorrespondPageContent();
+    /** Canvas page follows `selected_step_`. Entry points assign the step
+        directly, so this cannot live only in `setSelectedStep`. */
+    void syncCanvasPage();
     void onSatellitePicked(QPointF image_pt);
     void onPcdPicked(QPointF image_pt);
     void onUndoCorrespondence();

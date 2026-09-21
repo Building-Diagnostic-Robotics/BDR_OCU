@@ -766,7 +766,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     // loop for design iteration without a robot or an operator. Optional:
     // BDR_DEV_STAGE6_SHOT_DARK=1 (dark theme), BDR_DEV_STAGE6_SHOT_MODE=
     // measured|measured_map|scan|correspond|review|correspond_outlier|
-    // review_outlier|roi|plan|plan_confirm
+    // review_outlier|roi|plan|plan_confirm|revisit_align|revisit_search
     // (default: planning-only satellite trim). See docs/DEV_BYPASSES.md.
     if (!qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
         const QString shot_path =
@@ -952,6 +952,21 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                         SatelliteScreen::PlanMode::Satellite);
                     stage6_->devSeedDemoPlan();
                     stage6_->devSeedDemoScanStep();
+                } else if (shot_mode == QStringLiteral("revisit_align") ||
+                           shot_mode == QStringLiteral("revisit_search")) {
+                    // Entry assigns the step from computeStep instead of
+                    // navigating, then a second Start Scan reuses the screen.
+                    // revisit_align must be the two-pane picker; revisit_search
+                    // must be step 1 with the search pill, not the picker left
+                    // up from the visit before it.
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
+                    stage6_->devSeedDemoPlan();
+                    stage6_->devApplyComputedStep();
+                    if (shot_mode == QStringLiteral("revisit_search")) {
+                        stage6_->configureForScan(
+                            SatelliteScreen::PlanMode::Satellite);
+                    }
                 } else if (shot_mode == QStringLiteral("plan")) {
                     stage6_->configureForPlanning();
                     stage6_->devSeedDemoPlan();

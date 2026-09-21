@@ -1326,10 +1326,15 @@ void SatelliteScreen::devSeedDemoAlignmentEmpty() {
     updateAlignCardUi();
 }
 
+void SatelliteScreen::devApplyComputedStep() {
+    selected_step_ = computeStep();
+    applyModeVisibility();
+}
+
 void SatelliteScreen::devEnterAlignmentWithDemoSite() {
-    // setSelectedStep(Alignment) routes through showCorrespondPage(), whose
-    // loadSiteImage() fails without a saved job and clears sat_image_. Keep
-    // the synthetic site across that and repaint the panes from it.
+    // setSelectedStep(Alignment) syncs the picker, and that load fails
+    // without a saved job and clears sat_image_. Keep the synthetic site
+    // across that and repaint the panes from it.
     const QImage keep = sat_image_;
     setSelectedStep(Step::Alignment);
     sat_image_ = keep;
@@ -2777,24 +2782,40 @@ SatelliteScreen::Step SatelliteScreen::nextAvailableStep(Step step) const {
     return step;
 }
 
+bool SatelliteScreen::correspondPickerWanted() const {
+    return !planning_only_ && selected_step_ == Step::Alignment &&
+           plan_mode_ == PlanMode::Satellite;
+}
+
+void SatelliteScreen::syncCanvasPage() {
+    if (!canvas_stack_ || !map_page_ || !correspond_page_) {
+        return;
+    }
+    // Field satellite step 2 is the two-pane picker. Everything else — the
+    // measured grid, the scan page, a step-1 search — is the map. Derived
+    // here, not in setSelectedStep: configureForScan / newJob / the trim
+    // clamp assign selected_step_ directly, and the screen outlives a mission
+    // so the stack otherwise keeps the previous visit's page.
+    QWidget* const want =
+        correspondPickerWanted() ? correspond_page_ : map_page_;
+    if (canvas_stack_->currentWidget() == want) {
+        return;
+    }
+    // Switch before the load. refreshCorrespondPageContent ends in
+    // refreshStepUi, which re-enters here; the page has to already match or
+    // the load recurses. A guard that skipped that re-entry would also skip
+    // a clamp that moved the step, and the page would stay on the picker.
+    canvas_stack_->setCurrentWidget(want);
+    if (want == correspond_page_) {
+        refreshCorrespondPageContent();
+    }
+}
+
 void SatelliteScreen::setSelectedStep(Step step) {
     if (!stepReachable(step)) {
         return;
     }
     selected_step_ = step;
-    if (canvas_stack_) {
-        if (step != Step::Alignment) {
-            // Leaving the picker or the review behind must put the canvas
-            // back on the map, or the operator lands on step 3 still looking
-            // at a side-by-side picker.
-            canvas_stack_->setCurrentWidget(map_page_);
-        } else if (plan_mode_ == PlanMode::Satellite) {
-            // Step 2 IS the two-pane picker (frame): it opens with the point
-            // cloud pane in its capture empty state, so the operator never
-            // needs a rail card to get the capture started.
-            showCorrespondPage();
-        }
-    }
     applyModeVisibility();
 }
 
@@ -2944,10 +2965,8 @@ void SatelliteScreen::refreshStepUi() {
         }
         // Clear pairs / Align belong to the satellite picker, and only once
         // there is a cloud to pick against (frames 219:291 vs 234:1954).
-        const bool picker_actions = !planning_only_ &&
-                                    selected_step_ == Step::Alignment &&
-                                    plan_mode_ == PlanMode::Satellite &&
-                                    !pcd_image_.isNull();
+        const bool picker_actions =
+            correspondPickerWanted() && !pcd_image_.isNull();
         clear_pairs_button_->setVisible(picker_actions);
         // Aligned (235:3146): the footer drops Align; Clear pairs stays as
         // the way back to re-pick.
@@ -2966,6 +2985,7 @@ void SatelliteScreen::refreshStepUi() {
             refreshScanRunUi();
         }
     }
+    syncCanvasPage();
 }
 
 void SatelliteScreen::maybeRearmRoiDraw() {
@@ -3057,8 +3077,7 @@ void SatelliteScreen::applyStepVisibility() {
     // Satellite alignment is the full-width picker: no rail at all. The
     // measured variant keeps the rail card (capture + status), since its
     // canvas stays the grid and the point cloud lands straight on it.
-    const bool picker_step = !planning_only_ && step == Step::Alignment &&
-                             plan_mode_ == PlanMode::Satellite;
+    const bool picker_step = correspondPickerWanted();
     const bool scan_step = !planning_only_ && step == Step::AutonomousScan;
     if (rail_scroll_) {
         rail_scroll_->setVisible(!picker_step && !locate_step && !scan_step);
@@ -5771,11 +5790,9 @@ void SatelliteScreen::onMapCaptured(const MapCapture& capture) {
     }
 }
 
-void SatelliteScreen::showCorrespondPage() {
-    // The picker is step 2's whole surface, so it opens even before there is
-    // anything to pick: the satellite pane shows the cached site (or why it
-    // cannot), and the point-cloud pane shows the capture CTA until a map
-    // lands. Nothing here is a hard error — the panes explain themselves.
+void SatelliteScreen::refreshCorrespondPageContent() {
+    // The panes explain themselves: a missing site says why, and the point
+    // cloud pane stays on the capture CTA until a map lands.
     const QString image_error = loadSiteImage();
     if (!image_error.isEmpty()) {
         sat_image_ = QImage();
@@ -5785,14 +5802,18 @@ void SatelliteScreen::showCorrespondPage() {
         sat_pick_->setEmptyText(QString());
     }
     updateCorrespondenceUi();
-    if (selected_step_ != Step::Alignment) {
-        // Picking correspondences IS step 2, so the header follows the canvas
-        // rather than leaving the operator on a picker while the chips still
-        // claim they are somewhere else. setSelectedStep routes back here.
+}
+
+void SatelliteScreen::showCorrespondPage() {
+    // Page ownership is syncCanvasPage. This repaints a picker that is
+    // already the current step — a capture landing on an open step 2, where
+    // the page already matches and the sync would no-op. Selecting the step
+    // first covers a caller that got here from somewhere else.
+    if (!correspondPickerWanted()) {
         setSelectedStep(Step::Alignment);
         return;
     }
-    canvas_stack_->setCurrentWidget(correspond_page_);
+    refreshCorrespondPageContent();
 }
 
 void SatelliteScreen::onSatellitePicked(QPointF image_pt) {
