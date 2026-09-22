@@ -269,7 +269,12 @@ private:
      * and the site prefetch runs as part of saving. Office always; field
      * only when probeImageryReachable() says the laptop is online.
      */
-    bool saveSatelliteWithImagery(Job job, bool site_from_view = false);
+    /**
+     * `close_requested`, when set, is true only after a successful save
+     * the operator asked to leave from. The caller decides the destination.
+     */
+    bool saveSatelliteWithImagery(Job job, bool site_from_view = false,
+                                  bool* close_requested = nullptr);
     /// Footer Next. Field satellite step 1 with no cached imagery detours
     /// through cacheSiteThenAdvance() — alignment cannot run without it.
     void onNextClicked();

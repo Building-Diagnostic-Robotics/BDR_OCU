@@ -281,6 +281,12 @@ void SatellitePlanConfirmDialog::buildUi(const Job& job,
     cancel_button_->setObjectName("PlanConfirmSecondary");
     cancel_button_->setCursor(Qt::PointingHandCursor);
     footer->addWidget(cancel_button_);
+    close_button_ = new QPushButton(QStringLiteral("Save and close"), this);
+    close_button_->setObjectName("PlanConfirmSecondary");
+    close_button_->setCursor(Qt::PointingHandCursor);
+    close_button_->setToolTip(QStringLiteral(
+        "Cache this site and return to the Dashboard"));
+    footer->addWidget(close_button_);
     primary_button_ = new QPushButton(
         already_cached_ ? QStringLiteral("Refresh Imagery && Save")
                         : QStringLiteral("Download && Save"),
@@ -293,6 +299,8 @@ void SatellitePlanConfirmDialog::buildUi(const Job& job,
 
     connect(primary_button_, &QPushButton::clicked, this,
             &SatellitePlanConfirmDialog::onPrimaryClicked);
+    connect(close_button_, &QPushButton::clicked, this,
+            &SatellitePlanConfirmDialog::onSaveAndCloseClicked);
     connect(without_button_, &QPushButton::clicked, this,
             &SatellitePlanConfirmDialog::onSaveWithoutImagery);
     connect(cancel_button_, &QPushButton::clicked, this,
@@ -418,6 +426,7 @@ void SatellitePlanConfirmDialog::setDownloading(bool downloading) {
     advanced_toggle_->setEnabled(!downloading);
     advanced_host_->setEnabled(!downloading);
     primary_button_->setEnabled(!downloading);
+    close_button_->setEnabled(!downloading);
     progress_->setVisible(downloading || phase_ == Phase::Done);
     status_label_->setVisible(true);
     cancel_button_->setText(downloading ? QStringLiteral("Stop")
@@ -425,6 +434,16 @@ void SatellitePlanConfirmDialog::setDownloading(bool downloading) {
 }
 
 void SatellitePlanConfirmDialog::onPrimaryClicked() {
+    close_after_save_ = false;
+    beginDownload();
+}
+
+void SatellitePlanConfirmDialog::onSaveAndCloseClicked() {
+    close_after_save_ = true;
+    beginDownload();
+}
+
+void SatellitePlanConfirmDialog::beginDownload() {
     switch (phase_) {
         case Phase::Done:
             accept();
@@ -453,6 +472,13 @@ void SatellitePlanConfirmDialog::onPrefetchFinished(
         progress_->setValue(1);
         status_label_->setText(
             QStringLiteral("Imagery cached — %1").arg(result.message));
+        // Save and close is the same download; it just does not wait for
+        // a second press once the imagery is on disk.
+        if (close_after_save_) {
+            accept();
+            return;
+        }
+        close_button_->setVisible(false);
         primary_button_->setText(QStringLiteral("Done"));
         cancel_button_->setVisible(false);
         primary_button_->setFocus();

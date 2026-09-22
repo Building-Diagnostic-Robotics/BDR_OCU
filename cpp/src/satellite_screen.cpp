@@ -2645,7 +2645,13 @@ void SatelliteScreen::cacheSiteThenAdvance() {
                     "Next again, or use a plan saved in the office."));
             return;
         }
-        if (saveSatelliteWithImagery(job, /*site_from_view=*/true)) {
+        bool close_after = false;
+        if (saveSatelliteWithImagery(job, /*site_from_view=*/true,
+                                     &close_after)) {
+            if (close_after) {
+                emit backRequested();
+                return;
+            }
             setSelectedStep(nextAvailableStep(selected_step_));
         }
     });
@@ -5170,7 +5176,11 @@ void SatelliteScreen::probeImageryReachable(std::function<void(bool)> done) {
             });
 }
 
-bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view) {
+bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view,
+                                                bool* close_requested) {
+    if (close_requested) {
+        *close_requested = false;
+    }
     geo::GeoPoint centroid;
     double roi_radius_m = 0.0;
     const bool have_roi = map_->roiExtent(&centroid, &roi_radius_m);
@@ -5235,6 +5245,9 @@ bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view) {
                                        ? job.imagery_cache.captured.toString(
                                              Qt::ISODate)
                                        : QStringLiteral("date unknown")));
+                if (close_requested) {
+                    *close_requested = dialog.closeAfterSave();
+                }
                 return true;
             }
             return false;

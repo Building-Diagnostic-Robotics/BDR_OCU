@@ -63,6 +63,10 @@ public:
                                QWidget* parent = nullptr);
 
     Outcome outcome() const { return outcome_; }
+    /** True when the operator asked to leave after a successful save.
+        The dialog still reports SavedWithImagery; the caller decides
+        where that lands. */
+    bool closeAfterSave() const { return close_after_save_; }
     /** Valid only for SavedWithImagery. */
     TileService::SiteManifest manifest() const { return manifest_; }
     /** Dev screenshot hook: expands the Advanced disclosure. */
@@ -78,6 +82,8 @@ private:
     void refreshEstimate();
     PrefetchRequest currentRequest() const;
     void onPrimaryClicked();
+    void onSaveAndCloseClicked();
+    void beginDownload();
     void onSaveWithoutImagery();
     void onCancel();
     void onPrefetchFinished(const PrefetchResult& result);
@@ -91,6 +97,7 @@ private:
     bool already_cached_ = false;
     Phase phase_ = Phase::Review;
     Outcome outcome_ = Outcome::Cancelled;
+    bool close_after_save_ = false;
     TileService::SiteManifest manifest_;
 
     QLabel* estimate_label_ = nullptr;
@@ -104,6 +111,7 @@ private:
     QProgressBar* progress_ = nullptr;
     QLabel* status_label_ = nullptr;
     QPushButton* primary_button_ = nullptr;
+    QPushButton* close_button_ = nullptr;
     QPushButton* without_button_ = nullptr;
     QPushButton* cancel_button_ = nullptr;
 };
