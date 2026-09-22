@@ -843,8 +843,9 @@ Autonomous ROI coverage per `docs/AUTONOMY_CONOPS.md` Mode B. **Start New
 Scan no longer routes to Stage 4/5** — it opens `ScanSetupDialog` (saved
 plans unexecuted-first, or Measured/Satellite mode cards), then the
 metadata modal (building prefilled from the chosen plan), then
-`SatelliteScreen` (Stage 6). The Dashboard "Plan Job" card opens the same
-screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
+`SatelliteScreen` (Stage 6). Desk planning is the same Start New Scan
+flow: search the address, then Save and close on the confirm dialog.
+Classic Stage 4/5 remain in-tree, unrouted.
 
 ### Key files (all `satellite_*` prefixed, flat in cpp/include + cpp/src)
 
@@ -958,31 +959,17 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  delete path (confirm → `JobStore::remove` → row dropped in place,
  dialog stays open, `planDeleted(id)` emitted).
 
-### Two trims
+### One trim
 
-- **Office** (`planning_only_`, Dashboard "Plan Job"): no step header, no
- footer, no Find Robot, no numeric ROI spinboxes, no Collect Map. Plan card
- = name / address / Go / Rectangle|Polygon / Draw ROI / Clear / Place Robot
- / Save Plan. **Save Plan on the satellite canvas IS the imagery step** —
- it requires an ROI (it sizes the download), fits the view, and opens
- `SatellitePlanConfirmDialog`. The saved polygon is a draft the operator is
- expected to adjust on the roof.
-- **Field** (scan trim, "Start New Scan"): the five-step header and footer.
- Save Plan on a plan that already carries `imagery_cache` re-writes
- geometry only and carries the cache forward — a roof edit must never
- fetch. A satellite plan **created in the field** (no cache) probes
- `TileService::connectivityProbeUrl()` on Save (`probeImageryReachable`,
- 3 s HEAD): online → the same `SatellitePlanConfirmDialog` + prefetch as
- the office; offline → geometry-only save plus a `BdrMessageBox::warning`
- that 3D Alignment needs the site cached once. Connectivity, not trim,
- decides whether a save fetches. **Step-1 Next is the field's save**
- (`onNextClicked` → `cacheSiteThenAdvance`): a satellite plan with no
- `imagery_cache` probes connectivity, then runs
- `saveSatelliteWithImagery(job, site_from_view=true)` — no ROI exists yet,
- so the disc is centred on the map centre (the located address) at
- `PrefetchRequest::kMinRadiusM`; the step only advances on
- `SavedWithImagery`. Offline → warning, stays on step 1 (alignment cannot
- run without `site.jpg`). Plans already cached skip straight through.
+There is no office trim. Start New Scan is the only entry. **Save and
+close** on `SatellitePlanConfirmDialog` runs the same download as
+Download & Save and returns to the Dashboard; cancel saves nothing.
+**Step-1 Next** (`onNextClicked` → `cacheSiteThenAdvance`) probes
+connectivity, then runs `saveSatelliteWithImagery(job, site_from_view=true)`.
+No ROI exists yet, so the disc is `PrefetchRequest::forAddress` at
+`kAddressRadiusM` (500 m) around the located address, matching the canvas
+pan clamp. The step only advances on `SavedWithImagery`. Offline →
+warning, stays on step 1. Plans already cached skip straight through.
  The step-2 chip runs the same detour. `loadJob` treats a cached site as
  aimed (`canvas_aimed_`) and lands the view on the manifest centre when the
  plan has no geometry yet — the save's own `loadJob` round-trip must not
@@ -995,7 +982,7 @@ screen in planning-only trim. Classic Stage 4/5 remain in-tree, unrouted.
  without it a new plan keeps writing tiles into the previous plan's
  assets folder and inherits its zoom ceiling.
  **The field rail is per step** (`applyStepVisibility`,
- `frame_rail = !planning_only_`; rail is 288 px =
+ `frame_rail` is always on; rail is 288 px =
  `kLeftRailWidth`, frames 238:4289 / 222:1155): **step 1 has no rail**
  (`rail_scroll_` hidden like the picker) — a 420 px floating search pill
  (`buildSearchBar`, `#SatSearchBar`) sits 40 px under the step header

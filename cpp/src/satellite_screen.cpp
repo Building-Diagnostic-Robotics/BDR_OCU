@@ -1030,15 +1030,12 @@ void SatelliteScreen::devSetViewBearing(double degrees) {
 }
 
 void SatelliteScreen::devRenderPlanConfirm(const QString& png_path) {
-    geo::GeoPoint centroid;
-    double roi_radius_m = 0.0;
-    if (!map_->roiExtent(&centroid, &roi_radius_m)) {
-        return;
-    }
-    map_->fitToRoi();
+    // Step 1 saves a neighbourhood around the located address, before any
+    // ROI exists. The shot has to exercise that request, not the ROI one.
+    const geo::GeoPoint centroid{map_->centerLat(), map_->centerLon()};
     const Job job = jobFromRail();
-    const PrefetchRequest request = PrefetchRequest::forSite(
-        centroid, roi_radius_m, job_store_.assetsDir(job.id));
+    const PrefetchRequest request = PrefetchRequest::forAddress(
+        centroid, job_store_.assetsDir(job.id));
     SatellitePlanConfirmDialog dialog(tiles_, job, map_->grab(), request,
                                       false, this);
     // Polish happens on show; a never-shown frameless dialog grabs without
@@ -3779,8 +3776,7 @@ void SatelliteScreen::refreshScanParamsCard() {
     swath_unit_->setText(units::lengthUnitSuffix().trimmed());
     speed_unit_->setText(units::speedUnitSuffix().trimmed());
 
-    // Office: rides with the plan card. Field: steps 3-4 beside the ROI
-    // card. Either way only once there is a closed ROI to parameterise.
+    // Steps 3-4, beside the ROI card, and only once the polygon is closed.
     const Step step = selected_step_;
     const bool on_step = step == Step::RoiDefinition ||
                          step == Step::EdgeReview;
@@ -4609,9 +4605,8 @@ Job SatelliteScreen::jobFromRail() const {
             if (existing.id == job.id) {
                 job.created = existing.created;
                 job.last_executed_at = existing.last_executed_at;
-                // Fields the plan card does not own. They are produced by the
-                // prefetch / map-collection / alignment steps, so re-saving
-                // from the rail must not wipe them.
+                // Produced by the prefetch / map-collection / alignment steps,
+                // so a later save must not wipe them.
                 job.gps = existing.gps;
                 job.imagery_cache = existing.imagery_cache;
                 job.alignment = existing.alignment;

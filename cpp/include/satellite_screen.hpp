@@ -4,8 +4,8 @@
  *
  * Two canvas modes on one screen: Satellite (Esri imagery) and Measured
  * (CAD grid, tape-measurement planning). Opened by the Start New Scan flow
- * (ScanSetupDialog -> MissionMetadataDialog) or the Dashboard "Plan Job"
- * card (planning-only trim).
+ * (ScanSetupDialog -> MissionMetadataDialog). Save and close on the confirm
+ * dialog is the desk exit.
  *
  * The surface has a Figma frame: 49px top bar, a 55px step header of five
  * chips, then a 320px LEFT rail beside the canvas with a 65px footer bar

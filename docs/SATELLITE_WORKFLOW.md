@@ -21,17 +21,12 @@ Two constraints shape everything:
   a heading needs a baseline the robot may not get. GPS is used as a seed;
   operator-picked correspondences are the accuracy step.
 
-## Two trims, one screen
+## One screen
 
-The screen has two very different jobs and dresses differently for each:
-
-- **Office (planning-only trim).** Reached from Dashboard **Plan Job**.
-  There is internet, there is no robot. One task: draw the roof, place the
-  robot, save. No step header, no footer, no Find Robot, no Collect Map. Save
-  Plan is the imagery step — see below.
-- **Field (scan trim).** Reached from **Start New Scan**. There is a robot,
-  there is no internet. The five-step flow below runs here. Saving in the
-  field re-writes geometry only; it never tries to fetch.
+Reached from **Start New Scan**. At a desk with internet, step 1 locates the
+address and **Save and close** caches a 500 m neighbourhood and returns to
+the Dashboard. On the roof the same plan reopens and the five-step flow
+below runs. A plan that already has imagery does not download again.
 
 Satellite planning starts in the office by construction: the **New Satellite
 Plan** card in `ScanSetupDialog` is disabled until an imagery-reachability
@@ -99,39 +94,21 @@ Stage 5 scan surface. The log is a collapsible canvas overlay on every step,
 because SSH and launch failures surface during Collect Map and Send, not
 only during the scan.
 
-## Office: plan the job
+## Desk: locate and save
 
-The goal is the fewest operator steps that still produce a field-ready plan.
-The ROI drawn here is a draft — the operator will very likely adjust it on
-the roof — so the save's real product is the cached imagery, not the polygon.
+1. **Start New Scan** → **New Satellite Plan** → building name in the
+   metadata modal.
+2. Search the address on step 1.
+3. **Next** opens the confirm dialog. **Download & Save** caches the site
+   and continues. **Save and close** caches the same 500 m neighbourhood
+   (`PrefetchRequest::forAddress`) and returns to the Dashboard. **Cancel**
+   saves nothing.
 
-1. Dashboard **Plan Job** opens `SatelliteScreen` in planning-only trim:
-   mission and teleop cards hidden, no step header or footer, no Find Robot.
-2. Type a building name (and optionally an address), hit **Go** to geocode,
-   and pan to the roof.
-3. Pick **Rectangle** or **Polygon**, press **Draw ROI**. Rectangle is a
-   press-drag-release across the roof; Polygon takes a click per corner and
-   closes on right-click (this is the Stage 5 drawing model). Either way the
-   result is a `RoiPolygon`. Drag a vertex to move it; click an edge's
-   dimension chip to type an exact length; tap an edge to mark it as a **roof
-   edge** (it turns solid red). **Redraw ROI** starts over; **Clear** removes
-   it.
-4. **Place Robot**, then click where the robot will sit. The marker is
-   selected on placement: a click on it toggles a rotate handle at the arrow
-   tip, a drag on its body translates it, a click anywhere else deselects.
-   Unselected, the arrow is heading information only — it cannot be spun by
-   a careless drag.
-5. **Save Plan** opens the **Confirm Plan** dialog: canvas thumbnail framed
-   on the ROI, every edge length (pinned / roof-edge flags shown), the robot
-   pose, and the imagery about to be cached. **Download & Save** runs the
-   prefetch in place and saves the plan when it completes.
-
-   Every download parameter is derived, not typed: centre = ROI centroid,
-   radius = ROI radius + 60 m (floor 150 m), max zoom 19, World Imagery,
-   live mosaic, imagery no older than 3 years. The knobs still exist — cache
-   radius, max zoom, age window, Esri Clarity, Wayback release — behind a
-   collapsed **Advanced imagery options** disclosure. They are defaulted, not
-   removed.
+   With no ROI yet the disc is 500 m around the located address. A later
+   save that already has an ROI uses the ROI radius plus 60 m, floored at
+   150 m. Max zoom 19, World Imagery, live mosaic, imagery no older than 3
+   years. The knobs — radius, zoom, age, Clarity, Wayback — stay behind
+   **Advanced imagery options**. They are defaulted, not removed.
 
    Zoom selection picks **the highest native zoom whose source imagery is
    within the age window**. It never falls back to older-but-sharper tiles:
