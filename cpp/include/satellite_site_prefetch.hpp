@@ -48,8 +48,19 @@ struct PrefetchRequest {
                                    double roi_radius_m,
                                    const QString& assets_dir);
 
+    /**
+     * Defaults when the operator has located an address but not drawn an
+     * ROI yet. The disc is a fixed neighbourhood around that address —
+     * wide enough to cover the building and its neighbours — and matches
+     * the canvas pan clamp so every cached tile is reachable.
+     */
+    static PrefetchRequest forAddress(const geo::GeoPoint& centroid,
+                                      const QString& assets_dir);
+
     static constexpr int kFieldMarginM = 60;
     static constexpr int kMinRadiusM = 150;
+    /** Address-centred disc. Same radius as the canvas view clamp. */
+    static constexpr int kAddressRadiusM = 500;
     static constexpr int kDefaultMaxZoom = 19;
     static constexpr int kDefaultMaxAgeYears = 3;
 };

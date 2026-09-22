@@ -20,6 +20,18 @@ PrefetchRequest PrefetchRequest::forSite(const geo::GeoPoint& centroid,
     return request;
 }
 
+PrefetchRequest PrefetchRequest::forAddress(const geo::GeoPoint& centroid,
+                                            const QString& assets_dir) {
+    PrefetchRequest request;
+    request.lat = centroid.lat;
+    request.lon = centroid.lon;
+    request.radius_m = kAddressRadiusM;
+    request.max_zoom = kDefaultMaxZoom;
+    request.max_age_years = kDefaultMaxAgeYears;
+    request.assets_dir = assets_dir;
+    return request;
+}
+
 SitePrefetcher::SitePrefetcher(TileService* tiles, QObject* parent)
     : QObject(parent), tiles_(tiles) {
     connect(tiles_, &TileService::tileReady, this,

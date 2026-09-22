@@ -5173,7 +5173,8 @@ void SatelliteScreen::probeImageryReachable(std::function<void(bool)> done) {
 bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view) {
     geo::GeoPoint centroid;
     double roi_radius_m = 0.0;
-    if (!map_->roiExtent(&centroid, &roi_radius_m)) {
+    const bool have_roi = map_->roiExtent(&centroid, &roi_radius_m);
+    if (!have_roi) {
         if (!site_from_view) {
             // Office: without an ROI there is nothing to size the download by.
             appendLog(QStringLiteral(
@@ -5181,10 +5182,9 @@ bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view) {
                 "gets cached for the field"));
             return false;
         }
-        // Field step 1: the ROI is drawn on site (step 3), so the disc is
-        // centred on the located address at the prefetch's radius floor.
+        // Field step 1: no ROI yet. Cache a neighbourhood around the
+        // address the operator just located.
         centroid = geo::GeoPoint{map_->centerLat(), map_->centerLon()};
-        roi_radius_m = 0.0;
     } else {
         map_->fitToRoi();
     }
@@ -5193,7 +5193,8 @@ bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view) {
 
     const QString assets = job_store_.assetsDir(job.id);
     PrefetchRequest request =
-        PrefetchRequest::forSite(centroid, roi_radius_m, assets);
+        have_roi ? PrefetchRequest::forSite(centroid, roi_radius_m, assets)
+                 : PrefetchRequest::forAddress(centroid, assets);
     if (job.imagery_cache.cached) {
         // Re-saving a cached plan: keep whatever layer / release the
         // operator chose the first time unless they open Advanced.
