@@ -242,6 +242,8 @@ private:
         rail has no Draw button to get back with. */
     void maybeRearmRoiDraw();
 
+    /** Re-reads the store into `jobs_` without touching the canvas. */
+    void reloadJobs();
     void refreshJobsCombo(const QString& select_id = QString());
     /** Re-reads the store and rebuilds the combo items WITHOUT loading a
         plan into the canvas. Selection is preserved by id. */

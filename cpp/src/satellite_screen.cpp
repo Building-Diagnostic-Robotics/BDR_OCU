@@ -1070,7 +1070,8 @@ void SatelliteScreen::configureForScan(const Job& job) {
     // never reused across visits. loadJob() only resets on an id change
     // (mid-alignment saves reload the same id and must keep the session).
     resetAlignmentSession();
-    refreshJobsCombo(job.id);  // selects + loads the plan
+    reloadJobs();
+    loadJob(job);
     selected_step_ = computeStep();
     applyModeVisibility();
 }
@@ -1078,7 +1079,7 @@ void SatelliteScreen::configureForScan(const Job& job) {
 void SatelliteScreen::configureForScan(PlanMode mode) {
     planning_only_ = false;
     plan_mode_ = mode;
-    refreshJobsCombo(QString());
+    reloadJobs();
     newJob();
     selected_step_ = computeStep();
     applyModeVisibility();
@@ -4840,6 +4841,10 @@ void SatelliteScreen::setDarkMode(bool dark_mode) {
 }
 
 // ---- Jobs -------------------------------------------------------------------
+
+void SatelliteScreen::reloadJobs() {
+    jobs_ = job_store_.loadAll();
+}
 
 void SatelliteScreen::populateJobsCombo(const QString& select_id) {
     jobs_ = job_store_.loadAll();
