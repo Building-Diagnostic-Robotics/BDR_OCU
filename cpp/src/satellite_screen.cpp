@@ -39,11 +39,9 @@
 
 #include <QApplication>
 #include <QCheckBox>
-#include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
 #include <QDir>
-#include <QDoubleSpinBox>
 #include <QDoubleValidator>
 #include <QEventLoop>
 #include <QFile>
@@ -249,20 +247,6 @@ constexpr double kTeleopAngularSpeed = 1.0;  // rad/s
 // origin — the operator only ever sees meters.
 constexpr int kMeasuredDefaultZoom = 21;
 
-/** Spin display value -> meters, honoring the operator's unit system. */
-double spinToMeters(double display_value) {
-    return UnitsProvider::instance()->isMetric()
-               ? display_value
-               : units::feetToMeters(display_value);
-}
-
-/** Meters -> spin display value. */
-double metersToSpin(double meters) {
-    return UnitsProvider::instance()->isMetric()
-               ? meters
-               : units::metersToFeet(meters);
-}
-
 // ---- Palette (dark = zinc family per MissionMetadataDialog / planner) -------
 constexpr const char* kAccent = "#00BC7D";
 constexpr const char* kWarnAmber = "#F59E0B";
@@ -415,19 +399,6 @@ QWidget* makeFieldRow(const QString& label_text, QWidget* field,
     return row;
 }
 
-QDoubleSpinBox* makeSpin(double min, double max, double step, int decimals,
-                         const QString& suffix) {
-    auto* spin = new QDoubleSpinBox;
-    spin->setObjectName("SatInput");
-    spin->setRange(min, max);
-    spin->setSingleStep(step);
-    spin->setDecimals(decimals);
-    spin->setSuffix(suffix);
-    spin->setKeyboardTracking(false);
-    spin->setFixedHeight(36);
-    return spin;
-}
-
 }  // namespace
 
 SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
@@ -570,26 +541,8 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &SatelliteScreen::onMapCaptured);
 
     // ---- Map <-> rail sync ----
-    connect(map_, &SatelliteMapWidget::roiChanged, this, [this] {
-        const RoiRect roi = map_->roi();
-        // Along/across/heading only describe a rectangle. Once the operator
-        // draws a free polygon the rect mirror is stale, so the fields go
-        // read-only rather than reporting a shape that is no longer on the
-        // canvas — the per-edge chips are the live dimensions there.
-        const bool rectangular = map_->polygon().vertices.size() <= 4;
-        for (QDoubleSpinBox* spin : {roi_length_, roi_width_, roi_heading_}) {
-            spin->blockSignals(true);
-            spin->setEnabled(roi.valid && rectangular &&
-                             !mission_->missionActive());
-        }
-        roi_length_->setValue(metersToSpin(roi.length_m));
-        roi_width_->setValue(metersToSpin(roi.width_m));
-        roi_heading_->setValue(roi.heading_deg);
-        for (QDoubleSpinBox* spin : {roi_length_, roi_width_, roi_heading_}) {
-            spin->blockSignals(false);
-        }
-        refreshStepUi();
-    });
+    connect(map_, &SatelliteMapWidget::roiChanged, this,
+            &SatelliteScreen::refreshStepUi);
     // Closing the polygon (click-near-first / right-click) changes no vertex
     // but does flip the step-3 gate, so the footer must re-evaluate.
     connect(map_, &SatelliteMapWidget::interactionChanged, this,
@@ -608,22 +561,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             setManualOverride(false);
         }
     });
-    // Units toggle: re-suffix + re-display the length fields (values stay
-    // SI in the model; only the presentation flips — house rule).
-    connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
-            [this](Units) {
-                const RoiRect roi = map_->roi();
-                for (QDoubleSpinBox* spin : {roi_length_, roi_width_}) {
-                    spin->blockSignals(true);
-                    spin->setSuffix(QStringLiteral(" ") +
-                                    units::lengthUnitSuffix());
-                }
-                roi_length_->setValue(metersToSpin(roi.length_m));
-                roi_width_->setValue(metersToSpin(roi.width_m));
-                for (QDoubleSpinBox* spin : {roi_length_, roi_width_}) {
-                    spin->blockSignals(false);
-                }
-            });
     // World Imagery is a mosaic: the same roof can be served from different
     // flights at different zooms. Re-check provenance whenever the view moves,
     // but only mark it dirty here — viewChanged fires on every wheel notch and
@@ -637,15 +574,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             canvas_aimed_ = true;
             refreshStepUi();
         }
-        robot_heading_->blockSignals(true);
-        robot_heading_->setEnabled(marker.valid && !mission_->missionActive());
-        robot_heading_->setValue(marker.heading_deg);
-        robot_heading_->blockSignals(false);
-        robot_pos_label_->setText(
-            marker.valid ? QStringLiteral("Robot: %1, %2")
-                               .arg(marker.lat, 0, 'f', 6)
-                               .arg(marker.lon, 0, 'f', 6)
-                         : QStringLiteral("Robot: not placed"));
     });
 
     // ---- ROS telemetry -> map + pills ----
@@ -722,13 +650,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     connect(mission_, &MissionController::missionStateChanged, this,
             [this](bool active) {
                 map_->setEditLocked(active);
-                tool_rect_button_->setEnabled(!active);
-                tool_polygon_button_->setEnabled(!active);
                 refreshScanParamsCard();
-                draw_button_->setEnabled(!active);
-                place_robot_button_->setEnabled(!active);
-                clear_roi_button_->setEnabled(!active);
-                save_button_->setEnabled(!active);
                 top_back_button_->setEnabled(!active);
                 updateAlignCardUi();
                 if (active) {
@@ -1064,7 +986,6 @@ void SatelliteScreen::attemptMetadataPush() {
 }
 
 void SatelliteScreen::configureForScan(const Job& job) {
-    planning_only_ = false;
     plan_mode_ = job.isMeasured() ? PlanMode::Measured : PlanMode::Satellite;
     // A new visit, even to the plan opened last time: the collected map is
     // never reused across visits. loadJob() only resets on an id change
@@ -1077,7 +998,6 @@ void SatelliteScreen::configureForScan(const Job& job) {
 }
 
 void SatelliteScreen::configureForScan(PlanMode mode) {
-    planning_only_ = false;
     plan_mode_ = mode;
     reloadJobs();
     newJob();
@@ -1347,23 +1267,13 @@ void SatelliteScreen::devEnterAlignmentWithDemoSite() {
     canvas_stack_->setCurrentWidget(correspond_page_);
 }
 
-void SatelliteScreen::configureForPlanning() {
-    planning_only_ = true;
-    plan_mode_ = PlanMode::Satellite;
-    refreshJobsCombo(current_job_id_);
-    selected_step_ = computeStep();
-    applyModeVisibility();
-}
-
 void SatelliteScreen::refreshTitle() {
     if (!lbl_title_) {
         return;
     }
     const bool measured = plan_mode_ == PlanMode::Measured;
-    const QString base =
-        planning_only_ ? QStringLiteral("Plan Job")
-                       : (measured ? QStringLiteral("Measured ROI Setup")
-                                   : QStringLiteral("Satellite ROI Setup"));
+    const QString base = measured ? QStringLiteral("Measured ROI Setup")
+                                  : QStringLiteral("Satellite ROI Setup");
     const QString name = job_name_ ? job_name_->text().trimmed() : QString();
     // Frame: "Satellite ROI Setup  — <plan>" with the plan name muted.
     lbl_title_->setTextFormat(Qt::RichText);
@@ -1380,44 +1290,13 @@ void SatelliteScreen::applyModeVisibility() {
     map_->setImageryEnabled(!measured);
     refreshCompass();
     refreshTitle();
-    if (geo_tools_host_) {
-        // Address search / tile download / imagery provenance are geographic
-        // tools — meaningless on the measured (grid) canvas.
-        geo_tools_host_->setVisible(!measured);
-    }
     if (!measured) {
         // Entering (or re-entering) the satellite canvas: re-resolve
         // provenance for whatever view we land on.
         imagery_query_pending_ = true;
     }
-    if (jobs_combo_row_) {
-        // In the scan flow the plan was already chosen in ScanSetupDialog;
-        // the in-screen selector is an office (planning-only) affordance.
-        jobs_combo_row_->setVisible(planning_only_);
-    }
-    // The office is one task — draw, place, save — so it gets neither the
-    // five-step header nor the footer. Find Robot has no robot to find, and
-    // the numeric ROI mirror is redundant with the canvas chips and handles.
-    if (step_header_) {
-        step_header_->setVisible(!planning_only_);
-    }
-    if (footer_bar_) {
-        footer_bar_->setVisible(!planning_only_);
-    }
-    if (find_robot_button_) {
-        find_robot_button_->setVisible(!planning_only_);
-    }
-    if (roi_numeric_host_) {
-        roi_numeric_host_->setVisible(!planning_only_);
-    }
-    if (mission_card_) {
-        mission_card_->setVisible(!planning_only_);
-    }
-    if (teleop_card_) {
-        teleop_card_->setVisible(!planning_only_);
-    }
     // Aligning needs both a robot and real imagery, so the card is hidden on
-    // the measured canvas and in the office planning trim.
+    // the measured canvas.
     updateAlignCardUi();
     // refreshStepUi() first: it clamps selected_step_ when a trim change has
     // made it unavailable, and applyStepVisibility() has to act on the
@@ -1659,7 +1538,7 @@ QWidget* SatelliteScreen::buildStepHeader() {
                 teardownThen([this, step] { setSelectedStep(step); });
                 return;
             }
-            if (step == Step::Alignment && !planning_only_ &&
+            if (step == Step::Alignment &&
                 plan_mode_ == PlanMode::Satellite &&
                 !currentJobImageryCached()) {
                 cacheSiteThenAdvance();
@@ -2568,7 +2447,7 @@ QWidget* SatelliteScreen::buildScanFooter() {
 
 void SatelliteScreen::onNextClicked() {
     const bool field_satellite =
-        !planning_only_ && plan_mode_ == PlanMode::Satellite;
+        plan_mode_ == PlanMode::Satellite;
     if (field_satellite && selected_step_ == Step::SatelliteMap &&
         !currentJobImageryCached()) {
         cacheSiteThenAdvance();
@@ -2595,18 +2474,9 @@ void SatelliteScreen::onNextClicked() {
         refreshStepUi();
     }
     if (selected_step_ == Step::EdgeReview) {
-        if (!planning_only_) {
-            // Field: the launch confirm is the edge review confirm.
-            launchMissionFromEdgeReview();
-            return;
-        }
-        if (!confirmDialog(QStringLiteral("Edges Reviewed"),
-                           edgeReviewSummary(),
-                           QStringLiteral("Confirm"))) {
-            return;
-        }
-        edges_reviewed_ = true;
-        refreshStepUi();
+        // The launch confirm is the edge review confirm.
+        launchMissionFromEdgeReview();
+        return;
     }
     setSelectedStep(nextAvailableStep(selected_step_));
 }
@@ -2667,7 +2537,7 @@ bool SatelliteScreen::stepAvailable(Step step) const {
             return plan_mode_ == PlanMode::Satellite;
         case Step::Alignment:
         case Step::AutonomousScan:
-            return !planning_only_;
+            return true;
         case Step::RoiDefinition:
         case Step::EdgeReview:
             break;
@@ -2793,8 +2663,7 @@ SatelliteScreen::Step SatelliteScreen::nextAvailableStep(Step step) const {
 }
 
 bool SatelliteScreen::correspondPickerWanted(Step step) const {
-    return !planning_only_ && step == Step::Alignment &&
-           plan_mode_ == PlanMode::Satellite;
+    return step == Step::Alignment && plan_mode_ == PlanMode::Satellite;
 }
 
 void SatelliteScreen::syncCanvasPage() {
@@ -2961,16 +2830,14 @@ void SatelliteScreen::refreshStepUi() {
     }
 
     if (next_button_) {
-        const bool scan_step =
-            !planning_only_ && selected_step_ == Step::AutonomousScan;
+        const bool scan_step = selected_step_ == Step::AutonomousScan;
         const Step next = nextAvailableStep(selected_step_);
         const bool has_next =
-            next != selected_step_ && !planning_only_ && !scan_step;
+            next != selected_step_ && !scan_step;
         bool has_prev = false;
         for (int i = int(selected_step_) - 1; i >= 0 && !has_prev; --i) {
             has_prev = stepAvailable(Step(i));
         }
-        has_prev = has_prev && !planning_only_;
         // Step 5 swaps the frame footer for the Stage 5 footer + control bar.
         footer_bar_->setVisible((has_next || has_prev) && !scan_step);
         back_button_->setVisible(has_prev);
@@ -3011,7 +2878,7 @@ void SatelliteScreen::maybeRearmRoiDraw() {
     // cancelInteraction() has already dropped rings of one or two vertices,
     // and a ring of three or more is a usable shape that armPolygonDraw()
     // would wipe, so the gate is exactly "no polygon".
-    if (planning_only_ || selected_step_ != Step::RoiDefinition ||
+    if (selected_step_ != Step::RoiDefinition ||
         map_->polygon().valid() || map_->isDrawing() ||
         map_->isPlacingMarker() || map_->isMeasuring()) {
         return;
@@ -3030,13 +2897,8 @@ void SatelliteScreen::applyStepVisibility() {
     // name came from the chosen plan + metadata modal), step 3 the ROI
     // Definition rail (222:1284), step 4 the edge review card. The office
     // and the measured canvas keep the single authoring card.
-    const bool frame_rail = !planning_only_;
+    const bool frame_rail = true;
     const bool locate_step = frame_rail && step == Step::SatelliteMap;
-    if (plan_card_) {
-        plan_card_->setVisible(!frame_rail && (step == Step::SatelliteMap ||
-                                               step == Step::RoiDefinition ||
-                                               step == Step::EdgeReview));
-    }
     if (search_host_) {
         search_host_->setVisible(locate_step);
         if (locate_step) {
@@ -3078,9 +2940,8 @@ void SatelliteScreen::applyStepVisibility() {
                        : 40);
     }
     if (roi_card_) {
-        const bool roi_step = !planning_only_ &&
-                              (step == Step::RoiDefinition ||
-                               step == Step::EdgeReview);
+        const bool roi_step = step == Step::RoiDefinition ||
+                              step == Step::EdgeReview;
         roi_card_->setVisible(roi_step);
         refreshScanParamsCard();
         if (step == Step::RoiDefinition && !map_->polygon().valid() &&
@@ -3093,7 +2954,7 @@ void SatelliteScreen::applyStepVisibility() {
     // measured variant keeps the rail card (capture + status), since its
     // canvas stays the grid and the point cloud lands straight on it.
     const bool picker_step = correspondPickerWanted(step);
-    const bool scan_step = !planning_only_ && step == Step::AutonomousScan;
+    const bool scan_step = step == Step::AutonomousScan;
     if (rail_scroll_) {
         rail_scroll_->setVisible(!picker_step && !locate_step && !scan_step);
     }
@@ -3122,7 +2983,7 @@ void SatelliteScreen::applyStepVisibility() {
         canvas_tag_->hide();
     }
     if (align_card_) {
-        align_card_->setVisible(!planning_only_ && step == Step::Alignment &&
+        align_card_->setVisible(step == Step::Alignment &&
                                 plan_mode_ == PlanMode::Measured);
     }
     if (teleop_card_) {
@@ -3149,8 +3010,7 @@ QWidget* SatelliteScreen::buildLeftRail() {
     auto* layout = new QVBoxLayout(rail_content);
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(12);
-    plan_card_ = buildPlanCard(rail_content);
-    layout->addWidget(plan_card_);
+    createHiddenPlanFields();
     roi_card_ = buildRoiCard(rail_content);
     layout->addWidget(roi_card_);
     scan_params_card_ = buildScanParamsCard(rail_content);
@@ -3406,251 +3266,18 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
     return page;
 }
 
-QWidget* SatelliteScreen::buildPlanCard(QWidget* parent) {
-    auto* card = new QWidget(parent);
-    card->setObjectName("SatCard");
-    card->setAttribute(Qt::WA_StyledBackground, true);
-    auto* layout = new QVBoxLayout(card);
-    layout->setContentsMargins(16, 14, 16, 16);
-    layout->setSpacing(8);
-    layout->addWidget(makeCardHeader(QStringLiteral(":/assets/exploration/map.svg"),
-                                     QStringLiteral("Plan"), card));
-
-    // Plan selector — office (planning-only) affordance.
-    jobs_combo_ = new QComboBox(card);
-    jobs_combo_->setObjectName("SatInput");
-    jobs_combo_->setFixedHeight(36);
-    connect(jobs_combo_, QOverload<int>::of(&QComboBox::activated), this,
-            [this](int index) {
-                const QString id = jobs_combo_->itemData(index).toString();
-                for (const Job& job : jobs_) {
-                    if (job.id == id) {
-                        plan_mode_ = job.isMeasured() ? PlanMode::Measured
-                                                      : PlanMode::Satellite;
-                        loadJob(job);
-                        applyModeVisibility();
-                        return;
-                    }
-                }
-                newJob();
-            });
-    jobs_combo_row_ = makeFieldRow(QStringLiteral("Saved plan"), jobs_combo_, card);
-    layout->addWidget(jobs_combo_row_);
-
-    job_name_ = new QLineEdit(card);
-    job_name_->setObjectName("SatInput");
-    job_name_->setPlaceholderText(QStringLiteral("Building / job name"));
-    job_name_->setFixedHeight(36);
-    // Step 1's gate reads this field, so the footer has to re-evaluate as it
-    // is typed rather than only on save.
+void SatelliteScreen::createHiddenPlanFields() {
+    // The field rail has no name or address field. The metadata modal
+    // writes the name, the geocoder writes the address, and the step-1
+    // gate reads the name.
+    job_name_ = new QLineEdit(this);
+    job_name_->hide();
     connect(job_name_, &QLineEdit::textChanged, this, [this](const QString&) {
         refreshStepUi();
         refreshTitle();
     });
-    layout->addWidget(job_name_);
-
-    job_address_ = new QLineEdit(card);
-    job_address_->setObjectName("SatInput");
-    job_address_->setPlaceholderText(QStringLiteral("Address (reference)"));
-    job_address_->setFixedHeight(36);
-    layout->addWidget(job_address_);
-
-    // Geographic tools (satellite canvas only).
-    geo_tools_host_ = new QWidget(card);
-    auto* geo_layout = new QVBoxLayout(geo_tools_host_);
-    geo_layout->setContentsMargins(0, 0, 0, 0);
-    geo_layout->setSpacing(8);
-    auto* search_row = new QWidget(geo_tools_host_);
-    auto* search_layout = new QHBoxLayout(search_row);
-    search_layout->setContentsMargins(0, 0, 0, 0);
-    search_layout->setSpacing(8);
-    address_edit_ = new QLineEdit(search_row);
-    address_edit_->setObjectName("SatInput");
-    address_edit_->setPlaceholderText(QStringLiteral("Find address or \"lat, lon\""));
-    address_edit_->setFixedHeight(36);
-    connect(address_edit_, &QLineEdit::returnPressed, this,
-            &SatelliteScreen::onGoToAddress);
-    search_layout->addWidget(address_edit_, 1);
-    auto* go = new QPushButton(QStringLiteral("Go"), search_row);
-    go->setObjectName("SatButton");
-    go->setFixedHeight(36);
-    go->setCursor(Qt::PointingHandCursor);
-    connect(go, &QPushButton::clicked, this, &SatelliteScreen::onGoToAddress);
-    search_layout->addWidget(go);
-    geo_layout->addWidget(search_row);
-    // In the field the operator opens a plan and needs the canvas on the
-    // robot, not on wherever the plan was last panned to in the office. The
-    // seed fix from map collection is the only position we have before the
-    // correspondence fit lands, so it drives this.
-    find_robot_button_ =
-        new QPushButton(QStringLiteral("Find Robot"), geo_tools_host_);
-    find_robot_button_->setObjectName("SatButton");
-    find_robot_button_->setFixedHeight(36);
-    find_robot_button_->setCursor(Qt::PointingHandCursor);
-    connect(find_robot_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::onFindRobot);
-    geo_layout->addWidget(find_robot_button_);
-
-    // Source-imagery provenance. Lives inside geo_tools_host_ so
-    // applyModeVisibility() hides it on the measured canvas for free.
-    imagery_label_ = new QLabel(QStringLiteral("Imagery: —"), geo_tools_host_);
-    imagery_label_->setObjectName("SatFieldLabel");
-    imagery_label_->setWordWrap(true);
-    geo_layout->addWidget(imagery_label_);
-
-    layout->addWidget(geo_tools_host_);
-
-    // ROI drawing, Stage 5 style: shape toggle + one arm button.
-    auto* shape_row = new QWidget(card);
-    auto* shape_layout = new QHBoxLayout(shape_row);
-    shape_layout->setContentsMargins(0, 0, 0, 0);
-    shape_layout->setSpacing(8);
-    tool_rect_button_ = new QPushButton(QStringLiteral("Rectangle"), shape_row);
-    tool_polygon_button_ = new QPushButton(QStringLiteral("Polygon"), shape_row);
-    for (QPushButton* button : {tool_rect_button_, tool_polygon_button_}) {
-        button->setObjectName("SatToggle");
-        button->setCheckable(true);
-        button->setAutoExclusive(true);
-        button->setFixedHeight(32);
-        button->setCursor(Qt::PointingHandCursor);
-        shape_layout->addWidget(button, 1);
-    }
-    tool_rect_button_->setChecked(true);
-    // Switching tools mid-draw re-arms with the new tool so the operator
-    // is never left holding the other shape's cursor.
-    const auto rearmIfDrawing = [this] {
-        if (map_->isDrawing()) {
-            draw_button_->click();
-        }
-    };
-    connect(tool_rect_button_, &QPushButton::clicked, this, rearmIfDrawing);
-    connect(tool_polygon_button_, &QPushButton::clicked, this, rearmIfDrawing);
-    layout->addWidget(shape_row);
-
-    auto* draw_row = new QWidget(card);
-    auto* draw_layout = new QHBoxLayout(draw_row);
-    draw_layout->setContentsMargins(0, 0, 0, 0);
-    draw_layout->setSpacing(8);
-    draw_button_ = new QPushButton(QStringLiteral("Draw ROI"), draw_row);
-    clear_roi_button_ = new QPushButton(QStringLiteral("Clear"), draw_row);
-    for (QPushButton* button : {draw_button_, clear_roi_button_}) {
-        button->setObjectName("SatButton");
-        button->setFixedHeight(36);
-        button->setCursor(Qt::PointingHandCursor);
-    }
-    draw_layout->addWidget(draw_button_, 2);
-    draw_layout->addWidget(clear_roi_button_, 1);
-    connect(draw_button_, &QPushButton::clicked, this, [this] {
-        if (map_->isDrawing()) {
-            map_->cancelInteraction();
-            return;
-        }
-        if (tool_polygon_button_->isChecked()) {
-            map_->armPolygonDraw();
-            appendLog(QStringLiteral(
-                "[plan] click each roof corner in order; right-click to "
-                "close"));
-        } else {
-            map_->armRectangleDraw();
-            appendLog(QStringLiteral(
-                "[plan] drag across the roof from one corner to the "
-                "opposite corner"));
-        }
-    });
-    connect(clear_roi_button_, &QPushButton::clicked, this, [this] {
-        map_->cancelInteraction();
-        map_->setRoi(RoiRect{});
-        map_->clearPolygon();
-    });
-    connect(map_, &SatelliteMapWidget::interactionChanged, this,
-            &SatelliteScreen::refreshDrawButton);
-    connect(map_, &SatelliteMapWidget::roiChanged, this,
-            &SatelliteScreen::refreshDrawButton);
-    layout->addWidget(draw_row);
-
-    place_robot_button_ = new QPushButton(QStringLiteral("Place Robot"), card);
-    place_robot_button_->setObjectName("SatButton");
-    place_robot_button_->setFixedHeight(36);
-    place_robot_button_->setCursor(Qt::PointingHandCursor);
-    connect(place_robot_button_, &QPushButton::clicked, this, [this] {
-        map_->armMarkerPlacement();
-        appendLog(QStringLiteral(
-            "[plan] click the canvas where the robot physically sits; "
-            "click the marker to rotate it, drag to move it"));
-    });
-    layout->addWidget(place_robot_button_);
-
-    roi_numeric_host_ = new QWidget(card);
-    auto* numeric_layout = new QVBoxLayout(roi_numeric_host_);
-    numeric_layout->setContentsMargins(0, 0, 0, 0);
-    numeric_layout->setSpacing(8);
-    const QString length_suffix =
-        QStringLiteral(" ") + units::lengthUnitSuffix();
-    roi_length_ = makeSpin(2.0, 2000.0, 0.5, 1, length_suffix);
-    roi_width_ = makeSpin(2.0, 2000.0, 0.5, 1, length_suffix);
-    roi_heading_ = makeSpin(0.0, 359.9, 1.0, 1, QStringLiteral(" °"));
-    roi_heading_->setWrapping(true);
-    robot_heading_ = makeSpin(0.0, 359.9, 1.0, 1, QStringLiteral(" °"));
-    robot_heading_->setWrapping(true);
-    numeric_layout->addWidget(
-        makeFieldRow(QStringLiteral("ROI along"), roi_length_, roi_numeric_host_));
-    numeric_layout->addWidget(
-        makeFieldRow(QStringLiteral("ROI across"), roi_width_, roi_numeric_host_));
-    numeric_layout->addWidget(makeFieldRow(QStringLiteral("ROI heading"),
-                                           roi_heading_, roi_numeric_host_));
-    numeric_layout->addWidget(makeFieldRow(QStringLiteral("Robot heading"),
-                                           robot_heading_, roi_numeric_host_));
-    layout->addWidget(roi_numeric_host_);
-
-    const auto pushRoi = [this] {
-        RoiRect roi = map_->roi();
-        if (!roi.valid) {
-            return;
-        }
-        // Spins display the operator's units; the model stays SI.
-        roi.length_m = spinToMeters(roi_length_->value());
-        roi.width_m = spinToMeters(roi_width_->value());
-        roi.heading_deg = roi_heading_->value();
-        map_->setRoi(roi);
-    };
-    connect(roi_length_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, pushRoi);
-    connect(roi_width_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, pushRoi);
-    connect(roi_heading_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, pushRoi);
-    connect(robot_heading_,
-            QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-            [this](double value) {
-                geo::GeoPose marker = map_->marker();
-                if (marker.valid) {
-                    marker.heading_deg = value;
-                    map_->setMarker(marker);
-                }
-            });
-
-    robot_pos_label_ = new QLabel(QStringLiteral("Robot: not placed"), card);
-    robot_pos_label_->setObjectName("SatFieldLabel");
-    robot_pos_label_->setWordWrap(true);
-    layout->addWidget(robot_pos_label_);
-
-    auto* edge_hint = new QLabel(
-        QStringLiteral("Tap an ROI edge to mark it as a roof edge — red "
-                       "edges are physical fall hazards and get a larger "
-                       "setback."),
-        card);
-    edge_hint->setObjectName("SatFieldLabel");
-    edge_hint->setWordWrap(true);
-    layout->addWidget(edge_hint);
-
-    save_button_ = new QPushButton(QStringLiteral("Save Plan"), card);
-    save_button_->setObjectName("SatButton");
-    save_button_->setFixedHeight(36);
-    save_button_->setCursor(Qt::PointingHandCursor);
-    connect(save_button_, &QPushButton::clicked, this,
-            &SatelliteScreen::saveJob);
-    layout->addWidget(save_button_);
-    return card;
+    job_address_ = new QLineEdit(this);
+    job_address_->hide();
 }
 
 QWidget* SatelliteScreen::buildSearchBar(QWidget* parent) {
@@ -4155,12 +3782,8 @@ void SatelliteScreen::refreshScanParamsCard() {
     // Office: rides with the plan card. Field: steps 3-4 beside the ROI
     // card. Either way only once there is a closed ROI to parameterise.
     const Step step = selected_step_;
-    const bool on_step = planning_only_
-                             ? (step == Step::SatelliteMap ||
-                                step == Step::RoiDefinition ||
-                                step == Step::EdgeReview)
-                             : (step == Step::RoiDefinition ||
-                                step == Step::EdgeReview);
+    const bool on_step = step == Step::RoiDefinition ||
+                         step == Step::EdgeReview;
     const bool closed = map_->polygon().valid() && !map_->isDrawing();
     scan_params_card_->setVisible(on_step && closed);
     const bool editable = !mission_->missionActive();
@@ -4324,21 +3947,6 @@ void SatelliteScreen::refreshCompass() {
             ? QStringLiteral("North up")
             : QStringLiteral("Bearing %1° — click to reset to north")
                   .arg(bearing, 0, 'f', 0));
-}
-
-void SatelliteScreen::refreshDrawButton() {
-    if (!draw_button_) {
-        return;
-    }
-    if (map_->isDrawing()) {
-        draw_button_->setText(tool_polygon_button_->isChecked()
-                                  ? QStringLiteral("Drawing… (right-click to close)")
-                                  : QStringLiteral("Drawing… (drag)"));
-        return;
-    }
-    draw_button_->setText(map_->polygon().valid()
-                              ? QStringLiteral("Redraw ROI")
-                              : QStringLiteral("Draw ROI"));
 }
 
 QWidget* SatelliteScreen::buildTeleopCard(QWidget* parent) {
@@ -4846,57 +4454,6 @@ void SatelliteScreen::reloadJobs() {
     jobs_ = job_store_.loadAll();
 }
 
-void SatelliteScreen::populateJobsCombo(const QString& select_id) {
-    jobs_ = job_store_.loadAll();
-    jobs_combo_->clear();
-    jobs_combo_->addItem(QStringLiteral("— unsaved plan —"), QString());
-    // PLANNED first, then a separator, then COMPLETED (newest scan first) —
-    // the same split Scan Setup shows. loadAll() is updated-desc already.
-    int select_index = 0;
-    auto add = [&](const Job& job) {
-        jobs_combo_->addItem(job.name.isEmpty() ? job.id : job.name, job.id);
-        if (!select_id.isEmpty() && job.id == select_id) {
-            select_index = jobs_combo_->count() - 1;
-        }
-    };
-    for (const Job& job : jobs_) {
-        if (!job.executed()) {
-            add(job);
-        }
-    }
-    QVector<const Job*> completed;
-    for (const Job& job : jobs_) {
-        if (job.executed()) {
-            completed.append(&job);
-        }
-    }
-    if (!completed.isEmpty()) {
-        std::sort(completed.begin(), completed.end(),
-                  [](const Job* a, const Job* b) {
-                      return a->last_executed_at > b->last_executed_at;
-                  });
-        jobs_combo_->insertSeparator(jobs_combo_->count());
-        for (const Job* job : completed) {
-            add(*job);
-        }
-    }
-    jobs_combo_->setCurrentIndex(select_index);
-}
-
-void SatelliteScreen::refreshJobsCombo(const QString& select_id) {
-    populateJobsCombo(select_id);
-    const QString id = jobs_combo_->currentData().toString();
-    if (id.isEmpty()) {
-        return;
-    }
-    for (const Job& job : jobs_) {
-        if (job.id == id) {
-            loadJob(job);
-            return;
-        }
-    }
-}
-
 void SatelliteScreen::markCurrentPlanCompleted() {
     if (current_job_id_.isEmpty()) {
         return;  // unsaved plan — nothing on disk to archive
@@ -4927,9 +4484,7 @@ void SatelliteScreen::markCurrentPlanCompleted() {
                       .arg(pruned.size())
                       .arg(pruned.join(QStringLiteral(", "))));
     }
-    // Rebuild the office combo (hidden in the field) without reloading the
-    // canvas — teardown owns the screen state from here.
-    populateJobsCombo(id);
+    reloadJobs();
 }
 
 void SatelliteScreen::loadJob(const Job& job) {
@@ -5010,7 +4565,6 @@ void SatelliteScreen::newJob() {
     tiles_->resetToSharedCache();
     applySiteViewBounds(TileService::SiteManifest{});
     current_job_id_.clear();
-    jobs_combo_->setCurrentIndex(0);
     job_name_->clear();
     job_address_->clear();
     map_->setRoi(RoiRect{});
@@ -5076,10 +4630,14 @@ bool SatelliteScreen::persistJob(const Job& job, bool reload) {
         return false;
     }
     current_job_id_ = job.id;
+    reloadJobs();
     if (reload) {
-        refreshJobsCombo(job.id);
-    } else {
-        populateJobsCombo(job.id);
+        for (const Job& stored : jobs_) {
+            if (stored.id == job.id) {
+                loadJob(stored);
+                break;
+            }
+        }
     }
     return true;
 }
@@ -5101,68 +4659,6 @@ void SatelliteScreen::adoptImageryManifest(
     // offline pyramid they just paid for, capped where it ends.
     applyImageryManifest(manifest, job_store_.assetsDir(job.id));
     applySiteViewBounds(manifest);
-}
-
-void SatelliteScreen::saveJob() {
-    if (job_name_->text().trimmed().isEmpty()) {
-        appendLog(QStringLiteral("[plan] give the plan a name before saving"));
-        job_name_->setFocus();
-        return;
-    }
-    map_->cancelInteraction();
-    Job job = jobFromRail();
-    // An operator Save is a statement of intent to scan this plan again:
-    // a COMPLETED plan returns to PLANNED. (jobFromRail carries the stamp
-    // forward for the non-operator saves — GPS, alignment, prefetch.)
-    job.last_executed_at = QDateTime();
-
-    if (plan_mode_ == PlanMode::Measured) {
-        // A measured plan was never drawn against imagery: geometry only.
-        if (persistJob(job)) {
-            appendLog(QStringLiteral("[plan] saved '%1'").arg(job.name));
-        }
-        return;
-    }
-    if (planning_only_) {
-        // Office: the save IS the imagery step.
-        saveSatelliteWithImagery(job);
-        return;
-    }
-    if (job.imagery_cache.cached) {
-        // Field edit of a plan that already carries its site pyramid: the
-        // roof has no internet, and a geometry tweak must never fetch.
-        if (persistJob(job)) {
-            appendLog(QStringLiteral("[plan] saved '%1'").arg(job.name));
-        }
-        return;
-    }
-    // Field, satellite, nothing cached — the plan was created on site. Whether
-    // it can become field-ready is a connectivity question, not a trim one:
-    // a laptop on hotspot in the parking lot can cache the site right here.
-    save_button_->setEnabled(false);
-    save_button_->setText(QStringLiteral("Checking connection…"));
-    probeImageryReachable([this, job](bool online) {
-        save_button_->setEnabled(true);
-        save_button_->setText(QStringLiteral("Save Plan"));
-        if (online) {
-            saveSatelliteWithImagery(job);
-            return;
-        }
-        if (persistJob(job)) {
-            appendLog(QStringLiteral(
-                          "[plan] saved '%1' WITHOUT imagery — no connection; "
-                          "3D Alignment needs the site cached once")
-                          .arg(job.name));
-            BdrMessageBox::warning(
-                this, QStringLiteral("Saved without imagery"),
-                QStringLiteral(
-                    "No internet connection, so the satellite site could not "
-                    "be cached with this plan.\n\n3D Alignment needs that "
-                    "cached site image. Re-save this plan once the laptop has "
-                    "a connection (hotspot is fine) and it will download "
-                    "then."));
-        }
-    });
 }
 
 void SatelliteScreen::probeImageryReachable(std::function<void(bool)> done) {
@@ -5273,12 +4769,8 @@ bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view,
 
 // ---- Navigation -------------------------------------------------------------
 
-void SatelliteScreen::onGoToAddress() {
-    goToAddress(address_edit_->text(), QString());
-}
-
 void SatelliteScreen::refreshImageryInfo() {
-    if (!imagery_label_ || !imagery_query_pending_) {
+    if (!imagery_query_pending_) {
         return;
     }
     if (plan_mode_ == PlanMode::Measured) {
@@ -5295,19 +4787,7 @@ void SatelliteScreen::refreshImageryInfo() {
     tiles_->imageryInfoAt(
         map_->centerLat(), map_->centerLon(), zoom,
         [this, zoom](ImageryInfo info) {
-            if (!imagery_label_) {
-                return;
-            }
-            // Always set an explicit colour rather than clearing the
-            // stylesheet: an emptied inline sheet does not reliably repolish
-            // back to the card's #SatFieldLabel rule (same trap applyTheme's
-            // repolish sweep exists for).
-            const QString normal_color =
-                QStringLiteral("color: %1;").arg(mutedColor(dark_mode_));
             if (!info.valid) {
-                imagery_label_->setText(
-                    QStringLiteral("Imagery: capture date unavailable"));
-                imagery_label_->setStyleSheet(normal_color);
                 if (layer_chip_) {
                     layer_chip_->setToolTip(
                         QStringLiteral("Imagery capture date unavailable"));
@@ -5336,10 +4816,6 @@ void SatelliteScreen::refreshImageryInfo() {
             if (age >= 0) {
                 detail += QStringLiteral(" · %1 yr old").arg(age);
             }
-            imagery_label_->setText(QStringLiteral("Imagery: %1").arg(detail));
-            imagery_label_->setStyleSheet(
-                stale ? QStringLiteral("color: %1;").arg(QLatin1String(kAmber))
-                      : normal_color);
             if (layer_chip_) {
                 // Step 1 has no rail: the provenance rides the layer chip as
                 // its tooltip; the chip text stays the layer name (238:4537).

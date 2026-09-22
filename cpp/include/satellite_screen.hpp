@@ -45,8 +45,6 @@
 #include <QWidget>
 
 class QCheckBox;
-class QComboBox;
-class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -89,8 +87,6 @@ public:
     /** Names a fresh (unsaved) plan — the field rail carries no name field,
         so the metadata modal's building name is the plan name. */
     void setJobName(const QString& name);
-    /** Office preplanning trim: mission/teleop hidden, Send unavailable. */
-    void configureForPlanning();
 
     /** Dev screenshot hook: seeds a demo ROI (roof edges marked) + robot
         marker so canvas rendering can be verified headlessly. */
@@ -206,7 +202,9 @@ private:
     QWidget* buildStepHeader();
     QWidget* buildFooterBar();
     QWidget* buildLeftRail();
-    QWidget* buildPlanCard(QWidget* parent);
+    /** Hidden name and address fields. The rail has neither; the metadata
+        modal and the geocoder write them, and the step gate reads the name. */
+    void createHiddenPlanFields();
     QWidget* buildAlignCard(QWidget* parent);
     QWidget* buildCorrespondPage();
     /** Top-bar title: trim name plus the plan name (frame: "Satellite ROI
@@ -244,10 +242,6 @@ private:
 
     /** Re-reads the store into `jobs_` without touching the canvas. */
     void reloadJobs();
-    void refreshJobsCombo(const QString& select_id = QString());
-    /** Re-reads the store and rebuilds the combo items WITHOUT loading a
-        plan into the canvas. Selection is preserved by id. */
-    void populateJobsCombo(const QString& select_id);
     /**
      * Mission finalized with data on disk: stamp the current plan
      * `last_executed_at` (moves it to COMPLETED in Scan Setup) and prune
@@ -258,14 +252,6 @@ private:
     void markCurrentPlanCompleted();
     void loadJob(const Job& job);
     void newJob();
-    /**
-     * Save Plan. In the office trim on the satellite canvas this is the
-     * imagery step: it frames the ROI, opens SatellitePlanConfirmDialog, and
-     * the download runs as part of saving. Everywhere else (field, measured)
-     * it persists geometry only — there is no internet on the roof, and a
-     * field edit must never try to fetch.
-     */
-    void saveJob();
     /**
      * The imagery save: frames the ROI, opens SatellitePlanConfirmDialog,
      * and the site prefetch runs as part of saving. Office always; field
@@ -296,10 +282,6 @@ private:
                               const TileService::SiteManifest& manifest);
     /** Canvas tool stack: zoom, fit to ROI, ruler. */
     QWidget* buildCanvasTools(QWidget* parent);
-    /** Relabels the draw button for the armed tool / drawing state. */
-    void refreshDrawButton();
-
-    void onGoToAddress();
     /** Recentres on the best known robot position: confirmed anchor, else
         the map-collection GPS seed, else the saved plan's seed. */
     void onFindRobot();
@@ -565,33 +547,9 @@ private:
     // full-width two-pane picker with no side cards.
     QWidget* rail_scroll_ = nullptr;
 
-    // Plan card.
-    QWidget* plan_card_ = nullptr;
-    QComboBox* jobs_combo_ = nullptr;
-    QWidget* jobs_combo_row_ = nullptr;
+    // Hidden. The metadata modal writes the name, the geocoder the address.
     QLineEdit* job_name_ = nullptr;
     QLineEdit* job_address_ = nullptr;
-    QWidget* geo_tools_host_ = nullptr;  // address search + provenance (geo-only)
-    QLineEdit* address_edit_ = nullptr;
-    // ROI drawing follows the Stage 5 pattern: pick a shape tool, one button
-    // arms it ("Draw ROI" -> "Drawing…" -> "Redraw ROI"). The shape toggles
-    // are checkable and mutually exclusive.
-    QPushButton* tool_rect_button_ = nullptr;
-    QPushButton* tool_polygon_button_ = nullptr;
-    QPushButton* draw_button_ = nullptr;
-    QPushButton* place_robot_button_ = nullptr;
-    QPushButton* clear_roi_button_ = nullptr;
-    // Numeric ROI/heading mirror. Hidden in the office trim, where the
-    // canvas chips and handles are the whole editing surface.
-    QWidget* roi_numeric_host_ = nullptr;
-    QDoubleSpinBox* roi_length_ = nullptr;
-    QDoubleSpinBox* roi_width_ = nullptr;
-    QDoubleSpinBox* roi_heading_ = nullptr;
-    QDoubleSpinBox* robot_heading_ = nullptr;
-    QLabel* robot_pos_label_ = nullptr;
-    QPushButton* find_robot_button_ = nullptr;
-    QLabel* imagery_label_ = nullptr;  // source capture date / GSD (geo only)
-    QPushButton* save_button_ = nullptr;
 
     // Field step 1 — no rail; the floating address search (Figma 238:4509)
     // and the layer / provenance chip (238:4531) float over the canvas.
@@ -915,7 +873,6 @@ private:
     bool view_initialized_ = false;
 
     PlanMode plan_mode_ = PlanMode::Satellite;
-    bool planning_only_ = false;
 
     // Which step the rail is showing. Display state, seeded from
     // computeStep() and moved only by the footer action or a chip click —

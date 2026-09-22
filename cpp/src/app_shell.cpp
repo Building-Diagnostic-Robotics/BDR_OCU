@@ -968,7 +968,8 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                             SatelliteScreen::PlanMode::Satellite);
                     }
                 } else if (shot_mode == QStringLiteral("plan")) {
-                    stage6_->configureForPlanning();
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
                     stage6_->devSeedDemoPlan();
                     stage6_->devSelectMarker();
                     // BDR_DEV_STAGE6_SHOT_FIT=1: frame the demo ROI the way
@@ -987,7 +988,8 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     // alongside the screen shot. Deferred until the stage
                     // has been laid out, so the canvas thumbnail is the
                     // real canvas and not a pre-layout stub.
-                    stage6_->configureForPlanning();
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
                     stage6_->devSeedDemoPlan();
                     QString dialog_path = shot_path;
                     dialog_path.replace(QStringLiteral(".png"),
@@ -998,7 +1000,8 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                         }
                     });
                 } else {
-                    stage6_->configureForPlanning();
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
                 }
             }
             goToStage6();
@@ -1721,14 +1724,6 @@ void AppShellWindow::ensureStage3() {
     connect(stage3_, &DashboardScreen::runDiagnosticsRequested, this, &AppShellWindow::goToStage2);
     connect(stage3_, &DashboardScreen::startNewScanRequested, this, &AppShellWindow::onStartNewScan);
     connect(stage3_, &DashboardScreen::viewRecordingsRequested, this, &AppShellWindow::onUploadDataRequested);
-    connect(stage3_, &DashboardScreen::planJobRequested, this, [this]() {
-        // Office preplanning: planning-only trim, no Send/mission surface.
-        ensureStage6();
-        if (stage6_) {
-            stage6_->configureForPlanning();
-        }
-        goToStage6();
-    });
     // Mirror the dashboard's MQTT battery state onto the Stage 4 /
     // Stage 5 top-bar pills.  Dashboard owns the subprocess + JSON
     // parsing; AppShell only caches the latest sample and pushes it
