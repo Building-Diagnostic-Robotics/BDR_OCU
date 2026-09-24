@@ -26,6 +26,7 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QStackedWidget>
 #include <QSvgRenderer>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -40,6 +41,29 @@ constexpr int kDialogFixedWidth = 580;
 constexpr int kPlanRowHeight = 64;
 constexpr int kPlanListMaxVisible = 4;
 constexpr int kModeCardHeight = 150;
+constexpr int kPageChoose = 0;
+constexpr int kPageSaved = 1;
+constexpr int kPageNew = 2;
+
+/** Reports the current page, so the dialog shrinks when the operator leaves
+ *  the plan list. QStackedWidget's own hint is the tallest page. */
+class CurrentPageStack : public QStackedWidget {
+public:
+    using QStackedWidget::QStackedWidget;
+
+    QSize sizeHint() const override {
+        if (QWidget* page = currentWidget()) {
+            return page->sizeHint();
+        }
+        return QStackedWidget::sizeHint();
+    }
+    QSize minimumSizeHint() const override {
+        if (QWidget* page = currentWidget()) {
+            return page->minimumSizeHint();
+        }
+        return QStackedWidget::minimumSizeHint();
+    }
+};
 
 // Brand hues for the two plan modes. These are borders, icon tints and chip
 // fills, so they stay vivid in both themes. `brandText` is the variant to use
@@ -223,10 +247,12 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
     header_text->setSpacing(2);
     auto* title = new QLabel(QStringLiteral("Start New Scan"), this);
     title->setObjectName("SetupTitle");
+    title_ = title;
     header_text->addWidget(title);
     auto* subtitle = new QLabel(
-        QStringLiteral("Choose a saved plan or start a new one"), this);
+        QStringLiteral("Open a saved plan or start a new one"), this);
     subtitle->setObjectName("SetupSubtitle");
+    subtitle_ = subtitle;
     header_text->addWidget(subtitle);
     header_row->addLayout(header_text, 1);
 
@@ -258,39 +284,52 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
                   return a.last_executed_at > b.last_executed_at;
               });
 
+    pages_ = new CurrentPageStack(this);
+    root->addWidget(pages_);
+
+    auto* choose = new QWidget(pages_);
+    auto* choose_row = new QHBoxLayout(choose);
+    choose_row->setContentsMargins(0, 0, 0, 0);
+    choose_row->setSpacing(16);
+    auto* saved_card = buildModeCard(
+        choose, QStringLiteral("SetupCardSaved"),
+        QString::fromLatin1(kAccentBlue),
+        QStringLiteral(":/assets/dashboard/plan_job.svg"),
+        QStringLiteral("Saved Scan"),
+        QStringLiteral("Open a plan already\non this laptop"));
+    connect(saved_card, &QPushButton::clicked, this,
+            [this] { showPage(kPageSaved); });
+    choose_row->addWidget(saved_card, 1);
+    auto* new_card = buildModeCard(
+        choose, QStringLiteral("SetupCardNew"),
+        QString::fromLatin1(kAccentGreen),
+        QStringLiteral(":/assets/scansetup/new.svg"),
+        QStringLiteral("New Scan"),
+        QStringLiteral("Measured grid or\nsatellite imagery"));
+    connect(new_card, &QPushButton::clicked, this,
+            [this] { showPage(kPageNew); });
+    choose_row->addWidget(new_card, 1);
+    pages_->addWidget(choose);
+
+    auto* saved = new QWidget(pages_);
+    auto* saved_layout = new QVBoxLayout(saved);
+    saved_layout->setContentsMargins(0, 0, 0, 0);
+    saved_layout->setSpacing(16);
     planned_.completed = false;
     completed_.completed = true;
     buildPlanSection(planned_, QStringLiteral("SAVED PLANS"), planned, false,
-                     root);
+                     saved_layout);
     buildPlanSection(completed_, QStringLiteral("COMPLETED"), completed, true,
-                     root);
-
-    // "or" divider — two hairlines around muted text.
-    divider_ = new QWidget(this);
-    auto* divider_row = new QHBoxLayout(divider_);
-    divider_row->setContentsMargins(0, 0, 0, 0);
-    divider_row->setSpacing(12);
-    auto make_line = [this]() {
-        auto* line = new QFrame(divider_);
-        line->setObjectName("SetupDividerLine");
-        line->setFrameShape(QFrame::HLine);
-        line->setFixedHeight(1);
-        return line;
-    };
-    divider_row->addWidget(make_line(), 1);
-    auto* divider_label =
-        new QLabel(QStringLiteral("or start from scratch"), divider_);
-    divider_label->setObjectName("SetupDividerLabel");
-    divider_row->addWidget(divider_label, 0);
-    divider_row->addWidget(make_line(), 1);
-    root->addWidget(divider_);
+                     saved_layout);
+    pages_->addWidget(saved);
     refreshSectionChrome();
 
-    // ---- Mode cards ----
-    auto* cards_row = new QHBoxLayout();
+    auto* fresh = new QWidget(pages_);
+    auto* cards_row = new QHBoxLayout(fresh);
+    cards_row->setContentsMargins(0, 0, 0, 0);
     cards_row->setSpacing(16);
     auto* measured_card = buildModeCard(
-        this, QStringLiteral("SetupCardMeasured"),
+        fresh, QStringLiteral("SetupCardMeasured"),
         QString::fromLatin1(kAccentGreen),
         QStringLiteral(":/assets/scansetup/measured.svg"),
         QStringLiteral("Measured ROI Scan"),
@@ -304,7 +343,7 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
     satellite_description_text_ =
         QStringLiteral("Plan on satellite imagery\nof the site");
     satellite_card_ = buildModeCard(
-        this, QStringLiteral("SetupCardSatellite"),
+        fresh, QStringLiteral("SetupCardSatellite"),
         QString::fromLatin1(kAccentBlue),
         QStringLiteral(":/assets/scansetup/satellite.svg"),
         QStringLiteral("Satellite ROI Scan"), satellite_description_text_);
@@ -320,10 +359,17 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
         accept();
     });
     cards_row->addWidget(satellite_card_, 1);
-    root->addLayout(cards_row);
+    pages_->addWidget(fresh);
 
-    // ---- Footer ----
     auto* footer_row = new QHBoxLayout();
+    back_button_ = new QPushButton(QStringLiteral("Back"), this);
+    back_button_->setObjectName("SetupCancel");
+    back_button_->setCursor(Qt::PointingHandCursor);
+    back_button_->setFixedHeight(40);
+    back_button_->hide();
+    connect(back_button_, &QPushButton::clicked, this,
+            [this] { showPage(kPageChoose); });
+    footer_row->addWidget(back_button_);
     footer_row->addStretch(1);
     auto* cancel = new QPushButton(QStringLiteral("Cancel"), this);
     cancel->setObjectName("SetupCancel");
@@ -332,6 +378,8 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
     footer_row->addWidget(cancel);
     root->addLayout(footer_row);
+
+    showPage(hasSavedPlans() ? kPageChoose : kPageNew);
 }
 
 void ScanSetupDialog::buildPlanSection(PlanSection& section,
@@ -420,9 +468,49 @@ void ScanSetupDialog::refreshSectionChrome() {
     completed_.host->setVisible(completed_.count > 0);
     completed_.header->setText(
         QStringLiteral("COMPLETED (%1)").arg(completed_.count));
-    divider_->setVisible(planned_.count > 0 || completed_.count > 0);
     adjustSize();
 }
+
+bool ScanSetupDialog::hasSavedPlans() const {
+    return planned_.count + completed_.count > 0;
+}
+
+void ScanSetupDialog::showPage(int page) {
+    if (!pages_ || !title_ || !subtitle_) {
+        return;
+    }
+    pages_->setCurrentIndex(page);
+    if (page == kPageSaved) {
+        title_->setText(QStringLiteral("Saved Scans"));
+        subtitle_->setText(QStringLiteral("Choose a plan to open"));
+    } else if (page == kPageNew) {
+        title_->setText(QStringLiteral("New Scan"));
+        subtitle_->setText(QStringLiteral("Choose how to plan the roof"));
+    } else {
+        title_->setText(QStringLiteral("Start New Scan"));
+        subtitle_->setText(
+            QStringLiteral("Open a saved plan or start a new one"));
+    }
+    if (back_button_) {
+        back_button_->setVisible(page != kPageChoose && hasSavedPlans());
+    }
+    pages_->updateGeometry();
+    recenter();
+}
+
+void ScanSetupDialog::recenter() {
+    adjustSize();
+    QWidget* host = parentWidget();
+    if (!host) {
+        return;
+    }
+    move(host->mapToGlobal(QPoint((host->width() - width()) / 2,
+                                  (host->height() - height()) / 2)));
+}
+
+void ScanSetupDialog::devShowSaved() { showPage(kPageSaved); }
+
+void ScanSetupDialog::devShowNew() { showPage(kPageNew); }
 
 void ScanSetupDialog::onDeletePlanClicked(const Job& job, QWidget* row) {
     const QString name = job.name.isEmpty() ? job.id : job.name;
@@ -450,6 +538,9 @@ void ScanSetupDialog::onDeletePlanClicked(const Job& job, QWidget* row) {
     row->deleteLater();
     section.count = std::max(section.count - 1, 0);
     refreshSectionChrome();
+    if (!hasSavedPlans()) {
+        showPage(kPageNew);
+    }
     emit planDeleted(job.id);
 }
 

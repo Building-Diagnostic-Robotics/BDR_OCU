@@ -3,10 +3,9 @@
  * @brief "Start New Scan" mode/plan selector modal.
  *
  * Shown by `AppShellWindow::onStartNewScan` BEFORE the New Scan Information
- * modal. Presents the operator's saved plans (unexecuted first) and the two
- * ways to start from scratch — Measured ROI (CAD grid, tape measurements)
- * or Satellite ROI (imagery). Picking a saved plan skips the mode question
- * entirely: the plan carries its own mode.
+ * modal. The first screen offers Saved Scan or New Scan. Saved Scan is the
+ * plan list (unexecuted first, completed collapsed). New Scan is the two
+ * mode cards. With no saved plans the dialog opens on New Scan.
  *
  * No Figma frame exists for this surface; it is derived value-for-value
  * from MissionMetadataDialog (Figma 194:152 — zinc palette, #00BC7D accent,
@@ -41,6 +40,7 @@ class QNetworkAccessManager;
 class QVBoxLayout;
 class QNetworkReply;
 class QPushButton;
+class QStackedWidget;
 class QTimer;
 
 namespace f2c_cpp {
@@ -66,6 +66,9 @@ public:
 
     /** Dev shot only: expand/collapse the COMPLETED disclosure. */
     void devSetCompletedOpen(bool open);
+    /** Dev shot only: show the saved-plan list or the new-scan cards. */
+    void devShowSaved();
+    void devShowNew();
 
     static constexpr int kProbeIntervalMs = 5000;
     static constexpr int kProbeTimeoutMs = 4000;
@@ -91,6 +94,9 @@ private:
     };
 
     void buildUi(const QVector<Job>& jobs);
+    void showPage(int page);
+    void recenter();
+    bool hasSavedPlans() const;
     void buildPlanSection(PlanSection& section, const QString& title,
                           const QVector<Job>& jobs, bool collapsible,
                           QVBoxLayout* root);
@@ -114,8 +120,11 @@ private:
 
     PlanSection planned_;
     PlanSection completed_;
-    QWidget* divider_ = nullptr;  // "or start from scratch"; hidden when
-                                  // both sections are empty
+
+    QLabel* title_ = nullptr;
+    QLabel* subtitle_ = nullptr;
+    QStackedWidget* pages_ = nullptr;
+    QPushButton* back_button_ = nullptr;
 
     QPushButton* satellite_card_ = nullptr;
     QLabel* satellite_title_ = nullptr;

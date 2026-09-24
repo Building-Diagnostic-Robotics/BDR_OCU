@@ -877,13 +877,34 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                 dialog->show();
                 QCoreApplication::processEvents();
                 dialog->grab().save(shot_path);
+                dialog->devShowSaved();
+                QCoreApplication::processEvents();
+                QString saved_path = shot_path;
+                saved_path.replace(QStringLiteral(".png"),
+                                   QStringLiteral("_saved.png"));
+                dialog->grab().save(saved_path);
                 dialog->devSetCompletedOpen(true);
                 QCoreApplication::processEvents();
                 QString open_path = shot_path;
                 open_path.replace(QStringLiteral(".png"),
-                                  QStringLiteral("_open.png"));
+                                  QStringLiteral("_saved_open.png"));
                 dialog->grab().save(open_path);
+                dialog->devShowNew();
+                QCoreApplication::processEvents();
+                QString new_path = shot_path;
+                new_path.replace(QStringLiteral(".png"),
+                                 QStringLiteral("_new.png"));
+                dialog->grab().save(new_path);
                 dialog->deleteLater();
+
+                auto* empty = new ScanSetupDialog({}, this);
+                empty->show();
+                QCoreApplication::processEvents();
+                QString empty_path = shot_path;
+                empty_path.replace(QStringLiteral(".png"),
+                                   QStringLiteral("_empty.png"));
+                empty->grab().save(empty_path);
+                empty->deleteLater();
                 QApplication::quit();
                 return;
             }

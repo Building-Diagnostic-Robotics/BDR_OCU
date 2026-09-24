@@ -841,8 +841,8 @@ Facts agents should not re-derive:
 ## Stage 6 — ROI Coverage (Measured / Satellite), branch `feature/satellite-roi-stage`
 
 Autonomous ROI coverage per `docs/AUTONOMY_CONOPS.md` Mode B. **Start New
-Scan no longer routes to Stage 4/5** — it opens `ScanSetupDialog` (saved
-plans unexecuted-first, or Measured/Satellite mode cards), then the
+Scan no longer routes to Stage 4/5** — it opens `ScanSetupDialog`
+ (Saved Scan or New Scan; New Scan is Measured or Satellite), then the
 metadata modal (building prefilled from the chosen plan), then
 `SatelliteScreen` (Stage 6). Desk planning is the same Start New Scan
 flow: search the address, then Save for Later on the confirm dialog.
@@ -948,16 +948,19 @@ Classic Stage 4/5 remain in-tree, unrouted.
  cmd_vel/autonomy_enable pubs, coverage/odom/status subs, axis-state
  clients, `pushSessionMetadata` (coordinator SetParameters).
 - `components/scan_setup_dialog.{hpp,cpp}` — the mode/plan selector modal.
- The **New Satellite Plan** card is gated on imagery reachability: a
+ First screen is Saved Scan or New Scan. Saved Scan is the plan list:
+ **SAVED PLANS** (PLANNED, open) and a collapsed **COMPLETED (N)**
+ disclosure (newest scan first, `LAST RUN` chip; rows still open the
+ plan). Every row has a trash button — the only manual delete path
+ (confirm → `JobStore::remove` → row dropped in place, dialog stays
+ open, `planDeleted(id)` emitted). Deleting the last plan returns to
+ New Scan. New Scan is the Measured and Satellite cards. The **New
+ Satellite Plan** card is gated on imagery reachability: a
  `QNetworkAccessManager` HEAD against `TileService::connectivityProbeUrl()`
  every 5 s while the modal is open, two consecutive successes to enable,
  one failure to disable (same debounce shape as `UploadDialog`'s cloud
  probe). Satellite planning needs internet, so it happens in the office.
- Plans are split into **SAVED PLANS** (PLANNED, open) and a collapsed
- **COMPLETED (N)** disclosure (newest scan first, `LAST RUN` chip; rows
- still open the plan). Every row has a trash button — the only manual
- delete path (confirm → `JobStore::remove` → row dropped in place,
- dialog stays open, `planDeleted(id)` emitted).
+ With no saved plans the dialog opens on New Scan.
 
 ### One trim
 

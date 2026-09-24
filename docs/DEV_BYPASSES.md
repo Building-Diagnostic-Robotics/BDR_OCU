@@ -352,9 +352,10 @@ enumerates all sites.
       renders the Save Plan confirmation to `<png>_dialog.png`
       (`SatelliteScreen::devRenderPlanConfirm`). `scan_setup` renders the
       Start New Scan modal with in-memory demo plans (2 PLANNED, 3
-      COMPLETED; the on-disk JobStore is untouched) to `<png>` and, with
-      the COMPLETED disclosure expanded, `<png>_open.png`
-      (`ScanSetupDialog::devSetCompletedOpen`). `dialogs` renders the
+      COMPLETED; the on-disk JobStore is untouched): `<png>` is the
+      Saved/New choice, `<png>_saved.png` the plan list, `<png>_saved_open.png`
+      that list with COMPLETED expanded, `<png>_new.png` the mode cards,
+      and `<png>_empty.png` a dialog with no plans (opens on New Scan). `dialogs` renders the
       frameless dialogs that have no other render path — `BdrMessageBox` to
       `<png>`, then `BdrProgressDialog`, `MissionFinalizeDialog`,
       `OfflineFinalizeDialog` and `MissionMetadataDialog` to
