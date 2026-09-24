@@ -81,7 +81,7 @@ QMetaObject::invokeMethod(target, [=]() { /* UI update */ }, Qt::QueuedConnectio
 - `BdrProgressDialog` — frameless progress dialog
 - `BanterLoaderWidget` — animated loading indicator
 - `TiltCalibrationDialog` — 3-page (Setup → Progress → Success) dialog that SSHs into the robot and runs tilt calibration
-- `MissionMetadataDialog` — frameless "New Scan Information" modal shown when the operator clicks **Start New Scan** on Stage 3 Dashboard. Collects building name, operator name, and a Metric/ANSI units toggle, persists them to `QSettings`, and gates the transition to Stage 4. See **Mission Metadata + Units** below.
+- `MissionMetadataDialog` — frameless "New Scan Information" modal shown when the operator clicks **Start New Scan** on Stage 3 Dashboard. Collects building name and operator name, persists them to `QSettings`, and gates the transition to Stage 4. Display units are feet. See **Mission Metadata + Units** below.
 
 ## ROS2 Integration
 
@@ -101,20 +101,19 @@ The current production cloud upload path is **RDATA_EXT thumb drive → S3** via
 
 ## Mission Metadata + Units
 
-The **New Scan Information** modal (`MissionMetadataDialog`) intercepts `DashboardScreen::startNewScanRequested` in `AppShellWindow::onStartNewScan` *before* advancing to Stage 4. It collects three pieces of session-wide state, persists them to `QSettings` (keys in `settings_constants.hpp`: `kSettingsBuildingNameKey`, `kSettingsOperatorNameKey`, `kSettingsUnitsKey`), and applies a `QGraphicsBlurEffect` to the Dashboard underneath while open.
+The **New Scan Information** modal (`MissionMetadataDialog`) intercepts `DashboardScreen::startNewScanRequested` in `AppShellWindow::onStartNewScan` *before* advancing to Stage 4. It collects building name and operator name, persists them to `QSettings` (keys in `settings_constants.hpp`: `kSettingsBuildingNameKey`, `kSettingsOperatorNameKey`), and applies a `QGraphicsBlurEffect` to the Dashboard underneath while open. Display units are feet, fixed when `UnitsProvider` starts.
 
 | Field | Purpose | Used by |
 |-------|---------|---------|
 | Building name | Slugified to `<building_slug>` for the data layout above | Robot-side `data_collection_coordinator.py` |
 | Operator name | Audit / metadata.json | Cloud upload metadata |
-| Units (Metric / ANSI) | **Display-only** preference | `UnitsProvider` singleton |
 
-**`UnitsProvider`** (`units_system.hpp/cpp`) is a `QObject` singleton that owns the current `Units` selection, persists it to `QSettings`, and emits `unitsChanged()`. The `units::` namespace provides static formatting helpers — `units::formatLength(meters)`, `units::formatSpeed(mps)`, `units::formatArea(sqm)`, `units::lengthUnitSuffix()`, etc. — that produce the right text (`"1.50 m"` vs `"4.92 ft"`) based on the current selection. **All ROS payloads, internal state, and persisted scan data remain SI** — the toggle only swaps display strings. New display sites should always go through these helpers; never concatenate a hardcoded unit suffix.
+**`UnitsProvider`** (`units_system.hpp/cpp`) starts in feet. `setUnits()` still persists a choice and emits `unitsChanged()`, so the screens can be switched back to meters without a rewrite. The `units::` namespace provides static formatting helpers — `units::formatLength(meters)`, `units::formatSpeed(mps)`, `units::formatArea(sqm)`, `units::lengthUnitSuffix()`, etc. **All ROS payloads, internal state, and persisted scan data remain SI.** New display sites should always go through these helpers; never concatenate a hardcoded unit suffix.
 
 UI surfaces wired through `UnitsProvider`:
 
 - `ExplorationScreen` — telemetry cards (Speed, Position, Altitude).
-- `PlannerScreen` — value labels and slider min/max badges (re-rendered live via `relabelUnitEndpointBadges()` when the operator backs out and re-toggles between missions). The "Distance per scan" `QLineEdit` keeps its meters value but shows a `(≈ X.XX ft)` hint in ANSI mode (`refreshScanDistanceAnsiHint()`); the resulting scan segment list formats lengths via `units::formatLength`.
+- `PlannerScreen` — value labels and slider min/max badges (re-rendered via `relabelUnitEndpointBadges()` if `unitsChanged` fires). The "Distance per scan" `QLineEdit` keeps its meters value but shows a `(≈ X.XX ft)` hint while feet are active (`refreshScanDistanceAnsiHint()`); the resulting scan segment list formats lengths via `units::formatLength`.
 - `PlotWidget` — ROI rectangle dimensions, scan-segment hover tooltip, cursor coordinate tooltip.
 
 **Metadata push to robot:** `AppShellWindow::sendDataCollectorSessionMetadata()` calls `rcl_interfaces/srv/SetParameters` on `/data_collection_coordinator` to push `building_name`, `operator_name`, `units_preference` as ROS string parameters. It is invoked from `onPlannerScanStartRequested()` (Stage 5 **Start Scan**) *before* `sendControllerMaxLinearVelocity` and the `mpc_autonomy_enable=true` publish — if the push fails (service unreachable within 1.5 s, response missing/partial, any param rejected), the function shows a `BdrMessageBox` and **hard-blocks** the scan from arming. The autonomous controller (`mpc_accel_autonomous_controller.py`) fires `/dc/start` a few hundred ms after `autonomy_enable=true`, by which point the coordinator's `ensure_mission_session()` has the metadata it needs to land the section folder under `/R_DATA/<day>/<building_slug>/Section_*/`.

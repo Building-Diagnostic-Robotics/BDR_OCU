@@ -553,10 +553,11 @@ are missing. Modal is `show()`, not `exec()`.
 
 Operator-driven session metadata captured via the **New Scan
 Information** modal (`MissionMetadataDialog`) on Stage 3 Dashboard
-**Start New Scan**. Building name, operator name, and a Metric/ANSI
-units toggle are persisted to `QSettings` and pushed to the robot's
+**Start New Scan**. Building name and operator name are persisted to
+`QSettings` and pushed to the robot's
 `/data_collection_coordinator` as ROS string parameters before
-autonomy arms.
+autonomy arms. Display units are feet, fixed in `UnitsProvider`;
+the robot and saved data stay in meters.
 
 ### Key entry points
 
@@ -617,8 +618,8 @@ autonomy arms.
 - **Never concatenate a hardcoded unit suffix** (`" m"`, `" m/s"`,
  `" m²"`, `" ft"`) in display strings. Always go through
  `units::formatLength` / `formatSpeed` / `formatArea` /
- `lengthUnitSuffix`. The toggle is global and operators flip it
- between missions without restarting the OCU.
+ `lengthUnitSuffix`. Display is feet. `UnitsProvider::setUnits()`
+ still switches the screens to meters without a rewrite.
 - **Never convert units before sending to the robot.** Only the
  display layer is unit-aware; ROS payloads, `QSettings` values,
  scan plan data, and the autonomy stack remain SI.

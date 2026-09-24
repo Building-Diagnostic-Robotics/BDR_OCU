@@ -13,7 +13,6 @@
 #include "ui_theme_constants.hpp"
 
 #include "settings_constants.hpp"
-#include "units_system.hpp"
 
 #include <QHBoxLayout>
 #include <QIcon>
@@ -78,8 +77,6 @@ MissionMetadataDialog::MissionMetadataDialog(QWidget* parent) : QDialog(parent) 
     buildUi();
     applyStyle();
     loadDefaults();
-    refreshUnitToggleVisuals();
-    refreshInfoBanner();
     refreshProceedEnabled();
 }
 
@@ -263,77 +260,6 @@ void MissionMetadataDialog::buildUi() {
 
     bodyLayout->addWidget(operatorGroup);
 
-    // Unit System group (segmented toggle)
-    auto* unitGroup = new QWidget(body);
-    auto* unitLayout = new QVBoxLayout(unitGroup);
-    unitLayout->setContentsMargins(0, 0, 0, 0);
-    unitLayout->setSpacing(12);
-
-    unitLayout->addWidget(makeFieldLabel(
-        QStringLiteral(":/assets/dialog/ruler.svg"),
-        tr("Unit System"),
-        unitGroup));
-
-    auto* segmented = new QWidget(unitGroup);
-    segmented->setObjectName("UnitSegmented");
-    segmented->setFixedHeight(64);
-    auto* segLayout = new QHBoxLayout(segmented);
-    segLayout->setContentsMargins(4, 4, 4, 4);
-    segLayout->setSpacing(0);
-
-    auto buildSegmentButton = [](const QString& primary,
-                                  const QString& secondary,
-                                  const QString& objectName,
-                                  QWidget* parent) {
-        auto* btn = new QPushButton(parent);
-        btn->setObjectName(objectName);
-        btn->setCursor(Qt::PointingHandCursor);
-        btn->setCheckable(true);
-        btn->setFlat(true);
-        btn->setFixedHeight(56);
-
-        auto* col = new QVBoxLayout(btn);
-        col->setContentsMargins(0, 8, 0, 8);
-        col->setSpacing(2);
-
-        auto* primaryLbl = new QLabel(primary, btn);
-        primaryLbl->setObjectName("UnitPrimary");
-        primaryLbl->setAlignment(Qt::AlignCenter);
-        col->addWidget(primaryLbl);
-
-        auto* secondaryLbl = new QLabel(secondary, btn);
-        secondaryLbl->setObjectName("UnitSecondary");
-        secondaryLbl->setAlignment(Qt::AlignCenter);
-        col->addWidget(secondaryLbl);
-
-        return btn;
-    };
-
-    btn_unit_metric_ = buildSegmentButton(tr("Metric"), tr("meters (m)"),
-                                          QStringLiteral("UnitButtonMetric"),
-                                          segmented);
-    btn_unit_ansi_ = buildSegmentButton(tr("ANSI"), tr("feet (ft)"),
-                                        QStringLiteral("UnitButtonAnsi"),
-                                        segmented);
-    connect(btn_unit_metric_, &QPushButton::clicked, this,
-            &MissionMetadataDialog::onMetricClicked);
-    connect(btn_unit_ansi_, &QPushButton::clicked, this,
-            &MissionMetadataDialog::onAnsiClicked);
-
-    segLayout->addWidget(btn_unit_metric_, 1);
-    segLayout->addWidget(btn_unit_ansi_, 1);
-
-    unitLayout->addWidget(segmented);
-
-    bodyLayout->addWidget(unitGroup);
-
-    // Info banner — copy flips with selection.
-    lbl_info_banner_ = new QLabel(body);
-    lbl_info_banner_->setObjectName("InfoBanner");
-    lbl_info_banner_->setWordWrap(true);
-    lbl_info_banner_->setTextFormat(Qt::RichText);
-    bodyLayout->addWidget(lbl_info_banner_);
-
     bodyLayout->addStretch(1);
 
     outer->addWidget(body);
@@ -434,39 +360,6 @@ void MissionMetadataDialog::applyStyle() {
             font-size: 12px;
             padding-left: 4px;
         }
-        #UnitSegmented {
-            background-color: %3;
-            border-radius: 10px;
-        }
-        QPushButton#UnitButtonMetric, QPushButton#UnitButtonAnsi {
-            background: transparent;
-            border: none;
-            padding: 0;
-            border-radius: 8px;
-        }
-        QPushButton#UnitButtonMetric:checked, QPushButton#UnitButtonAnsi:checked {
-            background-color: %1;
-        }
-        QLabel#UnitPrimary {
-            color: %7;
-            font-size: 14px;
-        }
-        QLabel#UnitSecondary {
-            color: %5;
-            font-size: 12px;
-        }
-        QPushButton#UnitButtonMetric:checked QLabel#UnitPrimary,
-        QPushButton#UnitButtonAnsi:checked QLabel#UnitPrimary {
-            color: %8;
-        }
-        #InfoBanner {
-            background-color: rgba(43, 127, 255, 0.10);
-            border: 1px solid rgba(43, 127, 255, 0.20);
-            border-radius: 10px;
-            color: %9;
-            font-size: 12px;
-            padding: 12px 17px;
-        }
         #MetadataFooter {
             background-color: %3;
             border-top: 1px solid %2;
@@ -475,26 +368,26 @@ void MissionMetadataDialog::applyStyle() {
         }
         QPushButton#CancelButton {
             background-color: %2;
-            border: 1px solid %10;
+            border: 1px solid %9;
             border-radius: 10px;
             color: %4;
             font-size: 14px;
             padding: 0 18px;
         }
         QPushButton#CancelButton:hover {
-            background-color: %11;
+            background-color: %10;
         }
         QPushButton#ProceedButton {
             background-color: %8;
             border: none;
             border-radius: 10px;
-            color: %12;
+            color: %11;
             font-size: 14px;
             font-weight: 700;
             padding: 0 22px;
         }
         QPushButton#ProceedButton:hover {
-            background-color: %13;
+            background-color: %12;
         }
         QPushButton#ProceedButton:disabled {
             background-color: %2;
@@ -502,8 +395,7 @@ void MissionMetadataDialog::applyStyle() {
         }
     )")
                       .arg(t.surface, t.raised_border, t.raised, t.text,
-                           t.muted, t.neutral_hover, t.body, t.accent_green,
-                           t.info)
+                           t.muted, t.neutral_hover, t.body, t.accent_green)
                       .arg(t.muted, t.neutral_hover, t.on_accent,
                            t.accent_green_hover));
 }
@@ -520,39 +412,6 @@ void MissionMetadataDialog::loadDefaults() {
     if (edit_operator_) {
         edit_operator_->setText(settings.value(kSettingsOperatorNameKey).toString());
     }
-    selected_units_ = units::fromString(
-        settings.value(kSettingsUnitsKey, units::toString(Units::Metric)).toString());
-}
-
-void MissionMetadataDialog::refreshUnitToggleVisuals() {
-    if (btn_unit_metric_) {
-        btn_unit_metric_->setChecked(selected_units_ == Units::Metric);
-    }
-    if (btn_unit_ansi_) {
-        btn_unit_ansi_->setChecked(selected_units_ == Units::Ansi);
-    }
-    // QPushButton's :checked QLabel descendant pseudo-state isn't always
-    // re-evaluated on setChecked alone — kick the labels by re-polishing.
-    if (btn_unit_metric_) {
-        btn_unit_metric_->style()->unpolish(btn_unit_metric_);
-        btn_unit_metric_->style()->polish(btn_unit_metric_);
-    }
-    if (btn_unit_ansi_) {
-        btn_unit_ansi_->style()->unpolish(btn_unit_ansi_);
-        btn_unit_ansi_->style()->polish(btn_unit_ansi_);
-    }
-    refreshInfoBanner();
-}
-
-void MissionMetadataDialog::refreshInfoBanner() {
-    if (!lbl_info_banner_) return;
-    const QString unitWord = selected_units_ == Units::Metric
-                                 ? tr("meters")
-                                 : tr("feet");
-    lbl_info_banner_->setText(
-        tr("All distance measurements will be displayed in <b>%1</b> "
-           "throughout the scan process.")
-            .arg(unitWord));
 }
 
 void MissionMetadataDialog::refreshProceedEnabled() {
@@ -583,16 +442,6 @@ void MissionMetadataDialog::refreshProceedEnabled() {
 // Slots
 // ---------------------------------------------------------------------------
 
-void MissionMetadataDialog::onMetricClicked() {
-    selected_units_ = Units::Metric;
-    refreshUnitToggleVisuals();
-}
-
-void MissionMetadataDialog::onAnsiClicked() {
-    selected_units_ = Units::Ansi;
-    refreshUnitToggleVisuals();
-}
-
 void MissionMetadataDialog::onAnyTextChanged() {
     refreshProceedEnabled();
 }
@@ -605,12 +454,7 @@ void MissionMetadataDialog::onProceedClicked() {
         QSettings settings(kSettingsOrgName, kSettingsAppName);
         settings.setValue(kSettingsBuildingNameKey, buildingName());
         settings.setValue(kSettingsOperatorNameKey, operatorName());
-        // setUnits() also writes to QSettings, but we set it explicitly here
-        // so the persisted form is always written even if the value didn't
-        // change (defensive; QSettings is cheap).
-        settings.setValue(kSettingsUnitsKey, units::toString(selected_units_));
     }
-    UnitsProvider::instance()->setUnits(selected_units_);
     accept();
 }
 

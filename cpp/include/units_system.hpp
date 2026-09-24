@@ -9,9 +9,10 @@
  * Architecture:
  *   - `Units` enum: Metric or Ansi.
  *   - `UnitsProvider`: thread-affine `QObject` singleton (`instance()`).
- *     Owns the current selection, persists it to QSettings under
- *     `f2c_cpp::kSettingsUnitsKey`, and emits `unitsChanged()` whenever it
- *     flips. Widgets connect to that signal to relabel live.
+ *     Starts in feet. `setUnits()` still persists a choice under
+ *     `f2c_cpp::kSettingsUnitsKey` and emits `unitsChanged()` so the
+ *     screens can be switched back to meters without a rewrite. Startup
+ *     does not read that saved value.
  *   - Free helpers in the `units` namespace: `formatLength`, `formatSpeed`,
  *     `formatArea`, plus the inverse `feetToMeters`/`metersToFeet` for
  *     operator-edited spinbox values.

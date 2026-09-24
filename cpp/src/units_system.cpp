@@ -29,10 +29,9 @@ UnitsProvider* UnitsProvider::instance() {
 }
 
 UnitsProvider::UnitsProvider(QObject* parent) : QObject(parent) {
-    QSettings settings(kSettingsOrgName, kSettingsAppName);
-    units_ = units::fromString(settings.value(kSettingsUnitsKey,
-                                              units::toString(Units::Metric))
-                                   .toString());
+    // Feet is the fixed operator display. setUnits() remains so a later
+    // change can switch back to meters without rewriting the screens.
+    units_ = Units::Ansi;
 }
 
 void UnitsProvider::setUnits(Units u) {
