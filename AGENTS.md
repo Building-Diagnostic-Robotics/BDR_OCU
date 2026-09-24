@@ -844,7 +844,7 @@ Scan no longer routes to Stage 4/5** — it opens `ScanSetupDialog` (saved
 plans unexecuted-first, or Measured/Satellite mode cards), then the
 metadata modal (building prefilled from the chosen plan), then
 `SatelliteScreen` (Stage 6). Desk planning is the same Start New Scan
-flow: search the address, then Save and close on the confirm dialog.
+flow: search the address, then Save for Later on the confirm dialog.
 Classic Stage 4/5 remain in-tree, unrouted.
 
 ### Key files (all `satellite_*` prefixed, flat in cpp/include + cpp/src)
@@ -883,11 +883,10 @@ Classic Stage 4/5 remain in-tree, unrouted.
  split from any dialog so it can be reused. `PrefetchRequest::forSite`
  derives every parameter from the ROI (centroid, radius + 60 m margin,
  150 m floor, z19, 3 y).
-- `components/satellite_plan_confirm_dialog.{hpp,cpp}` — the office
- **Save Plan** confirmation: ROI thumbnail, per-edge lengths, robot pose,
- tile estimate, **Download & Save** running the prefetch in place, and the
- imagery knobs (radius / zoom / age / Clarity / Wayback) behind a collapsed
- Advanced disclosure. Outcomes: `SavedWithImagery`, `SavedWithoutImagery`
+- `components/satellite_plan_confirm_dialog.{hpp,cpp}` — the save
+ confirmation: map thumbnail, one distance line, and **Save for Later** /
+ **Save & Continue**, which run the prefetch. Outcomes: `SavedWithImagery`,
+ `SavedWithoutImagery`
  (explicit operator choice after a failure or with no API key),
  `Cancelled`. The old standalone `DownloadAreaDialog` is gone.
 - `satellite_tile_service.{hpp,cpp}` — Esri tiles + geocode + provenance,
@@ -961,9 +960,9 @@ Classic Stage 4/5 remain in-tree, unrouted.
 
 ### One trim
 
-There is no office trim. Start New Scan is the only entry. **Save and
-close** on `SatellitePlanConfirmDialog` runs the same download as
-Download & Save and returns to the Dashboard; cancel saves nothing.
+There is no office trim. Start New Scan is the only entry. **Save for
+Later** on `SatellitePlanConfirmDialog` runs the same download as
+Save & Continue and returns to the Dashboard; cancel saves nothing.
 **Step-1 Next** (`onNextClicked` → `cacheSiteThenAdvance`) probes
 connectivity, then runs `saveSatelliteWithImagery(job, site_from_view=true)`.
 No ROI exists yet, so the disc is `PrefetchRequest::forAddress` at
@@ -1627,7 +1626,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  revisit_search`,
  `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog
- to `<png>_dialog.png` / `_dialog_adv.png`. See docs/DEV_BYPASSES.md.
+ to `<png>_dialog.png`. See docs/DEV_BYPASSES.md.
  **`_STAGE` selects the app-shell stage, not the Stage 6 step**, and
  1-5 return before the `_MODE` switch is ever reached — a Stage 6 mode
  shot must leave `_STAGE` unset or every PNG is silently Stage 2.
@@ -1694,9 +1693,10 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 - **`review` shot mode = the aligned state** (235:3146): success card over
  the cloud, robot origin on the satellite pane, Next enabled. Do not
  re-add a separate review/confirm page; the frame has none.
-- **Do not drop the imagery knobs** (radius / zoom / age / Clarity /
- Wayback). They are defaulted and behind Advanced, not removed — the
- operator asked for that explicitly.
+- **The confirm dialog does not expose imagery knobs.** Radius, zoom,
+ age and layer are the `PrefetchRequest` defaults (500 m around an
+ address, z19, 3 years, live World Imagery). Do not put the Advanced
+ disclosure back on that dialog.
 - **Do not stamp `last_executed_at` at launch** or on a failed / cancelled /
  watchdog-deferred finalize. COMPLETED means data is on disk; an aborted
  mission must leave the plan PLANNED so it can be re-run. Only

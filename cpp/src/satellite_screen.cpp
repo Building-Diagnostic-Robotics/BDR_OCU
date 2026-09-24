@@ -1043,11 +1043,6 @@ void SatelliteScreen::devRenderPlanConfirm(const QString& png_path) {
     dialog.show();
     QCoreApplication::processEvents();
     dialog.grab().save(png_path);
-    dialog.devSetAdvancedOpen(true);
-    QCoreApplication::processEvents();
-    QString advanced_path = png_path;
-    advanced_path.replace(QStringLiteral(".png"), QStringLiteral("_adv.png"));
-    dialog.grab().save(advanced_path);
     dialog.close();
 }
 

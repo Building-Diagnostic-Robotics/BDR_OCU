@@ -349,8 +349,7 @@ enumerates all sites.
       would otherwise stay up.
       `plan` is the office trim with the demo plan seeded and the robot
       marker selected (rotate handle visible); `plan_confirm` additionally
-      renders the Save Plan confirmation to `<png>_dialog.png` and, with
-      the Advanced disclosure open, `<png>_dialog_adv.png`
+      renders the Save Plan confirmation to `<png>_dialog.png`
       (`SatelliteScreen::devRenderPlanConfirm`). `scan_setup` renders the
       Start New Scan modal with in-memory demo plans (2 PLANNED, 3
       COMPLETED; the on-disk JobStore is untouched) to `<png>` and, with
@@ -377,8 +376,7 @@ enumerates all sites.
 `AppShellWindow::AppShellWindow` (tagged `BDR_REWIRE`), plus
 `SatelliteScreen::devSeedDemoPlan()`, `devSelectMarker()`,
 `devRenderPlanConfirm()`, `devFitRoi()`, `devSeedDemoAlignment()`,
-`devSeedDemoAlignmentEmpty()`, `devEnterAlignmentWithDemoSite()`,
-`SatellitePlanConfirmDialog::devSetAdvancedOpen()`, and
+`devSeedDemoAlignmentEmpty()`, `devEnterAlignmentWithDemoSite()`, and
 `ScanSetupDialog::devSetCompletedOpen()`.
 
 ---

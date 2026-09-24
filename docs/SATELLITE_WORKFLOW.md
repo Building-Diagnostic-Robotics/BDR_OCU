@@ -24,7 +24,7 @@ Two constraints shape everything:
 ## One screen
 
 Reached from **Start New Scan**. At a desk with internet, step 1 locates the
-address and **Save and close** caches a 500 m neighbourhood and returns to
+address and **Save for Later** caches a 500 m neighbourhood and returns to
 the Dashboard. On the roof the same plan reopens and the five-step flow
 below runs. A plan that already has imagery does not download again.
 
@@ -99,16 +99,14 @@ only during the scan.
 1. **Start New Scan** → **New Satellite Plan** → building name in the
    metadata modal.
 2. Search the address on step 1.
-3. **Next** opens the confirm dialog. **Download & Save** caches the site
-   and continues. **Save and close** caches the same 500 m neighbourhood
+3. **Next** opens the confirm dialog. **Save & Continue** caches the site
+   and continues. **Save for Later** caches the same 500 m neighbourhood
    (`PrefetchRequest::forAddress`) and returns to the Dashboard. **Cancel**
    saves nothing.
 
-   With no ROI yet the disc is 500 m around the located address. A later
-   save that already has an ROI uses the ROI radius plus 60 m, floored at
-   150 m. Max zoom 19, World Imagery, live mosaic, imagery no older than 3
-   years. The knobs — radius, zoom, age, Clarity, Wayback — stay behind
-   **Advanced imagery options**. They are defaulted, not removed.
+   With no ROI yet the disc is 500 m around the located address. Max zoom
+   is 19, the layer is live World Imagery, and imagery older than 3 years
+   is refused. The operator is not asked to change any of these.
 
    Zoom selection picks **the highest native zoom whose source imagery is
    within the age window**. It never falls back to older-but-sharper tiles:
