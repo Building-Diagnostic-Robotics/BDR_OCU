@@ -147,6 +147,9 @@ public:
 
 signals:
     void backRequested();
+    /** A satellite site finished downloading. AppShell stops the imagery
+        reachability probe for the rest of the session. */
+    void imageryDownloaded();
     /** Mission launch lifecycle — AppShell arms/disarms the link monitor
         and reachability probe on this. */
     void missionActiveChanged(bool active);

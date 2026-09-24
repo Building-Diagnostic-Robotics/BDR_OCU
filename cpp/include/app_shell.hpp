@@ -22,6 +22,7 @@
 #include <std_srvs/srv/set_bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
+#include "imagery_reachability_probe.hpp"
 #include "link_health_monitor.hpp"
 #include "robot_reachability_probe.hpp"
 #include "robot_registry.hpp"
@@ -584,6 +585,7 @@ private:
     // up) from DISCONNECTED (host genuinely gone).  Armed/disarmed
     // alongside link_monitor_.
     RobotReachabilityProbe* reachability_probe_ = nullptr;
+    ImageryReachabilityProbe* imagery_probe_ = nullptr;
     // Toast widget used for "command dropped — robot offline" hints.
     // Lazily constructed on first show; always parented to central_root_
     // so the OTA banner / window controls stay above it.  Single

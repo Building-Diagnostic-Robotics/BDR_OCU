@@ -4739,6 +4739,7 @@ bool SatelliteScreen::saveSatelliteWithImagery(Job job, bool site_from_view,
                 if (close_requested) {
                     *close_requested = dialog.closeAfterSave();
                 }
+                emit imageryDownloaded();
                 return true;
             }
             return false;

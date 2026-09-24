@@ -11,7 +11,7 @@
 #include "components/scan_setup_dialog.hpp"
 
 #include "components/bdr_message_box.hpp"
-#include "satellite_tile_service.hpp"
+#include "imagery_reachability_probe.hpp"
 #include "ui_theme_constants.hpp"
 
 #include <QDate>
@@ -20,15 +20,11 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QSvgRenderer>
-#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -40,7 +36,7 @@ namespace {
 constexpr int kDialogFixedWidth = 580;
 constexpr int kPlanRowHeight = 64;
 constexpr int kPlanListMaxVisible = 4;
-constexpr int kModeCardHeight = 150;
+constexpr int kModeCardHeight = 116;
 constexpr int kPageChoose = 0;
 constexpr int kPageSaved = 1;
 constexpr int kPageNew = 2;
@@ -119,7 +115,8 @@ QPixmap tintedSvg(const QString& resource_path, int w, int h,
 
 }  // namespace
 
-ScanSetupDialog::ScanSetupDialog(const QVector<Job>& jobs, QWidget* parent)
+ScanSetupDialog::ScanSetupDialog(const QVector<Job>& jobs, QWidget* parent,
+                                 ImageryReachabilityProbe* imagery)
     : QDialog(parent) {
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
     setModal(true);
@@ -128,17 +125,10 @@ ScanSetupDialog::ScanSetupDialog(const QVector<Job>& jobs, QWidget* parent)
     setAttribute(Qt::WA_StyledBackground, true);
     buildUi(jobs);
     applyStyle();
-    startImageryProbe();
-}
-
-ScanSetupDialog::~ScanSetupDialog() {
-    if (probe_inflight_) {
-        // abort() emits finished() synchronously; the slot must not run on
-        // a dialog that is mid-destruction.
-        probe_inflight_->disconnect(this);
-        probe_inflight_->abort();
-        probe_inflight_->deleteLater();
-        probe_inflight_ = nullptr;
+    applyImageryReachable(imagery && imagery->reachable());
+    if (imagery) {
+        connect(imagery, &ImageryReachabilityProbe::reachableChanged, this,
+                &ScanSetupDialog::applyImageryReachable);
     }
 }
 
@@ -155,45 +145,6 @@ bool ScanSetupDialog::eventFilter(QObject* watched, QEvent* event) {
 }
 
 // ---- Imagery reachability gate ---------------------------------------------
-
-void ScanSetupDialog::startImageryProbe() {
-    probe_nam_ = new QNetworkAccessManager(this);
-    probe_timer_ = new QTimer(this);
-    probe_timer_->setInterval(kProbeIntervalMs);
-    connect(probe_timer_, &QTimer::timeout, this,
-            &ScanSetupDialog::onProbeTick);
-    applyImageryReachable(false);
-    onProbeTick();
-    probe_timer_->start();
-}
-
-void ScanSetupDialog::onProbeTick() {
-    if (probe_inflight_) {
-        return;  // the previous probe is still within its timeout
-    }
-    QNetworkRequest request(TileService::connectivityProbeUrl());
-    request.setTransferTimeout(kProbeTimeoutMs);
-    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
-                         QNetworkRequest::AlwaysNetwork);
-    probe_inflight_ = probe_nam_->head(request);
-    connect(probe_inflight_, &QNetworkReply::finished, this,
-            [this, reply = probe_inflight_] { onProbeFinished(reply); });
-}
-
-void ScanSetupDialog::onProbeFinished(QNetworkReply* reply) {
-    reply->deleteLater();
-    if (reply == probe_inflight_) {
-        probe_inflight_ = nullptr;
-    }
-    probe_answered_ = true;
-    if (reply->error() != QNetworkReply::NoError) {
-        probe_successes_ = 0;
-        applyImageryReachable(false);
-        return;
-    }
-    probe_successes_ = std::min(probe_successes_ + 1, kProbeSuccessesToEnable);
-    applyImageryReachable(probe_successes_ >= kProbeSuccessesToEnable);
-}
 
 void ScanSetupDialog::applyImageryReachable(bool reachable) {
     if (!satellite_card_) {
@@ -220,12 +171,6 @@ void ScanSetupDialog::applyImageryReachable(bool reachable) {
         "font-family: 'Arimo'; font-weight: 700; font-size: 18px; "
         "line-height: 28px; color: %1; background: transparent;")
         .arg(brandText(brand)));
-    satellite_description_->setText(
-        reachable ? satellite_description_text_
-                  : (probe_answered_
-                         ? QStringLiteral("NEEDS AN INTERNET CONNECTION —\n"
-                                          "PLAN SATELLITE JOBS IN THE OFFICE")
-                         : QStringLiteral("CHECKING IMAGERY CONNECTION…")));
     satellite_card_->setToolTip(
         reachable ? QString()
                   : QStringLiteral("Satellite imagery is unreachable. Plan "
@@ -254,20 +199,11 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
             [this] { showPage(kPageChoose); });
     header_row->addWidget(back_button_, 0, Qt::AlignVCenter);
 
-    auto* header_text = new QVBoxLayout();
-    header_text->setSpacing(2);
     auto* title = new QLabel(QStringLiteral("START NEW SCAN"), this);
     title->setObjectName("SetupTitle");
     title->setAlignment(Qt::AlignCenter);
     title_ = title;
-    header_text->addWidget(title);
-    auto* subtitle = new QLabel(
-        QStringLiteral("OPEN A SAVED PLAN OR START A NEW ONE"), this);
-    subtitle->setObjectName("SetupSubtitle");
-    subtitle->setAlignment(Qt::AlignCenter);
-    subtitle_ = subtitle;
-    header_text->addWidget(subtitle);
-    header_row->addLayout(header_text, 1);
+    header_row->addWidget(title, 1);
 
     const UiThemeTokens theme = appThemeTokens();
     auto* close_button = new QPushButton(this);
@@ -311,8 +247,7 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
         choose, QStringLiteral("SetupCardSaved"),
         QString::fromLatin1(kAccentBlue),
         QStringLiteral(":/assets/dashboard/plan_job.svg"),
-        QStringLiteral("SAVED SCAN"),
-        QStringLiteral("OPEN A PLAN ALREADY\nON THIS LAPTOP"));
+        QStringLiteral("SAVED SCAN"));
     connect(saved_card, &QPushButton::clicked, this,
             [this] { showPage(kPageSaved); });
     choose_row->addWidget(saved_card, 1);
@@ -320,8 +255,7 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
         choose, QStringLiteral("SetupCardNew"),
         QString::fromLatin1(kAccentGreen),
         QStringLiteral(":/assets/scansetup/new.svg"),
-        QStringLiteral("NEW SCAN"),
-        QStringLiteral("MEASURED GRID OR\nSATELLITE IMAGERY"));
+        QStringLiteral("NEW SCAN"));
     connect(new_card, &QPushButton::clicked, this,
             [this] { showPage(kPageNew); });
     choose_row->addWidget(new_card, 1);
@@ -348,25 +282,20 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
         fresh, QStringLiteral("SetupCardMeasured"),
         QString::fromLatin1(kAccentGreen),
         QStringLiteral(":/assets/scansetup/measured.svg"),
-        QStringLiteral("MEASURED ROI SCAN"),
-        QStringLiteral("DRAW THE ROOF FROM TAPE\nMEASUREMENTS ON A GRID"));
+        QStringLiteral("MEASURED ROI SCAN"));
     connect(measured_card, &QPushButton::clicked, this, [this] {
         choice_ = Choice::NewMeasuredPlan;
         accept();
     });
     cards_row->addWidget(measured_card, 1);
 
-    satellite_description_text_ =
-        QStringLiteral("PLAN ON SATELLITE IMAGERY\nOF THE SITE");
     satellite_card_ = buildModeCard(
         fresh, QStringLiteral("SetupCardSatellite"),
         QString::fromLatin1(kAccentBlue),
         QStringLiteral(":/assets/scansetup/satellite.svg"),
-        QStringLiteral("SATELLITE ROI SCAN"), satellite_description_text_);
+        QStringLiteral("SATELLITE ROI SCAN"));
     satellite_title_ =
         satellite_card_->findChild<QLabel*>(QStringLiteral("SetupCardTitle"));
-    satellite_description_ = satellite_card_->findChild<QLabel*>(
-        QStringLiteral("SetupCardDescription"));
     connect(satellite_card_, &QPushButton::clicked, this, [this] {
         if (!imagery_reachable_) {
             return;
@@ -474,7 +403,7 @@ bool ScanSetupDialog::hasSavedPlans() const {
 }
 
 void ScanSetupDialog::showPage(int page) {
-    if (!pages_ || !title_ || !subtitle_) {
+    if (!pages_ || !title_) {
         return;
     }
     pages_->setCurrentIndex(page);
@@ -489,14 +418,10 @@ void ScanSetupDialog::showPage(int page) {
     }
     if (page == kPageSaved) {
         title_->setText(QStringLiteral("SAVED SCANS"));
-        subtitle_->setText(QStringLiteral("CHOOSE A PLAN TO OPEN"));
     } else if (page == kPageNew) {
         title_->setText(QStringLiteral("NEW SCAN"));
-        subtitle_->setText(QStringLiteral("CHOOSE HOW TO PLAN THE ROOF"));
     } else {
         title_->setText(QStringLiteral("START NEW SCAN"));
-        subtitle_->setText(
-            QStringLiteral("OPEN A SAVED PLAN OR START A NEW ONE"));
     }
     if (back_button_) {
         const bool show_back = page != kPageChoose && hasSavedPlans();
@@ -655,8 +580,7 @@ QWidget* ScanSetupDialog::buildPlanRow(const Job& job, QWidget* parent) {
 
 QPushButton* ScanSetupDialog::buildModeCard(
     QWidget* parent, const QString& object_name, const QString& brand_color,
-    const QString& icon_resource, const QString& title,
-    const QString& description) {
+    const QString& icon_resource, const QString& title) {
     // Dashboard makeActionButton construction, dark-adapted (hover uses a
     // white wash instead of the light theme's black wash).
     auto* card = new QPushButton(parent);
@@ -695,16 +619,6 @@ QPushButton* ScanSetupDialog::buildModeCard(
         .arg(brandText(brand_color)));
     title_label->setAlignment(Qt::AlignCenter);
     layout->addWidget(title_label, 0, Qt::AlignCenter);
-
-    auto* description_label = new QLabel(description, card);
-    description_label->setObjectName("SetupCardDescription");
-    description_label->setStyleSheet(QStringLiteral(
-        "font-family: 'Arimo'; font-size: 14px; line-height: 20px; "
-        "color: %1; background: transparent;").arg(t.muted));
-    description_label->setAlignment(Qt::AlignCenter);
-    description_label->setWordWrap(true);
-    layout->addWidget(description_label, 0, Qt::AlignCenter);
-
     return card;
 }
 
@@ -720,9 +634,6 @@ void ScanSetupDialog::applyStyle() {
         #SetupTitle {
             font-family: 'Arimo'; font-weight: 700; font-size: 20px;
             color: %3;
-        }
-        #SetupSubtitle {
-            font-family: 'Arimo'; font-size: 14px; color: %4;
         }
         #SetupBack, #SetupBack:disabled {
             background: transparent; border: none; border-radius: 4px;

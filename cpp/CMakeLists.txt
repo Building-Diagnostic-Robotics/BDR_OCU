@@ -155,6 +155,7 @@ set(HEADERS
     include/pan_zoom_image.hpp
     include/satellite_map_capture.hpp
     include/components/scan_setup_dialog.hpp
+    include/imagery_reachability_probe.hpp
     include/plot_widget.hpp
     include/obstacle_detector.hpp
     include/transfer_manager.hpp
@@ -284,6 +285,7 @@ set(GUI_SOURCES
     src/units_system.cpp
     src/link_health_monitor.cpp
     src/robot_reachability_probe.cpp
+    src/imagery_reachability_probe.cpp
     src/satellite_job_model.cpp
     src/similarity_2d.cpp
     src/alignment_geometry.cpp

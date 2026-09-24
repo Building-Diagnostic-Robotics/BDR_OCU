@@ -13,11 +13,9 @@
  * makeActionButton card language (2px brand border, tinted 40px SVG,
  * Arimo 700 18 title / 400 14 description).
  *
- * The Satellite card is gated on imagery reachability. A satellite plan is
- * only worth starting where tiles can be fetched (the office), so the card
- * stays disabled until a periodic probe of `TileService::connectivityProbeUrl`
- * has answered twice in a row — the same debounce shape UploadDialog uses
- * for the cloud API. One failure disables it again.
+ * The Satellite card reads `ImageryReachabilityProbe`, which AppShell
+ * starts on the dashboard. The card is disabled until that probe has
+ * answered twice in a row. One failure disables it again.
  *
  * Plan lifecycle surfaces here: SAVED PLANS lists plans not yet scanned;
  * COMPLETED (N) is a collapsed disclosure of plans whose mission finalized
@@ -36,14 +34,14 @@
 #include <QVector>
 
 class QLabel;
-class QNetworkAccessManager;
 class QVBoxLayout;
 class QNetworkReply;
 class QPushButton;
 class QStackedWidget;
-class QTimer;
 
 namespace f2c_cpp {
+
+class ImageryReachabilityProbe;
 
 class ScanSetupDialog : public QDialog {
     Q_OBJECT
@@ -57,8 +55,9 @@ public:
     };
 
     explicit ScanSetupDialog(const QVector<Job>& jobs,
-                             QWidget* parent = nullptr);
-    ~ScanSetupDialog() override;
+                             QWidget* parent = nullptr,
+                             ImageryReachabilityProbe* imagery = nullptr);
+    ~ScanSetupDialog() override = default;
 
     Choice choice() const { return choice_; }
     /** Valid only when choice() == ExistingPlan. */
@@ -69,10 +68,6 @@ public:
     /** Dev shot only: show the saved-plan list or the new-scan cards. */
     void devShowSaved();
     void devShowNew();
-
-    static constexpr int kProbeIntervalMs = 5000;
-    static constexpr int kProbeTimeoutMs = 4000;
-    static constexpr int kProbeSuccessesToEnable = 2;
 
 signals:
     /** A plan was deleted from disk via the row's trash button. */
@@ -106,14 +101,9 @@ private:
     QPushButton* buildModeCard(QWidget* parent, const QString& object_name,
                                const QString& brand_color,
                                const QString& icon_resource,
-                               const QString& title,
-                               const QString& description);
-    void applyStyle();
-
-    void startImageryProbe();
-    void onProbeTick();
-    void onProbeFinished(QNetworkReply* reply);
+                               const QString& title);
     void applyImageryReachable(bool reachable);
+    void applyStyle();
 
     Choice choice_ = Choice::Cancelled;
     Job selected_job_;
@@ -122,19 +112,11 @@ private:
     PlanSection completed_;
 
     QLabel* title_ = nullptr;
-    QLabel* subtitle_ = nullptr;
     QStackedWidget* pages_ = nullptr;
     QPushButton* back_button_ = nullptr;
 
     QPushButton* satellite_card_ = nullptr;
     QLabel* satellite_title_ = nullptr;
-    QLabel* satellite_description_ = nullptr;
-    QString satellite_description_text_;
-    QNetworkAccessManager* probe_nam_ = nullptr;
-    QTimer* probe_timer_ = nullptr;
-    QNetworkReply* probe_inflight_ = nullptr;
-    int probe_successes_ = 0;
-    bool probe_answered_ = false;
     bool imagery_reachable_ = false;
 };
 

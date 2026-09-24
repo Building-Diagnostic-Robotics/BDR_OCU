@@ -960,12 +960,15 @@ Classic Stage 4/5 remain in-tree, unrouted.
  (confirm → `JobStore::remove` → row dropped in place, dialog stays
  open, `planDeleted(id)` emitted). Deleting the last plan returns to
  New Scan. New Scan is the Measured and Satellite cards. The **New
- Satellite Plan** card is gated on imagery reachability: a
- `QNetworkAccessManager` HEAD against `TileService::connectivityProbeUrl()`
- every 5 s while the modal is open, two consecutive successes to enable,
- one failure to disable (same debounce shape as `UploadDialog`'s cloud
- probe). Satellite planning needs internet, so it happens in the office.
- With no saved plans the dialog opens on New Scan.
+ Satellite Plan** card reads `ImageryReachabilityProbe`: two consecutive
+ successes against `TileService::connectivityProbeUrl()` enable it, one
+ failure disables it. AppShell starts that probe when the dashboard
+ opens and stops it on leaving. A finished site download
+ (`SatelliteScreen::imageryDownloaded`) stops it for the rest of the
+ session. Satellite planning needs internet, so it happens in the office.
+ The reachability check starts when the dashboard opens and stops on
+ leaving it. A finished site download stops it for the rest of the
+ session. With no saved plans the dialog opens on New Scan.
 
 ### One trim
 

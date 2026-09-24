@@ -341,6 +341,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     // (topics stale, probe fails).  Both probe and monitor arm/disarm
     // together — see startRobotCompleteLaunch / teardown paths.
     reachability_probe_ = new RobotReachabilityProbe(this);
+    imagery_probe_ = new ImageryReachabilityProbe(this);
     connect(reachability_probe_, &RobotReachabilityProbe::reachabilityChanged,
             this, [this](RobotReachabilityProbe::State /*old*/,
                           RobotReachabilityProbe::State next) {
@@ -1183,10 +1184,16 @@ void AppShellWindow::onLoginSubmitted(const QString& robotId, const QString& acc
 }
 
 void AppShellWindow::goToStage1() {
+    if (imagery_probe_) {
+        imagery_probe_->stop();
+    }
     stack_->setCurrentWidget(stage1_);
 }
 
 void AppShellWindow::goToStage2() {
+    if (imagery_probe_) {
+        imagery_probe_->stop();
+    }
     ensureStage2();
     if (!stage2_) {
         return;
@@ -1221,10 +1228,16 @@ void AppShellWindow::goToStage3() {
     // empty default if the first check failed.
     requestRobotSyncCheckNow();
     refreshRobotSyncBanner();
+    if (imagery_probe_) {
+        imagery_probe_->start();
+    }
     stack_->setCurrentWidget(stage3_);
 }
 
 void AppShellWindow::goToStage4() {
+    if (imagery_probe_) {
+        imagery_probe_->stop();
+    }
     ensureStage4();
     if (!stage4_) {
         return;
@@ -1252,6 +1265,9 @@ void AppShellWindow::goToStage4() {
 }
 
 void AppShellWindow::goToStage5() {
+    if (imagery_probe_) {
+        imagery_probe_->stop();
+    }
     ensureStage5();
     if (!stage5_) {
         return;
@@ -1281,6 +1297,9 @@ void AppShellWindow::goToStage5() {
 }
 
 void AppShellWindow::goToStage6() {
+    if (imagery_probe_) {
+        imagery_probe_->stop();
+    }
     ensureStage6();
     if (!stage6_) {
         return;
@@ -1299,6 +1318,8 @@ void AppShellWindow::ensureStage6() {
     stack_->addWidget(stage6_);
     connect(stage6_, &SatelliteScreen::backRequested, this,
             &AppShellWindow::goToStage3);
+    connect(stage6_, &SatelliteScreen::imageryDownloaded, imagery_probe_,
+            &ImageryReachabilityProbe::noteImageryDownloaded);
     // Layered link model for the Stage 6 BOT pill: the screen stamps the
     // monitor from its ROS callbacks; AppShell arms the monitor + the
     // ICMP/TCP-22 reachability probe for the mission's lifetime. The probe
@@ -1869,7 +1890,7 @@ void AppShellWindow::onStartNewScan() {
 
     // ---- 1. Plan / mode selection ----
     JobStore job_store;
-    auto* setup = new ScanSetupDialog(job_store.loadAll(), this);
+    auto* setup = new ScanSetupDialog(job_store.loadAll(), this, imagery_probe_);
     center_dialog(setup);
     const int setup_rc = setup->exec();
     const ScanSetupDialog::Choice choice = setup->choice();
