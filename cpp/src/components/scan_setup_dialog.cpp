@@ -223,9 +223,9 @@ void ScanSetupDialog::applyImageryReachable(bool reachable) {
     satellite_description_->setText(
         reachable ? satellite_description_text_
                   : (probe_answered_
-                         ? QStringLiteral("Needs an internet connection —\n"
-                                          "plan satellite jobs in the office")
-                         : QStringLiteral("Checking imagery connection…")));
+                         ? QStringLiteral("NEEDS AN INTERNET CONNECTION —\n"
+                                          "PLAN SATELLITE JOBS IN THE OFFICE")
+                         : QStringLiteral("CHECKING IMAGERY CONNECTION…")));
     satellite_card_->setToolTip(
         reachable ? QString()
                   : QStringLiteral("Satellite imagery is unreachable. Plan "
@@ -236,34 +236,50 @@ void ScanSetupDialog::applyImageryReachable(bool reachable) {
 void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(24, 20, 24, 20);
-    root->setSpacing(16);
+    root->setSpacing(12);
 
-    // ---- Header: title + subtitle left, close X right ----
+    // Arrow and X are the same width so the title stays centred when the
+    // arrow is blank (first screen, or no saved plans).
     auto* header_row = new QHBoxLayout();
     header_row->setContentsMargins(0, 0, 0, 0);
     header_row->setSpacing(8);
 
+    back_button_ = new QPushButton(this);
+    back_button_->setObjectName("SetupBack");
+    back_button_->setIconSize(QSize(20, 20));
+    back_button_->setFixedSize(28, 28);
+    back_button_->setCursor(Qt::PointingHandCursor);
+    back_button_->setFocusPolicy(Qt::NoFocus);
+    connect(back_button_, &QPushButton::clicked, this,
+            [this] { showPage(kPageChoose); });
+    header_row->addWidget(back_button_, 0, Qt::AlignVCenter);
+
     auto* header_text = new QVBoxLayout();
     header_text->setSpacing(2);
-    auto* title = new QLabel(QStringLiteral("Start New Scan"), this);
+    auto* title = new QLabel(QStringLiteral("START NEW SCAN"), this);
     title->setObjectName("SetupTitle");
+    title->setAlignment(Qt::AlignCenter);
     title_ = title;
     header_text->addWidget(title);
     auto* subtitle = new QLabel(
-        QStringLiteral("Open a saved plan or start a new one"), this);
+        QStringLiteral("OPEN A SAVED PLAN OR START A NEW ONE"), this);
     subtitle->setObjectName("SetupSubtitle");
+    subtitle->setAlignment(Qt::AlignCenter);
     subtitle_ = subtitle;
     header_text->addWidget(subtitle);
     header_row->addLayout(header_text, 1);
 
+    const UiThemeTokens theme = appThemeTokens();
     auto* close_button = new QPushButton(this);
     close_button->setObjectName("SetupClose");
-    close_button->setIcon(QIcon(QStringLiteral(":/assets/dialog/close.svg")));
+    close_button->setIcon(QIcon(tintedSvg(
+        QStringLiteral(":/assets/dialog/close.svg"), 16, 16, theme.danger)));
     close_button->setIconSize(QSize(16, 16));
     close_button->setFixedSize(28, 28);
     close_button->setCursor(Qt::PointingHandCursor);
+    close_button->setFocusPolicy(Qt::NoFocus);
     connect(close_button, &QPushButton::clicked, this, &QDialog::reject);
-    header_row->addWidget(close_button, 0, Qt::AlignTop);
+    header_row->addWidget(close_button, 0, Qt::AlignVCenter);
     root->addLayout(header_row);
 
     // ---- Saved plans: PLANNED (open) then COMPLETED (collapsed) ----
@@ -295,8 +311,8 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
         choose, QStringLiteral("SetupCardSaved"),
         QString::fromLatin1(kAccentBlue),
         QStringLiteral(":/assets/dashboard/plan_job.svg"),
-        QStringLiteral("Saved Scan"),
-        QStringLiteral("Open a plan already\non this laptop"));
+        QStringLiteral("SAVED SCAN"),
+        QStringLiteral("OPEN A PLAN ALREADY\nON THIS LAPTOP"));
     connect(saved_card, &QPushButton::clicked, this,
             [this] { showPage(kPageSaved); });
     choose_row->addWidget(saved_card, 1);
@@ -304,8 +320,8 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
         choose, QStringLiteral("SetupCardNew"),
         QString::fromLatin1(kAccentGreen),
         QStringLiteral(":/assets/scansetup/new.svg"),
-        QStringLiteral("New Scan"),
-        QStringLiteral("Measured grid or\nsatellite imagery"));
+        QStringLiteral("NEW SCAN"),
+        QStringLiteral("MEASURED GRID OR\nSATELLITE IMAGERY"));
     connect(new_card, &QPushButton::clicked, this,
             [this] { showPage(kPageNew); });
     choose_row->addWidget(new_card, 1);
@@ -332,8 +348,8 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
         fresh, QStringLiteral("SetupCardMeasured"),
         QString::fromLatin1(kAccentGreen),
         QStringLiteral(":/assets/scansetup/measured.svg"),
-        QStringLiteral("Measured ROI Scan"),
-        QStringLiteral("Draw the roof from tape\nmeasurements on a grid"));
+        QStringLiteral("MEASURED ROI SCAN"),
+        QStringLiteral("DRAW THE ROOF FROM TAPE\nMEASUREMENTS ON A GRID"));
     connect(measured_card, &QPushButton::clicked, this, [this] {
         choice_ = Choice::NewMeasuredPlan;
         accept();
@@ -341,12 +357,12 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
     cards_row->addWidget(measured_card, 1);
 
     satellite_description_text_ =
-        QStringLiteral("Plan on satellite imagery\nof the site");
+        QStringLiteral("PLAN ON SATELLITE IMAGERY\nOF THE SITE");
     satellite_card_ = buildModeCard(
         fresh, QStringLiteral("SetupCardSatellite"),
         QString::fromLatin1(kAccentBlue),
         QStringLiteral(":/assets/scansetup/satellite.svg"),
-        QStringLiteral("Satellite ROI Scan"), satellite_description_text_);
+        QStringLiteral("SATELLITE ROI SCAN"), satellite_description_text_);
     satellite_title_ =
         satellite_card_->findChild<QLabel*>(QStringLiteral("SetupCardTitle"));
     satellite_description_ = satellite_card_->findChild<QLabel*>(
@@ -360,24 +376,6 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
     });
     cards_row->addWidget(satellite_card_, 1);
     pages_->addWidget(fresh);
-
-    auto* footer_row = new QHBoxLayout();
-    back_button_ = new QPushButton(QStringLiteral("Back"), this);
-    back_button_->setObjectName("SetupCancel");
-    back_button_->setCursor(Qt::PointingHandCursor);
-    back_button_->setFixedHeight(40);
-    back_button_->hide();
-    connect(back_button_, &QPushButton::clicked, this,
-            [this] { showPage(kPageChoose); });
-    footer_row->addWidget(back_button_);
-    footer_row->addStretch(1);
-    auto* cancel = new QPushButton(QStringLiteral("Cancel"), this);
-    cancel->setObjectName("SetupCancel");
-    cancel->setCursor(Qt::PointingHandCursor);
-    cancel->setFixedHeight(40);
-    connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
-    footer_row->addWidget(cancel);
-    root->addLayout(footer_row);
 
     showPage(hasSavedPlans() ? kPageChoose : kPageNew);
 }
@@ -480,19 +478,33 @@ void ScanSetupDialog::showPage(int page) {
         return;
     }
     pages_->setCurrentIndex(page);
+    // QStackedLayout sizes to the tallest page. Ignored pages drop out
+    // of that, so the dialog shrinks back to the page on screen.
+    for (int i = 0; i < pages_->count(); ++i) {
+        if (QWidget* page_widget = pages_->widget(i)) {
+            page_widget->setSizePolicy(i == page
+                ? QSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred)
+                : QSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored));
+        }
+    }
     if (page == kPageSaved) {
-        title_->setText(QStringLiteral("Saved Scans"));
-        subtitle_->setText(QStringLiteral("Choose a plan to open"));
+        title_->setText(QStringLiteral("SAVED SCANS"));
+        subtitle_->setText(QStringLiteral("CHOOSE A PLAN TO OPEN"));
     } else if (page == kPageNew) {
-        title_->setText(QStringLiteral("New Scan"));
-        subtitle_->setText(QStringLiteral("Choose how to plan the roof"));
+        title_->setText(QStringLiteral("NEW SCAN"));
+        subtitle_->setText(QStringLiteral("CHOOSE HOW TO PLAN THE ROOF"));
     } else {
-        title_->setText(QStringLiteral("Start New Scan"));
+        title_->setText(QStringLiteral("START NEW SCAN"));
         subtitle_->setText(
-            QStringLiteral("Open a saved plan or start a new one"));
+            QStringLiteral("OPEN A SAVED PLAN OR START A NEW ONE"));
     }
     if (back_button_) {
-        back_button_->setVisible(page != kPageChoose && hasSavedPlans());
+        const bool show_back = page != kPageChoose && hasSavedPlans();
+        back_button_->setEnabled(show_back);
+        back_button_->setIcon(show_back
+            ? QIcon(tintedSvg(QStringLiteral(":/assets/satellite/footer_back.svg"),
+                              20, 20, QString::fromLatin1(kAccentBlue)))
+            : QIcon());
     }
     pages_->updateGeometry();
     recenter();
@@ -575,13 +587,14 @@ QWidget* ScanSetupDialog::buildPlanRow(const Job& job, QWidget* parent) {
 
     auto* text_column = new QVBoxLayout();
     text_column->setSpacing(2);
-    auto* name = new QLabel(job.name.isEmpty() ? job.id : job.name, row);
+    auto* name = new QLabel(
+        (job.name.isEmpty() ? job.id : job.name).toUpper(), row);
     name->setObjectName("SetupPlanName");
     text_column->addWidget(name);
     QString detail_text =
         job.address.isEmpty()
-            ? (measured ? QStringLiteral("Measured plan")
-                        : QStringLiteral("Satellite plan"))
+            ? (measured ? QStringLiteral("MEASURED PLAN")
+                        : QStringLiteral("SATELLITE PLAN"))
             : job.address;
     // Imagery provenance travels with the plan (schema 3): a plan saved last
     // month may have been drawn on a flight from years earlier, because World
@@ -711,10 +724,14 @@ void ScanSetupDialog::applyStyle() {
         #SetupSubtitle {
             font-family: 'Arimo'; font-size: 14px; color: %4;
         }
+        #SetupBack, #SetupBack:disabled {
+            background: transparent; border: none; border-radius: 4px;
+        }
+        #SetupBack:hover:enabled { background-color: %5; }
         #SetupClose {
             background: transparent; border: none; border-radius: 4px;
         }
-        #SetupClose:hover { background-color: %5; }
+        #SetupClose:hover { background-color: rgba(239, 68, 68, 0.12); }
         #SetupSectionLabel {
             font-family: 'Arimo'; font-weight: 700; font-size: 11px;
             letter-spacing: 0.5px; color: %4;
@@ -766,18 +783,6 @@ void ScanSetupDialog::applyStyle() {
             font-family: 'Arimo'; font-weight: 700; font-size: 10px;
             letter-spacing: 0.5px; color: %4;
         }
-        #SetupDividerLine { background-color: %2; border: none; }
-        #SetupDividerLabel {
-            font-family: 'Arimo'; font-size: 12px; color: %4;
-        }
-        #SetupCancel {
-            font-family: 'Arimo'; font-weight: 600; font-size: 14px;
-            color: %3;
-            background-color: %8;
-            border: none; border-radius: 10px;
-            padding: 0 24px;
-        }
-        #SetupCancel:hover { background-color: %5; }
     )")
                       .arg(t.surface, t.surface_border, t.text, t.muted,
                            t.neutral_hover, t.raised, t.accent_green,

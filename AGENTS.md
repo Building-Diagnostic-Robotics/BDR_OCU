@@ -948,7 +948,12 @@ Classic Stage 4/5 remain in-tree, unrouted.
  cmd_vel/autonomy_enable pubs, coverage/odom/status subs, axis-state
  clients, `pushSessionMetadata` (coordinator SetParameters).
 - `components/scan_setup_dialog.{hpp,cpp}` — the mode/plan selector modal.
- First screen is Saved Scan or New Scan. Saved Scan is the plan list:
+ First screen is Saved Scan or New Scan. Labels are capitals; plan
+ names are shown in capitals and addresses stay as typed. There is no
+ Cancel — the red X and Esc close the dialog. Back is a blue arrow at
+ the top left, shown on Saved Scan and New Scan only when a plan
+ exists, and it keeps its slot when hidden so the title stays centred.
+ Saved Scan is the plan list:
  **SAVED PLANS** (PLANNED, open) and a collapsed **COMPLETED (N)**
  disclosure (newest scan first, `LAST RUN` chip; rows still open the
  plan). Every row has a trash button — the only manual delete path
