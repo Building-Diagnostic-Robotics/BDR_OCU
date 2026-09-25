@@ -7,13 +7,11 @@
 
 #include <cmath>
 
-#include <QAbstractAnimation>
 #include <QApplication>
 #include <QColor>
 #include <QDateTime>
 #include <QFile>
 #include <QGraphicsDropShadowEffect>
-#include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QJsonDocument>
@@ -21,13 +19,9 @@
 #include <QJsonParseError>
 #include <QLabel>
 #include "components/bdr_message_box.hpp"
-#include "components/tilt_calibration_dialog.hpp"
-#include <QMouseEvent>
 #include <QPainter>
 #include <QProcess>
-#include <QPropertyAnimation>
 #include <QPushButton>
-#include <QRegularExpression>
 #include <QSettings>
 #include <QShowEvent>
 #include <QStandardPaths>
@@ -54,17 +48,9 @@ constexpr int kBatteryStaleTimerMs = 2000;
 constexpr double kBatteryLowPct = 25.0;
 constexpr double kBatteryCriticalPct = 12.0;
 
-// Calibration probe cadence. SSH round-trips are cheap but not free; once
-// every 5 minutes is plenty for a value that only changes when the
-// operator runs `Calibrate Tilt`.
-constexpr int kCalibrationRefreshMs = 5 * 60 * 1000;
-constexpr int kCalibrationProbeTimeoutMs = 8000;
-
-// Tilt-calibration policy: blink the calibration card and show "Due now"
-// once `kCalibrationDueAfterScans` scans have happened since the last
-// calibration. Soft reminder, not a hard requirement. Three matches the
-// current field-deployment guidance — bump in one place if it changes.
-constexpr int kCalibrationDueAfterScans = 3;
+// Total Scans probe cadence. SSH while Stage 3 is visible.
+constexpr int kScansRefreshMs = 5 * 60 * 1000;
+constexpr int kScansProbeTimeoutMs = 8000;
 
 // Offload probe: the worker heartbeat is 5 s. Poll while Stage 3 is
 // visible so Complete Mission → Dashboard shows "Syncing…" immediately.
@@ -310,19 +296,6 @@ DashboardScreen::DashboardScreen(QWidget* parent)
         "font-family: 'Arimo'; font-weight: 700; font-size: 24px; line-height: 32px; color: #1E2939;");
     cardsRow->addWidget(card_battery_top_, 1);
 
-    card_calibration_ = makeStatusCard(content, "DashboardCardCalibration",
-        "#FEF3C6", ":/assets/dashboard/settings.svg", "#E17100", "Next Calibration", lbl_calibration_value_);
-    lbl_calibration_value_->setText(QStringLiteral("—"));
-    lbl_calibration_value_->setStyleSheet(
-        "font-family: 'Arimo'; font-weight: 700; font-size: 24px; line-height: 32px; color: #E17100;");
-    cardsRow->addWidget(card_calibration_, 1);
-    // Click anywhere on the calibration card → trigger the Calibrate Tilt
-    // flow. Blink + clickable surface together make the "due now" state
-    // discoverable without forcing the operator to hunt for the button.
-    card_calibration_->setCursor(Qt::PointingHandCursor);
-    card_calibration_->setToolTip(QStringLiteral("Click to run Calibrate Tilt"));
-    card_calibration_->installEventFilter(this);
-
     contentLayout->addLayout(cardsRow);
 
     // Quick Actions
@@ -356,11 +329,6 @@ DashboardScreen::DashboardScreen(QWidget* parent)
         ":/assets/dashboard/camera.svg", "Upload Data", "Push completed scans to the cloud");
     connect(btn_view_recordings_, &QPushButton::clicked, this, &DashboardScreen::onViewRecordingsClicked);
     actionsRow->addWidget(btn_view_recordings_, 1);
-
-    btn_calibrate_tilt_ = makeActionButton(actionsCard, "DashboardBtnCalibrateTilt", "#E17100", "#E17100",
-        ":/assets/dashboard/settings.svg", "Calibrate Tilt", "Align LiDAR mount for odometry and maps");
-    connect(btn_calibrate_tilt_, &QPushButton::clicked, this, &DashboardScreen::onCalibrateTiltRequested);
-    actionsRow->addWidget(btn_calibrate_tilt_, 1);
 
     actionsLayout->addLayout(actionsRow);
     contentLayout->addWidget(actionsCard);
@@ -402,7 +370,6 @@ DashboardScreen::DashboardScreen(QWidget* parent)
 
     addInfoPair(infoCard, "Robot ID", lbl_robot_id_value_);
     addInfoPair(infoCard, "Firmware", lbl_firmware_value_);
-    addInfoPair(infoCard, "Last Calibration", lbl_calibration_value_info_);
     addInfoPair(infoCard, "Battery", lbl_battery_value_);
     addInfoPair(infoCard, "Uptime", lbl_uptime_value_);
 
@@ -413,7 +380,6 @@ DashboardScreen::DashboardScreen(QWidget* parent)
     // one line to bump the displayed version everywhere.
     lbl_firmware_value_->setText(
         QStringLiteral("v%1").arg(QString::fromLatin1(version::kAppSemver)));
-    lbl_calibration_value_info_->setText("—");
     lbl_battery_value_->setText("—");
     lbl_uptime_value_->setText("—");
 
@@ -442,10 +408,10 @@ DashboardScreen::DashboardScreen(QWidget* parent)
     connect(battery_stale_timer_, &QTimer::timeout, this,
             &DashboardScreen::onBatteryStaleTimerTick);
 
-    calibration_refresh_timer_ = new QTimer(this);
-    calibration_refresh_timer_->setInterval(kCalibrationRefreshMs);
-    connect(calibration_refresh_timer_, &QTimer::timeout, this,
-            &DashboardScreen::onCalibrationRefreshTimerTick);
+    scans_refresh_timer_ = new QTimer(this);
+    scans_refresh_timer_->setInterval(kScansRefreshMs);
+    connect(scans_refresh_timer_, &QTimer::timeout, this,
+            &DashboardScreen::onScansRefreshTimerTick);
 
     // System Status card refresh — 1 Hz is enough for a rollup that only
     // changes when MQTT freshness flips or preflight is re-run. Cheap.
@@ -479,7 +445,6 @@ DashboardScreen::DashboardScreen(QWidget* parent)
     applyDropShadow(card_status_, 6, 2, 25);
     applyDropShadow(card_scans_, 6, 2, 25);
     applyDropShadow(card_battery_top_, 6, 2, 25);
-    applyDropShadow(card_calibration_, 6, 2, 25);
     applyDropShadow(actionsCard, 6, 2, 25);
 
     applyStyle();
@@ -531,21 +496,6 @@ void DashboardScreen::onViewRecordingsClicked() {
     emit viewRecordingsRequested();
 }
 
-void DashboardScreen::onCalibrateTiltRequested() {
-    ResolvedRobotSshTarget target;
-    QString err;
-    if (!resolveRobotSshTargetFromSettings(&target, &err)) {
-        BdrMessageBox::warning(
-            this,
-            QStringLiteral("Calibration"),
-            err.isEmpty() ? QStringLiteral("Could not resolve robot SSH connection.") : err);
-        return;
-    }
-    TiltCalibrationDialog dlg(target.host, target.ssh_user, this);
-    dlg.setDarkMode(dark_mode_);
-    dlg.exec();
-}
-
 void DashboardScreen::loadRobotProfileFromRegistry() {
     ResolvedRobotSshTarget target;
     QString err;
@@ -566,7 +516,7 @@ void DashboardScreen::loadRobotProfileFromRegistry() {
 
 DashboardScreen::~DashboardScreen() {
     stopBatteryMonitor();
-    stopCalibrationProbe();
+    stopScansProbe();
     stopOffloadProbe();
 }
 
@@ -583,10 +533,10 @@ void DashboardScreen::showEvent(QShowEvent* event) {
         battery_stale_timer_->start();
     }
 
-    // Calibration: probe immediately, then refresh every 5 minutes.
-    startCalibrationProbe();
-    if (calibration_refresh_timer_) {
-        calibration_refresh_timer_->start();
+    // Total Scans: probe immediately, then refresh every 5 minutes.
+    startScansProbe();
+    if (scans_refresh_timer_) {
+        scans_refresh_timer_->start();
     }
 
     if (status_refresh_timer_) {
@@ -610,10 +560,10 @@ void DashboardScreen::hideEvent(QHideEvent* event) {
     // batterySocChanged -> AppShellWindow::onDashboardBatteryStateChanged). It
     // is torn down only in the destructor. The remaining probes below are
     // Stage-3-only (expensive SSH / blink animation) and still pause on hide.
-    if (calibration_refresh_timer_) {
-        calibration_refresh_timer_->stop();
+    if (scans_refresh_timer_) {
+        scans_refresh_timer_->stop();
     }
-    stopCalibrationProbe();
+    stopScansProbe();
     stopOffloadProbe();
     if (offload_refresh_timer_) {
         offload_refresh_timer_->stop();
@@ -623,16 +573,6 @@ void DashboardScreen::hideEvent(QHideEvent* event) {
     }
     if (status_refresh_timer_) {
         status_refresh_timer_->stop();
-    }
-    // Pause the blink animation while Stage 3 isn't visible — saves a
-    // tiny amount of CPU and avoids flicker when the operator comes
-    // back to the screen (we'll restart the animation if the next
-    // probe still says "due").
-    if (calibration_blink_anim_) {
-        calibration_blink_anim_->stop();
-    }
-    if (calibration_blink_effect_) {
-        calibration_blink_effect_->setOpacity(1.0);
     }
     if (upload_blink_timer_) {
         upload_blink_timer_->stop();
@@ -1130,278 +1070,101 @@ const char* DashboardScreen::statusCardColorHex(SystemStatus s) {
 }
 
 // =============================================================================
-// Last-calibration SSH probe
+// Total Scans SSH probe
 // =============================================================================
 
-void DashboardScreen::startCalibrationProbe() {
-    stopCalibrationProbe();
+void DashboardScreen::startScansProbe() {
+    stopScansProbe();
 
     if (robot_host_.isEmpty() || robot_ssh_user_.isEmpty()) {
-        setCalibrationDisplay(
-            QStringLiteral("—"),
-            QStringLiteral(
-                "No SSH target: complete setup login, or set robot_ip / robots.json."));
+        setTotalScansDisplay(-1);
         return;
     }
 
-    calibration_proc_ = new QProcess(this);
-    calibration_proc_->setProcessChannelMode(QProcess::SeparateChannels);
-    connect(calibration_proc_,
+    scans_proc_ = new QProcess(this);
+    scans_proc_->setProcessChannelMode(QProcess::SeparateChannels);
+    connect(scans_proc_,
             QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            &DashboardScreen::onCalibrationProbeFinished);
+            &DashboardScreen::onScansProbeFinished);
 
-    // BatchMode=yes prevents SSH from blocking on a password prompt — if
-    // keys aren't set up we get a clean exit-code failure rather than a
-    // hung QProcess. ConnectTimeout caps the radio round-trip.
-    //
-    // Combined probe: single SSH round-trip returns three values
-    //   <cal_mtime_epoch_or_0> <total_scans> <scans_since_cal>
-    // separated by whitespace. Three round-trips would be wasteful when
-    // they all share an SSH session — let the robot's shell aggregate.
     QStringList args;
     args << QStringLiteral("-o") << QStringLiteral("BatchMode=yes")
          << QStringLiteral("-o") << QStringLiteral("ConnectTimeout=5")
          << QStringLiteral("-o") << QStringLiteral("StrictHostKeyChecking=accept-new")
          << QStringLiteral("%1@%2").arg(robot_ssh_user_).arg(robot_host_)
          << QStringLiteral(
-                // shellcheck-tolerant one-liner; quotes are escaped for Qt.
-                "LATEST_CAL=$(ls -t /R_DATA/tilt_calibration/tilt_correction_matrices_*.npz "
-                "2>/dev/null | head -1); "
-                "CAL_M=0; "
-                "if [ -n \"$LATEST_CAL\" ]; then "
-                "  CAL_M=$(stat -c '%Y' \"$LATEST_CAL\" 2>/dev/null || echo 0); "
-                "fi; "
-                // Section folders live under
-                //   /R_DATA/<day>/<building_slug>/Section_*  (depth 3)
-                // since the New-Scan-Information modal landed
-                // (Stage 3 of the units / metadata feature). Pre-modal data
-                // at depth 2 (/R_DATA/<day>/Section_*) is intentionally
-                // ignored — the operator wiped /R_DATA in the changeover.
-                "TOTAL=$(find /R_DATA -mindepth 3 -maxdepth 3 -type d -name 'Section_*' "
-                "2>/dev/null | wc -l); "
-                "SINCE=0; "
-                "if [ -n \"$LATEST_CAL\" ]; then "
-                "  SINCE=$(find /R_DATA -mindepth 3 -maxdepth 3 -type d -name 'Section_*' "
-                "-newer \"$LATEST_CAL\" 2>/dev/null | wc -l); "
-                "else "
-                "  SINCE=$TOTAL; "
-                "fi; "
-                "echo \"$CAL_M $TOTAL $SINCE\"");
-    calibration_proc_->start(QStringLiteral("ssh"), args);
+                "find /R_DATA -mindepth 3 -maxdepth 3 -type d -name 'Section_*' "
+                "2>/dev/null | wc -l");
+    scans_proc_->start(QStringLiteral("ssh"), args);
 
-    // Hard deadline in case the connection itself stalls before SSH's own
-    // ConnectTimeout fires.
-    QTimer::singleShot(kCalibrationProbeTimeoutMs, calibration_proc_, [this]() {
-        if (calibration_proc_ && calibration_proc_->state() != QProcess::NotRunning) {
-            calibration_proc_->kill();
+    QTimer::singleShot(kScansProbeTimeoutMs, scans_proc_, [this]() {
+        if (scans_proc_ && scans_proc_->state() != QProcess::NotRunning) {
+            scans_proc_->kill();
         }
     });
 
-    if (!calibration_proc_->waitForStarted(1500)) {
+    if (!scans_proc_->waitForStarted(1500)) {
         update::log::warn(
             "dashboard",
-            QStringLiteral("calibration probe: ssh failed to start: %1")
-                .arg(calibration_proc_->errorString()));
-        stopCalibrationProbe();
-        setCalibrationDisplay(QStringLiteral("—"),
-                              QStringLiteral("Could not start SSH probe."));
+            QStringLiteral("scans probe: ssh failed to start: %1")
+                .arg(scans_proc_->errorString()));
+        stopScansProbe();
+        setTotalScansDisplay(-1);
     }
 }
 
-void DashboardScreen::stopCalibrationProbe() {
-    if (!calibration_proc_) {
+void DashboardScreen::stopScansProbe() {
+    if (!scans_proc_) {
         return;
     }
-    calibration_proc_->blockSignals(true);
-    if (calibration_proc_->state() != QProcess::NotRunning) {
-        calibration_proc_->kill();
-        calibration_proc_->waitForFinished(750);
+    scans_proc_->blockSignals(true);
+    if (scans_proc_->state() != QProcess::NotRunning) {
+        scans_proc_->kill();
+        scans_proc_->waitForFinished(750);
     }
-    calibration_proc_->deleteLater();
-    calibration_proc_ = nullptr;
+    scans_proc_->deleteLater();
+    scans_proc_ = nullptr;
 }
 
-void DashboardScreen::onCalibrationProbeFinished() {
-    if (!calibration_proc_) {
+void DashboardScreen::onScansProbeFinished() {
+    if (!scans_proc_) {
         return;
     }
-    const int exit_code = calibration_proc_->exitCode();
-    const QByteArray stdout_text = calibration_proc_->readAllStandardOutput();
-    const QByteArray stderr_text = calibration_proc_->readAllStandardError();
-
+    const int exit_code = scans_proc_->exitCode();
+    const QString line = QString::fromUtf8(scans_proc_->readAllStandardOutput()).trimmed();
+    const QByteArray stderr_text = scans_proc_->readAllStandardError();
+    stopScansProbe();
     if (exit_code != 0) {
         update::log::warn(
             "dashboard",
-            QStringLiteral(
-                "calibration probe: ssh exit=%1 stderr=%2")
+            QStringLiteral("scans probe: ssh exit=%1 stderr=%2")
                 .arg(exit_code)
                 .arg(QString::fromUtf8(stderr_text).trimmed()));
-        setCalibrationDisplay(QStringLiteral("unreachable"),
-                              QStringLiteral("SSH probe failed (exit %1).\n%2")
-                                  .arg(exit_code)
-                                  .arg(QString::fromUtf8(stderr_text).trimmed()));
-        setScansAndCalibrationDisplays(-1, -1);
-        stopCalibrationProbe();
+        setTotalScansDisplay(-1);
         return;
     }
-
-    const QString line = QString::fromUtf8(stdout_text).trimmed();
-    static const QRegularExpression kWhitespaceRx(QStringLiteral("\\s+"));
-    const QStringList parts = line.split(kWhitespaceRx, Qt::SkipEmptyParts);
-    // Expected: "<cal_mtime> <total_scans> <scans_since_cal>"
-    if (parts.size() < 3) {
-        update::log::warn(
-            "dashboard",
-            QStringLiteral(
-                "calibration probe: unexpected output (%1 fields): %2")
-                .arg(parts.size())
-                .arg(line));
-        setCalibrationDisplay(
-            QStringLiteral("—"),
-            QStringLiteral("Unexpected probe output: %1").arg(line));
-        setScansAndCalibrationDisplays(-1, -1);
-        stopCalibrationProbe();
-        return;
-    }
-
-    bool ok_m = false, ok_t = false, ok_s = false;
-    const qint64 mtime_secs = parts[0].toLongLong(&ok_m);
-    const int total_scans = parts[1].toInt(&ok_t);
-    const int scans_since_cal = parts[2].toInt(&ok_s);
-
-    if (mtime_secs <= 0 || !ok_m) {
-        // No file means the operator has never run tilt calibration on
-        // this robot — explicit "never" is more useful than empty.
-        setCalibrationDisplay(QStringLiteral("never"),
-                              QStringLiteral(
-                                  "No tilt_correction_matrices_*.npz found in "
-                                  "/R_DATA/tilt_calibration/. Run Calibrate Tilt "
-                                  "to generate one."));
-    } else {
-        calibration_last_mtime_ = QDateTime::fromSecsSinceEpoch(mtime_secs);
-        const QString relative = formatRelativeTime(calibration_last_mtime_);
-        const QString absolute =
-            calibration_last_mtime_.toString(QStringLiteral("yyyy-MM-dd HH:mm"));
-        setCalibrationDisplay(
-            relative,
-            QStringLiteral("Last tilt calibration: %1").arg(absolute));
-    }
-
-    setScansAndCalibrationDisplays(ok_t ? total_scans : -1,
-                                   ok_s ? scans_since_cal : -1);
-    stopCalibrationProbe();
+    bool ok = false;
+    const int total = line.toInt(&ok);
+    setTotalScansDisplay(ok ? total : -1);
 }
 
-void DashboardScreen::onCalibrationRefreshTimerTick() {
-    startCalibrationProbe();
+void DashboardScreen::onScansRefreshTimerTick() {
+    startScansProbe();
 }
 
-void DashboardScreen::setCalibrationDisplay(const QString& valueText,
-                                            const QString& tooltip) {
-    if (!lbl_calibration_value_info_) {
+void DashboardScreen::setTotalScansDisplay(int totalScans) {
+    if (!lbl_scans_value_) {
         return;
     }
-    lbl_calibration_value_info_->setText(valueText);
-    lbl_calibration_value_info_->setToolTip(tooltip);
-}
-
-void DashboardScreen::setScansAndCalibrationDisplays(int totalScans,
-                                                     int scansSinceCal) {
-    // Top-row Total Scans card. Negative sentinel → probe failed, fall
-    // back to em-dash so the operator can tell live vs stale at a glance.
-    if (lbl_scans_value_) {
-        if (totalScans < 0) {
-            lbl_scans_value_->setText(QStringLiteral("—"));
-            lbl_scans_value_->setToolTip(
-                QStringLiteral("Robot unreachable — last live count unavailable."));
-        } else {
-            lbl_scans_value_->setText(QString::number(totalScans));
-            lbl_scans_value_->setToolTip(
-                QStringLiteral(
-                    "Total Section_* folders under /R_DATA/<day>/<building>/."));
-        }
-    }
-
-    // Top-row Next Calibration card. We count scans created after the
-    // latest tilt-calibration file's mtime. Once that exceeds the soft
-    // limit the card flips to "Due now" and starts blinking — operator
-    // can click the card to run Calibrate Tilt.
-    if (!lbl_calibration_value_) {
+    if (totalScans < 0) {
+        lbl_scans_value_->setText(QStringLiteral("—"));
+        lbl_scans_value_->setToolTip(
+            QStringLiteral("Robot unreachable — last live count unavailable."));
         return;
     }
-    bool due = false;
-    if (scansSinceCal < 0) {
-        lbl_calibration_value_->setText(QStringLiteral("—"));
-        lbl_calibration_value_->setToolTip(
-            QStringLiteral("Robot unreachable — calibration countdown unavailable."));
-    } else if (scansSinceCal >= kCalibrationDueAfterScans) {
-        due = true;
-        lbl_calibration_value_->setText(QStringLiteral("Due now"));
-        lbl_calibration_value_->setToolTip(
-            QStringLiteral(
-                "%1 scans since last tilt calibration (policy: every %2). "
-                "Click the card to run Calibrate Tilt.")
-                .arg(scansSinceCal)
-                .arg(kCalibrationDueAfterScans));
-    } else {
-        const int remaining = kCalibrationDueAfterScans - scansSinceCal;
-        lbl_calibration_value_->setText(
-            remaining == 1 ? QStringLiteral("1 scan")
-                           : QStringLiteral("%1 scans").arg(remaining));
-        lbl_calibration_value_->setToolTip(
-            QStringLiteral("%1 scans since last tilt calibration; %2 until next "
-                           "recommended (policy: every %3).")
-                .arg(scansSinceCal)
-                .arg(remaining)
-                .arg(kCalibrationDueAfterScans));
-    }
-    setCalibrationDueBlink(due);
-}
-
-void DashboardScreen::setCalibrationDueBlink(bool blink) {
-    if (!card_calibration_) {
-        return;
-    }
-    if (!blink) {
-        if (calibration_blink_anim_) {
-            calibration_blink_anim_->stop();
-        }
-        if (calibration_blink_effect_) {
-            calibration_blink_effect_->setOpacity(1.0);
-        }
-        calibration_blink_active_ = false;
-        return;
-    }
-    // hideEvent stops the animation without clearing the flag, so an
-    // "already blinking" card can be paused. Restart rather than
-    // short-circuit, or it never resumes after a stage round-trip.
-    if (calibration_blink_active_ && calibration_blink_anim_) {
-        if (calibration_blink_anim_->state() != QAbstractAnimation::Running) {
-            calibration_blink_anim_->start();
-        }
-        return;
-    }
-    calibration_blink_active_ = true;
-
-    // Lazy-init the effect + animation. We attach a single
-    // QGraphicsOpacityEffect to the card and pulse its opacity in a loop
-    // so the whole tile fades. QPropertyAnimation handles the timing on
-    // the Qt event loop — no extra QTimer needed.
-    if (!calibration_blink_effect_) {
-        calibration_blink_effect_ = new QGraphicsOpacityEffect(card_calibration_);
-        calibration_blink_effect_->setOpacity(1.0);
-        card_calibration_->setGraphicsEffect(calibration_blink_effect_);
-    }
-    if (!calibration_blink_anim_) {
-        calibration_blink_anim_ =
-            new QPropertyAnimation(calibration_blink_effect_, "opacity", this);
-        calibration_blink_anim_->setDuration(900);
-        calibration_blink_anim_->setStartValue(1.0);
-        calibration_blink_anim_->setKeyValueAt(0.5, 0.45);
-        calibration_blink_anim_->setEndValue(1.0);
-        calibration_blink_anim_->setLoopCount(-1);  // forever until stopped
-    }
-    calibration_blink_anim_->start();
+    lbl_scans_value_->setText(QString::number(totalScans));
+    lbl_scans_value_->setToolTip(
+        QStringLiteral("Total Section_* folders under /R_DATA/<day>/<building>/."));
 }
 
 bool DashboardScreen::robotCopyIncomplete() const {
@@ -1741,56 +1504,6 @@ void DashboardScreen::applyUploadBlinkFrame() {
     }
 }
 
-bool DashboardScreen::eventFilter(QObject* watched, QEvent* event) {
-    if (watched == card_calibration_ && event &&
-        event->type() == QEvent::MouseButtonRelease) {
-        auto* me = static_cast<QMouseEvent*>(event);
-        if (me->button() == Qt::LeftButton &&
-            card_calibration_->rect().contains(me->pos())) {
-            onCalibrateTiltRequested();
-            return true;
-        }
-    }
-    return QWidget::eventFilter(watched, event);
-}
-
-QString DashboardScreen::formatRelativeTime(const QDateTime& past) {
-    if (!past.isValid()) {
-        return QStringLiteral("—");
-    }
-    const qint64 secs = past.secsTo(QDateTime::currentDateTimeUtc());
-    if (secs < 0) {
-        // Robot clock ahead of laptop clock — render as "just now" rather
-        // than a confusing negative.
-        return QStringLiteral("just now");
-    }
-    if (secs < 60) {
-        return QStringLiteral("just now");
-    }
-    if (secs < 3600) {
-        const qint64 mins = secs / 60;
-        return QStringLiteral("%1 min%2 ago").arg(mins).arg(mins == 1 ? "" : "s");
-    }
-    if (secs < 86400) {
-        const qint64 hours = secs / 3600;
-        return QStringLiteral("%1 hour%2 ago").arg(hours).arg(hours == 1 ? "" : "s");
-    }
-    if (secs < 7 * 86400) {
-        const qint64 days = secs / 86400;
-        return QStringLiteral("%1 day%2 ago").arg(days).arg(days == 1 ? "" : "s");
-    }
-    if (secs < 30 * 86400) {
-        const qint64 weeks = secs / (7 * 86400);
-        return QStringLiteral("%1 week%2 ago").arg(weeks).arg(weeks == 1 ? "" : "s");
-    }
-    if (secs < 365 * 86400) {
-        const qint64 months = secs / (30 * 86400);
-        return QStringLiteral("%1 month%2 ago").arg(months).arg(months == 1 ? "" : "s");
-    }
-    const qint64 years = secs / (365 * 86400);
-    return QStringLiteral("%1 year%2 ago").arg(years).arg(years == 1 ? "" : "s");
-}
-
 void DashboardScreen::applyStyle() {
     setProperty("theme", QVariant(dark_mode_ ? QStringLiteral("dark") : QStringLiteral("light")));
     setStyleSheet(R"(
@@ -1834,7 +1547,7 @@ void DashboardScreen::applyStyle() {
         #DashboardContent {
             background-color: #FAFAFA;
         }
-        #DashboardCardStatus, #DashboardCardScans, #DashboardCardBatteryTop, #DashboardCardCalibration {
+        #DashboardCardStatus, #DashboardCardScans, #DashboardCardBatteryTop {
             background: #FFFFFF;
             border: 1px solid #E4E4E7;
             border-radius: 10px;
@@ -1878,7 +1591,6 @@ void DashboardScreen::applyStyle() {
         #DashboardRoot[theme="dark"] #DashboardCardStatus,
         #DashboardRoot[theme="dark"] #DashboardCardScans,
         #DashboardRoot[theme="dark"] #DashboardCardBatteryTop,
-        #DashboardRoot[theme="dark"] #DashboardCardCalibration,
         #DashboardRoot[theme="dark"] #DashboardActionsCard {
             background: #18181B;
             border: 1px solid #27272A;
@@ -1923,14 +1635,12 @@ void DashboardScreen::applyStyle() {
     setCardLabelStyle("DashboardCardStatusLabel");
     setCardLabelStyle("DashboardCardScansLabel");
     setCardLabelStyle("DashboardCardBatteryTopLabel");
-    setCardLabelStyle("DashboardCardCalibrationLabel");
 
     const QString value_style =
         "font-family: 'Arimo'; font-weight: 700; font-size: 24px; line-height: 32px; color: %1;";
     setLabelStyle(lbl_status_value_, QString(value_style).arg(accent));
     setLabelStyle(lbl_scans_value_, QString(value_style).arg(is_dark ? "#FFFFFF" : "#18181B"));
     setLabelStyle(lbl_battery_card_value_, QString(value_style).arg(is_dark ? "#FFFFFF" : "#18181B"));
-    setLabelStyle(lbl_calibration_value_, QString(value_style).arg(is_dark ? "#FFFFFF" : "#18181B"));
 
     if (auto* actionsTitle = findChild<QLabel*>("DashboardActionsTitle")) {
         setLabelStyle(actionsTitle,
@@ -1959,11 +1669,9 @@ void DashboardScreen::applyStyle() {
     setActionTitleStyle("DashboardBtnStartScanTitle", is_dark ? "#FFFFFF" : "#18181B");
     setActionTitleStyle("DashboardBtnDiagnosticsTitle", is_dark ? "#FFFFFF" : "#18181B");
     setActionTitleStyle("DashboardBtnRecordingsTitle", is_dark ? "#FFFFFF" : "#18181B");
-    setActionTitleStyle("DashboardBtnCalibrateTiltTitle", is_dark ? "#FFFFFF" : "#18181B");
     setActionDescStyle("DashboardBtnStartScanDesc");
     setActionDescStyle("DashboardBtnDiagnosticsDesc");
     setActionDescStyle("DashboardBtnRecordingsDesc");
-    setActionDescStyle("DashboardBtnCalibrateTiltDesc");
 
     auto* infoTitle = findChild<QLabel*>("DashboardInfoTitle");
     if (infoTitle) {
@@ -1977,7 +1685,6 @@ void DashboardScreen::applyStyle() {
         "font-family: 'Arimo'; font-size: 14px; line-height: 20px; color: %1;";
     setLabelStyle(lbl_robot_id_value_, QString(info_value_style).arg(info_value_color));
     setLabelStyle(lbl_firmware_value_, QString(info_value_style).arg(info_value_color));
-    setLabelStyle(lbl_calibration_value_info_, QString(info_value_style).arg(info_value_color));
     setLabelStyle(lbl_battery_value_, QString(info_value_style).arg(info_value_color));
     setLabelStyle(lbl_uptime_value_, QString(info_value_style).arg(info_value_color));
 
@@ -1986,7 +1693,7 @@ void DashboardScreen::applyStyle() {
         for (auto* label : labels) {
             if (!label || label == infoTitle ||
                 label == lbl_robot_id_value_ || label == lbl_firmware_value_ ||
-                label == lbl_calibration_value_info_ || label == lbl_battery_value_ ||
+                label == lbl_battery_value_ ||
                 label == lbl_uptime_value_) {
                 continue;
             }
@@ -2014,8 +1721,6 @@ void DashboardScreen::applyStyle() {
     updateCardIcon("DashboardCardScans", ":/assets/dashboard/location_pin.svg",
                    icon_bg, accent);
     updateCardIcon("DashboardCardBatteryTop", ":/assets/dashboard/battery.svg",
-                   icon_bg, accent);
-    updateCardIcon("DashboardCardCalibration", ":/assets/dashboard/settings.svg",
                    icon_bg, accent);
 
     const QString action_bg = is_dark ? "#27272A" : "#FFFFFF";
@@ -2045,7 +1750,6 @@ void DashboardScreen::applyStyle() {
     updateActionButtonStyle(btn_start_scan_);
     updateActionButtonStyle(btn_run_diagnostics_);
     updateActionButtonStyle(btn_view_recordings_);
-    updateActionButtonStyle(btn_calibrate_tilt_);
 
     auto updateActionIcon = [&](const QString& buttonName, const QString& resourcePath,
                                 const QString& strokeColor) {
@@ -2060,7 +1764,6 @@ void DashboardScreen::applyStyle() {
     updateActionIcon("DashboardBtnStartScan", ":/assets/dashboard/location_pin.svg", accent);
     updateActionIcon("DashboardBtnDiagnostics", ":/assets/dashboard/heartbeat.svg", accent);
     updateActionIcon("DashboardBtnRecordings", ":/assets/dashboard/camera.svg", accent);
-    updateActionIcon("DashboardBtnCalibrateTilt", ":/assets/dashboard/settings.svg", "#E17100");
     applyUploadBlinkFrame();
 }
 

@@ -40,7 +40,7 @@
  *
  * Visual style follows the existing frameless dialog family
  * (`OfflineFinalizeDialog`, `MissionMetadataDialog`,
- * `TiltCalibrationDialog`).
+ * `MissionFinalizeDialog`).
  */
 
 #pragma once

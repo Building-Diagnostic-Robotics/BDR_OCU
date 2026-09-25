@@ -43,15 +43,9 @@ Quick inventory of current bypass sites:
   System Status rolls up
   {preflight, battery, MQTT-freshness reachability proxy} into
   INITIALIZING/READY/WARNING/NOT READY. Battery card mirrors the
-  live MQTT subscriber. Total Scans + Next Calibration share a
-  single combined SSH probe with Last Calibration that returns
-  `<cal_mtime> <total_scans> <scans_since_cal>`; the calibration
-  card blinks (`QGraphicsOpacityEffect`) and becomes clickable once
-  `kCalibrationDueAfterScans = 3` scans have passed since the last
-  tilt calibration. `TiltCalibrationDialog::setDarkMode` is called
-  from the Dashboard; only `#TiltCalibrationContainer` gets
-  `WA_StyledBackground` (opaque stack pages cover the 14px corners).
-  The Upload Data card stays disabled and
+  live MQTT subscriber. Total Scans counts `Section_*` folders over
+  SSH (`find` at depth 3) on show and every 5 minutes while Stage 3
+  is visible. The Upload Data card stays disabled and
   stylesheet-pulses until the robot→`RDATA_EXT` copy is complete
   (`OffloadStatus` + per-`robot_id` QSettings cache); Complete
   Mission does not wait on that copy. The lower System Information row is fully wired,
@@ -563,7 +557,7 @@ the robot and saved data stay in meters.
 
 - `cpp/include/components/mission_metadata_dialog.{hpp,cpp}` — the
   frameless modal (slugifies building name, persists to `QSettings`,
-  zinc family with `UploadDialog` / `TiltCalibrationDialog`).
+  zinc family with `UploadDialog` / `MissionFinalizeDialog`).
 - `cpp/src/app_shell.cpp` — `onStartNewScan` (intercept point,
  applies `QGraphicsBlurEffect` to Stage 3) and
  `sendDataCollectorSessionMetadata` (the `SetParameters` push).

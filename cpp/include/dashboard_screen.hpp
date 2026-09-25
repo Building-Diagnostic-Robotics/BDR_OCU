@@ -4,7 +4,6 @@
 #include "thumb_drive_watcher.hpp"
 
 #include <QByteArray>
-#include <QDateTime>
 #include <QString>
 #include <QWidget>
 #include <optional>
@@ -15,13 +14,8 @@ class QProcess;
 class QShowEvent;
 class QHideEvent;
 class QTimer;
-class QEvent;
-class QGraphicsOpacityEffect;
-class QPropertyAnimation;
 
 namespace f2c_cpp {
-
-class TiltCalibrationDialog;
 
 class DashboardScreen : public QWidget {
     Q_OBJECT
@@ -72,13 +66,12 @@ private slots:
     void onStartNewScanClicked();
     void onRunDiagnosticsClicked();
     void onViewRecordingsClicked();
-    void onCalibrateTiltRequested();
 
     void onBatteryStaleTimerTick();
     void onBatteryProcessReadyRead();
     void onBatteryProcessFinished();
-    void onCalibrationProbeFinished();
-    void onCalibrationRefreshTimerTick();
+    void onScansProbeFinished();
+    void onScansRefreshTimerTick();
     void onStatusCardRefreshTimerTick();
     void onOffloadProbeFinished();
     void onOffloadRefreshTimerTick();
@@ -100,14 +93,11 @@ private:
     void setBatteryDisplay(const QString& valueText, const QString& tooltip,
                            const QString& color);
 
-    // --- Last-calibration SSH probe ---
-    // Robot stores tilt_correction_matrices_<idx>.npz under
-    // /R_DATA/tilt_calibration/. We mtime the latest entry over SSH and
-    // render relative time on the card with absolute on hover.
-    void startCalibrationProbe();
-    void stopCalibrationProbe();
-    void setCalibrationDisplay(const QString& valueText, const QString& tooltip);
-    static QString formatRelativeTime(const QDateTime& past);
+    // --- Total Scans SSH probe ---
+    // Counts Section_* folders under /R_DATA/<day>/<building>/.
+    void startScansProbe();
+    void stopScansProbe();
+    void setTotalScansDisplay(int totalScans);
 
     // --- System Status card ---
     // Three-state rollup of {preflight, battery, robot reachability}.
@@ -123,13 +113,6 @@ private:
     // network + battery telemetry pipeline.
     bool robotReachableViaMqttBattery() const;
 
-    // --- Total Scans + Next Calibration cards ---
-    // Both fed from the same SSH probe that already runs for Last
-    // Calibration (`calibration_proc_`). The combined probe returns
-    // three whitespace-separated values: <cal_mtime_epoch> <total_scans>
-    // <scans_since_cal>. Saves an extra round-trip.
-    void setScansAndCalibrationDisplays(int totalScans, int scansSinceCal);
-    void setCalibrationDueBlink(bool blink);
     void startOffloadProbe();
     void stopOffloadProbe();
     void applyCachedOffload();
@@ -139,8 +122,6 @@ private:
     void applyUploadBlinkFrame();
     bool robotCopyIncomplete() const;
     bool stickCopyIncomplete() const;
-    bool eventFilter(QObject* watched, QEvent* event) override;
-
     void refreshUptimeDisplay();
 
     QString robot_id_;
@@ -164,16 +145,12 @@ private:
     QLabel* lbl_scans_value_ = nullptr;
     QWidget* card_battery_top_ = nullptr;
     QLabel* lbl_battery_card_value_ = nullptr;
-    QWidget* card_calibration_ = nullptr;
-    QLabel* lbl_calibration_value_ = nullptr;
 
     QPushButton* btn_start_scan_ = nullptr;
     QPushButton* btn_run_diagnostics_ = nullptr;
     QPushButton* btn_view_recordings_ = nullptr;
-    QPushButton* btn_calibrate_tilt_ = nullptr;
     QLabel* lbl_robot_id_value_ = nullptr;
     QLabel* lbl_firmware_value_ = nullptr;
-    QLabel* lbl_calibration_value_info_ = nullptr;
     QLabel* lbl_uptime_value_ = nullptr;
     QLabel* lbl_battery_value_ = nullptr;
 
@@ -193,21 +170,15 @@ private:
     qint64 battery_payload_stale_after_ms_ = 5000;
     qint64 battery_last_start_attempt_ms_ = 0;
 
-    // Calibration probe state.
-    QProcess* calibration_proc_ = nullptr;
-    QTimer* calibration_refresh_timer_ = nullptr;
-    QDateTime calibration_last_mtime_;
+    // Total Scans probe.
+    QProcess* scans_proc_ = nullptr;
+    QTimer* scans_refresh_timer_ = nullptr;
 
     // Status-card state. Refreshed by a 1 Hz timer + every time any
     // contributing signal changes (battery payload, preflight setter).
     QTimer* status_refresh_timer_ = nullptr;
     QString preflight_status_;  // "" / "READY" / "WARN" / "FAIL"
     qint64 dashboard_first_shown_ms_ = 0;
-
-    // Calibration-due blink state for the top calibration card.
-    QGraphicsOpacityEffect* calibration_blink_effect_ = nullptr;
-    QPropertyAnimation* calibration_blink_anim_ = nullptr;
-    bool calibration_blink_active_ = false;
 
     // Robot → RDATA_EXT offload. SSH-reads status.json; the laptop
     // stick walk is the second signal. Cache survives robot power-off.
