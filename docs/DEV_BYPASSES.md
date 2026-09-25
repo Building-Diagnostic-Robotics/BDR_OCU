@@ -121,14 +121,6 @@ enumerates all sites.
     (`f2c_cpp::version::kAppSemver`, derived from
     `project(... VERSION X.Y.Z)` in `cpp/CMakeLists.txt`). Bumping that
     one line bumps the displayed version everywhere.
-  - [x] Last Calibration — `DashboardScreen` runs an SSH `stat -c %Y`
-    probe against `/R_DATA/tilt_calibration/tilt_correction_matrices_*.npz`,
-    formats the mtime as relative time on the card with the absolute
-    timestamp on hover. Probe runs on show + every 5 minutes while
-    visible; uses the host/ssh_user resolved from `RobotRegistry`
-    (matches the `SetupScreen` pattern). On SSH failure the card shows
-    `unreachable` with the stderr in the tooltip; a missing
-    calibration file shows `never`.
   - [x] Battery — `DashboardScreen` spawns `mosquitto_sub` via
     `QProcess` against the host from `RobotRegistry`, port `1883`,
     topic `pilot/battery/state` (overridable via `battery_mqtt_topic`
@@ -162,16 +154,9 @@ enumerates all sites.
     lower System Information row. Displays just the percent; card
     title already says "Battery", so state is conveyed by color
     (#009966 nominal, #E17100 warn, #E74C3C critical).
-  - [x] Total Scans — `DashboardScreen` reuses the same SSH session
-    that probes Last Calibration to also `find /R_DATA -maxdepth 2
-    -type d -name 'Section_*' | wc -l`. Single round-trip returns
-    `<cal_mtime> <total_scans> <scans_since_cal>`.
-  - [x] Next Calibration — soft policy `kCalibrationDueAfterScans = 3`
-    in `dashboard_screen.cpp` (single edit point). Renders
-    `"N scans"` while under the limit, flips to `"Due now"` plus a
-    pulsing `QGraphicsOpacityEffect` blink once exceeded. Card is
-    clickable and routes straight to `onCalibrateTiltRequested()` so
-    the operator never has to hunt for the quick-action button.
+  - [x] Total Scans — SSH `find /R_DATA -mindepth 3 -maxdepth 3 -type d
+    -name 'Section_*' | wc -l` on show and every 5 minutes while the
+    dashboard is visible.
 
 ## Stage 5 — Planner (`cpp/src/planner_screen.cpp`)
 

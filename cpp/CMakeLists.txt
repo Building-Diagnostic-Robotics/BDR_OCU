@@ -173,7 +173,6 @@ set(HEADERS
     include/components/bdr_input_dialog.hpp
     include/components/bdr_progress_dialog.hpp
     include/components/banter_loader_widget.hpp
-    include/components/tilt_calibration_dialog.hpp
     include/components/pre_scan_checklist_dialog.hpp
     include/components/mission_metadata_dialog.hpp
     include/components/offline_finalize_dialog.hpp
@@ -265,7 +264,6 @@ set(GUI_SOURCES
     src/components/bdr_input_dialog.cpp
     src/components/bdr_progress_dialog.cpp
     src/components/banter_loader_widget.cpp
-    src/components/tilt_calibration_dialog.cpp
     src/components/pre_scan_checklist_dialog.cpp
     src/components/mission_metadata_dialog.cpp
     src/components/scan_setup_dialog.cpp

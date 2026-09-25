@@ -80,7 +80,6 @@ QMetaObject::invokeMethod(target, [=]() { /* UI update */ }, Qt::QueuedConnectio
 - `BdrMessageBox` — frameless replacement for `QMessageBox`
 - `BdrProgressDialog` — frameless progress dialog
 - `BanterLoaderWidget` — animated loading indicator
-- `TiltCalibrationDialog` — 3-page (Setup → Progress → Success) dialog that SSHs into the robot and runs tilt calibration
 - `MissionMetadataDialog` — frameless "New Scan Information" modal shown when the operator clicks **Start New Scan** on Stage 3 Dashboard. Collects building name and operator name, persists them to `QSettings`, and gates the transition to Stage 4. Display units are feet. See **Mission Metadata + Units** below.
 
 ## ROS2 Integration
