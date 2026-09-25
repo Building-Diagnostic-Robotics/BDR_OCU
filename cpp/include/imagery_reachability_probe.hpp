@@ -26,6 +26,8 @@ public:
     void noteImageryDownloaded();
 
     bool reachable() const { return reachable_; }
+    /** False until the first reply. The dialog uses this for CHECKING. */
+    bool answered() const { return answered_; }
 
 signals:
     void reachableChanged(bool reachable);
@@ -43,6 +45,7 @@ private:
     QNetworkReply* inflight_ = nullptr;
     int successes_ = 0;
     bool reachable_ = false;
+    bool answered_ = false;
     bool downloaded_ = false;
 };
 

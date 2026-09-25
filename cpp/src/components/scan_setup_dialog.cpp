@@ -36,7 +36,7 @@ namespace {
 constexpr int kDialogFixedWidth = 580;
 constexpr int kPlanRowHeight = 64;
 constexpr int kPlanListMaxVisible = 4;
-constexpr int kModeCardHeight = 116;
+constexpr int kModeCardHeight = 136;
 constexpr int kPageChoose = 0;
 constexpr int kPageSaved = 1;
 constexpr int kPageNew = 2;
@@ -77,6 +77,16 @@ QString brandText(const QString& brand) {
         return t.accent_text;
     }
     return t.muted;
+}
+
+QString chipFill(const QString& brand) {
+    if (brand == QLatin1String(kAccentBlue)) {
+        return QStringLiteral("rgba(43, 127, 255, 0.15)");
+    }
+    if (brand == QLatin1String(kAccentGreen)) {
+        return QStringLiteral("rgba(0, 188, 125, 0.15)");
+    }
+    return QStringLiteral("rgba(161, 161, 170, 0.15)");
 }
 
 /** Same stroke-retint approach as dashboard_screen.cpp's loadSvgPixmap. */
@@ -125,6 +135,7 @@ ScanSetupDialog::ScanSetupDialog(const QVector<Job>& jobs, QWidget* parent,
     setAttribute(Qt::WA_StyledBackground, true);
     buildUi(jobs);
     applyStyle();
+    imagery_ = imagery;
     applyImageryReachable(imagery && imagery->reachable());
     if (imagery) {
         connect(imagery, &ImageryReachabilityProbe::reachableChanged, this,
@@ -156,21 +167,35 @@ void ScanSetupDialog::applyImageryReachable(bool reachable) {
                                          : Qt::ForbiddenCursor);
     const UiThemeTokens t = appThemeTokens();
     const QString brand = reachable ? QString::fromLatin1(kAccentBlue)
-                                    : t.raised_border;
+                                    : t.muted;
     satellite_card_->setStyleSheet(QStringLiteral(
         "#SetupCardSatellite {"
-        "  background: transparent;"
-        "  border: 2px solid %1;"
-        "  border-radius: 10px;"
-        "  text-align: left;"
+        "  background: %1;"
+        "  border: 1px solid %2;"
+        "  border-radius: 12px;"
         "}"
-        "#SetupCardSatellite:hover:enabled { background: %2; }"
-        "#SetupCardSatellite:focus { outline: none; }")
-        .arg(brand, t.hover_wash));
+        "#SetupCardSatellite:hover:enabled { border-color: %3; }"
+        "#SetupCardSatellite:focus { border-color: %3; outline: none; }")
+        .arg(t.raised, t.raised_border, QString::fromLatin1(kAccentBlue)));
     satellite_title_->setStyleSheet(QStringLiteral(
-        "font-family: 'Arimo'; font-weight: 700; font-size: 18px; "
-        "line-height: 28px; color: %1; background: transparent;")
-        .arg(brandText(brand)));
+        "font-family: 'Arimo'; font-weight: 700; font-size: 16px; "
+        "letter-spacing: 1px; color: %1; background: transparent;")
+        .arg(reachable ? brandText(QString::fromLatin1(kAccentBlue))
+                       : t.muted));
+    if (auto* icon = satellite_card_->findChild<QLabel*>(
+            QStringLiteral("SetupCardIcon"))) {
+        icon->setStyleSheet(QStringLiteral(
+            "background-color: %1; border-radius: 28px;")
+            .arg(chipFill(brand)));
+        icon->setPixmap(tintedSvg(
+            QStringLiteral(":/assets/scansetup/satellite.svg"), 28, 28, brand));
+    }
+    if (satellite_status_) {
+        const bool checking = imagery_ && !imagery_->answered();
+        satellite_status_->setVisible(!reachable);
+        satellite_status_->setText(checking ? QStringLiteral("CHECKING")
+                                            : QStringLiteral("OFFLINE"));
+    }
     satellite_card_->setToolTip(
         reachable ? QString()
                   : QStringLiteral("Satellite imagery is unreachable. Plan "
@@ -180,8 +205,8 @@ void ScanSetupDialog::applyImageryReachable(bool reachable) {
 
 void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(24, 20, 24, 20);
-    root->setSpacing(12);
+    root->setContentsMargins(24, 24, 24, 24);
+    root->setSpacing(20);
 
     // Arrow and X are the same width so the title stays centred when the
     // arrow is blank (first screen, or no saved plans).
@@ -296,6 +321,12 @@ void ScanSetupDialog::buildUi(const QVector<Job>& jobs) {
         QStringLiteral("SATELLITE ROI SCAN"));
     satellite_title_ =
         satellite_card_->findChild<QLabel*>(QStringLiteral("SetupCardTitle"));
+    satellite_status_ = new QLabel(QStringLiteral("CHECKING"), satellite_card_);
+    satellite_status_->setObjectName(QStringLiteral("SetupCardStatus"));
+    satellite_status_->setAlignment(Qt::AlignCenter);
+    if (auto* card_layout = qobject_cast<QVBoxLayout*>(satellite_card_->layout())) {
+        card_layout->addWidget(satellite_status_, 0, Qt::AlignCenter);
+    }
     connect(satellite_card_, &QPushButton::clicked, this, [this] {
         if (!imagery_reachable_) {
             return;
@@ -316,7 +347,7 @@ void ScanSetupDialog::buildPlanSection(PlanSection& section,
     section.host = new QWidget(this);
     auto* host_layout = new QVBoxLayout(section.host);
     host_layout->setContentsMargins(0, 0, 0, 0);
-    host_layout->setSpacing(8);
+    host_layout->setSpacing(12);
 
     if (collapsible) {
         // Disclosure header: the whole row is the toggle, chevron at the
@@ -355,7 +386,7 @@ void ScanSetupDialog::buildPlanSection(PlanSection& section,
     auto* list_host = new QWidget(section.host);
     section.rows = new QVBoxLayout(list_host);
     section.rows->setContentsMargins(0, 0, 0, 0);
-    section.rows->setSpacing(8);
+    section.rows->setSpacing(12);
     for (const Job& job : jobs) {
         section.rows->addWidget(buildPlanRow(job, list_host));
     }
@@ -501,9 +532,8 @@ QWidget* ScanSetupDialog::buildPlanRow(const Job& job, QWidget* parent) {
     chip->setFixedSize(40, 40);
     chip->setAlignment(Qt::AlignCenter);
     chip->setStyleSheet(
-        QStringLiteral("background-color: %1; border-radius: 10px;")
-            .arg(measured ? QStringLiteral("rgba(0, 188, 125, 0.20)")
-                          : QStringLiteral("rgba(43, 127, 255, 0.10)")));
+        QStringLiteral("background-color: %1; border-radius: 12px;")
+            .arg(chipFill(brand)));
     chip->setPixmap(tintedSvg(
         measured ? QStringLiteral(":/assets/scansetup/measured.svg")
                  : QStringLiteral(":/assets/scansetup/satellite.svg"),
@@ -587,35 +617,38 @@ QPushButton* ScanSetupDialog::buildModeCard(
     card->setObjectName(object_name);
     card->setCursor(Qt::PointingHandCursor);
     card->setFlat(true);
+    card->setFocusPolicy(Qt::NoFocus);
     card->setFixedHeight(kModeCardHeight);
     const UiThemeTokens t = appThemeTokens();
     card->setStyleSheet(QStringLiteral(
         "#%1 {"
-        "  background: transparent;"
-        "  border: 2px solid %2;"
-        "  border-radius: 10px;"
-        "  text-align: left;"
+        "  background: %2;"
+        "  border: 1px solid %3;"
+        "  border-radius: 12px;"
         "}"
-        "#%1:hover:enabled { background: %3; }"
-        "#%1:focus { outline: none; }")
-        .arg(object_name, brand_color, t.hover_wash));
+        "#%1:hover:enabled { border-color: %4; }"
+        "#%1:focus { border-color: %4; outline: none; }")
+        .arg(object_name, t.raised, t.raised_border, brand_color));
 
     auto* layout = new QVBoxLayout(card);
-    layout->setContentsMargins(20, 18, 20, 18);
-    layout->setSpacing(10);
+    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setSpacing(8);
     layout->setAlignment(Qt::AlignCenter);
 
     auto* icon = new QLabel(card);
-    icon->setFixedSize(40, 40);
-    icon->setScaledContents(true);
-    icon->setPixmap(tintedSvg(icon_resource, 40, 40, brand_color));
+    icon->setObjectName(QStringLiteral("SetupCardIcon"));
+    icon->setFixedSize(56, 56);
+    icon->setAlignment(Qt::AlignCenter);
+    icon->setStyleSheet(QStringLiteral(
+        "background-color: %1; border-radius: 28px;").arg(chipFill(brand_color)));
+    icon->setPixmap(tintedSvg(icon_resource, 28, 28, brand_color));
     layout->addWidget(icon, 0, Qt::AlignCenter);
 
     auto* title_label = new QLabel(title, card);
     title_label->setObjectName("SetupCardTitle");
     title_label->setStyleSheet(QStringLiteral(
-        "font-family: 'Arimo'; font-weight: 700; font-size: 18px; "
-        "line-height: 28px; color: %1; background: transparent;")
+        "font-family: 'Arimo'; font-weight: 700; font-size: 16px; "
+        "letter-spacing: 1px; color: %1; background: transparent;")
         .arg(brandText(brand_color)));
     title_label->setAlignment(Qt::AlignCenter);
     layout->addWidget(title_label, 0, Qt::AlignCenter);
@@ -628,12 +661,12 @@ void ScanSetupDialog::applyStyle() {
         #ScanSetupDialog {
             background-color: %1;
             border: 1px solid %2;
-            border-radius: 10px;
+            border-radius: 16px;
         }
         QLabel { background: transparent; }
         #SetupTitle {
-            font-family: 'Arimo'; font-weight: 700; font-size: 20px;
-            color: %3;
+            font-family: 'Arimo'; font-weight: 600; font-size: 18px;
+            letter-spacing: 1px; color: %3;
         }
         #SetupBack, #SetupBack:disabled {
             background: transparent; border: none; border-radius: 4px;
@@ -649,11 +682,12 @@ void ScanSetupDialog::applyStyle() {
         }
         #SetupPlanRow {
             background-color: %6;
-            border: 1px solid transparent;
-            border-radius: 10px;
+            border: 1px solid %8;
+            border-radius: 12px;
             text-align: left;
         }
-        #SetupPlanRow:hover { border-color: %7; }
+        #SetupPlanRow:hover { background-color: %5; }
+        #SetupPlanRow:hover #SetupPlanStatusRun { color: %3; }
         #SetupPlanRow:focus { outline: none; }
         #SetupPlanDelete {
             background: transparent; border: none; border-radius: 6px;
@@ -681,7 +715,7 @@ void ScanSetupDialog::applyStyle() {
         #SetupPlanScroll QScrollBar::sub-page:vertical { background: transparent; }
         #SetupPlanName {
             font-family: 'Arimo'; font-weight: 600; font-size: 14px;
-            color: %3;
+            letter-spacing: 1px; color: %3;
         }
         #SetupPlanDetail {
             font-family: 'Arimo'; font-size: 12px; color: %4;
@@ -689,6 +723,10 @@ void ScanSetupDialog::applyStyle() {
         #SetupPlanStatusPlanned {
             font-family: 'Arimo'; font-weight: 700; font-size: 10px;
             letter-spacing: 0.5px; color: %9;
+        }
+        #SetupCardStatus {
+            font-family: 'Arimo'; font-weight: 700; font-size: 10px;
+            letter-spacing: 1px; color: %4;
         }
         #SetupPlanStatusRun {
             font-family: 'Arimo'; font-weight: 700; font-size: 10px;

@@ -959,16 +959,16 @@ Classic Stage 4/5 remain in-tree, unrouted.
  plan). Every row has a trash button — the only manual delete path
  (confirm → `JobStore::remove` → row dropped in place, dialog stays
  open, `planDeleted(id)` emitted). Deleting the last plan returns to
- New Scan. New Scan is the Measured and Satellite cards. The **New
+ New Scan. New Scan is the Measured and Satellite cards, a tonal fill with the
+ brand colour on the icon and on hover. The **New
  Satellite Plan** card reads `ImageryReachabilityProbe`: two consecutive
  successes against `TileService::connectivityProbeUrl()` enable it, one
  failure disables it. AppShell starts that probe when the dashboard
  opens and stops it on leaving. A finished site download
  (`SatelliteScreen::imageryDownloaded`) stops it for the rest of the
- session. Satellite planning needs internet, so it happens in the office.
- The reachability check starts when the dashboard opens and stops on
- leaving it. A finished site download stops it for the rest of the
- session. With no saved plans the dialog opens on New Scan.
+ session. While it is still checking, the card shows CHECKING; after a
+ failed reply it shows OFFLINE. With no saved plans the dialog opens
+ on New Scan.
 
 ### One trim
 

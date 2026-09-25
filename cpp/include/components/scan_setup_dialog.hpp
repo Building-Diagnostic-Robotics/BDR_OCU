@@ -117,6 +117,8 @@ private:
 
     QPushButton* satellite_card_ = nullptr;
     QLabel* satellite_title_ = nullptr;
+    QLabel* satellite_status_ = nullptr;
+    ImageryReachabilityProbe* imagery_ = nullptr;
     bool imagery_reachable_ = false;
 };
 

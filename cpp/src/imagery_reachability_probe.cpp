@@ -60,6 +60,7 @@ void ImageryReachabilityProbe::onFinished(QNetworkReply* reply) {
     if (reply == inflight_) {
         inflight_ = nullptr;
     }
+    answered_ = true;
     const bool ok = reply->error() == QNetworkReply::NoError;
     successes_ = ok ? std::min(successes_ + 1, kSuccessesToEnable) : 0;
     const bool now = successes_ >= kSuccessesToEnable;
