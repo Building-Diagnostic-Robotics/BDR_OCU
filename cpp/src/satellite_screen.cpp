@@ -1569,10 +1569,10 @@ QWidget* SatelliteScreen::buildFooterBar() {
     layout->setSpacing(12);
 
     // Frame (Figma 235:3113): left group = Back (icon 16 + label, 36 tall,
-    // 16px padding) and Clear pairs (icon 14, 12px padding); right group =
-    // Align (N pairs) (zinc, 40 tall, 20px padding) and Next (green, 24px
-    // padding, arrow after the label). Disabled = 40% opacity, not a grey
-    // restyle.
+    // 16px padding), Undo last, and Clear pairs (icon 14, 12px padding);
+    // right group = Align (N pairs) (zinc, 40 tall, 20px padding) and Next
+    // (green, 24px padding, arrow after the label). Disabled = 40% opacity,
+    // not a grey restyle. Undo last is the same ghost as Clear pairs.
     back_button_ = new QPushButton(QStringLiteral("Back"), footer_bar_);
     back_button_->setObjectName("SatGhostButton");
     back_button_->setIcon(QIcon(loadTintedSvg(
@@ -1583,6 +1583,19 @@ QWidget* SatelliteScreen::buildFooterBar() {
     connect(back_button_, &QPushButton::clicked, this,
             &SatelliteScreen::onFooterBackClicked);
     layout->addWidget(back_button_, 0, Qt::AlignVCenter);
+
+    undo_last_button_ =
+        new QPushButton(QStringLiteral("Undo last"), footer_bar_);
+    undo_last_button_->setObjectName("SatGhostButtonMuted");
+    undo_last_button_->setIcon(QIcon(loadTintedSvg(
+        QStringLiteral(":/assets/satellite/undo.svg"), 14, 14)));
+    undo_last_button_->setIconSize(QSize(14, 14));
+    undo_last_button_->setCursor(Qt::PointingHandCursor);
+    undo_last_button_->setFixedHeight(kFooterGhostButtonHeight);
+    undo_last_button_->hide();
+    connect(undo_last_button_, &QPushButton::clicked, this,
+            &SatelliteScreen::onUndoCorrespondence);
+    layout->addWidget(undo_last_button_, 0, Qt::AlignVCenter);
 
     clear_pairs_button_ =
         new QPushButton(QStringLiteral("Clear pairs"), footer_bar_);
@@ -2841,9 +2854,10 @@ void SatelliteScreen::refreshStepUi() {
         // there is a cloud to pick against (frames 219:291 vs 234:1954).
         const bool picker_actions =
             correspondPickerWanted(selected_step_) && !pcd_image_.isNull();
+        undo_last_button_->setVisible(picker_actions);
         clear_pairs_button_->setVisible(picker_actions);
-        // Aligned (235:3146): the footer drops Align; Clear pairs stays as
-        // the way back to re-pick.
+        // Aligned (235:3146): the footer drops Align. Undo last and Clear
+        // pairs stay so the operator can re-pick.
         align_button_->setVisible(picker_actions && !pcd_to_sat_.valid);
         if (has_next) {
             next_button_->setText(
@@ -3248,9 +3262,8 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
     connect(pcd_pick_, &PanZoomImageWidget::pointPicked, this,
             &SatelliteScreen::onPcdPicked);
 
-    // The frame has no Undo control; Clear pairs is the visible reset. A
-    // single misclick should not cost every pick though, so Undo stays as
-    // the platform shortcut while the picker is showing.
+    // Ctrl+Z undoes the last pick. The footer Undo last button calls the
+    // same slot; the shortcut stays for a keyboard.
     auto* undo = new QShortcut(QKeySequence::Undo, page);
     undo->setContext(Qt::WidgetWithChildrenShortcut);
     connect(undo, &QShortcut::activated, this,
@@ -5378,6 +5391,7 @@ void SatelliteScreen::onUndoCorrespondence() {
         // Undoing into a solved fit means the fit's evidence is changing —
         // it goes with the pick, same as Clear.
         pcd_to_sat_ = Similarity2D{};
+        align_rmse_m_ = 0.0;
         alignment_confirmed_ = false;
     }
     if (have_pending_sat_) {
@@ -5390,6 +5404,22 @@ void SatelliteScreen::onUndoCorrespondence() {
 }
 
 void SatelliteScreen::onClearCorrespondences() {
+    // Undo last sits beside this button. Three or more pairs is enough
+    // work that a mis-tap should not wipe them.
+    if (correspondences_.size() >= 3) {
+        const QString body =
+            pcd_to_sat_.valid
+                ? QStringLiteral(
+                      "This removes all %1 correspondence pairs and the "
+                      "alignment built from them.")
+                      .arg(correspondences_.size())
+                : QStringLiteral("This removes all %1 correspondence pairs.")
+                      .arg(correspondences_.size());
+        if (!confirmDialog(QStringLiteral("Clear pairs"), body,
+                           QStringLiteral("Clear pairs"))) {
+            return;
+        }
+    }
     correspondences_.clear();
     have_pending_sat_ = false;
     pending_sat_sigma_px_ = 0.0;
@@ -5579,7 +5609,7 @@ void SatelliteScreen::updateCorrespondenceUi() {
     corr_pairs_chip_->style()->unpolish(corr_pairs_chip_);
     corr_pairs_chip_->style()->polish(corr_pairs_chip_);
 
-    // Footer actions (shared bar): Align (N pairs), Clear pairs.
+    // Footer actions (shared bar): Undo last, Clear pairs, Align (N pairs).
     if (align_button_) {
         align_button_->setText(QStringLiteral("Align (%1 pair%2)")
                                    .arg(pairs)
@@ -5591,7 +5621,9 @@ void SatelliteScreen::updateCorrespondenceUi() {
             : pairs >= required
                 ? QString()
                 : QStringLiteral("Pick at least %1 pairs").arg(required));
-        clear_pairs_button_->setEnabled(pairs > 0 || have_pending_sat_);
+        const bool can_undo = pairs > 0 || have_pending_sat_;
+        undo_last_button_->setEnabled(can_undo);
+        clear_pairs_button_->setEnabled(can_undo);
     }
 
     // Success card (235:4011) over the point cloud.
