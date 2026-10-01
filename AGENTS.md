@@ -1071,12 +1071,18 @@ property) over `sat_pick_` (58 %) and `pcd_pane_stack_` (42 %:
 `pcd_empty_` capture CTA until `pcd_image_` exists, then `pcd_pick_host_`
 = `pcd_pick_` with `align_success_card_` floated over it). Pane tags read
 `SATELLITE MAP — click to add correspondences` once both images exist.
-**Step-2 actions live in the shared footer**: `clear_pairs_button_` beside
-Back, `align_button_` (`Align (N pairs)`, zinc) beside Next; both only
-while a cloud exists, Align hidden once aligned. Undo has no button (the
-frame has none) — it is `QKeySequence::Undo` on the page. Icons are the
-Figma exports under `:/assets/satellite/{align_info,align,align_success,
-clear_pairs,footer_back,footer_next,scan_frame,refresh}.svg`.
+**Step-2 actions live in the shared footer**: `undo_last_button_` and
+`clear_pairs_button_` beside Back (both the muted ghost), `align_button_`
+(`Align (N pairs)`, zinc) beside Next. All three show only while a cloud
+exists; Align hides once aligned. **Undo last** is a deliberate divergence
+from the Figma frames, which have no undo control — the field laptop is a
+touch panel, so Ctrl+Z (`QKeySequence::Undo`, same slot) is not the only
+way back. It drops the newest half-pair or pair. If a fit exists, that
+press also clears the fit and `align_rmse_m_`. The robot marker stays
+where Align put it until the next Align, the same as Clear pairs. Clear
+pairs asks first when 3 or more pairs exist. Icons are the Figma exports
+under `:/assets/satellite/{align_info,align,align_success,clear_pairs,
+footer_back,footer_next,scan_frame,refresh}.svg`, plus `undo.svg`.
 `refreshStepUi()` derives the canvas page (`syncCanvasPage`): field
 satellite step 2 is `correspond_page_`, every other step is `map_page_`.
 Entry points assign `selected_step_` directly, so the page is not a side

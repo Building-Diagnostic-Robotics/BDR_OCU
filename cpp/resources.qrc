@@ -28,6 +28,7 @@
     <file alias="satellite/align.svg">../App resource/icons/satellite_align.svg</file>
     <file alias="satellite/align_success.svg">../App resource/icons/satellite_align_success.svg</file>
     <file alias="satellite/clear_pairs.svg">../App resource/icons/satellite_clear_pairs.svg</file>
+    <file alias="satellite/undo.svg">../App resource/icons/satellite_undo.svg</file>
     <file alias="satellite/footer_back.svg">../App resource/icons/satellite_footer_back.svg</file>
     <file alias="satellite/footer_next.svg">../App resource/icons/satellite_footer_next.svg</file>
     <file alias="satellite/clear_roi.svg">../App resource/icons/satellite_clear_roi.svg</file>

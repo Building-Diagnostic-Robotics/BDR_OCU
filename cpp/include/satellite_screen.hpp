@@ -542,8 +542,10 @@ private:
     QWidget* footer_bar_ = nullptr;
     QPushButton* back_button_ = nullptr;
     QPushButton* next_button_ = nullptr;
-    // Step 2 only (frame): "Clear pairs" beside Back, "Align (N pairs)"
-    // beside Next. Hidden on every other step and until a cloud exists.
+    // Step 2 only: "Undo last" and "Clear pairs" beside Back, "Align
+    // (N pairs)" beside Next. Hidden on every other step and until a
+    // cloud exists. Undo is not in the Figma frames.
+    QPushButton* undo_last_button_ = nullptr;
     QPushButton* clear_pairs_button_ = nullptr;
     QPushButton* align_button_ = nullptr;
     // The rail as a whole: hidden on the alignment step, whose frame is a
