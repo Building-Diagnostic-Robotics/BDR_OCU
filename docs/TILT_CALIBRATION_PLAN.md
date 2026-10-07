@@ -1,5 +1,10 @@
 # Tilt Calibration Implementation Plan
 
+> Removed from the OCU. The Dashboard no longer offers Calibrate Tilt.
+> `pilot_control/scripts/tilt_calibration.py` is unchanged and can still
+> be run by hand over SSH. The robot launch keeps loading the latest
+> file under `/R_DATA/tilt_calibration/`.
+
 ## Executive Summary
 
 This document provides a detailed plan for integrating **tilt calibration** into the BDR Coverage Planner. The tilt calibration corrects LiDAR mount tilt to improve odometry and LiDAR map accuracy. It is critical for robots deployed on roofs (flat, uneven, and rough), where mechanical wear and environmental stress can change the LiDAR–body alignment over time.

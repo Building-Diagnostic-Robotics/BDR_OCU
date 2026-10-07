@@ -150,6 +150,7 @@ set(HEADERS
     include/satellite_site_prefetch.hpp
     include/components/satellite_plan_confirm_dialog.hpp
     include/satellite_job_model.hpp
+    include/swath_preview.hpp
     include/alignment_geometry.hpp
     include/similarity_2d.hpp
     include/pan_zoom_image.hpp
@@ -173,7 +174,6 @@ set(HEADERS
     include/components/bdr_input_dialog.hpp
     include/components/bdr_progress_dialog.hpp
     include/components/banter_loader_widget.hpp
-    include/components/tilt_calibration_dialog.hpp
     include/components/pre_scan_checklist_dialog.hpp
     include/components/mission_metadata_dialog.hpp
     include/components/offline_finalize_dialog.hpp
@@ -265,7 +265,6 @@ set(GUI_SOURCES
     src/components/bdr_input_dialog.cpp
     src/components/bdr_progress_dialog.cpp
     src/components/banter_loader_widget.cpp
-    src/components/tilt_calibration_dialog.cpp
     src/components/pre_scan_checklist_dialog.cpp
     src/components/mission_metadata_dialog.cpp
     src/components/scan_setup_dialog.cpp
@@ -287,6 +286,7 @@ set(GUI_SOURCES
     src/robot_reachability_probe.cpp
     src/imagery_reachability_probe.cpp
     src/satellite_job_model.cpp
+    src/swath_preview.cpp
     src/similarity_2d.cpp
     src/alignment_geometry.cpp
     src/pan_zoom_image.cpp
@@ -585,6 +585,20 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME satellite_job_store_tests COMMAND satellite_job_store_tests)
 
+        add_executable(swath_preview_tests
+            tests/swath_preview_tests.cpp
+            src/swath_preview.cpp
+        )
+        target_include_directories(swath_preview_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(swath_preview_tests PRIVATE
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME swath_preview_tests COMMAND swath_preview_tests)
+
         # Thumb-drive upload: local data-root walk, script resolver and
         # the /proc/mounts lookup. Headers listed so AUTOMOC mocs the
         # QObjects that live in include/.
@@ -693,7 +707,7 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME touch_gesture_state_tests COMMAND touch_gesture_state_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests)")
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests swath_preview_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

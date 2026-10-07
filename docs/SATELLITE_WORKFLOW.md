@@ -37,22 +37,24 @@ connection". The Measured card is never gated: a tape works anywhere.
 
 ## The step model (field)
 
-In the scan trim the screen is a five-step flow. The step header names the
+In the scan trim the screen is a six-step flow. The step header names the
 steps, the left rail shows only the active step's controls, and a footer
-button advances to the next one.
+button advances to the next one. Measured plans hide Satellite Map, so
+their chips number 1–5.
 
 | # | Step | Complete when | Unavailable when |
 |---|------|---------------|------------------|
-| 1 | Satellite Map | a job is named and the canvas has been aimed at the building | — |
-| 2 | 3D Alignment | measured: a map has been collected · satellite: the fit is confirmed | planning-only trim |
-| 3 | ROI Definition | satellite: the polygon is closed · measured: the operator confirms the ROI against the aligned map | — |
-| 4 | Edge Review | the operator acknowledges having reviewed the edges | — |
-| 5 | Autonomous Scan | the mission is finalized | planning-only trim |
+| 1 | Satellite Map | a job is named and the canvas has been aimed at the building | measured mode |
+| 2 | 3D Alignment | measured: a map has been collected · satellite: the fit is confirmed | — |
+| 3 | ROI Definition | the operator confirms the closed polygon | — |
+| 4 | Edge Review | the operator confirms the edge review | — |
+| 5 | Scan Parameters | a mission is active | — |
+| 6 | Autonomous Scan | the mission is finalized | — |
 
 Each step carries two separate predicates: whether it is **available** in
 this trim, and whether its own work is **complete**. Keeping them apart is
-what lets the same gating code run in the office (where steps 2 and 5 do not
-exist) without the robot-dependent steps blocking anything. The footer
+what lets the same gating code run when a mode hides a step (measured has
+no Satellite Map) without that step blocking anything. The footer
 advances to the next available incomplete step; completed steps stay
 clickable, because re-aligning or redrawing after seeing the result is normal
 rather than exceptional.
@@ -76,10 +78,22 @@ Some specifics that are easy to get wrong:
 - **Edge Review gates on the acknowledgement, not on a nonzero count.** A
   roof with no fall hazards is a legitimate answer, and gating on "at least
   one edge marked" would pressure the operator into marking something
-  spurious to advance. The point is that the question got asked. The
-  acknowledgement is per-session and is not persisted with the plan: parapets
-  and skylights are exactly what imagery gets wrong, so an office review does
-  not stand in for looking at the real roof.
+  spurious to advance. The point is that the question got asked. Confirming
+  saves the roof-edge flags with the plan, so leaving before launch does
+  not drop them. The acknowledgement itself is per visit: reopening a plan
+  asks again, because parapets and skylights are exactly what imagery gets
+  wrong.
+- **Scan Parameters is complete while a mission is active.** That is the
+  launch itself, not a stored flag: before launch the step is still to do,
+  and after teardown it is to do again. Width and speed are written at
+  launch, not on every slider move.
+- **The swath preview is a picture, not the route.** Lanes follow the
+  director: along the longer side of the ROI in the robot's frame, the
+  first half a width in from that box and the rest one width apart. They
+  are cut back 1.25 m from a marked roof edge and 0.55 m from any other
+  edge, and a piece shorter than the director's minimum is dropped. The
+  robot plans the real path; the preview is never sent. Without a placed
+  marker there is nothing to draw.
 - **Imagery is advisory in the field, not a gate.** The office save already
   cached it; if the operator chose "Save without imagery" the plan loads with
   `imagery_cache.cached = false` and the canvas shows whatever the shared
@@ -87,9 +101,10 @@ Some specifics that are easy to get wrong:
   way to fetch them.
 - **Measured mode reduces steps, it never skips them.** Step 1 keeps the job
   name and drops the imagery tools; step 2 keeps Collect Map and drops the
-  correspondence picker. Step numbering means the same thing in both modes.
+  correspondence picker. The steps mean the same thing; measured hides
+  Satellite Map, so its chips number 1–5.
 
-Teleop lives only in step 5, reached by clicking the FPV view as in the
+Teleop lives only on the scan page, reached by clicking the FPV view as in the
 Stage 5 scan surface. The log is a collapsible canvas overlay on every step,
 because SSH and launch failures surface during Collect Map and Send, not
 only during the scan.
@@ -217,7 +232,8 @@ still wins; the setback is not a safety system.
    the amber chip on the canvas and both turn green while you type; Enter
    slides the edge's far vertex to the entered length. Hovering a row lights
    its chip. **Clear ROI** empties the canvas and re-arms drawing. Next
-   enables once the polygon is closed.
+   enables once the polygon is closed. Roof-edge marks are not drawn here,
+   and tapping an edge does not flag it.
 
 ### Plans created in the field
 
@@ -236,9 +252,10 @@ scan parameters, and, when any edge is marked, `roi_edge_flags`.
 
 ### Scan parameters
 
-Once the ROI is closed, a **Scan Parameters** block appears in the rail
-(field steps 3-4, and the office plan rail): **Swath Width** 0.30-2.00 m in
-0.05 m steps and **Robot Speed** 0.4-0.6 m/s in 0.1 steps. Drag the slider
+**Scan Parameters** is the step after Edge Review. The rail is **Swath
+Width** 0.30-2.00 m in 0.05 m steps and **Robot Speed** 0.4-0.6 m/s in
+0.1 steps. The map shows a labelled preview of the lanes at that width.
+Next opens the launch confirmation. Drag the slider
 or click the value and type; typed input is converted from the display
 unit, clamped, and snapped. Both are saved on the plan and travel at Send as
 `coverage_width:=W swath_overlap:=0.0 desired_linear_speed:=V`. Overlap is

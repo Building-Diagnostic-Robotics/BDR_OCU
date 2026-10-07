@@ -18,6 +18,7 @@
 #include "touch_canvas_gestures.hpp"
 
 #include <QElapsedTimer>
+#include <QLineF>
 #include <QTransform>
 #include <QWidget>
 
@@ -134,6 +135,10 @@ public:
     /** Paints `edge`'s chip in the green editing look without opening the
         editor — rail row hover. -1 clears. */
     void setHighlightedEdge(int edge);
+    /** Sets one roof-edge flag. No-op when the polygon has no such edge. */
+    void setRoofEdge(int edge, bool on);
+    /** Sets every roof-edge flag. */
+    void setAllRoofEdges(bool on);
     /** Step 1 shows imagery only: skips the ROI + marker paint and ignores
         their hit-testing. Drawing / measuring are unaffected. */
     void setOverlaysHidden(bool hidden);
@@ -148,12 +153,43 @@ public:
     void setEditLocked(bool locked);
     bool editLocked() const { return edit_locked_; }
 
+    /**
+     * Edge Review: the polygon is anchored. Vertices, the body and dimension
+     * chips no longer move; tapping an edge still toggles its roof-edge flag.
+     */
+    void setGeometryLocked(bool locked);
+    bool geometryLocked() const { return geometry_locked_; }
+
+    /**
+     * Roof-edge marks. Hidden on ROI Definition; drawn from Edge Review on.
+     * Drawing and editing are separate: a later step can show the marks
+     * without accepting taps.
+     */
+    void setRoofEdgesVisible(bool visible);
+    bool roofEdgesVisible() const { return roof_edges_visible_; }
+    /** Edge taps toggle a roof-edge flag only while this is set. */
+    void setRoofEdgesEditable(bool editable);
+    bool roofEdgesEditable() const { return roof_edges_editable_; }
+
+    /**
+     * Surveyed anchor. The marker no longer translates, rotates or accepts
+     * a new placement. Cleared when the fit or the collected map is dropped.
+     */
+    void setMarkerLocked(bool locked);
+    bool markerLocked() const { return marker_locked_; }
+
     // ---- Live telemetry (anchor = marker pose snapshot at Send) ----
     void setMissionAnchor(const geo::GeoPose& anchor);
     void clearMissionAnchor();
     void setGrid(const GridSnapshot& grid);
     void setPath(const PolylineSet& path);
     void setSwaths(const PolylineSet& swaths);
+    /**
+     * Scan Parameters picture only. ENU metres about `origin`, drawn in the
+     * geo frame. Not the live mission swaths and never sent to the robot.
+     */
+    void setSwathPreview(const QVector<QLineF>& enu, const geo::GeoPoint& origin);
+    void clearSwathPreview();
     void setOdom(const OdomSnapshot& odom);
     void clearTelemetry();
     /** Body-frame odom breadcrumbs kept for the trail (scan quality input). */
@@ -367,6 +403,7 @@ private:
     void paintGrid(QPainter& painter);
     void paintTelemetry(QPainter& painter);
     void paintRoi(QPainter& painter);
+    void paintSwathPreview(QPainter& painter);
     void paintMarker(QPainter& painter);
     void paintChrome(QPainter& painter);
 
@@ -411,6 +448,10 @@ private:
     RoiPolygon polygon_;
     geo::GeoPose marker_;
     bool edit_locked_ = false;
+    bool geometry_locked_ = false;
+    bool roof_edges_visible_ = false;
+    bool roof_edges_editable_ = false;
+    bool marker_locked_ = false;
     bool overlays_hidden_ = false;  // step 1: imagery only, no ROI / marker
     bool place_marker_armed_ = false;
     bool draw_polygon_armed_ = false;
@@ -436,6 +477,10 @@ private:
     GridSnapshot grid_;
     PolylineSet path_;
     PolylineSet swaths_;
+    // Endpoints already in geographic coordinates, converted once when the
+    // preview is set rather than on every repaint.
+    QVector<geo::GeoPoint> swath_preview_from_;
+    QVector<geo::GeoPoint> swath_preview_to_;
     OdomSnapshot odom_;
     QVector<QPointF> trail_;  // body-frame breadcrumbs
 
