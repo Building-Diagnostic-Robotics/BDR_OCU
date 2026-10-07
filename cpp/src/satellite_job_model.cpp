@@ -86,8 +86,15 @@ QVector<geo::GeoPoint> RoiRect::corners() const {
 }
 
 void RoiPolygon::ensureEdgeFlags() {
-    roof_edges.resize(vertices.size());
-    edge_locks_m.resize(vertices.size());
+    // A changed vertex count makes every stored index refer to a different
+    // edge, so the roof-edge flags and length pins start over. An unchanged
+    // count keeps them: marking a roof edge must survive a vertex drag.
+    if (roof_edges.size() != vertices.size()) {
+        roof_edges.fill(false, vertices.size());
+    }
+    if (edge_locks_m.size() != vertices.size()) {
+        edge_locks_m.fill(0.0, vertices.size());
+    }
 }
 
 RoiPolygon RoiPolygon::fromRect(const RoiRect& rect) {

@@ -7,14 +7,14 @@
  * (ScanSetupDialog -> MissionMetadataDialog). Save and close on the confirm
  * dialog (Save for Later) is the desk exit.
  *
- * The surface has a Figma frame: 49px top bar, a 55px step header of five
+ * The surface has a Figma frame: 49px top bar, a 55px step header of six
  * chips, then a 320px LEFT rail beside the canvas with a 65px footer bar
  * carrying the gated "Next" action. Zinc palette (#18181b chrome, #27272a
  * inputs, #00BC7D accent) in dark mode, tokens-light equivalents in light
  * mode. The frame specifies Inter; we keep the Arimo per-element typography
  * the other stages use rather than splitting the app across two families.
  *
- * The five steps and the gates they derive from are specified in
+ * The six steps and the gates they derive from are specified in
  * `docs/SATELLITE_WORKFLOW.md`. The step model is derived, not stored: it
  * reads the same enable-gates the buttons already use, so the header can
  * never claim a step is reachable when its gate disagrees.
@@ -115,7 +115,11 @@ public:
     void devSeedDemoAlignmentEmpty();
     /** Dev shot only: aligned, then step 3 with the demo polygon closed. */
     void devSeedDemoRoiStep();
-    /** Dev shot only: step 5 (Stage 5 scan page) with no mission active. */
+    /** Dev shot only: Edge Review, demo polygon anchored, two edges marked. */
+    void devSeedDemoEdgeStep();
+    /** Dev shot only: Scan Parameters, with the swath preview drawn. */
+    void devSeedDemoParamsStep();
+    /** Dev shot only: the scan page (Stage 5 layout) with no mission active. */
     void devSeedDemoScanStep();
     /** Dev shot only: assign `selected_step_` from `computeStep()`, the
         Start Scan entry. Navigation goes through `setSelectedStep` and
@@ -160,19 +164,22 @@ protected:
 
 private:
     /**
-     * The five operator-facing steps, in order. Specified in
+     * The six operator-facing steps, in order. Specified in
      * `docs/SATELLITE_WORKFLOW.md`. ROI deliberately follows Alignment: the
      * operator draws against imagery already fitted to the robot's map
      * rather than drawing first and discovering the fit moved everything.
+     * Scan Parameters follows Edge Review so width and speed are chosen
+     * after the roof edges are marked, and that step's Next is the launch.
      */
     enum class Step {
         SatelliteMap = 0,
         Alignment = 1,
         RoiDefinition = 2,
         EdgeReview = 3,
-        AutonomousScan = 4,
+        ScanParameters = 4,
+        AutonomousScan = 5,
     };
-    static constexpr int kStepCount = 5;
+    static constexpr int kStepCount = 6;
 
     /** Reachable in the current trim. The office has no robot, so the
         robot-dependent steps are unavailable rather than merely incomplete —
@@ -214,13 +221,13 @@ private:
         Setup — <plan>"). */
     void refreshTitle();
     QWidget* buildTeleopCard(QWidget* parent);
-    // Step 5 — the shipped Stage 5 Scan page, reproduced 1:1.
+    // Scan page — the shipped Stage 5 Scan page, reproduced 1:1.
     QWidget* buildScanLeftRail(QWidget* parent);
     QWidget* buildScanRightRail(QWidget* parent);
     QWidget* buildScanControlBar(QWidget* parent);
     QWidget* buildScanStatusPill(QWidget* parent);
     /**
-     * Re-resolves step 5's per-element inline sheets against the current
+     * Re-resolves the scan page's per-element inline sheets against the current
      * theme. The page reproduces the Stage 5 frames 1:1 and styles widgets
      * in its builders, which run once; without this a theme toggle leaves
      * the whole scan page on the boot palette.
@@ -384,11 +391,11 @@ private:
      */
     void refreshImageryInfo();
     /**
-     * Edge-Review Next / chip-5: marker confirm, persist geometry, launch
-     * the director stack, advance to Autonomous Scan. Replaces the old
-     * Send button — same contract as Stage 4's "Start Scan" launch.
+     * Scan-Parameters Next: marker confirm, persist geometry, launch the
+     * director stack, advance to Autonomous Scan. Replaces the old Send
+     * button — same contract as Stage 4's "Start Scan" launch.
      */
-    void launchMissionFromEdgeReview();
+    void launchMissionFromScanParams();
     /** Legacy name kept as a thin wrapper so stray call sites compile. */
     void onSendMission();
     void onFooterBackClicked();
@@ -398,7 +405,7 @@ private:
     void onScanCancelClicked();
     void beginStartScan();
     /** A launch exited unasked (`side` = "robot" | "laptop"): tear down,
-        tell the operator, back to Edge Review. Plan stays PLANNED. */
+        tell the operator, back to Scan Parameters. Plan stays PLANNED. */
     void handleLaunchDeath(const QString& side, int exit_code);
     void maybePromptRevisit();
     /** Director entered a stop state while autonomy was on: one modeless
@@ -474,7 +481,7 @@ private:
     /**
      * Why Start Scan is locked, in the two lengths the UI needs.
      *
-     * Step 5 hides the rail, so the corner pill is the operator's ONLY view
+     * The scan page hides the rail, so the corner pill is the operator's ONLY view
      * of why the button is dead — a disabled button's tooltip is not a
      * surface you can rely on. `label` is empty only when nothing is
      * blocking the scan.
@@ -591,9 +598,22 @@ private:
     QWidget* buildRoiCard(QWidget* parent);
     void refreshRoiCard();
 
-    // Scan Parameters (both trims): swath width + robot speed. Slider plus
-    // a typed value per knob; SI in the sliders, display units in the edits.
-    // Shown once a closed ROI exists; saved on the Job; sent at launch.
+    // Edge Review: one row per edge (length, roof-edge toggle) plus Mark all
+    // and Clear all. The polygon is anchored on this step.
+    QWidget* edge_card_ = nullptr;
+    QLabel* edge_summary_ = nullptr;
+    QVBoxLayout* edge_review_rows_layout_ = nullptr;
+    QVector<QWidget*> edge_review_rows_;
+    QVector<QLabel*> edge_review_lengths_;
+    QVector<QCheckBox*> edge_review_toggles_;
+    QPushButton* edge_mark_all_ = nullptr;
+    QPushButton* edge_clear_all_ = nullptr;
+    QWidget* buildEdgeCard(QWidget* parent);
+    void refreshEdgeCard();
+
+    // Scan Parameters: swath width + robot speed. Slider plus a typed value
+    // per knob; SI in the sliders, display units in the edits. Its own step,
+    // after Edge Review. Saved on the Job at launch.
     QWidget* scan_params_card_ = nullptr;
     TrackSlider* swath_slider_ = nullptr;
     TrackSlider* speed_slider_ = nullptr;
@@ -604,6 +624,9 @@ private:
     QWidget* buildScanParamsCard(QWidget* parent);
     /** Re-renders the edits from the sliders and applies visibility. */
     void refreshScanParamsCard();
+    /** Draws or clears the approximate swath picture for Scan Parameters. */
+    void updateSwathPreview();
+    QLabel* swath_preview_pill_ = nullptr;
     ScanParams scanParams() const;
     void setScanParams(const ScanParams& params);
 

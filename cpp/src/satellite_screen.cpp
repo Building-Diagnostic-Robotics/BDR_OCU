@@ -18,6 +18,7 @@
 #include "link_health_monitor.hpp"
 #include "mission_finalize_policy.hpp"
 #include "stop_prompt_policy.hpp"
+#include "swath_preview.hpp"
 #include "components/bdr_message_box.hpp"
 #include "components/fpv_camera_view.hpp"
 #include "components/mission_finalize_dialog.hpp"
@@ -180,6 +181,7 @@ constexpr StepSpec kStepSpecs[] = {
     {"3D Alignment", "Match point cloud", "Capture Point Cloud"},
     {"ROI Definition", "Draw the scan area", "Define ROI"},
     {"Edge Review", "Mark fall hazards", "Review Edges"},
+    {"Scan Parameters", "Set width and speed", "Set Parameters"},
     {"Autonomous Scan", "Run the mission", "Autonomous Scan"},
 };
 
@@ -193,6 +195,7 @@ constexpr StepSpec kStepSpecs[] = {
 constexpr StepSpec kMeasuredStepSpecs[] = {
     {nullptr, nullptr, nullptr},  // SatelliteMap is unavailable in the field
     {"Robot Map", "Collect the point cloud", "Capture Point Cloud"},
+    {nullptr, nullptr, nullptr},
     {nullptr, nullptr, nullptr},
     {nullptr, nullptr, nullptr},
     {nullptr, nullptr, nullptr},
@@ -426,7 +429,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     content_layout->setSpacing(0);
     rail_scroll_ = buildLeftRail();
     content_layout->addWidget(rail_scroll_);
-    // Step 5 (Autonomous Scan) reproduces the shipped Stage 5 Scan page 1:1:
+    // The scan page (Autonomous Scan) reproduces the shipped Stage 5 Scan page 1:1:
     // a 384 px left rail (Overall Progress, Telemetry), the map with the
     // control bar under it, a 380 px right rail (Manual Override, Scan
     // Statistics). Both rails are siblings of the plan rail and only one
@@ -454,7 +457,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     map_page_layout->addWidget(map_, 0, 0);
     canvas_tools_ = buildCanvasTools(map_page_);
     // Top-right column: the Stage 5 scan status pill above the tool stack
-    // (pill only on step 5), so both share the corner without overlapping.
+    // (pill only on the scan page), so both share the corner without overlapping.
     auto* top_right_column = new QWidget(map_page_);
     top_right_column->setAttribute(Qt::WA_TranslucentBackground, true);
     auto* top_right_layout = new QVBoxLayout(top_right_column);
@@ -473,6 +476,13 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     canvas_tag_->setObjectName("SatPaneTag");
     canvas_tag_->hide();
     map_page_layout->addWidget(canvas_tag_, 0, 0, Qt::AlignLeft | Qt::AlignTop);
+    swath_preview_pill_ = new QLabel(map_page_);
+    swath_preview_pill_->setObjectName("SatPaneTag");
+    swath_preview_pill_->hide();
+    // Same corner as the ROI tag. The two never show together, and the
+    // bottom-left corner is the scale bar.
+    map_page_layout->addWidget(swath_preview_pill_, 0, 0,
+                               Qt::AlignLeft | Qt::AlignTop);
     // Step-1 floating search (238:4509) + layer/provenance chip (238:4531).
     search_host_ = buildSearchBar(map_page_);
     search_host_->hide();
@@ -509,7 +519,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     canvas_stack_->addWidget(correspond_page_);
     canvas_column_layout->addWidget(canvas_stack_, 1);
     // Stage 5 control bar (Start/Pause · summary · Cancel Scan · E-Stop)
-    // sits under the map card on step 5 only.
+    // sits under the map card on the scan page only.
     scan_control_bar_ = buildScanControlBar(canvas_column);
     scan_control_bar_->hide();
     canvas_column_layout->addWidget(scan_control_bar_);
@@ -525,8 +535,8 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     content_layout->addWidget(scan_right_rail_);
     content_ = content;
     root->addWidget(content, 1);
-    // Stage 5 footer (69 px, full width): back link · "Step 5 of 5" ·
-    // Complete Mission. Step 5 only; the other steps keep footer_bar_.
+    // Scan footer (69 px, full width): back link · "Step N of N" ·
+    // Complete Mission. The scan page only; the other steps keep footer_bar_.
     scan_footer_ = buildScanFooter();
     scan_footer_->hide();
     root->addWidget(scan_footer_);
@@ -541,8 +551,15 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &SatelliteScreen::onMapCaptured);
 
     // ---- Map <-> rail sync ----
-    connect(map_, &SatelliteMapWidget::roiChanged, this,
-            &SatelliteScreen::refreshStepUi);
+    connect(map_, &SatelliteMapWidget::roiChanged, this, [this] {
+        // A flag change after Edges Reviewed must be confirmed again, which
+        // is also what writes it to disk. Geometry is locked on that step,
+        // so a roiChanged there is a roof-edge toggle.
+        if (selected_step_ == Step::EdgeReview && edges_reviewed_) {
+            edges_reviewed_ = false;
+        }
+        refreshStepUi();
+    });
     // Closing the polygon (click-near-first / right-click) changes no vertex
     // but does flip the step-3 gate, so the footer must re-evaluate.
     connect(map_, &SatelliteMapWidget::interactionChanged, this,
@@ -1150,6 +1167,7 @@ void SatelliteScreen::devSeedDemoAlignment(bool review, bool skewed) {
         marker.heading_deg = 90.0;
         marker.valid = true;
         map_->setMarker(marker);
+        map_->setMarkerLocked(true);
         emit map_->markerChanged();
         map_->setView(0.0, 0.0, map_->zoom());
         updateAlignCardUi();
@@ -1200,16 +1218,31 @@ void SatelliteScreen::devSeedDemoRoiStep() {
     QTimer::singleShot(400, this, [this] { map_->fitToRoi(); });
 }
 
+void SatelliteScreen::devSeedDemoEdgeStep() {
+    devSeedDemoAlignment(true);
+    confirmed_vertices_ = map_->polygon().vertices;
+    setSelectedStep(Step::EdgeReview);
+    QTimer::singleShot(400, this, [this] { map_->fitToRoi(); });
+}
+
+void SatelliteScreen::devSeedDemoParamsStep() {
+    devSeedDemoAlignment(true);
+    confirmed_vertices_ = map_->polygon().vertices;
+    edges_reviewed_ = true;
+    setSelectedStep(Step::ScanParameters);
+    QTimer::singleShot(400, this, [this] { map_->fitToRoi(); });
+}
+
 void SatelliteScreen::devSeedDemoScanStep() {
-    // Step 5 as the Stage 5 frame shows it, without a robot: aligned plan,
+    // The scan page as the Stage 5 frame shows it, without a robot: aligned plan,
     // ROI + edges confirmed, the scan rails and control bar up. The map
     // shows the demo ROI; no mission is active so the buttons render in
     // their disabled state (the reference shot has the same look pre-run).
     devSeedDemoAlignment(true);
     confirmed_vertices_ = map_->polygon().vertices;
     edges_reviewed_ = true;
-    // Straight to the page: step 5 is unreachable without a mission, and
-    // the shot has none by design.
+    // Straight to the page: the scan step is unreachable without a mission,
+    // and the shot has none by design.
     selected_step_ = Step::AutonomousScan;
     canvas_stack_->setCurrentWidget(map_page_);
     applyModeVisibility();
@@ -1495,7 +1528,7 @@ QWidget* SatelliteScreen::buildStepHeader() {
         chip_layout->addWidget(chip.label, 0, Qt::AlignVCenter);
 
         // Only the active chip shows its detail line, so the header stays
-        // readable at five steps wide.
+        // readable at six steps wide.
         chip.detail = new QLabel(
             QStringLiteral("— %1").arg(
                 QString::fromLatin1(kStepSpecs[i].detail)),
@@ -1538,7 +1571,7 @@ QWidget* SatelliteScreen::buildStepHeader() {
             }
             if (step == Step::AutonomousScan &&
                 !mission_->missionActive()) {
-                launchMissionFromEdgeReview();
+                launchMissionFromScanParams();
                 return;
             }
             setSelectedStep(step);
@@ -1641,7 +1674,7 @@ QWidget* SatelliteScreen::buildFooterBar() {
     return footer_bar_;
 }
 
-// ---- Step 5: Stage 5 Scan page, 1:1 ----------------------------------------
+// ---- Scan page: Stage 5 layout, 1:1 ----------------------------------------
 //
 // Geometry and styling are lifted verbatim from PlannerScreen's scan stage
 // (the shipped build on origin/main): rails 384 / 380 px on #18181B with a
@@ -1662,7 +1695,7 @@ constexpr int kScanActionSafetyPad = 8;
 
 // ---- Step-5 palette roles ---------------------------------------------------
 //
-// Step 5 reproduces the Stage 5 Figma frames 1:1, so — unlike the rest of the
+// The scan page reproduces the Stage 5 Figma frames 1:1, so — unlike the rest of the
 // screen — its widgets carry per-element inline sheets rather than
 // object-name QSS. An inline sheet set once inside a builder keeps the boot
 // palette for the life of the screen, and this screen is constructed once and
@@ -1883,7 +1916,7 @@ QWidget* scanKeyValueRow(QWidget* parent, const QString& key,
 /**
  * Control-bar fills. These are the frame's own brand hues, not the shared
  * `*_fill` tokens — the dialogs' amber and red are a different, deeper pair,
- * and step 5 has to keep matching Figma in dark mode. Only the light column
+ * and the scan page has to keep matching Figma in dark mode. Only the light column
  * is new: amber keeps its hue and flips to a dark label (white on #FE9A00 is
  * 2.2:1), red darkens so a white label clears the contrast bar, and green
  * follows `on_accent` like every other primary in the app.
@@ -2359,7 +2392,7 @@ QWidget* SatelliteScreen::buildScanStatusPill(QWidget* parent) {
     layout->addWidget(scan_status_dot_, 0, Qt::AlignVCenter);
     // "Standby", not "Ready": before the director reports there is nothing
     // ready about the robot, and Start Scan is disabled. refreshScanRunUi()
-    // overwrites this on the first paint of step 5.
+    // overwrites this on the first paint of the scan page.
     scan_status_text_ = scanText(
         pill, QStringLiteral("Standby"), QStringLiteral("pillText"));
     layout->addWidget(scan_status_text_, 0, Qt::AlignVCenter);
@@ -2396,7 +2429,7 @@ QWidget* SatelliteScreen::buildScanFooter() {
         scan_footer_back_, QStringLiteral(":/assets/missionplanner/back.svg"),
         16, QStringLiteral("muted")));
     back_layout->addWidget(scanText(
-        scan_footer_back_, QStringLiteral("Edge Review"),
+        scan_footer_back_, QStringLiteral("Scan Parameters"),
         QStringLiteral("backText")));
     back_layout->addStretch(1);
     connect(scan_footer_back_, &QPushButton::clicked, this,
@@ -2410,7 +2443,7 @@ QWidget* SatelliteScreen::buildScanFooter() {
     centre_layout->setSpacing(0);
     centre_layout->addStretch(1);
     scan_footer_step_label_ = scanText(
-        centre, QStringLiteral("Step 5 of 5"), QStringLiteral("stepText"));
+        centre, QStringLiteral("Step 6 of 6"), QStringLiteral("stepText"));
     centre_layout->addWidget(scan_footer_step_label_);
     centre_layout->addStretch(1);
     layout->addWidget(centre, 1);
@@ -2479,8 +2512,23 @@ void SatelliteScreen::onNextClicked() {
         refreshStepUi();
     }
     if (selected_step_ == Step::EdgeReview) {
-        // The launch confirm is the edge review confirm.
-        launchMissionFromEdgeReview();
+        if (!confirmDialog(QStringLiteral("Edges Reviewed"),
+                           edgeReviewSummary(),
+                           QStringLiteral("Confirm"))) {
+            return;
+        }
+        edges_reviewed_ = true;
+        // The field rail has no Save Plan. Roof-edge flags otherwise reach
+        // disk only at launch, and a Scan Parameters step in between would
+        // drop them if the operator leaves first. No reload: loadJob clears
+        // confirmed_vertices_ and hides Next.
+        if (!job_name_->text().trimmed().isEmpty()) {
+            persistJob(jobFromRail(), /*reload=*/false);
+        }
+        refreshStepUi();
+    }
+    if (selected_step_ == Step::ScanParameters) {
+        launchMissionFromScanParams();
         return;
     }
     setSelectedStep(nextAvailableStep(selected_step_));
@@ -2541,6 +2589,7 @@ bool SatelliteScreen::stepAvailable(Step step) const {
             // Measured has no imagery to aim: Robot Map is step 1.
             return plan_mode_ == PlanMode::Satellite;
         case Step::Alignment:
+        case Step::ScanParameters:
         case Step::AutonomousScan:
             return true;
         case Step::RoiDefinition:
@@ -2574,6 +2623,10 @@ bool SatelliteScreen::stepComplete(Step step) const {
             return roiMatchesConfirmed();
         case Step::EdgeReview:
             return edges_reviewed_;
+        case Step::ScanParameters:
+            // Complete while a mission is up, so the flow does not skip the
+            // step before launch and asks again after teardown.
+            return mission_ && mission_->missionActive();
         case Step::AutonomousScan:
             // Terminal: "complete" here means the mission finalized, which
             // tears the screen down anyway.
@@ -2608,14 +2661,14 @@ bool SatelliteScreen::stepReachable(Step step) const {
     // BDR_REWIRE: dev mode lets the operator click any step chip so the five
     // pages can be inspected without a robot. stepAvailable() above still
     // applies — it is trim, not a gate, and bypassing it would show a step
-    // the current mode does not have. Step 5 renders with no telemetry and
-    // its own controls stay gated by scanBlockReason(); this only opens
-    // navigation. A Release build compiles this out.
+    // the current mode does not have. The scan page renders with no
+    // telemetry and its own controls stay gated by scanBlockReason(); this
+    // only opens navigation. A Release build compiles this out.
     if constexpr (kDevMode) {
         return true;
     }
     // The scan page only exists for a launched stack. The way onto it is
-    // Edge Review Next (which launches), never a chip or a skip-ahead.
+    // Scan Parameters Next (which launches), never a chip or a skip-ahead.
     if (step == Step::AutonomousScan && !mission_->missionActive()) {
         return false;
     }
@@ -2649,9 +2702,10 @@ SatelliteScreen::Step SatelliteScreen::nextAvailableStep(Step step) const {
     // "Capture Point Cloud" would be promising work that is finished.
     // Revisiting a completed step is still possible, just via its chip.
     // Availability, not reachability: Next is what completes this step
-    // (Confirm ROI / launch). Requiring the destination to already be
-    // reachable hid the button — Edge Review is unreachable until the
-    // modal has run, and step 5 is unreachable until that launch.
+    // (Confirm ROI / Edges Reviewed / launch). Requiring the destination
+    // to already be reachable hid the button — Edge Review is unreachable
+    // until the ROI modal has run, and the scan page is unreachable until
+    // Scan Parameters launches.
     // Chips and setSelectedStep still go through stepReachable, so Cancel
     // cannot skip onto a dead scan page.
     for (int i = int(step) + 1; i < kStepCount; ++i) {
@@ -2734,6 +2788,7 @@ void SatelliteScreen::refreshStepUi() {
                                    : QStringLiteral("#00A86D");
 
     int visible_number = 0;
+    int scan_number = 0;
     for (int i = 0; i < kStepCount; ++i) {
         const Step step = Step(i);
         const StepChip& chip = step_chips_[i];
@@ -2742,7 +2797,8 @@ void SatelliteScreen::refreshStepUi() {
         const bool complete = stepComplete(step);
         // Once autonomy has driven, Cancel Scan / Complete Mission are the
         // only exits. The chip handler already refuses, but only into the
-        // log, which is hidden on step 5 — so the chip has to look dead too.
+        // log, which is hidden on the scan page — so the chip has to look
+        // dead too.
         const bool clickable =
             stepReachable(step) && !(scan_autonomy_ran_ && !active);
         chip.button->setVisible(available);
@@ -2757,6 +2813,9 @@ void SatelliteScreen::refreshStepUi() {
             continue;
         }
         ++visible_number;
+        if (step == Step::AutonomousScan) {
+            scan_number = visible_number;
+        }
 
         chip.label->setText(QString::fromLatin1(spec(i).title));
         chip.detail->setText(
@@ -2843,12 +2902,19 @@ void SatelliteScreen::refreshStepUi() {
         for (int i = int(selected_step_) - 1; i >= 0 && !has_prev; --i) {
             has_prev = stepAvailable(Step(i));
         }
-        // Step 5 swaps the frame footer for the Stage 5 footer + control bar.
+        // The scan page swaps the frame footer for the Stage 5 footer +
+        // control bar. The label counts available steps, so measured plans
+        // (no Satellite Map) read "Step 5 of 5" and satellite plans "Step 6
+        // of 6".
         footer_bar_->setVisible((has_next || has_prev) && !scan_step);
         back_button_->setVisible(has_prev);
         next_button_->setVisible(has_next);
         if (scan_footer_) {
             scan_footer_->setVisible(scan_step);
+        }
+        if (scan_footer_step_label_) {
+            scan_footer_step_label_->setText(
+                QStringLiteral("Step %1 of %2").arg(scan_number).arg(visible_number));
         }
         // Clear pairs / Align belong to the satellite picker, and only once
         // there is a cloud to pick against (frames 219:291 vs 234:1954).
@@ -2893,16 +2959,11 @@ void SatelliteScreen::maybeRearmRoiDraw() {
 }
 
 void SatelliteScreen::applyStepVisibility() {
-    // Scaffolding stage: the rail still holds today's cards, shown and
-    // hidden per step. Each card gets reshaped into the frame's flat
-    // sections in its own change, so the step machinery below is not
-    // churning at the same time as the widgets it governs.
     const Step step = selected_step_;
-    // Field satellite trim follows the Figma frames step by step: step 1 is
-    // a full-width canvas with the floating address search (238:4289; the
-    // name came from the chosen plan + metadata modal), step 3 the ROI
-    // Definition rail (222:1284), step 4 the edge review card. The office
-    // and the measured canvas keep the single authoring card.
+    // Step 1 is a full-width canvas with the floating address search
+    // (238:4289; the name came from the chosen plan + metadata modal).
+    // Step 3 is the ROI Definition rail (222:1284). Edge Review and Scan
+    // Parameters each have their own card; the scan page hides this rail.
     const bool frame_rail = true;
     const bool locate_step = frame_rail && step == Step::SatelliteMap;
     if (search_host_) {
@@ -2928,6 +2989,12 @@ void SatelliteScreen::applyStepVisibility() {
     // Frames show a clean canvas on step 1 (238:4289): the saved ROI and
     // robot marker only appear once the operator reaches the ROI work.
     map_->setOverlaysHidden(locate_step);
+    // Edge Review anchors the polygon. ROI Definition is the only step
+    // where vertices, the body and dimension chips still move.
+    map_->setGeometryLocked(step == Step::EdgeReview ||
+                            step == Step::ScanParameters);
+    map_->setRoofEdgesVisible(int(step) >= int(Step::EdgeReview));
+    map_->setRoofEdgesEditable(step == Step::EdgeReview);
     // All four pills in both trims. The frames carry zoom-in + fit only
     // because the wheel used to zoom out, and the wheel pans now — a field
     // operator with no zoom-out control has no way back out of a roof.
@@ -2946,9 +3013,11 @@ void SatelliteScreen::applyStepVisibility() {
                        : 40);
     }
     if (roi_card_) {
-        const bool roi_step = step == Step::RoiDefinition ||
-                              step == Step::EdgeReview;
-        roi_card_->setVisible(roi_step);
+        roi_card_->setVisible(step == Step::RoiDefinition);
+        if (edge_card_) {
+            edge_card_->setVisible(step == Step::EdgeReview);
+            refreshEdgeCard();
+        }
         refreshScanParamsCard();
         if (step == Step::RoiDefinition && !map_->polygon().valid() &&
             !map_->isDrawing()) {
@@ -2964,7 +3033,7 @@ void SatelliteScreen::applyStepVisibility() {
     if (rail_scroll_) {
         rail_scroll_->setVisible(!picker_step && !locate_step && !scan_step);
     }
-    // Step 5 is the Stage 5 page: its own two rails, the control bar under
+    // The scan page is the Stage 5 layout: its own two rails, the control bar under
     // the map, the map framed as a card, and the Stage 5 footer.
     if (scan_left_rail_) {
         scan_left_rail_->setVisible(scan_step);
@@ -3019,6 +3088,8 @@ QWidget* SatelliteScreen::buildLeftRail() {
     createHiddenPlanFields();
     roi_card_ = buildRoiCard(rail_content);
     layout->addWidget(roi_card_);
+    edge_card_ = buildEdgeCard(rail_content);
+    layout->addWidget(edge_card_);
     scan_params_card_ = buildScanParamsCard(rail_content);
     layout->addWidget(scan_params_card_);
     align_card_ = buildAlignCard(rail_content);
@@ -3521,10 +3592,9 @@ QWidget* SatelliteScreen::buildRoiCard(QWidget* parent) {
     layout->addSpacing(16);
     layout->addWidget(stats);
 
-    // Edge Dimensions (222:1318).
+    layout->addSpacing(16);
     auto* edges_title = new QLabel(QStringLiteral("EDGE DIMENSIONS"), card);
     edges_title->setObjectName("SatRoiSection");
-    layout->addSpacing(16);
     layout->addWidget(edges_title);
     auto* rows_host = new QWidget(card);
     edge_rows_layout_ = new QVBoxLayout(rows_host);
@@ -3633,14 +3703,14 @@ void SatelliteScreen::refreshRoiCard() {
     }
     roi_stat_area_->setText(closed ? units::formatArea(area, 1)
                                    : QStringLiteral("—"));
-    if (canvas_tag_) {
+    if (canvas_tag_ && selected_step_ == Step::RoiDefinition) {
         canvas_tag_->setText(
             closed ? QStringLiteral("ROI DEFINED — click edge labels to edit "
                                     "dimensions")
             : drawing ? QStringLiteral("DRAWING ROI — click corners; click "
                                        "the first point to close")
                       : QStringLiteral("NO ROI — click the roof to start"));
-        canvas_tag_->setVisible(!roi_card_->isHidden());
+        canvas_tag_->setVisible(true);
     }
 
     // Rows: only rebuild when the count changes; retitle otherwise.
@@ -3682,6 +3752,143 @@ void SatelliteScreen::refreshRoiCard() {
     }
 }
 
+QWidget* SatelliteScreen::buildEdgeCard(QWidget* parent) {
+    auto* card = new QWidget(parent);
+    card->setObjectName("SatEdgeCard");
+    auto* layout = new QVBoxLayout(card);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    auto* title = new QLabel(QStringLiteral("Edge Review"), card);
+    title->setObjectName("SatRoiTitle");
+    layout->addWidget(title);
+    auto* blurb = new QLabel(
+        QStringLiteral("Mark each edge that is a roof edge (fall hazard). "
+                       "Tap an edge on the map or use the toggles."),
+        card);
+    blurb->setObjectName("SatRoiBlurb");
+    blurb->setWordWrap(true);
+    layout->addSpacing(4);
+    layout->addWidget(blurb);
+
+    edge_summary_ = new QLabel(card);
+    edge_summary_->setObjectName("SatEdgeSummary");
+    edge_summary_->setWordWrap(true);
+    layout->addSpacing(16);
+    layout->addWidget(edge_summary_);
+
+    auto* rows_host = new QWidget(card);
+    edge_review_rows_layout_ = new QVBoxLayout(rows_host);
+    edge_review_rows_layout_->setContentsMargins(0, 8, 0, 0);
+    edge_review_rows_layout_->setSpacing(4);
+    layout->addWidget(rows_host);
+
+    auto* actions = new QWidget(card);
+    auto* actions_layout = new QHBoxLayout(actions);
+    actions_layout->setContentsMargins(0, 16, 0, 0);
+    actions_layout->setSpacing(8);
+    edge_mark_all_ = new QPushButton(QStringLiteral("Mark all"), actions);
+    edge_clear_all_ = new QPushButton(QStringLiteral("Clear all"), actions);
+    for (QPushButton* button : {edge_mark_all_, edge_clear_all_}) {
+        button->setObjectName("SatRoiClearButton");
+        button->setFixedHeight(36);
+        button->setCursor(Qt::PointingHandCursor);
+        actions_layout->addWidget(button, 1);
+    }
+    connect(edge_mark_all_, &QPushButton::clicked, this,
+            [this] { map_->setAllRoofEdges(true); });
+    connect(edge_clear_all_, &QPushButton::clicked, this,
+            [this] { map_->setAllRoofEdges(false); });
+    layout->addWidget(actions);
+
+    connect(map_, &SatelliteMapWidget::roiChanged, this,
+            &SatelliteScreen::refreshEdgeCard);
+    connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
+            [this] { refreshEdgeCard(); });
+    refreshEdgeCard();
+    return card;
+}
+
+void SatelliteScreen::refreshEdgeCard() {
+    if (!edge_summary_ || !edge_review_rows_layout_) {
+        return;
+    }
+    // Hidden while the operator is still drawing. applyStepVisibility shows
+    // the card, then refreshes it, so vertex drags do not rebuild the rows.
+    if (edge_card_ && edge_card_->isHidden()) {
+        return;
+    }
+    const RoiPolygon& poly = map_->polygon();
+    const bool closed = poly.valid() && !map_->isDrawing();
+    const int n = closed ? poly.vertices.size() : 0;
+    const QVector<double> lengths = map_->edgeLengthsM();
+
+    if (edge_review_rows_.size() != n) {
+        for (QWidget* row : edge_review_rows_) {
+            row->deleteLater();
+        }
+        edge_review_rows_.clear();
+        edge_review_lengths_.clear();
+        edge_review_toggles_.clear();
+        for (int i = 0; i < n; ++i) {
+            auto* row = new QWidget(edge_review_rows_layout_->parentWidget());
+            row->setObjectName("SatRoiEdgeRow");
+            row->setAttribute(Qt::WA_StyledBackground, true);
+            row->setFixedHeight(28);
+            auto* rl = new QHBoxLayout(row);
+            rl->setContentsMargins(10, 0, 10, 0);
+            rl->setSpacing(8);
+            auto* name = new QLabel(QStringLiteral("Edge %1").arg(i + 1), row);
+            name->setObjectName("SatRoiEdgeName");
+            rl->addWidget(name);
+            auto* length = new QLabel(row);
+            length->setObjectName("SatEdgeLength");
+            rl->addWidget(length);
+            rl->addStretch(1);
+            auto* toggle = new QCheckBox(row);
+            toggle->setObjectName("SatCheck");
+            toggle->setToolTip(QStringLiteral("Roof edge (fall hazard)"));
+            toggle->setCursor(Qt::PointingHandCursor);
+            connect(toggle, &QCheckBox::toggled, this, [this, i](bool on) {
+                map_->setRoofEdge(i, on);
+            });
+            rl->addWidget(toggle);
+            row->installEventFilter(this);
+            row->setProperty("edgeIndex", i);
+            edge_review_rows_layout_->addWidget(row);
+            edge_review_rows_.append(row);
+            edge_review_lengths_.append(length);
+            edge_review_toggles_.append(toggle);
+        }
+    }
+
+    int marked = 0;
+    for (int i = 0; i < n; ++i) {
+        if (i < lengths.size()) {
+            edge_review_lengths_[i]->setText(units::formatLength(lengths[i], 2));
+        }
+        const bool on = i < poly.roof_edges.size() && poly.roof_edges[i];
+        marked += on ? 1 : 0;
+        QCheckBox* toggle = edge_review_toggles_[i];
+        toggle->blockSignals(true);
+        toggle->setChecked(on);
+        toggle->blockSignals(false);
+    }
+    edge_summary_->setText(
+        closed ? QStringLiteral("%1 of %2 marked as roof edges").arg(marked).arg(n)
+               : QStringLiteral("Close the ROI before marking edges."));
+    edge_mark_all_->setEnabled(closed && marked < n);
+    edge_clear_all_->setEnabled(closed && marked > 0);
+
+    if (canvas_tag_ && selected_step_ == Step::EdgeReview && closed) {
+        canvas_tag_->setText(QStringLiteral(
+            "ROI DEFINED — click an edge to mark a roof edge"));
+        canvas_tag_->setVisible(true);
+    } else if (canvas_tag_ && selected_step_ != Step::RoiDefinition) {
+        canvas_tag_->setVisible(false);
+    }
+}
+
 QWidget* SatelliteScreen::buildScanParamsCard(QWidget* parent) {
     // Same shape as the legacy Stage 5 slider blocks: name on the left, a
     // typed value + unit on the right, the track underneath. The slider is
@@ -3692,9 +3899,14 @@ QWidget* SatelliteScreen::buildScanParamsCard(QWidget* parent) {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(10);
 
-    auto* title = new QLabel(QStringLiteral("SCAN PARAMETERS"), card);
-    title->setObjectName("SatRoiSection");
+    auto* title = new QLabel(QStringLiteral("Scan Parameters"), card);
+    title->setObjectName("SatRoiTitle");
     layout->addWidget(title);
+    auto* blurb = new QLabel(
+        QStringLiteral("Set the pass width and the robot's speed."), card);
+    blurb->setObjectName("SatRoiBlurb");
+    blurb->setWordWrap(true);
+    layout->addWidget(blurb);
 
     const auto makeRow = [&](const QString& name, double lo, double hi,
                              double step, int decimals, TrackSlider** slider,
@@ -3784,17 +3996,50 @@ void SatelliteScreen::refreshScanParamsCard() {
     swath_unit_->setText(units::lengthUnitSuffix().trimmed());
     speed_unit_->setText(units::speedUnitSuffix().trimmed());
 
-    // Steps 3-4, beside the ROI card, and only once the polygon is closed.
-    const Step step = selected_step_;
-    const bool on_step = step == Step::RoiDefinition ||
-                         step == Step::EdgeReview;
-    const bool closed = map_->polygon().valid() && !map_->isDrawing();
-    scan_params_card_->setVisible(on_step && closed);
+    // Its own step. Reaching it already required a closed polygon.
+    scan_params_card_->setVisible(selected_step_ == Step::ScanParameters);
     const bool editable = !mission_->missionActive();
     swath_slider_->setEnabled(editable);
     speed_slider_->setEnabled(editable);
     swath_edit_->setEnabled(editable);
     speed_edit_->setEnabled(editable);
+    updateSwathPreview();
+}
+
+void SatelliteScreen::updateSwathPreview() {
+    if (!map_) {
+        return;
+    }
+    const geo::GeoPose marker = map_->marker();
+    const bool show = selected_step_ == Step::ScanParameters &&
+                      map_->polygon().valid() && !map_->isDrawing() &&
+                      marker.valid;
+    if (!show) {
+        map_->clearSwathPreview();
+        if (swath_preview_pill_) {
+            swath_preview_pill_->hide();
+        }
+        return;
+    }
+    const RoiPolygon& poly = map_->polygon();
+    const geo::GeoPoint origin{marker.lat, marker.lon};
+    SwathPreviewRequest request;
+    request.ring_enu.reserve(poly.vertices.size());
+    for (const geo::GeoPoint& vertex : poly.vertices) {
+        request.ring_enu.append(geo::enuFromGeo(origin, vertex));
+    }
+    request.roof_edges = poly.roof_edges;
+    request.heading_deg = marker.heading_deg;
+    request.marker_valid = true;
+    request.width_m = scanParams().coverage_width_m;
+    const SwathPreview preview = previewSwaths(request);
+    map_->setSwathPreview(preview.segments, origin);
+    if (swath_preview_pill_) {
+        swath_preview_pill_->setText(
+            QStringLiteral("Preview — robot plans the final route · ~%1 passes")
+                .arg(preview.passes));
+        swath_preview_pill_->setVisible(true);
+    }
 }
 
 ScanParams SatelliteScreen::scanParams() const {
@@ -4082,7 +4327,7 @@ QPushButton#SatNextButton:disabled {
     background-color: rgba(0, 153, 102, 0.40); color: @DISABLED_TEXT@;
 }
 #SatRailScroll { background-color: @PAGE@; border: none; border-right: 1px solid @SURFACE_BORDER@; }
-/* Step 5: the map reads as a peer card to the Stage 5 rails (#18181B
+/* Scan page: the map reads as a peer card to the Stage 5 rails (#18181B
    surface, 1 px #27272A ring, 12 px radius) — PlannerScreen's Scan variant
    of plannerPreviewContainer. */
 QStackedWidget#SatCanvasStack[scan="true"] {
@@ -4272,11 +4517,21 @@ QPushButton#SatRoiEdgeValue {
 QPushButton#SatRoiEdgeValue:hover { color: #00d492; }
 #SatRoiEdgeRow[editing="true"] QPushButton#SatRoiEdgeValue { color: #00d492; }
 QLabel#SatRoiHint { background: transparent; font-size: 12px; color: @MUTED@; }
+QLabel#SatEdgeSummary { background: transparent; font-size: 12px; color: @TEXT@; }
+QLabel#SatEdgeLength {
+    background: transparent;
+    font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace;
+    font-size: 12px; font-weight: 500; color: @TEXT@;
+}
 QPushButton#SatRoiClearButton {
     background: @RAISED@; border: none; border-radius: 10px; padding: 8px 12px;
     font-size: 14px; font-weight: 500; color: @MUTED@;
 }
 QPushButton#SatRoiClearButton:hover { background: @NEUTRAL_HOVER@; color: @TEXT@; }
+QPushButton#SatRoiClearButton:disabled,
+QPushButton#SatRoiClearButton:disabled:hover {
+    background: @RAISED@; color: @DISABLED_GHOST@;
+}
 #SatRoiNote { background: @RAISED@; border-radius: 10px; }
 
 /* ---- Scan Parameters (swath width / robot speed, both trims) ---- */
@@ -5270,8 +5525,12 @@ void SatelliteScreen::onMapCaptured(const MapCapture& capture) {
         marker.heading_deg = 90.0;
         marker.valid = true;
         map_->setMarker(marker);
+        map_->setMarkerLocked(true);
         emit map_->markerChanged();
         map_->setView(0.0, 0.0, map_->zoom());
+    } else {
+        // A new cloud invalidates the anchor the previous fit produced.
+        map_->setMarkerLocked(false);
     }
 
     if (!job_name_->text().trimmed().isEmpty()) {
@@ -5393,6 +5652,7 @@ void SatelliteScreen::onUndoCorrespondence() {
         pcd_to_sat_ = Similarity2D{};
         align_rmse_m_ = 0.0;
         alignment_confirmed_ = false;
+        map_->setMarkerLocked(false);
     }
     if (have_pending_sat_) {
         have_pending_sat_ = false;
@@ -5426,6 +5686,7 @@ void SatelliteScreen::onClearCorrespondences() {
     pcd_to_sat_ = Similarity2D{};
     align_rmse_m_ = 0.0;
     alignment_confirmed_ = false;
+    map_->setMarkerLocked(false);
     updateCorrespondenceUi();
 }
 
@@ -5437,6 +5698,7 @@ void SatelliteScreen::resetAlignmentSession() {
     pcd_bounds_m_ = QRectF();
     if (map_) {
         map_->clearMapRaster();   // the canvas paints its own copy
+        map_->setMarkerLocked(false);
     }
     capture_gps_ = GpsFix{};
     sat_image_ = QImage();
@@ -5808,6 +6070,7 @@ void SatelliteScreen::applyAlignmentAnchor() {
         std::fmod(std::atan2(enu.x(), enu.y()) / geo::kDegToRad + 360.0, 360.0);
     marker.valid = true;
     map_->setMarker(marker);
+    map_->setMarkerLocked(true);
     emit map_->markerChanged();
     // The fit is the surveyed answer to "where is the robot", so re-centre
     // the zoom-out ceiling on it instead of the prefetch disc's centre. Only
@@ -6003,9 +6266,9 @@ void SatelliteScreen::devRenderPrompt(const QString& png_path) {
     delete dialog;
 }
 
-void SatelliteScreen::onSendMission() { launchMissionFromEdgeReview(); }
+void SatelliteScreen::onSendMission() { launchMissionFromScanParams(); }
 
-void SatelliteScreen::launchMissionFromEdgeReview() {
+void SatelliteScreen::launchMissionFromScanParams() {
     if (mission_->missionActive()) {
         setSelectedStep(Step::AutonomousScan);
         return;
@@ -6021,24 +6284,25 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
                 "Draw a closed ROI and place the robot marker before launch."));
         return;
     }
-    // One confirmation covers the edge review and the launch.
+    const ScanParams params = scanParams();
     if (!confirmDialog(
             QStringLiteral("Launch coverage stack"),
             QStringLiteral(
                 "%1\n\n"
+                "Swath width %2 · speed %3\n\n"
                 "Confirm before launch:\n"
                 "• The robot is physically at the marker position.\n"
-                "• The robot is facing the marker's arrow direction (%2°).\n"
+                "• The robot is facing the marker's arrow direction (%4°).\n"
                 "• The ROI will be anchored to the robot exactly as drawn.")
-                .arg(edgeReviewSummary())
+                .arg(edgeReviewSummary(),
+                     units::formatLength(params.coverage_width_m, 2),
+                     units::formatSpeed(params.scan_speed_mps, 2))
                 .arg(marker.heading_deg, 0, 'f', 1),
             QStringLiteral("Launch"))) {
         return;
     }
-    edges_reviewed_ = true;
-    refreshStepUi();
     QString error;
-    if (!mission_->startMission(poly, marker, scanParams(), &error)) {
+    if (!mission_->startMission(poly, marker, params, &error)) {
         appendLog(QStringLiteral("[send] FAILED: %1").arg(error));
         return;
     }
@@ -6046,13 +6310,14 @@ void SatelliteScreen::launchMissionFromEdgeReview() {
     // Re-stamp the confirmation against the geometry that actually went to
     // the robot. Anything that nudged a vertex after Confirm ROI (or a
     // marker move, which re-anchors every vertex) would otherwise leave
-    // roiMatchesConfirmed() false, step 5 unreachable, and the operator
-    // pressing Launch on a page that never advances while the stack runs.
+    // roiMatchesConfirmed() false, the scan page unreachable, and the
+    // operator pressing Launch on a page that never advances while the
+    // stack runs.
     confirmed_vertices_ = poly.vertices;
     // Always write (new measured plans had a name but no id, so the old
     // "if we already have an id" guard dropped the roof-drawn ROI).
-    // No reload — loadJob would revoke the confirm that made step 5
-    // reachable.
+    // No reload — loadJob would revoke the confirm that made the scan
+    // page reachable.
     Job job = jobFromRail();
     job.polygon = poly;
     job.roi = map_->roi();
@@ -6189,7 +6454,7 @@ void SatelliteScreen::onDirectorWatchTick() {
     appendLog(QStringLiteral("[nav] operator cancelled the launch wait"));
     setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
-    teardownThen([this] { setSelectedStep(Step::EdgeReview); });
+    teardownThen([this] { setSelectedStep(Step::ScanParameters); });
 }
 
 void SatelliteScreen::onRobotSweepFailed(int exit_code) {
@@ -6241,7 +6506,7 @@ void SatelliteScreen::onRobotSweepFailed(int exit_code) {
         return;
     }
     appendLog(QStringLiteral("[nav] operator cancelled after sweep failed"));
-    teardownThen([this] { setSelectedStep(Step::EdgeReview); });
+    teardownThen([this] { setSelectedStep(Step::ScanParameters); });
 }
 
 bool SatelliteScreen::isRobotLinkUnreachable() const {
@@ -6283,8 +6548,8 @@ void SatelliteScreen::stepBackToReachable() {
 bool SatelliteScreen::stepReadyForAdvance(Step step) const {
     switch (step) {
         case Step::RoiDefinition:
-            return map_ && map_->polygon().valid() && !map_->isDrawing();
         case Step::EdgeReview:
+        case Step::ScanParameters:
             return map_ && map_->polygon().valid() && !map_->isDrawing();
         default:
             return stepComplete(step);
@@ -6459,7 +6724,7 @@ void SatelliteScreen::onScanCancelClicked() {
                                       "down anyway")
                            .arg(detail));
         ros_->requestAxisState(RosLink::kAxisIdle);
-        teardownThen([this] { setSelectedStep(Step::EdgeReview); });
+        teardownThen([this] { setSelectedStep(Step::ScanParameters); });
     };
     // Bridge first; on a congested radio zenoh queries time out, so fall
     // back to `ros2 service call` over SSH — the legacy screen's path.
@@ -6496,24 +6761,24 @@ void SatelliteScreen::handleLaunchDeath(const QString& side, int exit_code) {
     QString body =
         robot ? QStringLiteral(
                     "The software on the robot stopped (code %1). Your plan is "
-                    "saved — press Next on Edge Review to launch again.")
+                    "saved — press Next on Scan Parameters to launch again.")
                     .arg(exit_code)
               : QStringLiteral(
                     "The link software on this laptop stopped (code %1), and "
                     "the robot halts without it. Your plan is saved — press "
-                    "Next on Edge Review to launch again.")
+                    "Next on Scan Parameters to launch again.")
                     .arg(exit_code);
     if (!log_path.isEmpty()) {
         body += QStringLiteral("\n\nDetails for support: %1").arg(log_path);
     }
     // Explain after the stack is down, not over the teardown modal: the
-    // operator watches it stop, reads why, and lands on Edge Review.
+    // operator watches it stop, reads why, and lands on Scan Parameters.
     teardownThen([this, robot, body] {
         BdrMessageBox::warning(this,
                                robot ? QStringLiteral("Robot stack failed")
                                      : QStringLiteral("Laptop launch failed"),
                                body);
-        setSelectedStep(Step::EdgeReview);
+        setSelectedStep(Step::ScanParameters);
     });
 }
 
@@ -6666,7 +6931,7 @@ void SatelliteScreen::refreshScanRunUi() {
                                                     : block.detail);
     }
 
-    // A disabled Start Scan must always say why, and step 5 hides the rail's
+    // A disabled Start Scan must always say why, and the scan page hides the rail's
     // reason label, so the corner pill carries it. updateStatePill() owns the
     // pill whenever a status message is fresh (it has the director's real
     // state); this owns it the rest of the time, which is exactly the boot /
@@ -7363,7 +7628,7 @@ void SatelliteScreen::onEstop() {
     scan_run_state_ = estop_latch_policy::onEmergencyStop(scan_run_state_);
     appendLog(QStringLiteral(
         "[E-STOP] autonomy disabled + axis IDLE requested — latched"));
-    // Both pills: on step 5 the rail is hidden and the corner pill is the
+    // Both pills: on the scan page the rail is hidden and the corner pill is the
     // only surface the operator can read.
     setStatePill(QStringLiteral("E-STOP"), QColor(kEstopRed));
     refreshScanRunUi();
@@ -7719,7 +7984,7 @@ void SatelliteScreen::updateStatePill() {
         reason = QStringLiteral("Waiting on: %1")
                      .arg(status.not_ready.join(QStringLiteral(", ")));
     }
-    // Step 5 has no reason label, so the pill carries it on hover too.
+    // The scan page has no reason label, so the pill carries it on hover too.
     if (scan_status_pill_) {
         scan_status_pill_->setToolTip(reason);
     }

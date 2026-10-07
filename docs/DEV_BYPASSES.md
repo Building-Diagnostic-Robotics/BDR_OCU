@@ -51,7 +51,7 @@ connected.** The New-Scan metadata modal still shows (Cancel proceeds).
 | 5 | Start Scan metadata push | `app_shell.cpp` metadata callback (`!ok && !kDevMode`) | Failed push no longer aborts arming |
 | 5 | Complete Mission needs finished run | `planner_screen.cpp` `updateFooter()` + `onCompleteMissionClicked()` | Allowed without a `Completed` run |
 | 4/5 | Link-offline grey-out | `app_shell.cpp` `isRobotLinkOffline()` / `isRobotLinkUnreachable()` | Both return `false` → controls stay live |
-| 6 | Step chip nav gates | `satellite_screen.cpp` `stepReachable()` | All five steps clickable without a named plan, a collected map, a confirmed ROI, or a live mission. `stepAvailable()` still applies — it is trim (the office hides steps 2 and 5, measured hides step 1), not a gate, so bypassing it would show a step the mode does not have. Step 5 renders with no telemetry and its own controls remain gated by `scanBlockReason()` |
+| 6 | Step chip nav gates | `satellite_screen.cpp` `stepReachable()` | All six steps clickable without a named plan, a collected map, a confirmed ROI, an edge review, a launch confirm, or a live mission. `stepAvailable()` still applies — measured hides Satellite Map — so bypassing it would show a step the mode does not have. The scan page renders with no telemetry and its own controls remain gated by `scanBlockReason()` |
 
 **Re-assert verification:** a plain Release build (`-DCMAKE_BUILD_TYPE=Release`,
 no flag) restores every gate above. `rg -n 'kDevMode|BDR_REWIRE' cpp/`
@@ -309,7 +309,7 @@ enumerates all sites.
 - [ ] `BDR_DEV_STAGE6_SHOT=<png path>` — jumps to the Stage 6 planning
       screen on startup, renders offscreen, saves a PNG, and exits.
       Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
-      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|run|plan|plan_confirm|scan_setup|dialogs|revisit_align|revisit_search`,
+      `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|align_empty|correspond|review|roi|edges|params|run|plan|plan_confirm|scan_setup|dialogs|revisit_align|revisit_search`,
       `BDR_DEV_STAGE6_SHOT_STAGE=1|2|3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`,
       `BDR_DEV_STAGE6_SHOT_FIT=1` (`plan` only: `fitToRoi()` after seeding,
       lands past the fetch ceiling to exercise scaled-tile overzoom).
@@ -326,6 +326,8 @@ enumerates all sites.
       the right. Both go through `devEnterAlignmentWithDemoSite()`, which
       keeps the synthetic site image across the picker sync's
       `loadSiteImage()` failure (there is no saved job in a shot).
+      `edges` is Edge Review (polygon locked, two roof edges marked).
+      `params` is Scan Parameters with the swath preview drawn.
       `revisit_align` seeds a finished step 1 and assigns the step from
       `computeStep()` — the Start Scan entry, which never calls
       `setSelectedStep` — and must land on the two-pane picker.

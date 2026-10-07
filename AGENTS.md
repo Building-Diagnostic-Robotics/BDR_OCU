@@ -459,7 +459,7 @@ exactly one of seven states. The full state-transition diagram lives in
   304 path. `exclude` beats `include`; empty lists = everyone; malformed
   JSON fails **open** (a typo must not freeze the fleet). Do not move
   this to a downloaded asset without carrying the replay path with it.
-- **`include` is currently pinned to `["Roofus#0002"]`** to field-verify the
+- **`include` is currently pinned to `["Roofus#0002", "Roofus#0003"]`** to field-verify the
   `swath_overlap:=0.0` launch-arg fix on one laptop. A non-empty `include`
   means every other laptop in the fleet silently receives NO updates — this
   is a temporary state and must go back to `[]` once the fix is confirmed.
@@ -930,8 +930,11 @@ Classic Stage 4/5 remain in-tree, unrouted.
  node in the launch keeps running and logging, and Start Scan never
  unlocks. Cost a field session on 2026-09-15; guarded by
  `ScanParams.LaunchArgsAlwaysCarryADecimalPoint`.
-- **Scan Parameters card** (`buildScanParamsCard`, both trims, visible once
- the polygon is closed): `TrackSlider` (the legacy Stage 5 slider lifted to
+- **Scan Parameters** is its own step, after Edge Review (`buildScanParamsCard`,
+ both trims). `stepComplete` is whether a mission is active: true from a
+ successful launch until teardown, so the step is not skipped mid-run and
+ is asked again afterwards. Do not store a second flag for that.
+ `TrackSlider` (the legacy Stage 5 slider lifted to
  `components/track_slider.*`) + a typed `QLineEdit` per knob. Slider is SI
  and the model; the edit is a units-layer view. Ranges / step / defaults
  live ONLY in `ScanParams` (`satellite_job_model.hpp`): width 0.30-2.00 m
@@ -978,10 +981,11 @@ warning, stays on step 1. Plans already cached skip straight through.
  The step-2 chip runs the same detour. `loadJob` treats a cached site as
  aimed (`canvas_aimed_`) and lands the view on the manifest centre when the
  plan has no geometry yet — the save's own `loadJob` round-trip must not
- fail the step-1 gate. **Send persists the sent geometry** (polygon, edge
- flags, anchor) straight into the job (`job_store_.save`, no `loadJob`):
- the field rail has no Save Plan, so this is the only path by which the
- roof-drawn ROI reaches disk. **Per-job tile redirects are undone**
+ fail the step-1 gate. The field rail has no Save Plan. Confirm ROI,
+ Edges Reviewed, and launch each `persistJob` with `reload=false` (a
+ reload clears `confirmed_vertices_` and hides Next). Edges Reviewed is
+ what writes the roof-edge flags; launch writes the geometry that was
+ actually sent, including width and speed. **Per-job tile redirects are undone**
  by `TileService::resetToSharedCache()` (shared root, cap 0, World layer,
  no Wayback) from `newJob()` and the uncached branch of `loadJob()` —
  without it a new plan keeps writing tiles into the previous plan's
@@ -1016,15 +1020,25 @@ warning, stays on step 1. Plans already cached skip straight through.
  over the map. There is **no Draw button and no along/across/heading
  spinbox on this rail**: entering step 3 with no polygon
  `armPolygonDraw()`s the canvas, Clear ROI re-arms it, and clicking near
- the first vertex closes the polygon (right-click still works). Step-3
- Next pops a **Confirm ROI modal** (closed polygon is readiness,
- `confirmed_vertices_` is completion). Step-4 Next pops **one** modal: in
- the office it is **Edges Reviewed**; in the field it is **Launch coverage
- stack** (edge summary + marker-at-pose checklist in the same dialog) and
- confirming **launches** the director stack — there is no Send button and
- no second confirm. Ack checkboxes are gone. Measured
+ the first vertex closes the polygon (right-click still works). Roof-edge
+ flags are hidden on this step and an edge tap does not toggle them.
+ Step-3 Next pops a **Confirm ROI modal** (closed polygon is readiness,
+ `confirmed_vertices_` is completion). Step 4 is **Edge Review**: the
+ polygon is locked, the rail lists each edge with a roof-edge toggle
+ (synced with a map tap) plus Mark all / Clear all, and Next pops
+ **Edges Reviewed** ("N of M edges marked. Confirm?"). Confirming saves
+ the plan (`persistJob`, no reload) so the flags survive leaving before
+ launch, then advances. Step 5 is **Scan Parameters** (width and speed
+ only). Its map stays locked and draws an approximate swath preview —
+ lanes in the robot's frame (marker heading), the first half a width in
+ from the box, then one width apart, cut back 1.25 m from a marked roof
+ edge and 0.55 m from any other edge, labelled "Preview — robot plans the
+ final route". The preview is never sent to the robot. No marker, no
+ preview. Next pops **Launch coverage stack** (edge
+ summary, width and speed, marker checklist) and confirming launches —
+ there is no Send button. Ack checkboxes are gone. Measured
  field trim hides Satellite Map (Robot Map is step 1); chips renumber
- 1–4. **Step 5 is the shipped Stage 5 Scan page reproduced 1:1**
+ 1–5. **The scan page (step 6, step 5 when measured) is the shipped Stage 5 Scan page reproduced 1:1**
  (`buildScanLeftRail` / `buildScanRightRail` / `buildScanControlBar` /
  `buildScanFooter`, geometry lifted from `PlannerScreen`'s scan stage on
  `origin/main`): 384 px left rail (Overall Progress: coverage + quality
@@ -1037,7 +1051,7 @@ warning, stays on step 1. Plans already cached skip straight through.
  hands back and does NOT resume autonomy; Scan Statistics: distance, avg
  quality, ETA, data copy;
  Motors: Arm / Disarm — Arm is CLOSED_LOOP only, see the E-Stop latch
- rule below), and the 69 px footer (Edge Review back · Step 5 of 5 ·
+ rule below), and the 69 px footer (Scan Parameters back · Step N of N ·
  Complete Mission primary). The plan rail, log card and frame footer are
  hidden on this step. Scan Quality is
  `computeReprojectionQualityPercent` (odom trail vs `/coverage/
@@ -1430,7 +1444,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  death signal is `MissionController::launchDied(side, rc)`** (the SSH
  session carrying the robot launch, or the laptop launch, exiting
  unasked) — `handleLaunchDeath` auto-teardowns, keeps the plan PLANNED,
- and returns to Edge Review. The status watchdog (`onDirectorWatchTick`,
+ and returns to Scan Parameters. The status watchdog (`onDirectorWatchTick`,
  1 Hz) is advisory: it drives a `LAUNCHING · robot link / director Xs`
  pill, starts its clock at the first robot topic (`noteRobotTopic`), and
  after 120 s (180 s with no topic at all) asks Keep waiting / cancel. A
@@ -1444,7 +1458,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  itself — the full stack + Zenoh session takes 30-60 s and a 20 s
  auto-teardown killed a healthy launch in the field.
  Do not add a link gate to `end_button_`.
-- **Step 5's inline styles carry a palette role, and `restyleScanPage()` is
+- **The scan page's inline styles carry a palette role, and `restyleScanPage()` is
  what makes the theme toggle reach them.** The page reproduces the Stage 5
  frames 1:1, so its widgets are styled per-element inside
  `buildScanLeftRail` / `buildScanRightRail` / `buildScanControlBar` /
@@ -1453,15 +1467,15 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  there would hold the boot palette forever. Every styled widget records a
  role in the `satScanRole` / `satScanRoleArg` dynamic properties and
  `restyleScanPage()` (called from `setDarkMode`) re-resolves them. A new
- styled widget on step 5 needs a role, not a second patch site. Control-bar
+ styled widget on the scan page needs a role, not a second patch site. Control-bar
  fills stay in the local `scanActionPalette` table, NOT the shared
  `danger_fill` / `warning_fill` tokens — the dialogs use a deeper amber and
- red, and step 5 has to keep matching Figma in dark mode. Their labels are
+ red, and the scan page has to keep matching Figma in dark mode. Their labels are
  tinted by `applyScanActionFg`, driven by a `ScanActionTint` event filter,
  because Qt cannot restyle a child `QLabel` from the button's `:disabled`
  pseudo-state and a white label on the disabled grey is unreadable in light.
 - **A disabled Start Scan must always say why, and the step-5 corner pill
- is the only place it can.** The rail is hidden on step 5, and a disabled
+ is the only place it can.** The rail is hidden on the scan page, and a disabled
  button's tooltip is not a surface a field operator can reach. `scanBlockReason()`
  is the single source for both: it returns a short pill label plus one
  plain sentence, in operator language with no ROS vocabulary.
@@ -1563,7 +1577,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  (flushed per line, newest `kMissionLogsKept = 10` kept). Do not also write
  from `hookProcessLogging` — process output would land twice — and do not
  re-log `recentRobotOutput()` at failure time for the same reason.
-- **Launch is Edge Review Next**, not a Send button. Back from step 5
+- **Launch is Scan Parameters Next**, not a Send button. Back from the scan page
  while the stack is up (and Start Scan has never run) confirms teardown;
  once autonomy has run, Back is disabled — Cancel / Complete are the exits.
 - **Launch/teardown primitives are shared and deliberately dumb.**
@@ -1598,7 +1612,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  those sweeps are 20 s + 11 s + 7 s of remote work and the operator read
  the motionless window as a crashed app.
  - `startMission` returns false only for input errors. It marks the
- mission active **before** spawning, so the operator lands on step 5
+ mission active **before** spawning, so the operator lands on the scan page
  and Cancel works during the sweeps, and narrates itself through
  `launchPhase` into `scanBlockReason()`'s corner pill. A spawn failure
  arrives as `launchDied`, same as any other death.
@@ -1620,9 +1634,9 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  failures ride back in `capture.error`). A roof cloud is millions of
  points; PCL on the GUI thread froze the alignment step for seconds.
 - **Re-stamp `confirmed_vertices_` at launch**
- (`launchMissionFromEdgeReview`). Any nudge after Confirm ROI — a vertex
+ (`launchMissionFromScanParams`). Any nudge after Confirm ROI — a vertex
  drag, a marker move, which re-anchors every vertex — otherwise leaves
- `roiMatchesConfirmed()` false, step 5 unreachable, and `setSelectedStep`
+ `roiMatchesConfirmed()` false, the scan page unreachable, and `setSelectedStep`
  silently refusing: the stack launches and the operator sits on Edge
  Review pressing a button that looks dead. The fallback log line naming
  the blocking step is the tripwire if a future gate regresses.
@@ -1634,7 +1648,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
  (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|
- correspond_outlier|review_outlier|roi|run|plan|plan_confirm|revisit_align|
+ correspond_outlier|review_outlier|roi|edges|params|run|plan|plan_confirm|revisit_align|
  revisit_search`,
  `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog
@@ -1807,7 +1821,7 @@ twist. Gestures are ungated — always on, no preference.
   forwarding — the operator pans and zooms with fingers and *picks* with
   the trackpad. Do not "restore" tap-to-pick on any of them.
 - The one carve-out is `SatelliteMapWidget::canvasTapped()`, which replaces
-  the forwarded click. `SatelliteScreen` consumes it **only on step 5**, to
+  the forwarded click. `SatelliteScreen` consumes it **only on the scan page**, to
   leave manual override, because that is the one canvas action with no
   precision requirement. Adding a second consumer means re-arguing the rule
   above.
@@ -1876,12 +1890,12 @@ that is how frameless dialogs get the right theme without being handed it.
  fill; `disabled_ghost` is a label on a disabled *transparent* control.
  The same value cannot do both — with no fill under it, `disabled_text`
  looks enabled. Qt cannot restyle a child `QLabel` from a parent's
- `:disabled` pseudo-state, so composite buttons (step 5's control bar)
+ `:disabled` pseudo-state, so composite buttons (the scan page's control bar)
  need the `applyScanActionFg` / `ScanActionTint` treatment instead.
 - **A sheet set in a constructor holds the boot palette forever.** Every
  screen here is built once and reused across missions. Anything styled
  per-element inside a builder needs a re-style hook on the theme toggle:
- `restyleScanPage()` for step 5, `applyPlaceholderStyle()` for
+ `restyleScanPage()` for the scan page, `applyPlaceholderStyle()` for
  `FPVCameraView`, `setDarkMode` on the painted widgets.
 - **A dialog with no render path is a dialog nobody verified.** Every
  Stage 6 confirmation — Leave to Dashboard, Collect Map from Robot,
@@ -1912,7 +1926,7 @@ also writes the Stage 6 confirm prompt to `<png>_prompt.png`. The shot pins
 the window to **1920x1080**, the Figma frame size and the field laptop's
 panel; do not shrink it. The staged constants are frame px unscaled, so a
 shorter shot gives the layout less vertical budget than it will ever have
-and manufactures phantom clipping — at 860 px step 5's right rail squeezed
+and manufactures phantom clipping — at 860 px the scan page's right rail squeezed
 the Manual Override and Scan Statistics cards together. Contrast
 claims should be measured off those PNGs at the glyph core, not eyeballed —
 point-sampling a label hits antialiasing and reads far lighter than the
