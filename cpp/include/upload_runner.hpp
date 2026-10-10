@@ -62,15 +62,27 @@ enum class UploadSource {
  *
  * State definitions (match `uploader.py` runtime contract):
  *  - `None`    — neither `upload_state.json` nor `manifest.json` exist.
- *  - `Partial` — `upload_state.json` exists; `manifest.json` does not.
- *                Resume re-uses the on-disk completed set.
- *  - `Done`    — `manifest.json` exists. Re-runs are a no-op (script
- *                short-circuits with "Upload complete: noop").
+ *  - `Partial` — `upload_state.json` exists, whether or not a manifest
+ *                was also written. The script re-PUTs a file whose
+ *                recorded size no longer matches, and a manifest left
+ *                next to the state file was not confirmed.
+ *  - `Done`    — `manifest.json` exists and `upload_state.json` does
+ *                not. The script no-ops when local sizes still match
+ *                `size_bytes`, and re-uploads when they do not.
  */
 enum class UploadStatus {
     None = 0,
     Partial,
     Done,
+};
+
+/// Result of checking a `Done` section against S3. Separate from
+/// `UploadStatus`, which is only what the stick sentinels say.
+enum class CloudCheck {
+    Unchecked = 0,  ///< Not checked, or the check could not run.
+    Checking,       ///< `/verify` is in flight.
+    Verified,       ///< Listing matches the stick manifest.
+    Missing,        ///< S3 is missing the section or a file disagrees.
 };
 
 /**
@@ -94,12 +106,30 @@ struct UploadTarget {
     QString operator_name;
     QDateTime captured_at;
     UploadStatus status = UploadStatus::None;
+    /// Cloud check over a `Done` row. `Unchecked` is the on-disk badge
+    /// ("Uploaded") and is also where a failed or offline check leaves
+    /// the row. Only `Missing` is selectable, and it uploads with
+    /// `force_reupload`.
+    CloudCheck cloud_check = CloudCheck::Unchecked;
+    /// Pass `--force` on the next launch of this target only. The
+    /// runner clears it once that launch is built, so a connection
+    /// retry or a later Upload press resumes the state file instead of
+    /// deleting it.
+    bool force_reupload = false;
     int completed_files = 0;
     int total_files = 0;
     qint64 total_bytes = 0;
 
     bool isMission() const { return section_name.startsWith(QStringLiteral("Mission_")); }
 };
+
+/// Arguments after `python3` for one `uploader.py` launch. `--force`
+/// is appended only when `force` is true.
+QStringList uploaderArguments(const QString& script_path,
+                              const QString& data_path,
+                              const QString& robot_id,
+                              const QString& run_id,
+                              bool force);
 
 // ---------------------------------------------------------------------------
 // State probe
@@ -286,6 +316,8 @@ public:
     // each retry re-launches the SSH command identically — the script
     // re-reads `upload_state.json` and skips the files it already
     // landed, so retries are idempotent and never duplicate uploads.
+    // A `--force` launch clears that flag before the retry, so the
+    // retry does not delete the state file the first launch wrote.
     //
     // Backoff sequence (attempt index → wait): 1 → 5 s, 2 → 15 s,
     // 3 → 45 s. After exhaustion the runner emits `targetFailed`

@@ -31,9 +31,20 @@ namespace {
 
 // Sentinel files `uploader.py` keeps next to the data. Excluded from
 // the "total files" count so progress reads N/N at completion.
+// The `.tmp` siblings are atomic-write leftovers (`save_state` /
+// manifest write). Any other `*.tmp` name is data.
 const char* const kStateFile = "upload_state.json";
 const char* const kPauseFile = "pause.flag";
 const char* const kManifestFile = "manifest.json";
+
+bool isUploadBookkeepingName(const QString& name) {
+    const QString state = QLatin1String(kStateFile);
+    const QString manifest = QLatin1String(kManifestFile);
+    return name == state || name == QLatin1String(kPauseFile) ||
+           name == manifest ||
+           name == state + QStringLiteral(".tmp") ||
+           name == manifest + QStringLiteral(".tmp");
+}
 
 // Where create_deb.sh installs the canonical script.
 const char* const kInstalledLocalScript =
@@ -165,7 +176,7 @@ QString buildProbeRemoteCommand(const QString& data_root) {
                "  date=$(echo \"$p\" | cut -d/ -f2); "
                "  building=$(echo \"$p\" | cut -d/ -f3); "
                "  section=$(basename \"$p\"); "
-               "  if [ -f \"$p/manifest.json\" ]; then "
+               "  if [ -f \"$p/manifest.json\" ] && [ ! -f \"$p/upload_state.json\" ]; then "
                "    state=done; "
                "    completed=$(python3 -c \"import json,sys;d=json.load(open(sys.argv[1]));print(len(d.get('files',[])))\" \"$p/manifest.json\" 2>/dev/null || echo 0); "
                "  elif [ -f \"$p/upload_state.json\" ]; then "
@@ -176,6 +187,7 @@ QString buildProbeRemoteCommand(const QString& data_root) {
                "  fi; "
                "  total=$(find \"$p\" -type f "
                "    ! -name upload_state.json ! -name pause.flag ! -name manifest.json "
+               "    ! -name upload_state.json.tmp ! -name manifest.json.tmp "
                "    | wc -l); "
                "  size=$(du -sb \"$p\" 2>/dev/null | awk '{print $1}'); "
                "  cfg=\"$p/session_config.json\"; "
@@ -204,6 +216,16 @@ UploadStatus parseStatus(const QString& token) {
 }
 
 }  // namespace
+
+QStringList uploaderArguments(const QString& script_path,
+                              const QString& data_path,
+                              const QString& robot_id,
+                              const QString& run_id,
+                              bool force) {
+    QStringList args{QStringLiteral("-u"), script_path, data_path, robot_id, run_id};
+    if (force) args << QStringLiteral("--force");
+    return args;
+}
 
 // ---------------------------------------------------------------------------
 // UploadStateProbe
@@ -270,7 +292,10 @@ QList<UploadTarget> UploadStateProbe::scanLocalDataRoot(const QString& data_root
                     t.data_path + QLatin1Char('/') + QLatin1String(kManifestFile);
                 const QString state =
                     t.data_path + QLatin1Char('/') + QLatin1String(kStateFile);
-                if (QFileInfo::exists(manifest)) {
+                // `uploader.py` deletes upload_state.json only after
+                // /complete returns. A manifest that still has the state
+                // file beside it was not confirmed.
+                if (QFileInfo::exists(manifest) && !QFileInfo::exists(state)) {
                     t.status = UploadStatus::Done;
                     t.completed_files = jsonArrayLength(manifest, "files");
                 } else if (QFileInfo::exists(state)) {
@@ -282,7 +307,7 @@ QList<UploadTarget> UploadStateProbe::scanLocalDataRoot(const QString& data_root
                 }
 
                 // Same counting rule as the SSH probe: every regular file
-                // except the three sentinels; bytes over everything.
+                // except the bookkeeping sentinels; bytes over everything.
                 QDirIterator it(t.data_path,
                                 QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden,
                                 QDirIterator::Subdirectories);
@@ -290,10 +315,7 @@ QList<UploadTarget> UploadStateProbe::scanLocalDataRoot(const QString& data_root
                     it.next();
                     const QFileInfo fi = it.fileInfo();
                     t.total_bytes += fi.size();
-                    const QString name = fi.fileName();
-                    if (name == QLatin1String(kStateFile) ||
-                        name == QLatin1String(kPauseFile) ||
-                        name == QLatin1String(kManifestFile)) {
+                    if (isUploadBookkeepingName(fi.fileName())) {
                         continue;
                     }
                     t.total_files += 1;
@@ -664,7 +686,11 @@ void UploadRunner::launchActiveTarget() {
     fatal_error_.clear();
     stdout_carry_.clear();
 
-    const UploadTarget& target = queue_.at(current_index_);
+    // Snapshot first. Clearing the flag before the process is built
+    // means a connection retry launches without `--force` and keeps
+    // whatever upload_state.json the first launch already wrote.
+    const UploadTarget target = queue_.at(current_index_);
+    queue_[current_index_].force_reupload = false;
     emit targetStarted(current_index_, queue_total_, target);
 
     // The script only ever *reads* pause.flag; a flag left by the last
@@ -700,11 +726,9 @@ void UploadRunner::configureLocalProcess(QProcess* proc, const UploadTarget& tar
     env.insert(QStringLiteral("PYTHONUNBUFFERED"), QStringLiteral("1"));
     proc->setProcessEnvironment(env);
     proc->setProgram(QStringLiteral("python3"));
-    proc->setArguments({QStringLiteral("-u"),
-                        resolveLocalScriptPath(local_script_path_),
-                        target.data_path,
-                        robot_id_,
-                        target.run_id});
+    proc->setArguments(uploaderArguments(
+        resolveLocalScriptPath(local_script_path_),
+        target.data_path, robot_id_, target.run_id, target.force_reupload));
 }
 
 void UploadRunner::configureSshProcess(QProcess* proc, const UploadTarget& target) {
@@ -730,24 +754,26 @@ QString UploadRunner::buildRemoteCommand(const UploadTarget& target) const {
     // ssh user@host arg is a single shell command on the remote side.
     // The leading `rm -f` clears a pause.flag left by the previous
     // Pause, in the same shell so it is ordered before the launch.
+    // `--force` comes from the same argument list as the local launch.
     const QString flag = target.data_path + QLatin1Char('/') +
                          QLatin1String(kPauseFile);
+    const QStringList args = uploaderArguments(
+        script, target.data_path, robot_id_, target.run_id, target.force_reupload);
+    QStringList quoted;
+    for (const QString& arg : args) quoted << shellSingleQuote(arg);
     return QStringLiteral(
-               "rm -f %8; "
+               "rm -f %1; "
                "env "
-               "BDR_CLOUD_API_BASE=%1 "
-               "BDR_CLOUD_CLIENT_ID=%2 "
-               "BDR_CLOUD_DEVICE_TOKEN=%3 "
+               "BDR_CLOUD_API_BASE=%2 "
+               "BDR_CLOUD_CLIENT_ID=%3 "
+               "BDR_CLOUD_DEVICE_TOKEN=%4 "
                "BDR_UPLOAD_WORKERS=12 "
-               "python3 -u %4 %5 %6 %7")
-        .arg(shellSingleQuote(cloud_api_base_),
+               "python3 %5")
+        .arg(shellSingleQuote(flag),
+             shellSingleQuote(cloud_api_base_),
              shellSingleQuote(cloud_client_id_),
              shellSingleQuote(cloud_device_token_),
-             shellSingleQuote(script),
-             shellSingleQuote(target.data_path),
-             shellSingleQuote(robot_id_),
-             shellSingleQuote(target.run_id),
-             shellSingleQuote(flag));
+             quoted.join(QLatin1Char(' ')));
 }
 
 void UploadRunner::clearPauseFlag(const UploadTarget& target) {

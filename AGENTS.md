@@ -679,14 +679,38 @@ kept in sync by hand.
   `upload_state.json` → Partial, neither → None; file count excludes the
   three sentinels. `scanLocalDataRoot()` is the pure engine (tested).
 - **`UploadRunner`**: ThumbDrive mode runs `python3 -u <script>
-  <data_path> <robot_id> <run_id>` as a plain `QProcess` with the creds
-  in `QProcessEnvironment`; `resolveLocalScriptPath()` tries the
-  override → `/usr/share/bdr-coverage-planner/uploader.py` →
-  `<appdir>/../scripts/uploader.py` (dev). `FailedToStart` (no python3)
-  is routed into the normal finish path so the queue never sticks busy.
+  <data_path> <robot_id> <run_id> [--force]` as a plain `QProcess` with
+  the creds in `QProcessEnvironment`; `resolveLocalScriptPath()` tries
+  the override → `/usr/share/bdr-coverage-planner/uploader.py` →
+  `<appdir>/../scripts/uploader.py` (dev). `--force` is only the first
+  launch of a row the cloud check marked missing. A pause, a retry, or
+  the next Upload press omits it, so the state file that launch already
+  wrote is the resume record. `FailedToStart` (no python3) is routed
+  into the normal finish path so the queue never sticks busy.
   Stdout parsing (`^✓ Uploaded:`, `^Skipping already uploaded:`,
   `^Connection error:`, `^Unexpected error:` …) is unchanged and shared
   with the SSH mode.
+- **`CloudVerifier`** (`cpp/include/cloud_verifier.hpp`): every time the
+  Upload dialog finishes a stick listing and the cloud is reachable, it
+  `POST`s `/verify` for the **10 newest** `Done` rows (sections and
+  missions, by scan time), **one `run_id` per request**, 30 s timeout.
+  The stick `manifest.json` is read off the GUI thread and compared to
+  the listing: a manifest file missing from S3, a size mismatch, or an
+  md5 mismatch (only when the manifest recorded `md5` — older manifests
+  are size-only) marks the row **Missing in cloud** (amber, ticked,
+  uploaded with `--force`). A full match shows **Uploaded · Verified**.
+  A manifest whose `client_id` or `robot_id` differs from the logged-in
+  robot is left **Uploaded** — the listing was for a different S3
+  prefix, and marking it missing would re-upload it under the wrong
+  owner. Empty owner fields are not a disagreement.
+  While the request is in flight the badge is **Uploaded · checking…**.
+  `manifest.json` itself must be in the listing. Extra S3 keys are
+  ignored, including `GPR_Output/` (produced in the cloud after upload,
+  not on the stick) and `_UPLOAD_COMPLETE.json`. Any non-200, timeout,
+  or offline result leaves every still-checking row as **Uploaded**.
+  The check does not write the stick and does not change the Dashboard
+  card. `/verify` needs the Lambda timeout at 29 s and `s3:ListBucket`
+  on the upload bucket; a 3 s timeout cannot list a real section.
 - **`UploadDialog`**: frameless modal from the Stage 3 "Upload Data"
   card. Flat list (Building, Operator, Date, Size, Status) — metadata
   from `session_config.json` / `mission_config.json`, no date combo.
@@ -728,6 +752,9 @@ kept in sync by hand.
 - **Per-file progress.** One `^✓ Uploaded:` line per file is the unit of
   progress.
 - **Manifest schema is strict.** `{client_id, robot_id, run_id, files[]}`.
+  New manifests also store `md5` beside `sha256` and `size_bytes` so the
+  cloud check can compare an S3 ETag. Manifests without `md5` are
+  compared on size only.
 - **State on the stick, not the laptop.** The probe re-derives
   Done/Partial/None from on-disk truth on every dialog open / stick
   insertion.
@@ -802,6 +829,20 @@ clearing, `FailedToStart` handling).
 - The SSH fallback **must NOT** go through `ros2 run` — invoke
   `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`
   directly.
+- **Do NOT pass `--force` on a retry or a resume.** It deletes
+  `manifest.json`, `upload_state.json`, and their `.tmp` siblings.
+  Only the first launch of a **Missing in cloud** row sets it.
+- **Do NOT treat `GPR_Output/` or `_UPLOAD_COMPLETE.json` as stick
+  files.** They are written in the cloud. The check ignores any S3 key
+  the manifest does not list, and still requires `manifest.json`.
+- **Do NOT batch more than one `run_id` into a `/verify` call.** A
+  large section's listing is ~0.5 MB and Lambda responses cap at 6 MB.
+- **A failed or offline cloud check must leave rows Uploaded.** Do not
+  mark a section missing because the check itself could not run.
+- **Do NOT mark a row missing when its manifest names a different
+  `client_id` or `robot_id` than the logged-in robot.** The check
+  lists that login's prefix; an empty listing there is not proof the
+  section is gone.
 
 ## FAST-LIVO2 migration (planned, not yet built)
 

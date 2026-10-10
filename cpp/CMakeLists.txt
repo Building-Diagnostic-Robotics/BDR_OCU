@@ -166,6 +166,7 @@ set(HEADERS
     include/robot_registry.hpp
     include/upload_runner.hpp
     include/upload_dialog.hpp
+    include/cloud_verifier.hpp
     include/thumb_drive_watcher.hpp
     include/launch_env.hpp
     include/offload_status.hpp
@@ -254,6 +255,7 @@ set(GUI_SOURCES
     src/cloud_upload_manager.cpp
     src/upload_runner.cpp
     src/upload_dialog.cpp
+    src/cloud_verifier.cpp
     src/thumb_drive_watcher.cpp
     src/offload_status.cpp
     src/repo_sync_manager.cpp
@@ -622,6 +624,28 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME upload_thumb_drive_tests COMMAND upload_thumb_drive_tests)
 
+        # /verify client and the stick-manifest vs S3 comparison.
+        add_executable(cloud_verifier_tests
+            tests/cloud_verifier_tests.cpp
+            src/cloud_verifier.cpp
+            include/cloud_verifier.hpp
+        )
+        target_include_directories(cloud_verifier_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(cloud_verifier_tests PRIVATE
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME cloud_verifier_tests COMMAND cloud_verifier_tests)
+
+        # uploader.py integrity checks (Content-MD5, ETag, resume). No Qt.
+        add_test(
+            NAME uploader_integrity_tests
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_uploader.py
+        )
+
         # Laptop↔robot ~/pilot_ws sanitizers + package map. Header listed
         # so AUTOMOC generates RepoSyncManager's moc (Q_OBJECT).
         add_executable(repo_sync_tests
@@ -707,7 +731,7 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME touch_gesture_state_tests COMMAND touch_gesture_state_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests swath_preview_tests)")
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests swath_preview_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()
