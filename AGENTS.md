@@ -692,28 +692,40 @@ kept in sync by hand.
   with the SSH mode.
 - **`CloudVerifier`** (`cpp/include/cloud_verifier.hpp`): every time the
   Upload dialog finishes a stick listing and the cloud is reachable, it
-  `POST`s `/verify` for the **10 newest** `Done` rows (sections and
-  missions, by scan time), **one `run_id` per request**, 30 s timeout.
-  The stick `manifest.json` is read off the GUI thread and compared to
-  the listing: a manifest file missing from S3, a size mismatch, or an
-  md5 mismatch (only when the manifest recorded `md5` — older manifests
-  are size-only) marks the row **Missing in cloud** (amber, ticked,
-  uploaded with `--force`). A full match shows **Uploaded · Verified**.
+  `POST`s `/verify` for the **Done folders of the 10 newest buildings
+  that already have an uploaded folder** (by each building's newest
+  scan), **one `run_id` per request**, 30 s timeout. The stick
+  `manifest.json` is read off the GUI thread and compared to the
+  listing: a manifest file missing from S3, a size mismatch, or an md5
+  mismatch (only when the manifest recorded `md5` — older manifests are
+  size-only) marks that folder **Missing in cloud**. The building row
+  then shows **Missing in cloud** (amber, ticked) and only those
+  folders upload with `--force`. A full match on every folder shows
+  **Uploaded · Verified**.
   A manifest whose `client_id` or `robot_id` differs from the logged-in
   robot is left **Uploaded** — the listing was for a different S3
   prefix, and marking it missing would re-upload it under the wrong
   owner. Empty owner fields are not a disagreement.
-  While the request is in flight the badge is **Uploaded · checking…**.
-  `manifest.json` itself must be in the listing. Extra S3 keys are
-  ignored, including `GPR_Output/` (produced in the cloud after upload,
-  not on the stick) and `_UPLOAD_COMPLETE.json`. Any non-200, timeout,
-  or offline result leaves every still-checking row as **Uploaded**.
+  While a request is in flight, a building whose folders are all
+  uploaded shows **Uploaded · checking…**. A building that still has a
+  new scan keeps Pending or Partial. `manifest.json` itself must be in
+  the listing. Extra S3 keys are ignored, including `GPR_Output/`
+  (produced in the cloud after upload, not on the stick) and
+  `_UPLOAD_COMPLETE.json`. Any non-200, timeout, or offline result
+  leaves every still-checking folder as **Uploaded**.
   The check does not write the stick and does not change the Dashboard
   card. `/verify` needs the Lambda timeout at 29 s and `s3:ListBucket`
   on the upload bucket; a 3 s timeout cannot list a real section.
 - **`UploadDialog`**: frameless modal from the Stage 3 "Upload Data"
-  card. Flat list (Building, Operator, Date, Size, Status) — metadata
+  card. One flat row per building slug, across every date on the stick
+  (Building, Operator, newest scan, summed size, status) — metadata
   from `session_config.json` / `mission_config.json`, no date combo.
+  A later scan of the same building stays on that row and shows
+  Pending until its new folders upload; already-uploaded folders are
+  not sent again. Ticking the row uploads the rest oldest-first, the
+  Mission folder before a Section that shares its timestamp. Fully
+  uploaded buildings stay listed and greyed. "Found N scans" counts
+  buildings.
   Header names the robot the upload is attributed to **and** the
   drive (`Drive: RDATA_EXT at /media/… · N GB free`). Banner + Upload
   gating = drive mounted AND cloud reachable (2 s `curl` HEAD, 2-miss

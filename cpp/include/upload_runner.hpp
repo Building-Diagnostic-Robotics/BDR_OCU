@@ -39,6 +39,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QPointer>
@@ -130,6 +131,67 @@ QStringList uploaderArguments(const QString& script_path,
                               const QString& robot_id,
                               const QString& run_id,
                               bool force);
+
+// ---------------------------------------------------------------------------
+// One list row per building
+// ---------------------------------------------------------------------------
+
+/**
+ * Badge for every folder that shares a building slug, across dates.
+ * `Uploaded` / `Checking` / `Verified` apply only when every folder is
+ * already uploaded. A later scan of the same building stays `Pending`
+ * (or `Partial`) until its own folders finish.
+ */
+enum class UploadRowBadge {
+    Pending = 0,
+    Partial,
+    Uploaded,
+    Checking,
+    Verified,
+    Missing,
+};
+
+/**
+ * One upload-dialog row. `run_ids` is the upload order: oldest visit
+ * first, and on an equal timestamp the Mission folder before a Section.
+ * The runner still launches one folder at a time.
+ */
+struct UploadBuildingRow {
+    QString key;
+    QString building_label;
+    QString operator_name;
+    QDateTime newest;
+    QString newest_date_folder;
+    QStringList run_ids;
+    qint64 total_bytes = 0;
+    UploadRowBadge badge = UploadRowBadge::Pending;
+    QString badge_text;
+    int partial_percent = 0;
+    bool selectable = false;
+    QString tooltip;
+};
+
+/// Slug, or a key that cannot collide with a slug when the folder has
+/// none. Empty `run_id` still returns a key; callers skip those targets.
+QString uploadBuildingKey(const UploadTarget& target);
+
+/// One row per building, newest scan first. Targets with an empty
+/// `run_id` are dropped.
+QList<UploadBuildingRow> groupUploadTargets(
+    const QHash<QString, UploadTarget>& targets);
+
+/// Folders a ticked row should hand the runner. Skips folders that are
+/// already uploaded. A folder the cloud check marked missing is included
+/// with `force_reupload` set.
+QList<UploadTarget> uploadTargetsForRow(const QHash<QString, UploadTarget>& targets,
+                                        const UploadBuildingRow& row);
+
+/// Done folders of the `building_limit` newest buildings that have at
+/// least one uploaded folder. Buildings with nothing uploaded do not
+/// take a slot. One entry per folder; the caller requests them one at
+/// a time.
+QList<UploadTarget> cloudCheckTargets(const QHash<QString, UploadTarget>& targets,
+                                      int building_limit);
 
 // ---------------------------------------------------------------------------
 // State probe

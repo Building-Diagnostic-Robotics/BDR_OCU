@@ -227,6 +227,224 @@ QStringList uploaderArguments(const QString& script_path,
     return args;
 }
 
+namespace {
+
+// Oldest visit first. Equal timestamps put Mission_* ahead of Section_*,
+// which is the tie on a scan whose mission and section share a minute.
+// A later visit's mission keeps its own later timestamp, so it does not
+// jump ahead of an earlier visit's section.
+bool uploadBefore(const UploadTarget& a, const UploadTarget& b) {
+    const bool a_ok = a.captured_at.isValid();
+    const bool b_ok = b.captured_at.isValid();
+    if (a_ok != b_ok) return a_ok;
+    if (a_ok && a.captured_at != b.captured_at) return a.captured_at < b.captured_at;
+    if (a.date_folder != b.date_folder) return a.date_folder < b.date_folder;
+    if (a.isMission() != b.isMission()) return a.isMission();
+    return a.run_id < b.run_id;
+}
+
+bool folderNeedsUpload(const UploadTarget& target) {
+    if (target.status != UploadStatus::Done) return true;
+    return target.cloud_check == CloudCheck::Missing;
+}
+
+QString folderStatusText(const UploadTarget& target) {
+    if (target.status == UploadStatus::Done) {
+        switch (target.cloud_check) {
+            case CloudCheck::Checking: return QStringLiteral("Uploaded · checking…");
+            case CloudCheck::Verified: return QStringLiteral("Uploaded · Verified");
+            case CloudCheck::Missing:  return QStringLiteral("Missing in cloud");
+            case CloudCheck::Unchecked: break;
+        }
+        return QStringLiteral("Uploaded");
+    }
+    if (target.status == UploadStatus::Partial) return QStringLiteral("Partial");
+    return QStringLiteral("Pending");
+}
+
+UploadBuildingRow makeBuildingRow(const QString& key, QList<UploadTarget> members) {
+    UploadBuildingRow row;
+    row.key = key;
+    if (members.isEmpty()) return row;
+
+    std::sort(members.begin(), members.end(), uploadBefore);
+    for (const UploadTarget& target : members) {
+        row.run_ids << target.run_id;
+        if (target.total_bytes > 0) row.total_bytes += target.total_bytes;
+    }
+
+    const UploadTarget* newest = &members.first();
+    for (const UploadTarget& target : members) {
+        if (!target.captured_at.isValid()) continue;
+        if (!newest->captured_at.isValid() || target.captured_at > newest->captured_at) {
+            newest = &target;
+        }
+    }
+    row.newest = newest->captured_at;
+    row.newest_date_folder = newest->date_folder;
+    row.building_label = newest->building_name.trimmed();
+    if (row.building_label.isEmpty()) row.building_label = newest->building_slug.trimmed();
+    if (row.building_label.isEmpty()) row.building_label = newest->section_name;
+    if (row.building_label.isEmpty()) row.building_label = QStringLiteral("Unknown");
+
+    QList<UploadTarget> newest_first = members;
+    std::sort(newest_first.begin(), newest_first.end(),
+              [](const UploadTarget& a, const UploadTarget& b) {
+                  return uploadBefore(b, a);
+              });
+    for (const UploadTarget& target : newest_first) {
+        if (!target.operator_name.trimmed().isEmpty()) {
+            row.operator_name = target.operator_name.trimmed();
+            break;
+        }
+    }
+
+    bool any_missing = false;
+    bool any_open = false;
+    bool any_partial = false;
+    bool any_checking = false;
+    bool all_verified = true;
+    qint64 open_done = 0;
+    qint64 open_total = 0;
+    for (const UploadTarget& target : members) {
+        if (target.status == UploadStatus::Done &&
+            target.cloud_check == CloudCheck::Missing) {
+            any_missing = true;
+            all_verified = false;
+            continue;
+        }
+        if (target.status != UploadStatus::Done) {
+            any_open = true;
+            all_verified = false;
+            if (target.status == UploadStatus::Partial) any_partial = true;
+            open_done += qMax(0, target.completed_files);
+            open_total += qMax(0, target.total_files);
+            continue;
+        }
+        if (target.cloud_check == CloudCheck::Checking) any_checking = true;
+        if (target.cloud_check != CloudCheck::Verified) all_verified = false;
+    }
+
+    if (any_missing) {
+        row.badge = UploadRowBadge::Missing;
+        row.badge_text = QStringLiteral("Missing in cloud");
+        row.selectable = true;
+    } else if (any_open && any_partial) {
+        row.badge = UploadRowBadge::Partial;
+        row.selectable = true;
+        if (open_total > 0) {
+            row.partial_percent = static_cast<int>(
+                qBound<qint64>(0, open_done * 100 / open_total, 100));
+            row.badge_text = QStringLiteral("Partial · %1%").arg(row.partial_percent);
+        } else {
+            row.badge_text = QStringLiteral("Partial");
+        }
+    } else if (any_open) {
+        row.badge = UploadRowBadge::Pending;
+        row.badge_text = QStringLiteral("Pending");
+        row.selectable = true;
+    } else if (any_checking) {
+        row.badge = UploadRowBadge::Checking;
+        row.badge_text = QStringLiteral("Uploaded · checking…");
+    } else if (all_verified) {
+        row.badge = UploadRowBadge::Verified;
+        row.badge_text = QStringLiteral("Uploaded · Verified");
+    } else {
+        row.badge = UploadRowBadge::Uploaded;
+        row.badge_text = QStringLiteral("Uploaded");
+    }
+
+    QStringList lines;
+    constexpr int kTooltipCap = 12;
+    const int shown = qMin(kTooltipCap, newest_first.size());
+    for (int i = 0; i < shown; ++i) {
+        const UploadTarget& target = newest_first.at(i);
+        const QString when = target.date_folder.isEmpty()
+                                 ? QStringLiteral("—")
+                                 : target.date_folder;
+        const QString name = target.section_name.isEmpty()
+                                 ? target.run_id
+                                 : target.section_name;
+        lines << QStringLiteral("%1 · %2 · %3").arg(when, name, folderStatusText(target));
+    }
+    if (newest_first.size() > shown) {
+        lines << QStringLiteral("… and %1 more").arg(newest_first.size() - shown);
+    }
+    row.tooltip = lines.join(QLatin1Char('\n'));
+    return row;
+}
+
+}  // namespace
+
+QString uploadBuildingKey(const UploadTarget& target) {
+    const QString slug = target.building_slug.trimmed();
+    if (!slug.isEmpty()) return slug;
+    // Leading unit separator so a slug can never equal this key.
+    return QStringLiteral("\x1e") + target.run_id;
+}
+
+QList<UploadBuildingRow> groupUploadTargets(
+    const QHash<QString, UploadTarget>& targets) {
+    QHash<QString, QList<UploadTarget>> buckets;
+    for (const UploadTarget& target : targets) {
+        if (target.run_id.isEmpty()) continue;
+        buckets[uploadBuildingKey(target)].append(target);
+    }
+
+    QList<UploadBuildingRow> rows;
+    rows.reserve(buckets.size());
+    for (auto it = buckets.cbegin(); it != buckets.cend(); ++it) {
+        rows.append(makeBuildingRow(it.key(), it.value()));
+    }
+    std::sort(rows.begin(), rows.end(),
+              [](const UploadBuildingRow& a, const UploadBuildingRow& b) {
+                  const bool a_ok = a.newest.isValid();
+                  const bool b_ok = b.newest.isValid();
+                  if (a_ok != b_ok) return a_ok;
+                  if (a_ok && a.newest != b.newest) return a.newest > b.newest;
+                  return a.key < b.key;
+              });
+    return rows;
+}
+
+QList<UploadTarget> uploadTargetsForRow(const QHash<QString, UploadTarget>& targets,
+                                        const UploadBuildingRow& row) {
+    QList<UploadTarget> out;
+    for (const QString& run_id : row.run_ids) {
+        const auto it = targets.constFind(run_id);
+        if (it == targets.constEnd()) continue;
+        if (!folderNeedsUpload(*it)) continue;
+        UploadTarget copy = *it;
+        // The cloud check records the decision on the folder. Setting
+        // the flag here means a missing folder cannot resume against
+        // the manifest that just failed the check. A retry has already
+        // moved the folder to Partial, so it does not pass --force.
+        if (copy.cloud_check == CloudCheck::Missing) copy.force_reupload = true;
+        out.append(copy);
+    }
+    return out;
+}
+
+QList<UploadTarget> cloudCheckTargets(const QHash<QString, UploadTarget>& targets,
+                                      int building_limit) {
+    QList<UploadTarget> out;
+    if (building_limit <= 0) return out;
+    int buildings = 0;
+    for (const UploadBuildingRow& row : groupUploadTargets(targets)) {
+        QList<UploadTarget> done;
+        for (const QString& run_id : row.run_ids) {
+            const auto it = targets.constFind(run_id);
+            if (it == targets.constEnd()) continue;
+            if (it->status == UploadStatus::Done) done.append(*it);
+        }
+        if (done.isEmpty()) continue;
+        if (buildings >= building_limit) break;
+        ++buildings;
+        out += done;
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // UploadStateProbe
 // ---------------------------------------------------------------------------
