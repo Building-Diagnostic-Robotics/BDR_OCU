@@ -757,6 +757,8 @@ kept in sync by hand.
   anything is uploaded. A file on the stick that the robot did not
   record is skipped, with one warning naming it.
   `thumbsync_manifest.json` itself is still uploaded.
+  An unreadable copy record blocks every section in that building
+  folder, because it cannot say which sections it covers.
 - **Single PUT only.** Backend mints single-PUT presigns; per-file
   ceiling is 5 GB.
 - **Sequential targets, parallel files within a target.** Script's

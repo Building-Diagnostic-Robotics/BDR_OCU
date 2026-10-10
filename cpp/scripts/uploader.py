@@ -1007,7 +1007,9 @@ def find_thumb_manifest(data_root: str) -> Optional[str]:
 
     A mission folder carries its own. A section folder uses the sibling
     Mission_* manifest that lists it. Two missions listing the same
-    section is an error: there is no safe record to trust.
+    section is an error: there is no safe record to trust. A sibling
+    manifest that cannot be read is also an error: it cannot say which
+    sections it covers, so every section in the building folder stops.
     """
     root = os.path.abspath(data_root)
     own = os.path.join(root, THUMB_MANIFEST)
@@ -1019,6 +1021,7 @@ def find_thumb_manifest(data_root: str) -> Optional[str]:
     except OSError:
         return None
     matches = []
+    unreadable = []
     for name in names:
         if not name.startswith("Mission_"):
             continue
@@ -1026,9 +1029,18 @@ def find_thumb_manifest(data_root: str) -> Optional[str]:
         if not os.path.isfile(path):
             continue
         doc = _read_json_object(path)
-        sections = doc.get("sections") if doc else None
+        if doc is None:
+            unreadable.append(path)
+            continue
+        sections = doc.get("sections")
         if isinstance(sections, list) and folder in sections:
             matches.append(path)
+    if unreadable:
+        rels = ", ".join(_mission_relpath(path) for path in unreadable)
+        raise UploadIntegrityError(
+            f"Copy record unreadable for {rels}, so it cannot say which "
+            f"sections it covers. Delete {rels} on the stick, then plug "
+            f"the stick into the robot to re-copy it.")
     if len(matches) > 1:
         raise UploadIntegrityError(
             f"More than one mission on the stick lists {folder}; "
