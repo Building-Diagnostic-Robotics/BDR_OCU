@@ -39,6 +39,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QPointer>
@@ -62,15 +63,27 @@ enum class UploadSource {
  *
  * State definitions (match `uploader.py` runtime contract):
  *  - `None`    — neither `upload_state.json` nor `manifest.json` exist.
- *  - `Partial` — `upload_state.json` exists; `manifest.json` does not.
- *                Resume re-uses the on-disk completed set.
- *  - `Done`    — `manifest.json` exists. Re-runs are a no-op (script
- *                short-circuits with "Upload complete: noop").
+ *  - `Partial` — `upload_state.json` exists, whether or not a manifest
+ *                was also written. The script re-PUTs a file whose
+ *                recorded size no longer matches, and a manifest left
+ *                next to the state file was not confirmed.
+ *  - `Done`    — `manifest.json` exists and `upload_state.json` does
+ *                not. The script no-ops when local sizes still match
+ *                `size_bytes`, and re-uploads when they do not.
  */
 enum class UploadStatus {
     None = 0,
     Partial,
     Done,
+};
+
+/// Result of checking a `Done` section against S3. Separate from
+/// `UploadStatus`, which is only what the stick sentinels say.
+enum class CloudCheck {
+    Unchecked = 0,  ///< Not checked, or the check could not run.
+    Checking,       ///< `/verify` is in flight.
+    Verified,       ///< Listing matches the stick manifest.
+    Missing,        ///< S3 is missing the section or a file disagrees.
 };
 
 /**
@@ -94,12 +107,91 @@ struct UploadTarget {
     QString operator_name;
     QDateTime captured_at;
     UploadStatus status = UploadStatus::None;
+    /// Cloud check over a `Done` row. `Unchecked` is the on-disk badge
+    /// ("Uploaded") and is also where a failed or offline check leaves
+    /// the row. Only `Missing` is selectable, and it uploads with
+    /// `force_reupload`.
+    CloudCheck cloud_check = CloudCheck::Unchecked;
+    /// Pass `--force` on the next launch of this target only. The
+    /// runner clears it once that launch is built, so a connection
+    /// retry or a later Upload press resumes the state file instead of
+    /// deleting it.
+    bool force_reupload = false;
     int completed_files = 0;
     int total_files = 0;
     qint64 total_bytes = 0;
 
     bool isMission() const { return section_name.startsWith(QStringLiteral("Mission_")); }
 };
+
+/// Arguments after `python3` for one `uploader.py` launch. `--force`
+/// is appended only when `force` is true.
+QStringList uploaderArguments(const QString& script_path,
+                              const QString& data_path,
+                              const QString& robot_id,
+                              const QString& run_id,
+                              bool force);
+
+// ---------------------------------------------------------------------------
+// One list row per building
+// ---------------------------------------------------------------------------
+
+/**
+ * Badge for every folder that shares a building slug, across dates.
+ * `Uploaded` / `Checking` / `Verified` apply only when every folder is
+ * already uploaded. A later scan of the same building stays `Pending`
+ * (or `Partial`) until its own folders finish.
+ */
+enum class UploadRowBadge {
+    Pending = 0,
+    Partial,
+    Uploaded,
+    Checking,
+    Verified,
+    Missing,
+};
+
+/**
+ * One upload-dialog row. `run_ids` is the upload order: oldest visit
+ * first, and on an equal timestamp the Mission folder before a Section.
+ * The runner still launches one folder at a time.
+ */
+struct UploadBuildingRow {
+    QString key;
+    QString building_label;
+    QString operator_name;
+    QDateTime newest;
+    QString newest_date_folder;
+    QStringList run_ids;
+    qint64 total_bytes = 0;
+    UploadRowBadge badge = UploadRowBadge::Pending;
+    QString badge_text;
+    int partial_percent = 0;
+    bool selectable = false;
+    QString tooltip;
+};
+
+/// Slug, or a key that cannot collide with a slug when the folder has
+/// none. Empty `run_id` still returns a key; callers skip those targets.
+QString uploadBuildingKey(const UploadTarget& target);
+
+/// One row per building, newest scan first. Targets with an empty
+/// `run_id` are dropped.
+QList<UploadBuildingRow> groupUploadTargets(
+    const QHash<QString, UploadTarget>& targets);
+
+/// Folders a ticked row should hand the runner. Skips folders that are
+/// already uploaded. A folder the cloud check marked missing is included
+/// with `force_reupload` set.
+QList<UploadTarget> uploadTargetsForRow(const QHash<QString, UploadTarget>& targets,
+                                        const UploadBuildingRow& row);
+
+/// Done folders of the `building_limit` newest buildings that have at
+/// least one uploaded folder. Buildings with nothing uploaded do not
+/// take a slot. One entry per folder; the caller requests them one at
+/// a time.
+QList<UploadTarget> cloudCheckTargets(const QHash<QString, UploadTarget>& targets,
+                                      int building_limit);
 
 // ---------------------------------------------------------------------------
 // State probe
@@ -286,6 +378,8 @@ public:
     // each retry re-launches the SSH command identically — the script
     // re-reads `upload_state.json` and skips the files it already
     // landed, so retries are idempotent and never duplicate uploads.
+    // A `--force` launch clears that flag before the retry, so the
+    // retry does not delete the state file the first launch wrote.
     //
     // Backoff sequence (attempt index → wait): 1 → 5 s, 2 → 15 s,
     // 3 → 45 s. After exhaustion the runner emits `targetFailed`

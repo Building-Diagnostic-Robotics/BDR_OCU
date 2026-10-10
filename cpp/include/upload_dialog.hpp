@@ -20,17 +20,18 @@
  *     `AppShellWindow::onUploadDataRequested()` (called whenever the
  *     dashboard "Upload Data" quick-action fires).
  *  2. `showEvent` arms `ThumbDriveWatcher`. Once the stick is mounted,
- *     `UploadStateProbe` walks it and the dialog lists every section
- *     as a flat row (building, operator, date/time, size, status),
- *     classified None/Partial/Done from the sentinel files beside the data.
- *     Browse… lets the operator point at an unlabelled stick or a
- *     local copy.
- *  3. Operator selects sections, presses **Upload Data**. The dialog
- *     builds a queue of `UploadTarget`s (sequential per design
- *     decision) and feeds it to `UploadRunner`, which spawns one
- *     `python3 -u uploader.py …` subprocess per target.
+ *     `UploadStateProbe` walks it and the dialog lists one row per
+ *     building (operator, newest scan, summed size, rolled-up status).
+ *     Every Mission_* and Section_* folder of that building, on any
+ *     date, sits on the same row. Browse… lets the operator point at
+ *     an unlabelled stick or a local copy.
+ *  3. Operator selects buildings, presses **Upload Data**. The dialog
+ *     expands each ticked row into the folders that are not already
+ *     uploaded (oldest visit first) and feeds that queue to
+ *     `UploadRunner`, which spawns one `python3 -u uploader.py …`
+ *     subprocess per folder.
  *  4. Per-file events stream in via `UploadRunner::fileUploaded`;
- *     the tree row's per-section count + progress bar update live.
+ *     the building row's status and the progress bar update live.
  *  5. **Pause** touches `pause.flag`; the script exits cleanly at the
  *     next file boundary. Resume = re-press Upload.
  *  6. **Cancel** SIGTERMs the subprocess. State on disk is preserved
@@ -52,6 +53,7 @@
 #include <QPointer>
 #include <QString>
 
+#include "cloud_verifier.hpp"
 #include "robot_reachability_probe.hpp"
 #include "thumb_drive_watcher.hpp"
 #include "upload_runner.hpp"
@@ -100,6 +102,12 @@ public:
     /// ThumbDrive: filesystem label to wait for. Defaults to RDATA_EXT.
     void setDriveLabel(const QString& label);
 
+public slots:
+    /// Esc hides the dialog through `close()`, so the upload pauses and
+    /// the cloud check stops. `QDialog::closeEvent` calls `reject()`
+    /// again; `in_close_` makes that second call the plain hide.
+    void reject() override;
+
 protected:
     void showEvent(QShowEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
@@ -140,19 +148,42 @@ private slots:
     void onCloudProbeFinished(int exit_code, int /*QProcess::ExitStatus*/ status);
 
 private:
+    struct Selection {
+        int buildings = 0;
+        QList<UploadTarget> folders;
+    };
+
     void buildUi();
     void applyStyle();
     void repopulateTree();
-    QString formatWhen(const UploadTarget& target) const;
+    QString formatWhen(const QDateTime& when, const QString& date_folder) const;
     void refreshSelectionSummary();
     void refreshButtonStates();
     void refreshHeaderSubtitle();
     void resetProgress();
-    void setSectionRowStatus(QTreeWidgetItem* row, const UploadTarget& target);
-    QTreeWidgetItem* findSectionRow(const UploadTarget& target) const;
+    void applyBuildingRow(QTreeWidgetItem* row, const UploadBuildingRow& view,
+                          bool tick_if_missing);
+    void refreshRowForTarget(const UploadTarget& target, bool tick_if_missing);
+    QTreeWidgetItem* findBuildingRow(const QString& key) const;
     QString formatBytes(qint64 bytes) const;
-    QList<UploadTarget> selectedTargets() const;
+    Selection currentSelection() const;
+    int listedBuildingCount() const;
     void startProbe();
+
+    // S3 check of the done folders on the 10 newest buildings that have
+    // one. Read-only on the stick. A failure or an offline cloud leaves
+    // those folders Uploaded.
+    void maybeStartCloudCheck();
+    void startCloudCheck(const QList<UploadTarget>& newest_done);
+    void cancelCloudCheck(bool reschedule);
+    void revertCheckingRows();
+    void onCloudRunFinished(int generation, const QString& run_id, bool http_ok,
+                            const QList<CloudObject>& files, const QString& error);
+    void onManifestsLoaded(int generation,
+                           const QHash<QString, LoadedManifest>& by_run);
+    void applyCloudResult(const QString& run_id);
+    void presentCloudRow(const UploadTarget& target, bool tick_if_missing);
+    void noteCloudVerify(const QString& line);
 
     // Connectivity helpers.
     void armConnectivityProbes();
@@ -168,6 +199,12 @@ private:
     QString sourceNoun() const;
 
     bool dark_mode_ = false;
+    bool in_close_ = false;
+    bool shutting_down_ = false;
+    /// Cancel (unlike pause or a finished upload) used to skip the
+    /// rescan, so a `--force` that was killed before it deleted the
+    /// manifest stayed "Uploaded" with the force flag already cleared.
+    bool recheck_after_cancel_ = false;
     UploadSource source_ = UploadSource::ThumbDrive;
     QString remote_host_;
     QString ssh_user_;
@@ -193,6 +230,19 @@ private:
 
     UploadStateProbe* probe_ = nullptr;
     UploadRunner* runner_ = nullptr;
+    CloudVerifier* cloud_verifier_ = nullptr;
+
+    // `probe_serial_` advances on each successful stick listing.
+    // `cloud_check_for_probe_` is that serial once a check has been
+    // started for it, so opening the dialog checks once per listing
+    // and a later cloud-up retries a check that never started.
+    int probe_serial_ = 0;
+    int cloud_check_for_probe_ = -1;
+    int verify_generation_ = 0;
+    bool manifests_ready_ = false;
+    QStringList cloud_check_ids_;
+    QHash<QString, QList<CloudObject>> cloud_listings_;
+    QHash<QString, LoadedManifest> loaded_manifests_;
 
     // Connectivity gating (Decision #3 + #4).  Robot reachability uses
     // the existing layered ICMP→TCP-22 probe; cloud reachability uses

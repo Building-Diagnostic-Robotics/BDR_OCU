@@ -31,6 +31,8 @@
 #include <QTreeWidgetItem>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include "components/bdr_message_box.hpp"
 #include "ui_theme_constants.hpp"
@@ -39,16 +41,35 @@ namespace f2c_cpp {
 
 namespace {
 
-constexpr int kRunIdRole = Qt::UserRole + 1;
+constexpr int kBuildingKeyRole = Qt::UserRole + 1;
+constexpr int kCloudVerifyNewest = 10;
 
-QString statusBadgeText(UploadStatus s) {
-    switch (s) {
-        case UploadStatus::Done:    return QStringLiteral("Uploaded");
-        case UploadStatus::Partial: return QStringLiteral("Partial");
-        case UploadStatus::None:    return QStringLiteral("Pending");
-    }
-    return QString();
+QString scansFoundText(int count) {
+    return QStringLiteral("Found %1 scan%2.")
+        .arg(count)
+        .arg(count == 1 ? QString() : QStringLiteral("s"));
 }
+
+QColor badgeColor(UploadRowBadge badge, bool dark) {
+    switch (badge) {
+        case UploadRowBadge::Missing:
+        case UploadRowBadge::Partial:
+            return QColor(QStringLiteral("#F59E0B"));
+        case UploadRowBadge::Uploaded:
+        case UploadRowBadge::Checking:
+        case UploadRowBadge::Verified:
+            return QColor(QStringLiteral("#10B981"));
+        case UploadRowBadge::Pending:
+            break;
+    }
+    return dark ? QColor(QStringLiteral("#A1A1AA"))
+                : QColor(QStringLiteral("#52525B"));
+}
+
+struct ManifestBatch {
+    int generation = 0;
+    QHash<QString, LoadedManifest> by_run;
+};
 
 }  // namespace
 
@@ -64,6 +85,9 @@ UploadDialog::UploadDialog(QWidget* parent) : QDialog(parent) {
 
     probe_ = new UploadStateProbe(this);
     runner_ = new UploadRunner(this);
+    cloud_verifier_ = new CloudVerifier(this);
+    connect(cloud_verifier_, &CloudVerifier::runFinished,
+            this, &UploadDialog::onCloudRunFinished);
 
     connect(probe_, &UploadStateProbe::targetsReady,
             this, &UploadDialog::onProbeReady);
@@ -109,6 +133,8 @@ UploadDialog::UploadDialog(QWidget* parent) : QDialog(parent) {
 }
 
 UploadDialog::~UploadDialog() {
+    shutting_down_ = true;
+    cancelCloudCheck(false);
     if (runner_ && runner_->isBusy()) {
         runner_->requestCancel();
     }
@@ -154,6 +180,10 @@ void UploadDialog::setCloudAuth(const QString& api_base,
     if (runner_) {
         runner_->setCloudAuth(cloud_api_base_, cloud_client_id_,
                               cloud_device_token_);
+    }
+    if (cloud_verifier_) {
+        cloud_verifier_->setAuth(cloud_api_base_, cloud_client_id_,
+                                 cloud_device_token_);
     }
     refreshHeaderSubtitle();
 }
@@ -659,13 +689,26 @@ void UploadDialog::showEvent(QShowEvent* event) {
 }
 
 void UploadDialog::closeEvent(QCloseEvent* event) {
+    cancelCloudCheck(false);
     if (runner_ && runner_->isBusy()) {
         // Graceful pause per the design spec — the script will finish
         // its in-flight files, write upload_state.json, and exit.
         runner_->requestPause();
     }
     disarmConnectivityProbes();
+    // QDialog::closeEvent calls reject() while the dialog is still
+    // visible. The flag stops that from calling close() again.
+    in_close_ = true;
     QDialog::closeEvent(event);
+    in_close_ = false;
+}
+
+void UploadDialog::reject() {
+    if (in_close_ || shutting_down_) {
+        QDialog::reject();
+        return;
+    }
+    close();
 }
 
 void UploadDialog::mousePressEvent(QMouseEvent* event) {
@@ -704,6 +747,7 @@ void UploadDialog::mouseReleaseEvent(QMouseEvent* event) {
 // ---------------------------------------------------------------------------
 
 void UploadDialog::startProbe() {
+    cancelCloudCheck(false);
     if (isThumbDrive()) {
         if (!drive_mounted_ || drive_mount_.isEmpty()) {
             const QString label = drive_watcher_ ? drive_watcher_->label()
@@ -780,6 +824,7 @@ void UploadDialog::onProbeReady(bool ok, const QList<UploadTarget>& targets,
     }
 
     all_targets_.clear();
+    ++probe_serial_;
     for (const UploadTarget& t : targets) {
         if (!all_targets_.contains(t.run_id)) {
             all_targets_.insert(t.run_id, t);
@@ -793,14 +838,11 @@ void UploadDialog::onProbeReady(bool ok, const QList<UploadTarget>& targets,
             lbl_probe_status_->setText(
                 QStringLiteral("No scans recorded yet."));
         } else {
-            lbl_probe_status_->setText(
-                QStringLiteral("Found %1 scan%2.")
-                    .arg(all_targets_.size())
-                    .arg(all_targets_.size() == 1 ? QString()
-                                                  : QStringLiteral("s")));
+            lbl_probe_status_->setText(scansFoundText(listedBuildingCount()));
         }
     }
     refreshButtonStates();
+    maybeStartCloudCheck();
 }
 
 void UploadDialog::onRefreshClicked() {
@@ -828,12 +870,12 @@ void UploadDialog::onBrowseClicked() {
     drive_watcher_->setManualPath(chosen);   // triggers onDriveStateChanged
 }
 
-QString UploadDialog::formatWhen(const UploadTarget& target) const {
-    if (target.captured_at.isValid()) {
-        return QLocale().toString(target.captured_at, QStringLiteral("MMM d, yyyy  h:mm AP"));
+QString UploadDialog::formatWhen(const QDateTime& when,
+                                const QString& date_folder) const {
+    if (when.isValid()) {
+        return QLocale().toString(when, QStringLiteral("MMM d, yyyy  h:mm AP"));
     }
-    return target.date_folder.isEmpty() ? QStringLiteral("—")
-                                        : target.date_folder;
+    return date_folder.isEmpty() ? QStringLiteral("—") : date_folder;
 }
 
 void UploadDialog::repopulateTree() {
@@ -854,64 +896,65 @@ void UploadDialog::repopulateTree() {
     }
     if (lbl_tree_status_) lbl_tree_status_->setVisible(false);
 
-    QList<UploadTarget> rows = all_targets_.values();
-    std::sort(rows.begin(), rows.end(),
-              [](const UploadTarget& a, const UploadTarget& b) {
-                  if (a.captured_at.isValid() && b.captured_at.isValid() &&
-                      a.captured_at != b.captured_at) {
-                      return a.captured_at > b.captured_at;
-                  }
-                  return a.run_id > b.run_id;
-              });
-
-    for (const UploadTarget& t : rows) {
+    const QList<UploadBuildingRow> rows = groupUploadTargets(all_targets_);
+    for (const UploadBuildingRow& view : rows) {
         auto* row = new QTreeWidgetItem(tree_);
-        const QString building =
-            t.building_name.isEmpty() ? t.building_slug : t.building_name;
-        row->setText(0, building);
-        row->setToolTip(0, t.section_name);
-        row->setData(0, kRunIdRole, t.run_id);
-        row->setText(1, t.operator_name.isEmpty() ? QStringLiteral("—")
-                                                  : t.operator_name);
-        row->setText(2, formatWhen(t));
-        row->setText(3, formatBytes(t.total_bytes));
-        setSectionRowStatus(row, t);
+        row->setText(0, view.building_label);
+        row->setData(0, kBuildingKeyRole, view.key);
+        row->setText(1, view.operator_name.isEmpty() ? QStringLiteral("—")
+                                                     : view.operator_name);
+        row->setText(2, formatWhen(view.newest, view.newest_date_folder));
+        row->setText(3, formatBytes(view.total_bytes));
         row->setFlags(row->flags() | Qt::ItemIsUserCheckable);
-        if (t.status == UploadStatus::Done) {
-            row->setFlags(row->flags() & ~Qt::ItemIsEnabled);
-            row->setCheckState(0, Qt::Unchecked);
-        } else {
-            row->setCheckState(0, Qt::Unchecked);
+        row->setCheckState(0, Qt::Unchecked);
+        applyBuildingRow(row, view, false);
+    }
+}
+
+void UploadDialog::applyBuildingRow(QTreeWidgetItem* row,
+                                   const UploadBuildingRow& view,
+                                   bool tick_if_missing) {
+    if (!row) return;
+    row->setText(4, view.badge_text);
+    row->setForeground(4, badgeColor(view.badge, dark_mode_));
+    for (int column = 0; column < 5; ++column) {
+        row->setToolTip(column, view.tooltip);
+    }
+
+    QSignalBlocker blocker(tree_);
+    const Qt::ItemFlags enabled =
+        (row->flags() | Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+    const Qt::ItemFlags disabled = (row->flags() & ~Qt::ItemIsEnabled);
+    if (!view.selectable) {
+        if (row->flags() != disabled) row->setFlags(disabled);
+        if (row->checkState(0) != Qt::Unchecked) row->setCheckState(0, Qt::Unchecked);
+        return;
+    }
+    if (row->flags() != enabled) row->setFlags(enabled);
+    if (tick_if_missing && view.badge == UploadRowBadge::Missing &&
+        row->checkState(0) != Qt::Checked) {
+        row->setCheckState(0, Qt::Checked);
+    }
+}
+
+void UploadDialog::refreshRowForTarget(const UploadTarget& target,
+                                      bool tick_if_missing) {
+    const QString key = uploadBuildingKey(target);
+    QTreeWidgetItem* row = findBuildingRow(key);
+    if (!row) return;
+    for (const UploadBuildingRow& view : groupUploadTargets(all_targets_)) {
+        if (view.key == key) {
+            applyBuildingRow(row, view, tick_if_missing);
+            return;
         }
     }
 }
 
-void UploadDialog::setSectionRowStatus(QTreeWidgetItem* row,
-                                       const UploadTarget& target) {
-    if (!row) return;
-    QString status_text = statusBadgeText(target.status);
-    if (target.status == UploadStatus::Partial && target.total_files > 0) {
-        const int pct = qBound(0, target.completed_files * 100 / qMax(1, target.total_files), 100);
-        status_text = QStringLiteral("Partial · %1%").arg(pct);
-    }
-    row->setText(4, status_text);
-    QColor color;
-    switch (target.status) {
-        case UploadStatus::Done:    color = QColor("#10B981"); break;
-        case UploadStatus::Partial: color = QColor("#F59E0B"); break;
-        case UploadStatus::None:    color = dark_mode_ ? QColor("#A1A1AA")
-                                                       : QColor("#52525B"); break;
-    }
-    row->setForeground(4, color);
-}
-
-QTreeWidgetItem* UploadDialog::findSectionRow(const UploadTarget& target) const {
+QTreeWidgetItem* UploadDialog::findBuildingRow(const QString& key) const {
     if (!tree_) return nullptr;
     for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
         QTreeWidgetItem* row = tree_->topLevelItem(i);
-        if (row && row->data(0, kRunIdRole).toString() == target.run_id) {
-            return row;
-        }
+        if (row && row->data(0, kBuildingKeyRole).toString() == key) return row;
     }
     return nullptr;
 }
@@ -934,38 +977,48 @@ void UploadDialog::onSelectAllClicked() {
     refreshButtonStates();
 }
 
-QList<UploadTarget> UploadDialog::selectedTargets() const {
-    QList<UploadTarget> out;
+UploadDialog::Selection UploadDialog::currentSelection() const {
+    Selection out;
     if (!tree_) return out;
+    QHash<QString, UploadBuildingRow> by_key;
+    for (const UploadBuildingRow& row : groupUploadTargets(all_targets_)) {
+        by_key.insert(row.key, row);
+    }
     for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
-        QTreeWidgetItem* row = tree_->topLevelItem(i);
-        if (!row || row->checkState(0) != Qt::Checked) continue;
-        const QString run_id = row->data(0, kRunIdRole).toString();
-        if (!all_targets_.contains(run_id)) continue;
-        const UploadTarget& t = all_targets_.value(run_id);
-        if (t.status == UploadStatus::Done) continue;
-        out.append(t);
+        QTreeWidgetItem* item = tree_->topLevelItem(i);
+        if (!item || item->checkState(0) != Qt::Checked) continue;
+        const auto it = by_key.constFind(item->data(0, kBuildingKeyRole).toString());
+        if (it == by_key.constEnd()) continue;
+        const QList<UploadTarget> folders = uploadTargetsForRow(all_targets_, *it);
+        if (folders.isEmpty()) continue;
+        ++out.buildings;
+        out.folders += folders;
     }
     return out;
 }
 
+int UploadDialog::listedBuildingCount() const {
+    return groupUploadTargets(all_targets_).size();
+}
+
 void UploadDialog::refreshSelectionSummary() {
-    const QList<UploadTarget> sel = selectedTargets();
+    const Selection sel = currentSelection();
     qint64 size = 0;
     int files = 0;
-    for (const UploadTarget& t : sel) {
-        size += t.total_bytes;
-        files += t.total_files;
+    for (const UploadTarget& folder : sel.folders) {
+        size += folder.total_bytes;
+        files += folder.total_files;
     }
     if (!lbl_selection_summary_) return;
-    if (sel.isEmpty()) {
-        lbl_selection_summary_->setText(
-            QStringLiteral("No sections selected."));
+    if (sel.buildings == 0) {
+        lbl_selection_summary_->setText(QStringLiteral("No buildings selected."));
     } else {
         lbl_selection_summary_->setText(
-            QStringLiteral("Selected: %1 section%2 · %3 files · %4")
-                .arg(sel.size())
-                .arg(sel.size() == 1 ? QString() : QStringLiteral("s"))
+            QStringLiteral("Selected: %1 building%2 · %3 folder%4 · %5 files · %6")
+                .arg(sel.buildings)
+                .arg(sel.buildings == 1 ? QString() : QStringLiteral("s"))
+                .arg(sel.folders.size())
+                .arg(sel.folders.size() == 1 ? QString() : QStringLiteral("s"))
                 .arg(files)
                 .arg(formatBytes(size)));
     }
@@ -973,7 +1026,7 @@ void UploadDialog::refreshSelectionSummary() {
 
 void UploadDialog::refreshButtonStates() {
     const bool busy = runner_ && runner_->isBusy();
-    const bool any_selected = !selectedTargets().isEmpty();
+    const bool any_selected = currentSelection().buildings > 0;
     const bool any_targets = !all_targets_.isEmpty();
     const bool has_source = isThumbDrive() ? drive_mounted_
                                            : !remote_host_.isEmpty();
@@ -1025,11 +1078,7 @@ void UploadDialog::refreshButtonStates() {
         // Restore probe summary when idle.
         if (lbl_probe_status_ && !probe_in_progress_ &&
             !all_targets_.isEmpty()) {
-            lbl_probe_status_->setText(
-                QStringLiteral("Found %1 scan%2.")
-                    .arg(all_targets_.size())
-                    .arg(all_targets_.size() == 1 ? QString()
-                                                  : QStringLiteral("s")));
+            lbl_probe_status_->setText(scansFoundText(listedBuildingCount()));
         }
     }
 }
@@ -1098,8 +1147,11 @@ QString UploadDialog::formatBytes(qint64 bytes) const {
 // ---------------------------------------------------------------------------
 
 void UploadDialog::onUploadClicked() {
-    const QList<UploadTarget> sel = selectedTargets();
-    if (sel.isEmpty()) return;
+    const Selection sel = currentSelection();
+    if (sel.folders.isEmpty()) return;
+    // Stop the check before launch. Rows already marked missing keep
+    // their selection; the copies in `sel` still carry force_reupload.
+    cancelCloudCheck(false);
     if (cloud_client_id_.isEmpty() || cloud_device_token_.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Upload Data"),
                              QStringLiteral(
@@ -1119,15 +1171,15 @@ void UploadDialog::onUploadClicked() {
     }
 
     runner_->setSource(source_);
-    runner_->setQueue(sel);
+    runner_->setQueue(sel.folders);
     active_queue_index_ = -1;
-    active_queue_total_ = sel.size();
+    active_queue_total_ = sel.folders.size();
     if (progress_block_) progress_block_->setVisible(true);
     if (lbl_progress_caption_) {
         lbl_progress_caption_->setText(
-            QStringLiteral("Preparing upload (%1 section%2)…")
-                .arg(sel.size())
-                .arg(sel.size() == 1 ? QString() : QStringLiteral("s")));
+            QStringLiteral("Preparing upload (%1 folder%2)…")
+                .arg(sel.folders.size())
+                .arg(sel.folders.size() == 1 ? QString() : QStringLiteral("s")));
     }
     if (lbl_progress_detail_) lbl_progress_detail_->setText(QString());
     if (progress_bar_) {
@@ -1167,6 +1219,10 @@ void UploadDialog::onCancelClicked() {
             return;
         }
     }
+    // The rescan classifies whatever --force managed to delete and
+    // checks the rows that are still Done. Without it the force flag
+    // is already cleared and the next Upload no-ops on the old manifest.
+    recheck_after_cancel_ = true;
     if (runner_) runner_->requestCancel();
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
@@ -1205,11 +1261,15 @@ void UploadDialog::onTargetStarted(int index, int total,
         progress_bar_->setValue(active_files_done_);
         progress_bar_->setFormat(QStringLiteral("%v / %m files"));
     }
-    if (auto* row = findSectionRow(target)) {
-        UploadTarget t = target;
-        t.status = UploadStatus::Partial;
-        setSectionRowStatus(row, t);
+    if (all_targets_.contains(target.run_id)) {
+        // The launch already captured force_reupload. A pause and a
+        // later Upload press must not pass --force again.
+        UploadTarget& cached = all_targets_[target.run_id];
+        cached.force_reupload = false;
+        cached.cloud_check = CloudCheck::Unchecked;
+        cached.status = UploadStatus::Partial;
     }
+    refreshRowForTarget(target, false);
     refreshButtonStates();
 }
 
@@ -1227,14 +1287,14 @@ void UploadDialog::onFileUploaded(const UploadTarget& target,
         lbl_progress_detail_->setText(
             QStringLiteral("Last: %1").arg(relpath));
     }
-    if (auto* row = findSectionRow(target)) {
+    if (all_targets_.contains(target.run_id)) {
         UploadTarget& cached = all_targets_[target.run_id];
         cached.completed_files = active_files_done_;
         if (cached.total_files < active_files_total_) {
             cached.total_files = active_files_total_;
         }
         cached.status = UploadStatus::Partial;
-        setSectionRowStatus(row, cached);
+        refreshRowForTarget(target, false);
     }
 }
 
@@ -1257,13 +1317,13 @@ void UploadDialog::onTargetPaused(const UploadTarget& target,
         lbl_progress_detail_->setText(
             QStringLiteral("Paused: %1").arg(reason));
     }
-    if (auto* row = findSectionRow(target)) {
+    if (all_targets_.contains(target.run_id)) {
         UploadTarget& cached = all_targets_[target.run_id];
         if (cached.status != UploadStatus::Done) {
             cached.status = UploadStatus::Partial;
         }
-        setSectionRowStatus(row, cached);
     }
+    refreshRowForTarget(target, false);
 }
 
 void UploadDialog::onTargetFailed(const UploadTarget& target,
@@ -1272,18 +1332,14 @@ void UploadDialog::onTargetFailed(const UploadTarget& target,
         lbl_progress_detail_->setText(
             QStringLiteral("Failed: %1").arg(error));
     }
-    if (auto* row = findSectionRow(target)) {
-        // Keep on-disk classification accurate. None stays None; Partial
-        // stays Partial. Failure doesn't downgrade past what the script
-        // observed in upload_state.json.
-        const UploadTarget& cached = all_targets_.value(target.run_id, target);
-        setSectionRowStatus(row, cached);
-    }
+    // The launch already marked the folder Partial. Leave that; the
+    // rescan after the queue stops replaces it from disk.
+    refreshRowForTarget(target, false);
     QMessageBox::warning(this,
                          QStringLiteral("Upload failed"),
                          QStringLiteral(
                              "Section %1 / %2 failed:\n\n%3\n\n"
-                             "Other selected sections were not started. "
+                             "Other selected folders were not started. "
                              "Press Refresh, then try again.")
                              .arg(target.building_slug,
                                   target.section_name,
@@ -1291,19 +1347,19 @@ void UploadDialog::onTargetFailed(const UploadTarget& target,
 }
 
 void UploadDialog::onTargetCompleted(const UploadTarget& target) {
-    if (auto* row = findSectionRow(target)) {
+    if (all_targets_.contains(target.run_id)) {
         UploadTarget& cached = all_targets_[target.run_id];
         cached.status = UploadStatus::Done;
+        cached.cloud_check = CloudCheck::Unchecked;
+        cached.force_reupload = false;
         cached.completed_files = qMax(cached.total_files, active_files_done_);
-        setSectionRowStatus(row, cached);
-        // Disable the row now that it's done; this matches the "Done
-        // items are unselectable" rule established in repopulateTree().
-        row->setFlags(row->flags() & ~Qt::ItemIsEnabled);
-        row->setCheckState(0, Qt::Unchecked);
     }
+    // The building row disables only once every folder on it is uploaded.
+    refreshRowForTarget(target, false);
 }
 
 void UploadDialog::onQueueFinished(bool cancelled) {
+    if (shutting_down_) return;
     if (lbl_progress_caption_) {
         lbl_progress_caption_->setText(
             cancelled ? QStringLiteral("Upload cancelled.")
@@ -1316,8 +1372,11 @@ void UploadDialog::onQueueFinished(bool cancelled) {
     refreshSelectionSummary();
     refreshButtonStates();
     // Re-probe so any newly Done sections refresh from on-disk truth
-    // and partial counters get an authoritative value.
-    if (!cancelled) {
+    // and partial counters get an authoritative value. Cancel does
+    // this too: a killed re-upload has to be classified again.
+    const bool recheck = recheck_after_cancel_;
+    recheck_after_cancel_ = false;
+    if (!cancelled || recheck) {
         startProbe();
     }
 }
@@ -1505,6 +1564,9 @@ void UploadDialog::onCloudProbeFinished(int exit_code, int /*status*/) {
 void UploadDialog::handleConnectivityTransition() {
     const bool now_online = isFullyOnline();
     if (!now_online) {
+        // A check that cannot finish must not relabel rows. Coming back
+        // online retries it (`reschedule`).
+        cancelCloudCheck(true);
         // Offline transition.  Pause the runner gracefully if it's
         // mid-flight so it doesn't burn through retries against a
         // dead network.  No auto-resume — operator clicks Upload
@@ -1525,6 +1587,7 @@ void UploadDialog::handleConnectivityTransition() {
         // queue per the locked design decision.
         if (runner_) runner_->setRetryEnabled(true);
         offline_pause_active_ = false;
+        maybeStartCloudCheck();
     }
     refreshConnectivityBanner();
     refreshButtonStates();
@@ -1575,6 +1638,226 @@ void UploadDialog::refreshConnectivityBanner() {
     offline_banner_label_->setText(msg);
     offline_banner_->setVisible(true);
     last_offline_reason_ = msg;
+}
+
+// ---------------------------------------------------------------------------
+// Cloud check (done folders of the 10 newest buildings, every listing)
+// ---------------------------------------------------------------------------
+
+void UploadDialog::maybeStartCloudCheck() {
+    // Thumb drive only: the manifest is a local file. RobotSsh is the
+    // unwired fallback and is not checked.
+    if (!isThumbDrive() || !isSourceReady() || !cloud_reachable_) return;
+    if (probe_in_progress_) return;
+    if (runner_ && runner_->isBusy()) return;
+    if (cloud_api_base_.isEmpty() || cloud_client_id_.isEmpty() ||
+        cloud_device_token_.isEmpty() || robot_id_.isEmpty()) return;
+    if (probe_serial_ == 0 || cloud_check_for_probe_ == probe_serial_) return;
+
+    const QList<UploadTarget> done =
+        cloudCheckTargets(all_targets_, kCloudVerifyNewest);
+    cloud_check_for_probe_ = probe_serial_;
+    if (done.isEmpty()) return;
+    startCloudCheck(done);
+}
+
+void UploadDialog::startCloudCheck(const QList<UploadTarget>& newest_done) {
+    if (!cloud_verifier_) return;
+    ++verify_generation_;
+    const int generation = verify_generation_;
+    cloud_listings_.clear();
+    loaded_manifests_.clear();
+    manifests_ready_ = false;
+    cloud_check_ids_.clear();
+
+    QList<QPair<QString, QString>> jobs;
+    for (const UploadTarget& src : newest_done) {
+        if (!all_targets_.contains(src.run_id)) continue;
+        UploadTarget& cached = all_targets_[src.run_id];
+        if (cached.status != UploadStatus::Done) continue;
+        cached.cloud_check = CloudCheck::Checking;
+        cached.force_reupload = false;
+        cloud_check_ids_ << src.run_id;
+        jobs.append(qMakePair(src.run_id,
+                              src.data_path + QStringLiteral("/manifest.json")));
+        presentCloudRow(cached, false);
+    }
+    if (cloud_check_ids_.isEmpty()) {
+        cloud_verifier_->cancel();
+        return;
+    }
+
+    noteCloudVerify(QStringLiteral("Checking %1 uploaded folder%2 against the cloud…")
+                        .arg(cloud_check_ids_.size())
+                        .arg(cloud_check_ids_.size() == 1 ? QString()
+                                                         : QStringLiteral("s")));
+    qInfo("[UploadDialog] cloud-verify: checking %d section(s)",
+          cloud_check_ids_.size());
+    refreshSelectionSummary();
+    refreshButtonStates();
+
+    auto* watcher = new QFutureWatcher<ManifestBatch>(this);
+    connect(watcher, &QFutureWatcher<ManifestBatch>::finished, this,
+            [this, watcher]() {
+                const ManifestBatch batch = watcher->result();
+                watcher->deleteLater();
+                onManifestsLoaded(batch.generation, batch.by_run);
+            });
+    const QStringList ids = cloud_check_ids_;
+    watcher->setFuture(QtConcurrent::run([generation, jobs]() {
+        ManifestBatch batch;
+        batch.generation = generation;
+        for (const auto& job : jobs) {
+            batch.by_run.insert(job.first, loadManifestAt(job.second));
+        }
+        return batch;
+    }));
+    cloud_verifier_->verify(robot_id_, ids, generation);
+}
+
+void UploadDialog::cancelCloudCheck(bool reschedule) {
+    bool was_checking = false;
+    for (const QString& run_id : cloud_check_ids_) {
+        if (all_targets_.value(run_id).cloud_check == CloudCheck::Checking) {
+            was_checking = true;
+            break;
+        }
+    }
+    ++verify_generation_;
+    if (cloud_verifier_) cloud_verifier_->cancel();
+    revertCheckingRows();
+    if (reschedule) cloud_check_for_probe_ = -1;
+    if (!was_checking) return;
+    // The row badges are back to Uploaded. Don't leave the status line
+    // saying the check is still running.
+    if (reschedule) {
+        noteCloudVerify(QStringLiteral(
+            "Cloud check stopped — cloud unreachable."));
+    } else {
+        noteCloudVerify(scansFoundText(listedBuildingCount()));
+    }
+}
+
+void UploadDialog::revertCheckingRows() {
+    const QStringList ids = cloud_check_ids_;
+    for (const QString& run_id : ids) {
+        if (!all_targets_.contains(run_id)) continue;
+        UploadTarget& cached = all_targets_[run_id];
+        if (cached.cloud_check != CloudCheck::Checking) continue;
+        cached.cloud_check = CloudCheck::Unchecked;
+        cached.force_reupload = false;
+        presentCloudRow(cached, false);
+    }
+    refreshSelectionSummary();
+    refreshButtonStates();
+}
+
+void UploadDialog::onCloudRunFinished(int generation, const QString& run_id,
+                                      bool http_ok, const QList<CloudObject>& files,
+                                      const QString& error) {
+    if (generation != verify_generation_) return;
+    if (!http_ok) {
+        // One failed request means the check is unavailable. Rows that
+        // were still "checking" go back to Uploaded; nothing is guessed.
+        const QString line =
+            QStringLiteral("cloud-verify %1: unavailable (%2)").arg(run_id, error);
+        qInfo("[UploadDialog] %s", qUtf8Printable(line));
+        noteCloudVerify(line);
+        revertCheckingRows();
+        return;
+    }
+    cloud_listings_.insert(run_id, files);
+    if (manifests_ready_ && cloud_listings_.size() >= cloud_check_ids_.size()) {
+        for (const QString& id : cloud_check_ids_) applyCloudResult(id);
+    }
+}
+
+void UploadDialog::onManifestsLoaded(int generation,
+                                     const QHash<QString, LoadedManifest>& by_run) {
+    if (generation != verify_generation_) return;
+    loaded_manifests_ = by_run;
+    manifests_ready_ = true;
+    if (cloud_listings_.size() < cloud_check_ids_.size()) return;
+    for (const QString& id : cloud_check_ids_) applyCloudResult(id);
+}
+
+void UploadDialog::applyCloudResult(const QString& run_id) {
+    if (!all_targets_.contains(run_id)) return;
+    UploadTarget& cached = all_targets_[run_id];
+    if (cached.status != UploadStatus::Done) return;
+    if (cached.cloud_check != CloudCheck::Checking) return;
+
+    const LoadedManifest manifest = loaded_manifests_.value(run_id);
+    QString summary;
+    if (!manifest.ok) {
+        cached.cloud_check = CloudCheck::Unchecked;
+        cached.force_reupload = false;
+        summary = QStringLiteral("unavailable (%1)")
+                      .arg(manifest.error.isEmpty()
+                               ? QStringLiteral("manifest unreadable")
+                               : manifest.error);
+        presentCloudRow(cached, false);
+    } else if (!manifestMatchesLogin(manifest.client_id, manifest.robot_id,
+                                    cloud_client_id_, robot_id_)) {
+        // Listing this under the logged-in robot came back empty or
+        // different because the objects live in another prefix. Leave
+        // the row Uploaded so Upload cannot move them.
+        cached.cloud_check = CloudCheck::Unchecked;
+        cached.force_reupload = false;
+        summary = QStringLiteral("skipped (belongs to %1 / %2)")
+                      .arg(manifest.client_id.isEmpty() ? QStringLiteral("unknown client")
+                                                       : manifest.client_id,
+                           manifest.robot_id.isEmpty() ? QStringLiteral("unknown robot")
+                                                      : manifest.robot_id);
+        presentCloudRow(cached, false);
+    } else {
+        const CloudCompareResult result = compareManifestWithCloud(
+            manifest.files, cloud_listings_.value(run_id));
+        summary = cloudVerifySummary(result);
+        if (result.matches) {
+            cached.cloud_check = CloudCheck::Verified;
+            cached.force_reupload = false;
+            presentCloudRow(cached, false);
+        } else {
+            cached.cloud_check = CloudCheck::Missing;
+            cached.force_reupload = true;
+            presentCloudRow(cached, true);
+        }
+    }
+    const QString line = QStringLiteral("cloud-verify %1: %2").arg(run_id, summary);
+    qInfo("[UploadDialog] %s", qUtf8Printable(line));
+    noteCloudVerify(line);
+
+    int pending = 0;
+    int missing = 0;
+    int verified = 0;
+    for (const QString& id : cloud_check_ids_) {
+        if (!all_targets_.contains(id)) continue;
+        const CloudCheck state = all_targets_[id].cloud_check;
+        if (state == CloudCheck::Checking) ++pending;
+        else if (state == CloudCheck::Missing) ++missing;
+        else if (state == CloudCheck::Verified) ++verified;
+    }
+    if (pending == 0 && missing > 0) {
+        noteCloudVerify(QStringLiteral("Cloud check: %1 section%2 missing in cloud.")
+                            .arg(missing)
+                            .arg(missing == 1 ? QString() : QStringLiteral("s")));
+    } else if (pending == 0 && verified == cloud_check_ids_.size() && verified > 0) {
+        noteCloudVerify(QStringLiteral("Cloud check: %1 section%2 verified.")
+                            .arg(verified)
+                            .arg(verified == 1 ? QString() : QStringLiteral("s")));
+    }
+    refreshSelectionSummary();
+    refreshButtonStates();
+}
+
+void UploadDialog::presentCloudRow(const UploadTarget& target, bool tick_if_missing) {
+    refreshRowForTarget(target, tick_if_missing);
+}
+
+void UploadDialog::noteCloudVerify(const QString& line) {
+    if (runner_ && runner_->isBusy()) return;
+    if (lbl_probe_status_) lbl_probe_status_->setText(line);
 }
 
 }  // namespace f2c_cpp
