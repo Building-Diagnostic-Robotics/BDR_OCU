@@ -96,6 +96,11 @@ DEVICE_TOKEN = os.environ.get("BDR_CLOUD_DEVICE_TOKEN", "")
 MAX_FILE_BYTES = 5_000_000_000
 CHUNK_BYTES = 8 * 1024 * 1024
 
+# One warning per upload_run when /presign did not sign Content-MD5.
+# Parallel workers share it.
+_unsigned_md5_lock = threading.Lock()
+_unsigned_md5_warned = False
+
 try:
     UPLOAD_WORKERS = max(1, int(os.environ.get("BDR_UPLOAD_WORKERS", "12")))
 except ValueError:
@@ -399,13 +404,18 @@ def _auth_headers() -> Dict[str, str]:
     }
 
 
-def presign(robot_id: str, run_id: str, relpath: str, size_bytes: int) -> Dict:
+def presign(robot_id: str, run_id: str, relpath: str, size_bytes: int,
+            content_md5: str) -> Dict:
+    # content_md5 is the base64 MD5 of the bytes about to be sent. The
+    # Lambda signs it into the URL when it understands the field, and
+    # says so with md5_signed. Older Lambdas ignore the field.
     url = f"{API_BASE}/presign"
     payload = {
         "robot_id": robot_id,
         "run_id": run_id,
         "relpath": relpath.replace("\\", "/"),
         "size_bytes": int(size_bytes),
+        "content_md5": content_md5,
     }
     r = requests.post(url, headers=_auth_headers(), json=payload, timeout=30)
     r.raise_for_status()
@@ -483,23 +493,24 @@ class _ExactReader:
 
 def upload_put(upload_url: str, file_path: str,
                robot_id: str, run_id: str,
-               md5_hex: str, size: int) -> None:
-    # The /presign Lambda mints SigV4 URLs that fold five headers into the
-    # canonical request:
+               md5_hex: str, size: int,
+               content_md5: Optional[str]) -> None:
+    # The /presign Lambda signs these headers into the URL:
     #   host, x-amz-server-side-encryption,
-    #   x-amz-meta-client_id, x-amz-meta-robot_id, x-amz-meta-run_id.
+    #   x-amz-meta-client_id, x-amz-meta-robot_id, x-amz-meta-run_id,
+    #   and Content-MD5 when the request carried content_md5 and the
+    #   response says md5_signed.
     # Every signed header MUST be echoed back on the PUT with the exact
     # value the Lambda used or S3 returns 403 SignatureDoesNotMatch.
-    # `host` is set automatically by urllib3 from the URL; the other four
-    # are set explicitly here. Keep the values in lock-step with the
-    # Lambda — if the server-side signing list changes, this dict has to
-    # change too.
+    # `host` is set automatically by urllib3 from the URL. Keep the
+    # values in lock-step with the Lambda.
     #
-    # Content-MD5 is deliberately NOT a signed header. The Lambda never
-    # sees the file bytes, so it cannot have signed one, and S3 checks
-    # the header against the stored object on its own. A body that does
-    # not match — including a truncated or empty body — is rejected with
-    # 400 BadDigest instead of being stored.
+    # Content-MD5 is sent only when `content_md5` is set, which is only
+    # when the URL signed it. S3 rejects an unsigned Content-MD5 with
+    # 403 HeadersNotSigned, before it looks at the body. When it is
+    # signed, a body that does not match is rejected with 400 BadDigest
+    # and nothing is stored. The ETag check below still runs either way,
+    # and it is the whole check when the Lambda did not sign.
     if size < 0:
         raise RuntimeError(f"negative upload size for {file_path}")
     headers = {
@@ -508,8 +519,9 @@ def upload_put(upload_url: str, file_path: str,
         "x-amz-meta-robot_id": robot_id,
         "x-amz-meta-run_id": run_id,
         "Content-Length": str(size),
-        "Content-MD5": _content_md5_b64(md5_hex),
     }
+    if content_md5 is not None:
+        headers["Content-MD5"] = content_md5
     if size == 0:
         # urllib3's body-framing logic falls back to
         # `Transfer-Encoding: chunked` when handed an empty file stream,
@@ -552,6 +564,42 @@ def upload_put(upload_url: str, file_path: str,
             f"(etag {etag}, local md5 {md5_hex}, {size} bytes)")
 
 
+def _reset_unsigned_md5_warning() -> None:
+    global _unsigned_md5_warned
+    with _unsigned_md5_lock:
+        _unsigned_md5_warned = False
+
+
+def _warn_unsigned_md5() -> None:
+    global _unsigned_md5_warned
+    with _unsigned_md5_lock:
+        if _unsigned_md5_warned:
+            return
+        _unsigned_md5_warned = True
+    print("Warning: /presign did not sign Content-MD5; "
+          "each file is still checked against the S3 ETag.", flush=True)
+
+
+def _presign_and_put(robot_id: str, run_id: str, rel_norm: str,
+                     file_path: str, md5_hex: str, size: int) -> None:
+    """Mint a URL for these exact bytes and PUT them.
+
+    The base64 MD5 is computed once and sent to /presign. It is echoed
+    as Content-MD5 only when the Lambda reports md5_signed, because S3
+    rejects the header on a URL that did not sign it.
+    """
+    content_md5 = _content_md5_b64(md5_hex)
+    presign_resp = presign(robot_id, run_id, rel_norm, size, content_md5)
+    upload_url = _upload_url(presign_resp, rel_norm)
+    if presign_resp.get("md5_signed") is True:
+        upload_put(upload_url, file_path, robot_id, run_id,
+                   md5_hex, size, content_md5)
+        return
+    _warn_unsigned_md5()
+    upload_put(upload_url, file_path, robot_id, run_id,
+               md5_hex, size, None)
+
+
 def put_verified_file(robot_id: str, run_id: str,
                       full: str, rel_norm: str) -> Tuple[int, str]:
     """Hash, PUT, and confirm S3 stored those bytes.
@@ -584,9 +632,7 @@ def put_verified_file(robot_id: str, run_id: str,
             f"(read {size} bytes, file is now {current} bytes)")
     if size == 0:
         print(f"Warning: {rel_norm} is 0 bytes; uploading it empty.", flush=True)
-    presign_resp = presign(robot_id, run_id, rel_norm, size)
-    upload_put(_upload_url(presign_resp, rel_norm), full,
-               robot_id, run_id, md5_hex, size)
+    _presign_and_put(robot_id, run_id, rel_norm, full, md5_hex, size)
     try:
         after = os.path.getsize(full)
     except OSError as exc:
@@ -835,9 +881,8 @@ def _upload_manifest_and_complete(data_root: str, robot_id: str, run_id: str):
         if current != m_size:
             raise UploadIntegrityError(
                 f"{MANIFEST_FILENAME} changed while it was being read")
-        presign_resp = presign(robot_id, run_id, MANIFEST_FILENAME, m_size)
-        upload_put(_upload_url(presign_resp, MANIFEST_FILENAME), mpath,
-                   robot_id, run_id, m_md5, m_size)
+        _presign_and_put(robot_id, run_id, MANIFEST_FILENAME, mpath,
+                         m_md5, m_size)
         return complete(robot_id, run_id, MANIFEST_FILENAME)
     except Exception as exc:
         disc = _discard_manifest(data_root)
@@ -917,6 +962,7 @@ def upload_run(data_root: str, robot_id: str, run_id: str, *,
         print(f"Connection error: data_root does not exist: {data_root}", flush=True)
         return 1
 
+    _reset_unsigned_md5_warning()
     remove_stale_temps(data_root)
 
     if force:
