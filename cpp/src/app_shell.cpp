@@ -786,7 +786,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
             // The Figma frames are 1920x1080 and every staged constant is a
             // frame px value unscaled, so the shot has to be that size or it
             // hands the layout less vertical budget than the field ever will.
-            // Step 5's right rail needs ~905 px; at the old 860 it squeezed
+            // The scan page's right rail needs ~905 px; at the old 860 it squeezed
             // the Manual Override and Scan Statistics cards into each other
             // and the shot invited a "fix" to a layout that was fine.
             resize(1920, 1080);
@@ -964,6 +964,16 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     stage6_->devSeedDemoAlignment(
                         shot_mode.startsWith(QStringLiteral("review")),
                         shot_mode.endsWith(QStringLiteral("_outlier")));
+                } else if (shot_mode == QStringLiteral("params")) {
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
+                    stage6_->devSeedDemoPlan();
+                    stage6_->devSeedDemoParamsStep();
+                } else if (shot_mode == QStringLiteral("edges")) {
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
+                    stage6_->devSeedDemoPlan();
+                    stage6_->devSeedDemoEdgeStep();
                 } else if (shot_mode == QStringLiteral("roi")) {
                     stage6_->configureForScan(
                         SatelliteScreen::PlanMode::Satellite);

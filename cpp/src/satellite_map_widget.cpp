@@ -550,7 +550,7 @@ void SatelliteMapWidget::setPolygon(const RoiPolygon& poly) {
 }
 
 void SatelliteMapWidget::armPolygonDraw() {
-    if (edit_locked_) {
+    if (edit_locked_ || geometry_locked_) {
         return;
     }
     cancelInteraction();
@@ -564,7 +564,7 @@ void SatelliteMapWidget::armPolygonDraw() {
 }
 
 void SatelliteMapWidget::armRectangleDraw() {
-    if (edit_locked_) {
+    if (edit_locked_ || geometry_locked_) {
         return;
     }
     cancelInteraction();
@@ -645,7 +645,7 @@ void SatelliteMapWidget::clearMeasure() {
 }
 
 void SatelliteMapWidget::setMarkerSelected(bool selected) {
-    selected = selected && marker_.valid && !edit_locked_;
+    selected = selected && marker_.valid && !edit_locked_ && !marker_locked_;
     if (selected == marker_selected_) {
         return;
     }
@@ -823,7 +823,7 @@ void SatelliteMapWidget::setMarker(const geo::GeoPose& marker) {
 }
 
 void SatelliteMapWidget::armMarkerPlacement() {
-    if (edit_locked_) {
+    if (edit_locked_ || marker_locked_) {
         return;
     }
     cancelInteraction();
@@ -836,6 +836,58 @@ void SatelliteMapWidget::setEditLocked(bool locked) {
     edit_locked_ = locked;
     if (locked) {
         cancelInteraction();
+        setMarkerSelected(false);
+    }
+    update();
+}
+
+void SatelliteMapWidget::setGeometryLocked(bool locked) {
+    if (geometry_locked_ == locked) {
+        return;
+    }
+    geometry_locked_ = locked;
+    if (locked) {
+        cancelEdgeLengthEdit();
+        dim_hover_edge_ = -1;
+        if (drag_ == Drag::MoveRoi || drag_ == Drag::MoveVertex ||
+            drag_ == Drag::ResizeRoiCorner || drag_ == Drag::RotateRoi ||
+            drag_ == Drag::DimBadge) {
+            drag_ = Drag::None;
+        }
+        cancelInteraction();
+    }
+    update();
+}
+
+void SatelliteMapWidget::setRoofEdgesVisible(bool visible) {
+    if (roof_edges_visible_ == visible) {
+        return;
+    }
+    roof_edges_visible_ = visible;
+    update();
+}
+
+void SatelliteMapWidget::setRoofEdgesEditable(bool editable) {
+    if (roof_edges_editable_ == editable) {
+        return;
+    }
+    roof_edges_editable_ = editable;
+    if (!editable && drag_ == Drag::EdgeTogglePending) {
+        drag_ = Drag::None;
+    }
+    update();
+}
+
+void SatelliteMapWidget::setMarkerLocked(bool locked) {
+    if (marker_locked_ == locked) {
+        return;
+    }
+    marker_locked_ = locked;
+    if (locked) {
+        place_marker_armed_ = false;
+        if (drag_ == Drag::MoveMarker || drag_ == Drag::RotateMarker) {
+            drag_ = Drag::None;
+        }
         setMarkerSelected(false);
     }
     update();
@@ -866,6 +918,30 @@ void SatelliteMapWidget::setPath(const PolylineSet& path) {
 
 void SatelliteMapWidget::setSwaths(const PolylineSet& swaths) {
     swaths_ = swaths;
+    update();
+}
+
+void SatelliteMapWidget::setSwathPreview(const QVector<QLineF>& enu,
+                                        const geo::GeoPoint& origin) {
+    swath_preview_from_.clear();
+    swath_preview_to_.clear();
+    swath_preview_from_.reserve(enu.size());
+    swath_preview_to_.reserve(enu.size());
+    for (const QLineF& line : enu) {
+        swath_preview_from_.append(
+            geo::geoFromEnu(origin, line.x1(), line.y1()));
+        swath_preview_to_.append(
+            geo::geoFromEnu(origin, line.x2(), line.y2()));
+    }
+    update();
+}
+
+void SatelliteMapWidget::clearSwathPreview() {
+    if (swath_preview_from_.isEmpty()) {
+        return;
+    }
+    swath_preview_from_.clear();
+    swath_preview_to_.clear();
     update();
 }
 
@@ -943,7 +1019,7 @@ SatelliteMapWidget::Drag SatelliteMapWidget::hitTest(const QPointF& pos,
     if (edit_locked_ || overlays_hidden_) {
         return Drag::Pan;
     }
-    if (marker_.valid) {
+    if (marker_.valid && !marker_locked_) {
         // The rotate handle exists only on a selected marker; see
         // setMarkerSelected() for why.
         if (marker_selected_ &&
@@ -957,51 +1033,65 @@ SatelliteMapWidget::Drag SatelliteMapWidget::hitTest(const QPointF& pos,
     }
     const bool have_poly = polygon_.valid() || roi_.valid;
     if (have_poly) {
-        if (!polygon_.valid() && roi_.valid) {
-            if (QLineF(pos, roiRotateHandleScreen()).length() <= kHitRadiusPx) {
-                return Drag::RotateRoi;
-            }
-        }
-        for (int i = 0; i < dim_boxes_.size(); ++i) {
-            if (dim_boxes_[i].contains(pos)) {
-                if (edge_index) {
-                    *edge_index = i;
-                }
-                return Drag::DimBadge;
-            }
-        }
         const QVector<QPointF> corners = polygon_.valid()
                                             ? polygonScreenPoints()
                                             : roiCornerScreenPoints();
-        for (int i = 0; i < corners.size(); ++i) {
-            if (QLineF(pos, corners[i]).length() <= kHitRadiusPx) {
-                if (corner_index) {
-                    *corner_index = i;
+        // Anchored polygon: an edge tap still marks a roof edge. Everything
+        // that would move a vertex falls through to pan.
+        if (!geometry_locked_) {
+            if (!polygon_.valid() && roi_.valid) {
+                if (QLineF(pos, roiRotateHandleScreen()).length() <=
+                    kHitRadiusPx) {
+                    return Drag::RotateRoi;
                 }
-                return polygon_.valid() ? Drag::MoveVertex : Drag::ResizeRoiCorner;
+            }
+            for (int i = 0; i < dim_boxes_.size(); ++i) {
+                if (dim_boxes_[i].contains(pos)) {
+                    if (edge_index) {
+                        *edge_index = i;
+                    }
+                    return Drag::DimBadge;
+                }
+            }
+            for (int i = 0; i < corners.size(); ++i) {
+                if (QLineF(pos, corners[i]).length() <= kHitRadiusPx) {
+                    if (corner_index) {
+                        *corner_index = i;
+                    }
+                    return polygon_.valid() ? Drag::MoveVertex
+                                            : Drag::ResizeRoiCorner;
+                }
             }
         }
-        for (int i = 0; i < corners.size(); ++i) {
-            const QLineF edge(corners[i], corners[(i + 1) % corners.size()]);
-            const QPointF ab = edge.p2() - edge.p1();
-            const double len_sq = QPointF::dotProduct(ab, ab);
-            if (len_sq < 1.0) {
-                continue;
-            }
-            const double t = qBound(
-                0.0, QPointF::dotProduct(pos - edge.p1(), ab) / len_sq, 1.0);
-            const QPointF closest = edge.p1() + ab * t;
-            if (QLineF(pos, closest).length() <= kEdgeHitBandPx) {
-                if (edge_index) {
-                    *edge_index = i;
+        // Only Edge Review accepts a tap. Later steps still draw the marks.
+        // The dimension chips above still take their own hit.
+        if (roof_edges_editable_) {
+            for (int i = 0; i < corners.size(); ++i) {
+                const QLineF edge(corners[i],
+                                  corners[(i + 1) % corners.size()]);
+                const QPointF ab = edge.p2() - edge.p1();
+                const double len_sq = QPointF::dotProduct(ab, ab);
+                if (len_sq < 1.0) {
+                    continue;
                 }
-                return Drag::EdgeTogglePending;
+                const double t = qBound(
+                    0.0, QPointF::dotProduct(pos - edge.p1(), ab) / len_sq,
+                    1.0);
+                const QPointF closest = edge.p1() + ab * t;
+                if (QLineF(pos, closest).length() <= kEdgeHitBandPx) {
+                    if (edge_index) {
+                        *edge_index = i;
+                    }
+                    return Drag::EdgeTogglePending;
+                }
             }
         }
-        QPainterPath path;
-        path.addPolygon(QPolygonF(corners));
-        if (path.contains(pos)) {
-            return Drag::MoveRoi;
+        if (!geometry_locked_) {
+            QPainterPath path;
+            path.addPolygon(QPolygonF(corners));
+            if (path.contains(pos)) {
+                return Drag::MoveRoi;
+            }
         }
     }
     return Drag::Pan;
@@ -1062,6 +1152,7 @@ void SatelliteMapWidget::paintEvent(QPaintEvent*) {
         dim_boxes_.clear();  // no chips on screen → nothing to click
     } else {
         paintRoi(painter);
+        paintSwathPreview(painter);
         paintMarker(painter);
     }
     paintInteraction(painter);
@@ -1465,6 +1556,20 @@ void SatelliteMapWidget::paintTelemetry(QPainter& painter) {
     }
 }
 
+void SatelliteMapWidget::paintSwathPreview(QPainter& painter) {
+    if (swath_preview_from_.isEmpty()) {
+        return;
+    }
+    QPen pen(satpal::accent(), 2.0, Qt::SolidLine, Qt::RoundCap);
+    pen.setCosmetic(true);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+    for (int i = 0; i < swath_preview_from_.size(); ++i) {
+        painter.drawLine(screenFromGeo(swath_preview_from_[i]),
+                         screenFromGeo(swath_preview_to_[i]));
+    }
+}
+
 void SatelliteMapWidget::paintRoi(QPainter& painter) {
     const QVector<QPointF> corners = polygon_.valid()
                                         ? polygonScreenPoints()
@@ -1489,8 +1594,9 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
 
     for (int i = 0; i < n; ++i) {
         const bool marked =
-            i < polygon_.roof_edges.size() ? polygon_.roof_edges[i]
-            : (roi_.valid && i < 4 ? roi_.roof_edges[size_t(i)] : false);
+            roof_edges_visible_ &&
+            (i < polygon_.roof_edges.size() ? polygon_.roof_edges[i]
+             : (roi_.valid && i < 4 ? roi_.roof_edges[size_t(i)] : false));
         if (marked) {
             painter.setPen(
                 QPen(satpal::danger(), 4.5, Qt::SolidLine, Qt::RoundCap));
@@ -1502,7 +1608,7 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
         painter.drawLine(corners[i], corners[(i + 1) % n]);
     }
 
-    if (!edit_locked_ && roi_.valid && !polygon_.valid()) {
+    if (!edit_locked_ && !geometry_locked_ && roi_.valid && !polygon_.valid()) {
         const QPointF fwd_mid = (corners[0] + corners[3]) / 2.0;
         const QPointF rot_handle = roiRotateHandleScreen();
         painter.setPen(QPen(edge, 1.5, Qt::DotLine));
@@ -1513,7 +1619,7 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
         Q_UNUSED(fwd_mid);
     }
 
-    if (!edit_locked_) {
+    if (!edit_locked_ && !geometry_locked_) {
         painter.setBrush(satpal::cardBg());
         painter.setPen(QPen(edge, 2.0));
         for (const QPointF& corner : corners) {
@@ -1525,6 +1631,18 @@ void SatelliteMapWidget::paintRoi(QPainter& painter) {
     // Edge chips per Figma 222:1492: amber bold label on a near-black chip
     // with a 40 % amber hairline. The chip being edited (or hovered) goes
     // green so the operator can see which endpoint is about to move.
+    // Hidden once the polygon is anchored — the lengths are no longer
+    // editable, and the rail's row hover lands on the edge itself.
+    if (geometry_locked_ && dim_hover_edge_ >= 0 && dim_hover_edge_ < n) {
+        painter.setPen(
+            QPen(satpal::accent(), 6.0, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(corners[dim_hover_edge_],
+                         corners[(dim_hover_edge_ + 1) % n]);
+    }
+    if (geometry_locked_) {
+        dim_boxes_.clear();
+        return;
+    }
     QFont dim_font = font();
     dim_font.setPixelSize(14);
     dim_font.setBold(true);
@@ -1605,7 +1723,44 @@ void SatelliteMapWidget::setHighlightedEdge(int edge) {
     update();
 }
 
+void SatelliteMapWidget::setRoofEdge(int edge, bool on) {
+    if (!polygon_.valid()) {
+        return;
+    }
+    polygon_.ensureEdgeFlags();
+    if (edge < 0 || edge >= polygon_.roof_edges.size() ||
+        polygon_.roof_edges[edge] == on) {
+        return;
+    }
+    polygon_.roof_edges[edge] = on;
+    update();
+    emit roiChanged();
+}
+
+void SatelliteMapWidget::setAllRoofEdges(bool on) {
+    if (!polygon_.valid()) {
+        return;
+    }
+    polygon_.ensureEdgeFlags();
+    bool changed = false;
+    for (int i = 0; i < polygon_.roof_edges.size(); ++i) {
+        if (polygon_.roof_edges[i] == on) {
+            continue;
+        }
+        polygon_.roof_edges[i] = on;
+        changed = true;
+    }
+    if (!changed) {
+        return;
+    }
+    update();
+    emit roiChanged();
+}
+
 void SatelliteMapWidget::beginEdgeLengthEdit(int edge) {
+    if (geometry_locked_ || edit_locked_) {
+        return;
+    }
     const int n = polygon_.valid() ? polygon_.vertices.size() : 4;
     if (edge < 0 || edge >= n || edge >= dim_boxes_.size()) {
         return;
