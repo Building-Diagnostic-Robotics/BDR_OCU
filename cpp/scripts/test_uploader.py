@@ -178,11 +178,35 @@ class UploadCase(unittest.TestCase):
         self.complete_calls.append((robot_id, run_id, manifest_relpath))
         return {"ok": True}
 
-    def run_upload(self):
+    def run_upload(self, root=None):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = uploader.upload_run(self.root, ROBOT, RUN)
+            rc = uploader.upload_run(self.root if root is None else root, ROBOT, RUN)
         return rc, buf.getvalue()
+
+    def stick_section(self, files, *, bad=None, legacy=False):
+        """A section folder plus the sibling mission manifest that lists it.
+
+        `files` maps a relpath to its bytes. `bad` names one relpath whose
+        recorded sha256 is wrong. `legacy` omits the files map.
+        """
+        day = os.path.join(self.root, "October_09_2026", "BNY")
+        section = os.path.join(day, "Section_1")
+        for rel, data in files.items():
+            write(os.path.join(section, rel), data)
+        record = {}
+        for rel, data in files.items():
+            digest = ("0" * 64 if rel == bad
+                      else hashlib.sha256(data).hexdigest())
+            record["Section_1/" + rel] = {"size": len(data), "sha256": digest}
+        doc = {"schema": 2, "sections": ["Section_1"], "files": record}
+        if legacy:
+            del doc["files"]
+            del doc["schema"]
+        mission = os.path.join(day, "Mission_120000")
+        write(os.path.join(mission, uploader.THUMB_MANIFEST),
+              json.dumps(doc).encode())
+        return section
 
     def puts(self):
         with SERVER.lock:
@@ -618,6 +642,79 @@ class PutTests(UploadCase):
         for rec in self.puts():
             self.assertIsNone(rec["content_md5"], rec["rel"])
         self.assertEqual(out.count("did not sign Content-MD5"), 1)
+
+    def test_stick_record_from_the_mission_manifest_uploads(self):
+        payload = b"abc"
+        section = self.stick_section({"a.bin": payload})
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 0, out)
+        bodies = {rec["rel"]: rec["body"] for rec in self.puts()}
+        self.assertEqual(bodies["a.bin"], payload)
+        self.assertNotIn("not in the robot's copy record", out)
+
+    def test_stick_mismatch_uploads_nothing(self):
+        section = self.stick_section({"a.bin": b"abc"}, bad="a.bin")
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("does not match the robot", out)
+        self.assertIn("October_09_2026/BNY/Mission_120000", out)
+        self.assertEqual(self.puts(), [])
+        self.assertFalse(os.path.exists(
+            os.path.join(section, uploader.MANIFEST_FILENAME)))
+
+    def test_stick_missing_file_blocks_before_upload(self):
+        section = self.stick_section({"a.bin": b"abc", "gone.bin": b"x"})
+        os.remove(os.path.join(section, "gone.bin"))
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("missing gone.bin", out)
+        self.assertEqual(self.puts(), [])
+
+    def test_stick_extra_file_is_not_uploaded(self):
+        section = self.stick_section({"a.bin": b"abc"})
+        write(os.path.join(section, "photo.jpg"), b"pic")
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("photo.jpg is not in the robot's copy record", out)
+        rels = [rec["rel"] for rec in self.puts()]
+        self.assertNotIn("photo.jpg", rels)
+        self.assertIn("a.bin", rels)
+        self.assertEqual(out.count("photo.jpg"), 1)
+
+    def test_old_stick_manifest_uploads_everything(self):
+        section = self.stick_section(
+            {"a.bin": b"abc", "b.bin": b"defg"}, legacy=True)
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 0, out)
+        rels = {rec["rel"] for rec in self.puts()}
+        self.assertIn("a.bin", rels)
+        self.assertIn("b.bin", rels)
+        self.assertNotIn("not in the robot's copy record", out)
+
+    def test_mission_folder_uses_its_own_manifest_and_keeps_provenance(self):
+        mission = os.path.join(self.root, "October_09_2026", "BNY", "Mission_120000")
+        notes = b"notes"
+        write(os.path.join(mission, "notes.txt"), notes)
+        write(os.path.join(mission, "photo.jpg"), b"pic")
+        doc = {
+            "schema": 2,
+            "sections": ["Section_1"],
+            "files": {
+                "Mission_120000/notes.txt": {
+                    "size": len(notes),
+                    "sha256": hashlib.sha256(notes).hexdigest(),
+                },
+            },
+        }
+        write(os.path.join(mission, uploader.THUMB_MANIFEST),
+              json.dumps(doc).encode())
+        rc, out = self.run_upload(mission)
+        self.assertEqual(rc, 0, out)
+        rels = {rec["rel"] for rec in self.puts()}
+        self.assertIn("notes.txt", rels)
+        self.assertIn(uploader.THUMB_MANIFEST, rels)
+        self.assertNotIn("photo.jpg", rels)
+        self.assertIn("photo.jpg is not in the robot's copy record", out)
 
     def test_unsigned_presign_still_rejects_a_bad_etag(self):
         self.md5_signed = False
