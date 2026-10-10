@@ -6988,6 +6988,11 @@ void SatelliteScreen::refreshScanRunUi() {
             text = QStringLiteral("in progress");
         } else if (copy == QLatin1String("waiting_for_drive")) {
             text = QStringLiteral("waiting for drive");
+        } else if (copy == QLatin1String("stick_full")) {
+            // The copy has not failed. The stick is under its floor and
+            // the robot will retry when free space changes. copy_error
+            // (the tooltip) is the coordinator's "need X GB" text.
+            text = QStringLiteral("stick full");
         } else if (copy == QLatin1String("done")) {
             text = QStringLiteral("done");
         } else if (copy == QLatin1String("skipped")) {
@@ -7410,7 +7415,8 @@ void SatelliteScreen::startCompleteMissionSettle() {
             copy == QLatin1String("copying") ||
             copy == QLatin1String("done") ||
             copy == QLatin1String("skipped") ||
-            copy == QLatin1String("failed");
+            copy == QLatin1String("failed") ||
+            copy == QLatin1String("stick_full");
         // Skip-copy stays unwired here: those copy states already count as
         // save_done, so the button would appear and vanish in the same tick.
         if (finalize_policy::shouldOfferAbort(save_done, conclude_wait_ticks_,
@@ -7428,10 +7434,15 @@ void SatelliteScreen::startCompleteMissionSettle() {
                                                   abort_save_used_)) {
             markCurrentPlanCompleted();
         }
-        if (copy == QLatin1String("pending") ||
-            copy == QLatin1String("queued") ||
-            copy == QLatin1String("waiting_for_drive") ||
-            copy == QLatin1String("copying")) {
+        if (copy == QLatin1String("stick_full")) {
+            appendLog(QStringLiteral(
+                "[mission] thumb drive is full — upload older scans "
+                "from the laptop, run the cloud check, then plug the "
+                "stick back into the robot"));
+        } else if (copy == QLatin1String("pending") ||
+                   copy == QLatin1String("queued") ||
+                   copy == QLatin1String("waiting_for_drive") ||
+                   copy == QLatin1String("copying")) {
             appendLog(QStringLiteral(
                 "[mission] thumb-drive copy handed to the offload "
                 "worker — Dashboard will show progress"));

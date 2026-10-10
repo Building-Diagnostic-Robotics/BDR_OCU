@@ -186,12 +186,54 @@ QList<UploadBuildingRow> groupUploadTargets(
 QList<UploadTarget> uploadTargetsForRow(const QHash<QString, UploadTarget>& targets,
                                         const UploadBuildingRow& row);
 
-/// Done folders of the `building_limit` newest buildings that have at
-/// least one uploaded folder. Buildings with nothing uploaded do not
-/// take a slot. One entry per folder; the caller requests them one at
-/// a time.
-QList<UploadTarget> cloudCheckTargets(const QHash<QString, UploadTarget>& targets,
-                                      int building_limit);
+/// Every `Done` folder that is not already `CloudCheck::Verified`.
+/// Oldest visit first, and on an equal timestamp the Mission folder
+/// before a Section. The caller checks them in batches; a folder the
+/// probe already marked Verified (a valid `cloud_verified.json`) is
+/// left out so a repeat check does not call the cloud again.
+QList<UploadTarget> cloudCheckTargets(const QHash<QString, UploadTarget>& targets);
+
+// ---------------------------------------------------------------------------
+// cloud_verified.json — the robot's proof a folder is in the cloud
+// ---------------------------------------------------------------------------
+
+/**
+ * `valid` is the robot's rule (`rdata_retention.folder_cloud_verified`):
+ * `manifest.json` exists, `upload_state.json` does not, and
+ * `manifest_sha256` is 64 hex characters equal to the sha256 of the
+ * manifest file bytes. Anything else is ignored, including a file left
+ * behind after the manifest was rewritten.
+ */
+struct CloudVerifiedProof {
+    bool valid = false;
+    QString manifest_sha256;
+};
+
+/// Lowercase hex sha256 of the file's bytes, or empty if it cannot be read.
+QByteArray fileSha256Hex(const QString& path);
+
+CloudVerifiedProof readCloudVerified(const QString& folder);
+
+/// Hash `manifest.json` on disk and write `cloud_verified.json` beside
+/// it (tmp file, flush, rename). False when the manifest cannot be read
+/// or the rename fails — the caller must not treat the folder as verified.
+bool writeCloudVerified(const QString& folder,
+                        const QString& client_id,
+                        const QString& robot_id,
+                        int file_count);
+
+/// Delete `cloud_verified.json` and a leftover `.tmp`. True when both
+/// are gone, including when they were never there.
+bool removeCloudVerified(const QString& folder);
+
+/// Write the proof after a matching cloud check, or delete it when the
+/// check says the folder is missing. `client_id` / `robot_id` /
+/// `file_count` are recorded only on a match; the robot reads the hash.
+bool settleCloudVerified(const QString& folder,
+                         bool matches,
+                         const QString& client_id,
+                         const QString& robot_id,
+                         int file_count);
 
 // ---------------------------------------------------------------------------
 // State probe

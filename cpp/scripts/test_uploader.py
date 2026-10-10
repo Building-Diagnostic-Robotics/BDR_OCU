@@ -261,6 +261,8 @@ class RecordTests(unittest.TestCase):
         self.assertTrue(uploader.is_sentinel("upload_state.json"))
         self.assertTrue(uploader.is_sentinel("nested/manifest.json.tmp"))
         self.assertTrue(uploader.is_sentinel("pause.flag"))
+        self.assertTrue(uploader.is_sentinel("cloud_verified.json"))
+        self.assertTrue(uploader.is_sentinel("nested/cloud_verified.json.tmp"))
         self.assertFalse(uploader.is_sentinel("notes.tmp"))
         self.assertFalse(uploader.is_sentinel("thumbsync_manifest.json"))
         self.assertFalse(uploader.is_sentinel("Visual_data/frame.tmp.jpg"))
@@ -577,9 +579,15 @@ class PutTests(UploadCase):
         # pause.flag would stop a run; the clear itself must leave it.
         write(os.path.join(self.root, "manifest.json"), b'{"files":[]}')
         write(os.path.join(self.root, "upload_state.json"), b"{}")
+        write(os.path.join(self.root, "cloud_verified.json"), b"{}")
         write(os.path.join(self.root, "manifest.json.tmp"), b"x")
         write(os.path.join(self.root, "upload_state.json.tmp"), b"y")
+        write(os.path.join(self.root, "cloud_verified.json.tmp"), b"z")
         self.assertIsNone(uploader.discard_bookkeeping(self.root))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.root, "cloud_verified.json")))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.root, "cloud_verified.json.tmp")))
         self.assertTrue(os.path.exists(os.path.join(self.root, "a.bin")))
         self.assertTrue(os.path.exists(os.path.join(self.root, "keep.tmp")))
         self.assertTrue(os.path.exists(os.path.join(self.root, "pause.flag")))
@@ -593,6 +601,8 @@ class PutTests(UploadCase):
         with SERVER.lock:
             SERVER.puts.clear()
         self.complete_calls.clear()
+        write(os.path.join(self.root, "cloud_verified.json"), b'{"schema":1}')
+        write(os.path.join(self.root, "cloud_verified.json.tmp"), b"torn")
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -602,6 +612,10 @@ class PutTests(UploadCase):
         self.assertIn("Re-uploading: operator requested a fresh upload.", out)
         rels = {rec["rel"] for rec in self.puts()}
         self.assertEqual(rels, {"a.bin", "keep.tmp", uploader.MANIFEST_FILENAME})
+        self.assertFalse(os.path.exists(
+            os.path.join(self.root, "cloud_verified.json")))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.root, "cloud_verified.json.tmp")))
         bodies = {rec["rel"]: rec["body"] for rec in self.puts()}
         self.assertEqual(bodies["a.bin"], payload)
         self.assertTrue(os.path.exists(os.path.join(self.root, "a.bin")))
@@ -611,6 +625,35 @@ class PutTests(UploadCase):
         by_rel = {entry["relpath"]: entry for entry in manifest["files"]}
         self.assertEqual(by_rel["a.bin"]["md5"], md5_hex(payload))
         self.assertEqual(by_rel["keep.tmp"]["md5"], md5_hex(b"data"))
+
+    def test_cloud_verified_is_not_uploaded_and_a_noop_keeps_it(self):
+        write(os.path.join(self.root, "a.bin"), b"abc")
+        write(os.path.join(self.root, uploader.CLOUD_VERIFIED_FILENAME),
+              b'{"schema":1}')
+        write(os.path.join(self.root, uploader.CLOUD_VERIFIED_FILENAME + ".tmp"),
+              b"torn")
+        rc, out = self.run_upload()
+        self.assertEqual(rc, 0, out)
+        rels = {rec["rel"] for rec in self.puts()}
+        self.assertNotIn(uploader.CLOUD_VERIFIED_FILENAME, rels)
+        self.assertNotIn(uploader.CLOUD_VERIFIED_FILENAME + ".tmp", rels)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.root, uploader.CLOUD_VERIFIED_FILENAME)))
+
+        proof = os.path.join(self.root, uploader.CLOUD_VERIFIED_FILENAME)
+        torn = proof + ".tmp"
+        write(proof, b'{"schema":1,"manifest_sha256":"ab"}')
+        write(torn, b"torn")
+        with SERVER.lock:
+            SERVER.puts.clear()
+        rc, out = self.run_upload()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Already uploaded", out)
+        self.assertEqual(self.puts(), [])
+        self.assertTrue(os.path.exists(proof))
+        self.assertFalse(os.path.exists(torn))
+        with open(proof, "rb") as fh:
+            self.assertEqual(fh.read(), b'{"schema":1,"manifest_sha256":"ab"}')
 
     def test_pause_flag_sends_nothing(self):
         write(os.path.join(self.root, "a.bin"), b"abc")

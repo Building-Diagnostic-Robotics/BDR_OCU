@@ -86,7 +86,8 @@ struct CoverageStatus {
     QString stop;        // stop_reason, empty when moving
     QString stale;       // staleness_stop_reason, empty when inputs fresh
     QString dc;          // IDLE / STARTING / RUNNING / PAUSED / ROLLOVER / ERROR
-    QString copy;        // idle / pending / copying / done / failed / skipped
+    QString copy;        // idle / pending / copying / done / failed /
+                         // skipped / waiting_for_drive / stick_full
     QString copy_error;
     QString error;       // director fault string; state == ERROR when set
     QStringList not_ready;  // readiness inputs still false (WAITING_READY)

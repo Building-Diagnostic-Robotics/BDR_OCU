@@ -42,7 +42,9 @@ namespace f2c_cpp {
 namespace {
 
 constexpr int kBuildingKeyRole = Qt::UserRole + 1;
-constexpr int kCloudVerifyNewest = 10;
+// One /verify request per folder. A batch keeps a slow stick from
+// starting hundreds of listings at once; the rest follow oldest-first.
+constexpr int kCloudVerifyBatch = 10;
 
 QString scansFoundText(int count) {
     return QStringLiteral("Found %1 scan%2.")
@@ -1641,7 +1643,7 @@ void UploadDialog::refreshConnectivityBanner() {
 }
 
 // ---------------------------------------------------------------------------
-// Cloud check (done folders of the 10 newest buildings, every listing)
+// Cloud check (every finished folder without a valid proof, oldest first)
 // ---------------------------------------------------------------------------
 
 void UploadDialog::maybeStartCloudCheck() {
@@ -1654,15 +1656,26 @@ void UploadDialog::maybeStartCloudCheck() {
         cloud_device_token_.isEmpty() || robot_id_.isEmpty()) return;
     if (probe_serial_ == 0 || cloud_check_for_probe_ == probe_serial_) return;
 
-    const QList<UploadTarget> done =
-        cloudCheckTargets(all_targets_, kCloudVerifyNewest);
+    cloud_check_queue_ = cloudCheckTargets(all_targets_);
     cloud_check_for_probe_ = probe_serial_;
-    if (done.isEmpty()) return;
-    startCloudCheck(done);
+    if (cloud_check_queue_.isEmpty()) return;
+    launchNextCloudBatch();
 }
 
-void UploadDialog::startCloudCheck(const QList<UploadTarget>& newest_done) {
-    if (!cloud_verifier_) return;
+void UploadDialog::launchNextCloudBatch() {
+    while (!cloud_check_queue_.isEmpty()) {
+        if (!isThumbDrive() || !isSourceReady() || !cloud_reachable_) {
+            cloud_check_queue_.clear();
+            return;
+        }
+        const QList<UploadTarget> batch = cloud_check_queue_.mid(0, kCloudVerifyBatch);
+        cloud_check_queue_ = cloud_check_queue_.mid(kCloudVerifyBatch);
+        if (startCloudCheck(batch)) return;
+    }
+}
+
+bool UploadDialog::startCloudCheck(const QList<UploadTarget>& batch) {
+    if (!cloud_verifier_) return false;
     ++verify_generation_;
     const int generation = verify_generation_;
     cloud_listings_.clear();
@@ -1671,7 +1684,7 @@ void UploadDialog::startCloudCheck(const QList<UploadTarget>& newest_done) {
     cloud_check_ids_.clear();
 
     QList<QPair<QString, QString>> jobs;
-    for (const UploadTarget& src : newest_done) {
+    for (const UploadTarget& src : batch) {
         if (!all_targets_.contains(src.run_id)) continue;
         UploadTarget& cached = all_targets_[src.run_id];
         if (cached.status != UploadStatus::Done) continue;
@@ -1683,8 +1696,8 @@ void UploadDialog::startCloudCheck(const QList<UploadTarget>& newest_done) {
         presentCloudRow(cached, false);
     }
     if (cloud_check_ids_.isEmpty()) {
-        cloud_verifier_->cancel();
-        return;
+        if (cloud_verifier_) cloud_verifier_->cancel();
+        return false;
     }
 
     noteCloudVerify(QStringLiteral("Checking %1 uploaded folder%2 against the cloud…")
@@ -1713,9 +1726,11 @@ void UploadDialog::startCloudCheck(const QList<UploadTarget>& newest_done) {
         return batch;
     }));
     cloud_verifier_->verify(robot_id_, ids, generation);
+    return true;
 }
 
 void UploadDialog::cancelCloudCheck(bool reschedule) {
+    cloud_check_queue_.clear();
     bool was_checking = false;
     for (const QString& run_id : cloud_check_ids_) {
         if (all_targets_.value(run_id).cloud_check == CloudCheck::Checking) {
@@ -1759,6 +1774,8 @@ void UploadDialog::onCloudRunFinished(int generation, const QString& run_id,
     if (!http_ok) {
         // One failed request means the check is unavailable. Rows that
         // were still "checking" go back to Uploaded; nothing is guessed.
+        // Older batches stay queued for the next time the dialog checks.
+        cloud_check_queue_.clear();
         const QString line =
             QStringLiteral("cloud-verify %1: unavailable (%2)").arg(run_id, error);
         qInfo("[UploadDialog] %s", qUtf8Printable(line));
@@ -1768,7 +1785,10 @@ void UploadDialog::onCloudRunFinished(int generation, const QString& run_id,
     }
     cloud_listings_.insert(run_id, files);
     if (manifests_ready_ && cloud_listings_.size() >= cloud_check_ids_.size()) {
-        for (const QString& id : cloud_check_ids_) applyCloudResult(id);
+        // Copy: the last result starts the next batch, which replaces
+        // cloud_check_ids_ while this loop is still walking it.
+        const QStringList ids = cloud_check_ids_;
+        for (const QString& id : ids) applyCloudResult(id);
     }
 }
 
@@ -1778,7 +1798,10 @@ void UploadDialog::onManifestsLoaded(int generation,
     loaded_manifests_ = by_run;
     manifests_ready_ = true;
     if (cloud_listings_.size() < cloud_check_ids_.size()) return;
-    for (const QString& id : cloud_check_ids_) applyCloudResult(id);
+    // Copy: the last result starts the next batch, which replaces
+    // cloud_check_ids_ while this loop is still walking it.
+    const QStringList ids = cloud_check_ids_;
+    for (const QString& id : ids) applyCloudResult(id);
 }
 
 void UploadDialog::applyCloudResult(const QString& run_id) {
@@ -1815,10 +1838,31 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
             manifest.files, cloud_listings_.value(run_id));
         summary = cloudVerifySummary(result);
         if (result.matches) {
-            cached.cloud_check = CloudCheck::Verified;
-            cached.force_reupload = false;
-            presentCloudRow(cached, false);
+            const QString client = manifest.client_id.isEmpty() ? cloud_client_id_
+                                                                : manifest.client_id;
+            const QString robot = manifest.robot_id.isEmpty() ? robot_id_
+                                                              : manifest.robot_id;
+            // The hash is of the manifest file, and the rename finishes
+            // before this returns, so a later batch and a stick unplug
+            // both see the proof.
+            if (settleCloudVerified(cached.data_path, true, client, robot,
+                                    manifest.files.size())) {
+                cached.cloud_check = CloudCheck::Verified;
+                cached.force_reupload = false;
+                presentCloudRow(cached, false);
+            } else {
+                cached.cloud_check = CloudCheck::Unchecked;
+                cached.force_reupload = false;
+                summary = QStringLiteral(
+                    "matched, but the stick could not record the cloud check");
+                presentCloudRow(cached, false);
+            }
         } else {
+            if (!settleCloudVerified(cached.data_path, false, QString(), QString(), 0)) {
+                qWarning("[UploadDialog] cloud-verify %s: cloud_verified.json "
+                         "is still on the stick",
+                         qUtf8Printable(run_id));
+            }
             cached.cloud_check = CloudCheck::Missing;
             cached.force_reupload = true;
             presentCloudRow(cached, true);
@@ -1829,23 +1873,39 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
     noteCloudVerify(line);
 
     int pending = 0;
-    int missing = 0;
-    int verified = 0;
     for (const QString& id : cloud_check_ids_) {
         if (!all_targets_.contains(id)) continue;
-        const CloudCheck state = all_targets_[id].cloud_check;
-        if (state == CloudCheck::Checking) ++pending;
-        else if (state == CloudCheck::Missing) ++missing;
-        else if (state == CloudCheck::Verified) ++verified;
+        if (all_targets_[id].cloud_check == CloudCheck::Checking) ++pending;
     }
-    if (pending == 0 && missing > 0) {
-        noteCloudVerify(QStringLiteral("Cloud check: %1 section%2 missing in cloud.")
-                            .arg(missing)
-                            .arg(missing == 1 ? QString() : QStringLiteral("s")));
-    } else if (pending == 0 && verified == cloud_check_ids_.size() && verified > 0) {
-        noteCloudVerify(QStringLiteral("Cloud check: %1 section%2 verified.")
-                            .arg(verified)
-                            .arg(verified == 1 ? QString() : QStringLiteral("s")));
+    if (pending == 0 && !cloud_check_queue_.isEmpty()) {
+        noteCloudVerify(QStringLiteral("Checking older scans against the cloud…"));
+        refreshSelectionSummary();
+        refreshButtonStates();
+        launchNextCloudBatch();
+        return;
+    }
+    // The queue is empty here. Count the whole stick, not this batch:
+    // an older folder marked missing must not vanish behind a later
+    // batch that all matched.
+    if (pending == 0) {
+        int missing_all = 0;
+        int verified_all = 0;
+        int done = 0;
+        for (const UploadTarget& target : all_targets_) {
+            if (target.status != UploadStatus::Done) continue;
+            ++done;
+            if (target.cloud_check == CloudCheck::Missing) ++missing_all;
+            else if (target.cloud_check == CloudCheck::Verified) ++verified_all;
+        }
+        if (missing_all > 0) {
+            noteCloudVerify(QStringLiteral("Cloud check: %1 section%2 missing in cloud.")
+                                .arg(missing_all)
+                                .arg(missing_all == 1 ? QString() : QStringLiteral("s")));
+        } else if (done > 0 && verified_all == done) {
+            noteCloudVerify(QStringLiteral("Cloud check: %1 section%2 verified.")
+                                .arg(verified_all)
+                                .arg(verified_all == 1 ? QString() : QStringLiteral("s")));
+        }
     }
     refreshSelectionSummary();
     refreshButtonStates();

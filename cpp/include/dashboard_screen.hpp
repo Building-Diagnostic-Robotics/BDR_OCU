@@ -122,6 +122,9 @@ private:
     void applyUploadBlinkFrame();
     bool robotCopyIncomplete() const;
     bool stickCopyIncomplete() const;
+    /// True when the live probe, or the cached state while the robot is
+    /// offline, says the stick is under its free-space floor.
+    bool offloadStickFull() const;
     void refreshUptimeDisplay();
 
     QString robot_id_;

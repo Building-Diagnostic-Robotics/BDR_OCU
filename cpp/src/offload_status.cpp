@@ -33,6 +33,9 @@ OffloadCopyState stateFromString(const QString& raw) {
     if (s == QLatin1String("waiting_for_drive")) {
         return OffloadCopyState::WaitingForDrive;
     }
+    if (s == QLatin1String("stick_full")) {
+        return OffloadCopyState::StickFull;
+    }
     if (s == QLatin1String("error") || s == QLatin1String("failed")) {
         return OffloadCopyState::Error;
     }
@@ -52,6 +55,7 @@ bool OffloadSnapshot::copyIncomplete() const {
         case OffloadCopyState::Queued:
         case OffloadCopyState::Copying:
         case OffloadCopyState::WaitingForDrive:
+        case OffloadCopyState::StickFull:
         case OffloadCopyState::Error:
             return true;
         case OffloadCopyState::Idle:
@@ -86,13 +90,28 @@ OffloadSnapshot parseOffloadStatusJson(const QByteArray& json) {
     bool any_waiting = false;
     bool any_copying = false;
     bool any_queued = false;
+    bool any_stick_full = false;
     QString job_error;
+    QString stick_full_error;
     for (auto it = jobs.begin(); it != jobs.end(); ++it) {
         const QJsonObject job = it.value().toObject();
-        const OffloadCopyState js =
+        OffloadCopyState js =
             stateFromString(job.value(QStringLiteral("state")).toString());
         const QString je = job.value(QStringLiteral("error")).toString();
+        // Unplugging a full stick moves the job to waiting_for_drive but
+        // keeps the "stick full: …" error. The stick is still full, and
+        // the operator is about to upload from it on the laptop.
+        if (js == OffloadCopyState::WaitingForDrive &&
+            je.startsWith(QLatin1String("stick full"), Qt::CaseInsensitive)) {
+            js = OffloadCopyState::StickFull;
+        }
         switch (js) {
+            case OffloadCopyState::StickFull:
+                any_stick_full = true;
+                if (stick_full_error.isEmpty() && !je.isEmpty()) {
+                    stick_full_error = je;
+                }
+                break;
             case OffloadCopyState::Error:
                 any_job_error = true;
                 if (job_error.isEmpty() && !je.isEmpty()) {
@@ -126,6 +145,14 @@ OffloadSnapshot parseOffloadStatusJson(const QByteArray& json) {
             out.state = OffloadCopyState::Idle;
         }
         out.error.clear();
+    }
+    // Same precedence as the worker's rollup: a live copy wins.
+    if (any_stick_full && out.state != OffloadCopyState::Copying &&
+        out.state != OffloadCopyState::Error) {
+        out.state = OffloadCopyState::StickFull;
+        if (out.error.isEmpty()) {
+            out.error = stick_full_error;
+        }
     }
 
     const QString updated = obj.value(QStringLiteral("updated_at")).toString();

@@ -682,8 +682,10 @@ kept in sync by hand.
   on a `QtConcurrent` worker (generation-counted so a stick swapped
   mid-scan is discarded, and a re-probe supersedes a running walk).
   Same classification as the SSH `find` probe: `manifest.json` → Done,
-  `upload_state.json` → Partial, neither → None; file count excludes the
-  three sentinels. `scanLocalDataRoot()` is the pure engine (tested).
+  `upload_state.json` → Partial, neither → None; file count excludes
+  the bookkeeping names, including `cloud_verified.json`. A Done folder
+  whose `cloud_verified.json` hash matches `manifest.json` starts as
+  Verified. `scanLocalDataRoot()` is the pure engine (tested).
 - **`UploadRunner`**: ThumbDrive mode runs `python3 -u <script>
   <data_path> <robot_id> <run_id> [--force]` as a plain `QProcess` with
   the creds in `QProcessEnvironment`; `resolveLocalScriptPath()` tries
@@ -698,10 +700,13 @@ kept in sync by hand.
   with the SSH mode.
 - **`CloudVerifier`** (`cpp/include/cloud_verifier.hpp`): every time the
   Upload dialog finishes a stick listing and the cloud is reachable, it
-  `POST`s `/verify` for the **Done folders of the 10 newest buildings
-  that already have an uploaded folder** (by each building's newest
-  scan), **one `run_id` per request**, 30 s
-  timeout. The stick `manifest.json` is read off the GUI thread and
+  `POST`s `/verify` for **every Done folder that does not already have
+  a valid `cloud_verified.json`**, oldest first, in batches of 10,
+  **one `run_id` per request**, 30 s
+  timeout. A match writes `cloud_verified.json` next to `manifest.json`
+  (tmp, flush, rename) with the sha256 of the manifest file bytes; a
+  Missing result deletes that file. The stick `manifest.json` is read
+  off the GUI thread and
   compared to the listing: a manifest file missing from S3, a size
   mismatch, or an md5 mismatch (only when the manifest recorded `md5` —
   older manifests are size-only) marks that folder **Missing in cloud**.
@@ -801,7 +806,11 @@ kept in sync by hand.
   Operator-locked: Complete Mission first.
 - **Hard-blocked until the robot→stick copy is done.** The Upload
   card stays disabled (and blinks) while `OffloadStatus` says the
-  copy is incomplete. Complete Mission must not wait on that copy.
+  copy is incomplete. `stick_full` is the exception: the copy did not
+  start because the stick is under its free-space floor, the card
+  stays enabled, and the subtitle tells the operator to upload older
+  scans and cloud-check them. Complete Mission must not wait on that
+  copy, and `copy=stick_full` counts as save-done.
 
 ### Configuration
 
@@ -860,8 +869,12 @@ clearing, `FailedToStart` handling).
   uses an opacity effect because it *replaces* its own shadow.
 - **Do NOT add IAM credentials to the OCU.**
 - **Do NOT make the dialog write anything to the stick except through
-  `uploader.py`** (`upload_state.json`, `manifest.json`, `pause.flag`).
-  The robot's `rdata_thumbdrive_sync.py` treats a destination with
+  `uploader.py`** (`upload_state.json`, `manifest.json`, `pause.flag`)
+  **and `cloud_verified.json`.** That file is the one exception: the
+  dialog writes it only after a cloud check matches, and deletes it
+  when the check says Missing. `uploader.py` deletes it when a
+  re-upload starts and never uploads it. The robot's
+  `rdata_thumbdrive_sync.py` treats a destination with
   `thumbsync_manifest.json` as done and never re-copies, so anything
   else the laptop leaves there is permanent.
 - The SSH fallback **must NOT** go through `ros2 run` — invoke

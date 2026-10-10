@@ -170,11 +170,13 @@ private:
     int listedBuildingCount() const;
     void startProbe();
 
-    // S3 check of the done folders on the 10 newest buildings that have
-    // one. Read-only on the stick. A failure or an offline cloud leaves
-    // those folders Uploaded.
+    // S3 check of every finished folder that does not already carry a
+    // valid cloud_verified.json. Oldest first, in batches. A failure or
+    // an offline cloud leaves the unchecked folders Uploaded.
     void maybeStartCloudCheck();
-    void startCloudCheck(const QList<UploadTarget>& newest_done);
+    void launchNextCloudBatch();
+    /// True when a batch was handed to the verifier.
+    bool startCloudCheck(const QList<UploadTarget>& batch);
     void cancelCloudCheck(bool reschedule);
     void revertCheckingRows();
     void onCloudRunFinished(int generation, const QString& run_id, bool http_ok,
@@ -240,6 +242,8 @@ private:
     int cloud_check_for_probe_ = -1;
     int verify_generation_ = 0;
     bool manifests_ready_ = false;
+    /// Finished folders still waiting for a batch. Oldest first.
+    QList<UploadTarget> cloud_check_queue_;
     QStringList cloud_check_ids_;
     QHash<QString, QList<CloudObject>> cloud_listings_;
     QHash<QString, LoadedManifest> loaded_manifests_;
