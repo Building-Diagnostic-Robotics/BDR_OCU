@@ -52,6 +52,7 @@
 #include <QPointer>
 #include <QString>
 
+#include "cloud_verifier.hpp"
 #include "robot_reachability_probe.hpp"
 #include "thumb_drive_watcher.hpp"
 #include "upload_runner.hpp"
@@ -99,6 +100,12 @@ public:
     void setDataRoot(const QString& root);
     /// ThumbDrive: filesystem label to wait for. Defaults to RDATA_EXT.
     void setDriveLabel(const QString& label);
+
+public slots:
+    /// Esc hides the dialog through `close()`, so the upload pauses and
+    /// the cloud check stops. `QDialog::closeEvent` calls `reject()`
+    /// again; `in_close_` makes that second call the plain hide.
+    void reject() override;
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -154,6 +161,20 @@ private:
     QList<UploadTarget> selectedTargets() const;
     void startProbe();
 
+    // S3 check of the 10 newest Uploaded rows. Read-only on the stick.
+    // A failure or an offline cloud leaves those rows Uploaded.
+    void maybeStartCloudCheck();
+    void startCloudCheck(const QList<UploadTarget>& newest_done);
+    void cancelCloudCheck(bool reschedule);
+    void revertCheckingRows();
+    void onCloudRunFinished(int generation, const QString& run_id, bool http_ok,
+                            const QList<CloudObject>& files, const QString& error);
+    void onManifestsLoaded(int generation,
+                           const QHash<QString, LoadedManifest>& by_run);
+    void applyCloudResult(const QString& run_id);
+    void presentCloudRow(const UploadTarget& target, bool tick_if_missing);
+    void noteCloudVerify(const QString& line);
+
     // Connectivity helpers.
     void armConnectivityProbes();
     void disarmConnectivityProbes();
@@ -168,6 +189,12 @@ private:
     QString sourceNoun() const;
 
     bool dark_mode_ = false;
+    bool in_close_ = false;
+    bool shutting_down_ = false;
+    /// Cancel (unlike pause or a finished upload) used to skip the
+    /// rescan, so a `--force` that was killed before it deleted the
+    /// manifest stayed "Uploaded" with the force flag already cleared.
+    bool recheck_after_cancel_ = false;
     UploadSource source_ = UploadSource::ThumbDrive;
     QString remote_host_;
     QString ssh_user_;
@@ -193,6 +220,19 @@ private:
 
     UploadStateProbe* probe_ = nullptr;
     UploadRunner* runner_ = nullptr;
+    CloudVerifier* cloud_verifier_ = nullptr;
+
+    // `probe_serial_` advances on each successful stick listing.
+    // `cloud_check_for_probe_` is that serial once a check has been
+    // started for it, so opening the dialog checks once per listing
+    // and a later cloud-up retries a check that never started.
+    int probe_serial_ = 0;
+    int cloud_check_for_probe_ = -1;
+    int verify_generation_ = 0;
+    bool manifests_ready_ = false;
+    QStringList cloud_check_ids_;
+    QHash<QString, QList<CloudObject>> cloud_listings_;
+    QHash<QString, LoadedManifest> loaded_manifests_;
 
     // Connectivity gating (Decision #3 + #4).  Robot reachability uses
     // the existing layered ICMP→TCP-22 probe; cloud reachability uses

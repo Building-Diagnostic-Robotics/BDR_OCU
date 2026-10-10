@@ -31,6 +31,8 @@
 #include <QTreeWidgetItem>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include "components/bdr_message_box.hpp"
 #include "ui_theme_constants.hpp"
@@ -40,15 +42,30 @@ namespace f2c_cpp {
 namespace {
 
 constexpr int kRunIdRole = Qt::UserRole + 1;
+constexpr int kCloudVerifyNewest = 10;
 
-QString statusBadgeText(UploadStatus s) {
-    switch (s) {
-        case UploadStatus::Done:    return QStringLiteral("Uploaded");
-        case UploadStatus::Partial: return QStringLiteral("Partial");
-        case UploadStatus::None:    return QStringLiteral("Pending");
+QString statusBadgeText(const UploadTarget& target) {
+    if (target.status == UploadStatus::Done) {
+        switch (target.cloud_check) {
+            case CloudCheck::Checking:
+                return QStringLiteral("Uploaded · checking…");
+            case CloudCheck::Verified:
+                return QStringLiteral("Uploaded · Verified");
+            case CloudCheck::Missing:
+                return QStringLiteral("Missing in cloud");
+            case CloudCheck::Unchecked:
+                break;
+        }
+        return QStringLiteral("Uploaded");
     }
-    return QString();
+    if (target.status == UploadStatus::Partial) return QStringLiteral("Partial");
+    return QStringLiteral("Pending");
 }
+
+struct ManifestBatch {
+    int generation = 0;
+    QHash<QString, LoadedManifest> by_run;
+};
 
 }  // namespace
 
@@ -64,6 +81,9 @@ UploadDialog::UploadDialog(QWidget* parent) : QDialog(parent) {
 
     probe_ = new UploadStateProbe(this);
     runner_ = new UploadRunner(this);
+    cloud_verifier_ = new CloudVerifier(this);
+    connect(cloud_verifier_, &CloudVerifier::runFinished,
+            this, &UploadDialog::onCloudRunFinished);
 
     connect(probe_, &UploadStateProbe::targetsReady,
             this, &UploadDialog::onProbeReady);
@@ -109,6 +129,8 @@ UploadDialog::UploadDialog(QWidget* parent) : QDialog(parent) {
 }
 
 UploadDialog::~UploadDialog() {
+    shutting_down_ = true;
+    cancelCloudCheck(false);
     if (runner_ && runner_->isBusy()) {
         runner_->requestCancel();
     }
@@ -154,6 +176,10 @@ void UploadDialog::setCloudAuth(const QString& api_base,
     if (runner_) {
         runner_->setCloudAuth(cloud_api_base_, cloud_client_id_,
                               cloud_device_token_);
+    }
+    if (cloud_verifier_) {
+        cloud_verifier_->setAuth(cloud_api_base_, cloud_client_id_,
+                                 cloud_device_token_);
     }
     refreshHeaderSubtitle();
 }
@@ -659,13 +685,26 @@ void UploadDialog::showEvent(QShowEvent* event) {
 }
 
 void UploadDialog::closeEvent(QCloseEvent* event) {
+    cancelCloudCheck(false);
     if (runner_ && runner_->isBusy()) {
         // Graceful pause per the design spec — the script will finish
         // its in-flight files, write upload_state.json, and exit.
         runner_->requestPause();
     }
     disarmConnectivityProbes();
+    // QDialog::closeEvent calls reject() while the dialog is still
+    // visible. The flag stops that from calling close() again.
+    in_close_ = true;
     QDialog::closeEvent(event);
+    in_close_ = false;
+}
+
+void UploadDialog::reject() {
+    if (in_close_ || shutting_down_) {
+        QDialog::reject();
+        return;
+    }
+    close();
 }
 
 void UploadDialog::mousePressEvent(QMouseEvent* event) {
@@ -704,6 +743,7 @@ void UploadDialog::mouseReleaseEvent(QMouseEvent* event) {
 // ---------------------------------------------------------------------------
 
 void UploadDialog::startProbe() {
+    cancelCloudCheck(false);
     if (isThumbDrive()) {
         if (!drive_mounted_ || drive_mount_.isEmpty()) {
             const QString label = drive_watcher_ ? drive_watcher_->label()
@@ -780,6 +820,7 @@ void UploadDialog::onProbeReady(bool ok, const QList<UploadTarget>& targets,
     }
 
     all_targets_.clear();
+    ++probe_serial_;
     for (const UploadTarget& t : targets) {
         if (!all_targets_.contains(t.run_id)) {
             all_targets_.insert(t.run_id, t);
@@ -801,6 +842,7 @@ void UploadDialog::onProbeReady(bool ok, const QList<UploadTarget>& targets,
         }
     }
     refreshButtonStates();
+    maybeStartCloudCheck();
 }
 
 void UploadDialog::onRefreshClicked() {
@@ -889,14 +931,17 @@ void UploadDialog::repopulateTree() {
 void UploadDialog::setSectionRowStatus(QTreeWidgetItem* row,
                                        const UploadTarget& target) {
     if (!row) return;
-    QString status_text = statusBadgeText(target.status);
+    QString status_text = statusBadgeText(target);
     if (target.status == UploadStatus::Partial && target.total_files > 0) {
         const int pct = qBound(0, target.completed_files * 100 / qMax(1, target.total_files), 100);
         status_text = QStringLiteral("Partial · %1%").arg(pct);
     }
     row->setText(4, status_text);
     QColor color;
-    switch (target.status) {
+    if (target.status == UploadStatus::Done &&
+        target.cloud_check == CloudCheck::Missing) {
+        color = QColor("#F59E0B");
+    } else switch (target.status) {
         case UploadStatus::Done:    color = QColor("#10B981"); break;
         case UploadStatus::Partial: color = QColor("#F59E0B"); break;
         case UploadStatus::None:    color = dark_mode_ ? QColor("#A1A1AA")
@@ -943,7 +988,10 @@ QList<UploadTarget> UploadDialog::selectedTargets() const {
         const QString run_id = row->data(0, kRunIdRole).toString();
         if (!all_targets_.contains(run_id)) continue;
         const UploadTarget& t = all_targets_.value(run_id);
-        if (t.status == UploadStatus::Done) continue;
+        // A finished section stays unselectable until the cloud check
+        // finds it missing. That row uploads with --force.
+        if (t.status == UploadStatus::Done &&
+            t.cloud_check != CloudCheck::Missing) continue;
         out.append(t);
     }
     return out;
@@ -1100,6 +1148,9 @@ QString UploadDialog::formatBytes(qint64 bytes) const {
 void UploadDialog::onUploadClicked() {
     const QList<UploadTarget> sel = selectedTargets();
     if (sel.isEmpty()) return;
+    // Stop the check before launch. Rows already marked missing keep
+    // their selection; the copies in `sel` still carry force_reupload.
+    cancelCloudCheck(false);
     if (cloud_client_id_.isEmpty() || cloud_device_token_.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("Upload Data"),
                              QStringLiteral(
@@ -1167,6 +1218,10 @@ void UploadDialog::onCancelClicked() {
             return;
         }
     }
+    // The rescan classifies whatever --force managed to delete and
+    // checks the rows that are still Done. Without it the force flag
+    // is already cleared and the next Upload no-ops on the old manifest.
+    recheck_after_cancel_ = true;
     if (runner_) runner_->requestCancel();
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
@@ -1205,9 +1260,20 @@ void UploadDialog::onTargetStarted(int index, int total,
         progress_bar_->setValue(active_files_done_);
         progress_bar_->setFormat(QStringLiteral("%v / %m files"));
     }
+    if (all_targets_.contains(target.run_id)) {
+        // The launch already captured force_reupload. A pause and a
+        // later Upload press must not pass --force again.
+        UploadTarget& cached = all_targets_[target.run_id];
+        cached.force_reupload = false;
+        cached.cloud_check = CloudCheck::Unchecked;
+        if (cached.status == UploadStatus::Done) {
+            cached.status = UploadStatus::Partial;
+        }
+    }
     if (auto* row = findSectionRow(target)) {
         UploadTarget t = target;
         t.status = UploadStatus::Partial;
+        t.cloud_check = CloudCheck::Unchecked;
         setSectionRowStatus(row, t);
     }
     refreshButtonStates();
@@ -1294,6 +1360,8 @@ void UploadDialog::onTargetCompleted(const UploadTarget& target) {
     if (auto* row = findSectionRow(target)) {
         UploadTarget& cached = all_targets_[target.run_id];
         cached.status = UploadStatus::Done;
+        cached.cloud_check = CloudCheck::Unchecked;
+        cached.force_reupload = false;
         cached.completed_files = qMax(cached.total_files, active_files_done_);
         setSectionRowStatus(row, cached);
         // Disable the row now that it's done; this matches the "Done
@@ -1304,6 +1372,7 @@ void UploadDialog::onTargetCompleted(const UploadTarget& target) {
 }
 
 void UploadDialog::onQueueFinished(bool cancelled) {
+    if (shutting_down_) return;
     if (lbl_progress_caption_) {
         lbl_progress_caption_->setText(
             cancelled ? QStringLiteral("Upload cancelled.")
@@ -1316,8 +1385,11 @@ void UploadDialog::onQueueFinished(bool cancelled) {
     refreshSelectionSummary();
     refreshButtonStates();
     // Re-probe so any newly Done sections refresh from on-disk truth
-    // and partial counters get an authoritative value.
-    if (!cancelled) {
+    // and partial counters get an authoritative value. Cancel does
+    // this too: a killed re-upload has to be classified again.
+    const bool recheck = recheck_after_cancel_;
+    recheck_after_cancel_ = false;
+    if (!cancelled || recheck) {
         startProbe();
     }
 }
@@ -1505,6 +1577,9 @@ void UploadDialog::onCloudProbeFinished(int exit_code, int /*status*/) {
 void UploadDialog::handleConnectivityTransition() {
     const bool now_online = isFullyOnline();
     if (!now_online) {
+        // A check that cannot finish must not relabel rows. Coming back
+        // online retries it (`reschedule`).
+        cancelCloudCheck(true);
         // Offline transition.  Pause the runner gracefully if it's
         // mid-flight so it doesn't burn through retries against a
         // dead network.  No auto-resume — operator clicks Upload
@@ -1525,6 +1600,7 @@ void UploadDialog::handleConnectivityTransition() {
         // queue per the locked design decision.
         if (runner_) runner_->setRetryEnabled(true);
         offline_pause_active_ = false;
+        maybeStartCloudCheck();
     }
     refreshConnectivityBanner();
     refreshButtonStates();
@@ -1575,6 +1651,254 @@ void UploadDialog::refreshConnectivityBanner() {
     offline_banner_label_->setText(msg);
     offline_banner_->setVisible(true);
     last_offline_reason_ = msg;
+}
+
+// ---------------------------------------------------------------------------
+// Cloud check (10 newest Uploaded rows, every listing)
+// ---------------------------------------------------------------------------
+
+void UploadDialog::maybeStartCloudCheck() {
+    // Thumb drive only: the manifest is a local file. RobotSsh is the
+    // unwired fallback and is not checked.
+    if (!isThumbDrive() || !isSourceReady() || !cloud_reachable_) return;
+    if (probe_in_progress_) return;
+    if (runner_ && runner_->isBusy()) return;
+    if (cloud_api_base_.isEmpty() || cloud_client_id_.isEmpty() ||
+        cloud_device_token_.isEmpty() || robot_id_.isEmpty()) return;
+    if (probe_serial_ == 0 || cloud_check_for_probe_ == probe_serial_) return;
+
+    QList<UploadTarget> done;
+    for (const UploadTarget& target : all_targets_) {
+        if (target.status == UploadStatus::Done) done.append(target);
+    }
+    std::sort(done.begin(), done.end(),
+              [](const UploadTarget& a, const UploadTarget& b) {
+                  if (a.captured_at.isValid() && b.captured_at.isValid() &&
+                      a.captured_at != b.captured_at) {
+                      return a.captured_at > b.captured_at;
+                  }
+                  return a.run_id > b.run_id;
+              });
+    if (done.size() > kCloudVerifyNewest) {
+        done = done.mid(0, kCloudVerifyNewest);
+    }
+    cloud_check_for_probe_ = probe_serial_;
+    if (done.isEmpty()) return;
+    startCloudCheck(done);
+}
+
+void UploadDialog::startCloudCheck(const QList<UploadTarget>& newest_done) {
+    if (!cloud_verifier_) return;
+    ++verify_generation_;
+    const int generation = verify_generation_;
+    cloud_listings_.clear();
+    loaded_manifests_.clear();
+    manifests_ready_ = false;
+    cloud_check_ids_.clear();
+
+    QList<QPair<QString, QString>> jobs;
+    for (const UploadTarget& src : newest_done) {
+        if (!all_targets_.contains(src.run_id)) continue;
+        UploadTarget& cached = all_targets_[src.run_id];
+        if (cached.status != UploadStatus::Done) continue;
+        cached.cloud_check = CloudCheck::Checking;
+        cached.force_reupload = false;
+        cloud_check_ids_ << src.run_id;
+        jobs.append(qMakePair(src.run_id,
+                              src.data_path + QStringLiteral("/manifest.json")));
+        presentCloudRow(cached, false);
+    }
+    if (cloud_check_ids_.isEmpty()) {
+        cloud_verifier_->cancel();
+        return;
+    }
+
+    noteCloudVerify(QStringLiteral("Checking %1 newest upload%2 against the cloud…")
+                        .arg(cloud_check_ids_.size())
+                        .arg(cloud_check_ids_.size() == 1 ? QString()
+                                                         : QStringLiteral("s")));
+    qInfo("[UploadDialog] cloud-verify: checking %d section(s)",
+          cloud_check_ids_.size());
+    refreshSelectionSummary();
+    refreshButtonStates();
+
+    auto* watcher = new QFutureWatcher<ManifestBatch>(this);
+    connect(watcher, &QFutureWatcher<ManifestBatch>::finished, this,
+            [this, watcher]() {
+                const ManifestBatch batch = watcher->result();
+                watcher->deleteLater();
+                onManifestsLoaded(batch.generation, batch.by_run);
+            });
+    const QStringList ids = cloud_check_ids_;
+    watcher->setFuture(QtConcurrent::run([generation, jobs]() {
+        ManifestBatch batch;
+        batch.generation = generation;
+        for (const auto& job : jobs) {
+            batch.by_run.insert(job.first, loadManifestAt(job.second));
+        }
+        return batch;
+    }));
+    cloud_verifier_->verify(robot_id_, ids, generation);
+}
+
+void UploadDialog::cancelCloudCheck(bool reschedule) {
+    bool was_checking = false;
+    for (const QString& run_id : cloud_check_ids_) {
+        if (all_targets_.value(run_id).cloud_check == CloudCheck::Checking) {
+            was_checking = true;
+            break;
+        }
+    }
+    ++verify_generation_;
+    if (cloud_verifier_) cloud_verifier_->cancel();
+    revertCheckingRows();
+    if (reschedule) cloud_check_for_probe_ = -1;
+    if (!was_checking) return;
+    // The row badges are back to Uploaded. Don't leave the status line
+    // saying the check is still running.
+    if (reschedule) {
+        noteCloudVerify(QStringLiteral(
+            "Cloud check stopped — cloud unreachable."));
+    } else {
+        noteCloudVerify(QStringLiteral("Found %1 scan%2.")
+                            .arg(all_targets_.size())
+                            .arg(all_targets_.size() == 1 ? QString()
+                                                         : QStringLiteral("s")));
+    }
+}
+
+void UploadDialog::revertCheckingRows() {
+    const QStringList ids = cloud_check_ids_;
+    for (const QString& run_id : ids) {
+        if (!all_targets_.contains(run_id)) continue;
+        UploadTarget& cached = all_targets_[run_id];
+        if (cached.cloud_check != CloudCheck::Checking) continue;
+        cached.cloud_check = CloudCheck::Unchecked;
+        cached.force_reupload = false;
+        presentCloudRow(cached, false);
+    }
+    refreshSelectionSummary();
+    refreshButtonStates();
+}
+
+void UploadDialog::onCloudRunFinished(int generation, const QString& run_id,
+                                      bool http_ok, const QList<CloudObject>& files,
+                                      const QString& error) {
+    if (generation != verify_generation_) return;
+    if (!http_ok) {
+        // One failed request means the check is unavailable. Rows that
+        // were still "checking" go back to Uploaded; nothing is guessed.
+        const QString line =
+            QStringLiteral("cloud-verify %1: unavailable (%2)").arg(run_id, error);
+        qInfo("[UploadDialog] %s", qUtf8Printable(line));
+        noteCloudVerify(line);
+        revertCheckingRows();
+        return;
+    }
+    cloud_listings_.insert(run_id, files);
+    if (manifests_ready_ && cloud_listings_.size() >= cloud_check_ids_.size()) {
+        for (const QString& id : cloud_check_ids_) applyCloudResult(id);
+    }
+}
+
+void UploadDialog::onManifestsLoaded(int generation,
+                                     const QHash<QString, LoadedManifest>& by_run) {
+    if (generation != verify_generation_) return;
+    loaded_manifests_ = by_run;
+    manifests_ready_ = true;
+    if (cloud_listings_.size() < cloud_check_ids_.size()) return;
+    for (const QString& id : cloud_check_ids_) applyCloudResult(id);
+}
+
+void UploadDialog::applyCloudResult(const QString& run_id) {
+    if (!all_targets_.contains(run_id)) return;
+    UploadTarget& cached = all_targets_[run_id];
+    if (cached.status != UploadStatus::Done) return;
+    if (cached.cloud_check != CloudCheck::Checking) return;
+
+    const LoadedManifest manifest = loaded_manifests_.value(run_id);
+    QString summary;
+    if (!manifest.ok) {
+        cached.cloud_check = CloudCheck::Unchecked;
+        cached.force_reupload = false;
+        summary = QStringLiteral("unavailable (%1)")
+                      .arg(manifest.error.isEmpty()
+                               ? QStringLiteral("manifest unreadable")
+                               : manifest.error);
+        presentCloudRow(cached, false);
+    } else if (!manifestMatchesLogin(manifest.client_id, manifest.robot_id,
+                                    cloud_client_id_, robot_id_)) {
+        // Listing this under the logged-in robot came back empty or
+        // different because the objects live in another prefix. Leave
+        // the row Uploaded so Upload cannot move them.
+        cached.cloud_check = CloudCheck::Unchecked;
+        cached.force_reupload = false;
+        summary = QStringLiteral("skipped (belongs to %1 / %2)")
+                      .arg(manifest.client_id.isEmpty() ? QStringLiteral("unknown client")
+                                                       : manifest.client_id,
+                           manifest.robot_id.isEmpty() ? QStringLiteral("unknown robot")
+                                                      : manifest.robot_id);
+        presentCloudRow(cached, false);
+    } else {
+        const CloudCompareResult result = compareManifestWithCloud(
+            manifest.files, cloud_listings_.value(run_id));
+        summary = cloudVerifySummary(result);
+        if (result.matches) {
+            cached.cloud_check = CloudCheck::Verified;
+            cached.force_reupload = false;
+            presentCloudRow(cached, false);
+        } else {
+            cached.cloud_check = CloudCheck::Missing;
+            cached.force_reupload = true;
+            presentCloudRow(cached, true);
+        }
+    }
+    const QString line = QStringLiteral("cloud-verify %1: %2").arg(run_id, summary);
+    qInfo("[UploadDialog] %s", qUtf8Printable(line));
+    noteCloudVerify(line);
+
+    int pending = 0;
+    int missing = 0;
+    int verified = 0;
+    for (const QString& id : cloud_check_ids_) {
+        if (!all_targets_.contains(id)) continue;
+        const CloudCheck state = all_targets_[id].cloud_check;
+        if (state == CloudCheck::Checking) ++pending;
+        else if (state == CloudCheck::Missing) ++missing;
+        else if (state == CloudCheck::Verified) ++verified;
+    }
+    if (pending == 0 && missing > 0) {
+        noteCloudVerify(QStringLiteral("Cloud check: %1 section%2 missing in cloud.")
+                            .arg(missing)
+                            .arg(missing == 1 ? QString() : QStringLiteral("s")));
+    } else if (pending == 0 && verified == cloud_check_ids_.size() && verified > 0) {
+        noteCloudVerify(QStringLiteral("Cloud check: %1 section%2 verified.")
+                            .arg(verified)
+                            .arg(verified == 1 ? QString() : QStringLiteral("s")));
+    }
+    refreshSelectionSummary();
+    refreshButtonStates();
+}
+
+void UploadDialog::presentCloudRow(const UploadTarget& target, bool tick_if_missing) {
+    QTreeWidgetItem* row = findSectionRow(target);
+    if (!row || !tree_) return;
+    setSectionRowStatus(row, target);
+    QSignalBlocker blocker(tree_);
+    const bool missing = target.status == UploadStatus::Done &&
+                         target.cloud_check == CloudCheck::Missing;
+    if (target.status == UploadStatus::Done && !missing) {
+        row->setFlags(row->flags() & ~Qt::ItemIsEnabled);
+        row->setCheckState(0, Qt::Unchecked);
+    } else if (missing) {
+        row->setFlags(row->flags() | Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        if (tick_if_missing) row->setCheckState(0, Qt::Checked);
+    }
+}
+
+void UploadDialog::noteCloudVerify(const QString& line) {
+    if (runner_ && runner_->isBusy()) return;
+    if (lbl_probe_status_) lbl_probe_status_->setText(line);
 }
 
 }  // namespace f2c_cpp

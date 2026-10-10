@@ -31,6 +31,7 @@ using f2c_cpp::UploadStatus;
 using f2c_cpp::UploadTarget;
 using f2c_cpp::classifyStickSync;
 using f2c_cpp::parseOffloadStatusJson;
+using f2c_cpp::uploaderArguments;
 
 namespace {
 
@@ -58,6 +59,11 @@ void layOutStick(const QString& root) {
     writeFile(b + "/Section_2_113000/upload_state.json",
               R"({"completed":["a.bin","b.bin"]})");
     writeFile(b + "/Section_2_113000/pause.flag", "");
+    // Atomic-write leftovers are not data. A capture file that happens
+    // to end in .tmp still is.
+    writeFile(b + "/Section_2_113000/upload_state.json.tmp", "");
+    writeFile(b + "/Section_2_113000/manifest.json.tmp", QByteArray(4, 't'));
+    writeFile(b + "/Section_2_113000/notes.tmp", QByteArray(3, 'n'));
 
     // Fully uploaded: manifest present.
     writeFile(b + "/Mission_101400/GNSS_data/rover.ubx", QByteArray(64, 'g'));
@@ -117,8 +123,27 @@ TEST(UploadThumbDrive, LocalWalkClassifiesPartialFromStateFile) {
     ASSERT_NE(s2, nullptr);
     EXPECT_EQ(s2->status, UploadStatus::Partial);
     EXPECT_EQ(s2->completed_files, 2);
-    // Sentinels (upload_state.json, pause.flag) are not data files.
-    EXPECT_EQ(s2->total_files, 3);
+    // Bookkeeping sentinels (including the atomic-write .tmp siblings)
+    // are not data. notes.tmp is a capture file and still counts.
+    EXPECT_EQ(s2->total_files, 4);
+}
+
+TEST(UploadThumbDrive, ManifestBesideStateIsNotConfirmed) {
+    QTemporaryDir tmp;
+    ASSERT_TRUE(tmp.isValid());
+    const QString section = tmp.path() + "/September_13_2026/Acme_HQ/Section_3_120000";
+    writeFile(section + "/a.bin", QByteArray(8, 'a'));
+    writeFile(section + "/manifest.json",
+              R"({"files":[{"relpath":"a.bin","size_bytes":8}]})");
+    writeFile(section + "/upload_state.json",
+              R"({"completed":["a.bin"],"uploaded":{"a.bin":{"size":8,"md5":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}})");
+
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    const UploadTarget* s3 = find(all, "Section_3_120000");
+    ASSERT_NE(s3, nullptr);
+    EXPECT_EQ(s3->status, UploadStatus::Partial);
+    EXPECT_EQ(s3->completed_files, 1);
+    EXPECT_EQ(s3->total_files, 1);
 }
 
 TEST(UploadThumbDrive, LocalWalkClassifiesDoneFromManifest) {
@@ -251,6 +276,126 @@ print("Upload complete: {}", flush=True)
         }
     }
     EXPECT_TRUE(saw_args) << logs.join(" | ").toStdString();
+}
+
+TEST(UploadThumbDrive, ForceArgOnlyWhenRequested) {
+    const QStringList plain =
+        uploaderArguments("s.py", "/data", "R", "run/a", false);
+    EXPECT_EQ(plain, (QStringList{"-u", "s.py", "/data", "R", "run/a"}));
+    const QStringList forced =
+        uploaderArguments("s.py", "/data", "R", "run/a", true);
+    EXPECT_EQ(forced.mid(0, 5), plain);
+    EXPECT_EQ(forced.last(), "--force");
+}
+
+TEST(UploadThumbDrive, LocalRunnerPassesForceOnlyForThatTarget) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+
+    QTemporaryDir tmp;
+    ASSERT_TRUE(tmp.isValid());
+    layOutStick(tmp.path());
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    const UploadTarget* s1 = find(all, "Section_1_101500");
+    const UploadTarget* s2 = find(all, "Section_2_113000");
+    ASSERT_NE(s1, nullptr);
+    ASSERT_NE(s2, nullptr);
+    UploadTarget forced = *s1;
+    forced.force_reupload = true;
+    UploadTarget plain = *s2;
+
+    const QString stub = tmp.path() + "/stub_force.py";
+    writeFile(stub, R"PY(
+import sys
+flag = "yes" if "--force" in sys.argv else "no"
+print(f"force={flag} {sys.argv[3]}", flush=True)
+print("Upload complete: {}", flush=True)
+)PY");
+
+    UploadRunner runner;
+    runner.setLocalScriptPath(stub);
+    runner.setCloudAuth("https://api.example", "c", "t");
+    runner.setRobotId("Roofus#0001");
+    runner.setQueue({forced, plain});
+
+    QStringList logs;
+    QEventLoop loop;
+    QObject::connect(&runner, &UploadRunner::logLine,
+                     [&](const QString& l) { logs << l; });
+    QObject::connect(&runner, &UploadRunner::queueFinished,
+                     [&](bool) { loop.quit(); });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    runner.start();
+    loop.exec();
+
+    const QString joined = logs.join("\n");
+    EXPECT_TRUE(joined.contains(
+        "force=yes September_13_2026/Acme_HQ/Section_1_101500"))
+        << joined.toStdString();
+    EXPECT_TRUE(joined.contains(
+        "force=no September_13_2026/Acme_HQ/Section_2_113000"))
+        << joined.toStdString();
+    const int yes = joined.indexOf("force=yes");
+    const int no = joined.indexOf("force=no");
+    EXPECT_GT(no, yes);
+}
+
+TEST(UploadThumbDrive, RetryAfterForceDoesNotPassForceAgain) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+
+    QTemporaryDir tmp;
+    ASSERT_TRUE(tmp.isValid());
+    layOutStick(tmp.path());
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    const UploadTarget* s1 = find(all, "Section_1_101500");
+    ASSERT_NE(s1, nullptr);
+    UploadTarget forced = *s1;
+    forced.force_reupload = true;
+
+    const QString stub = tmp.path() + "/stub_retry.py";
+    writeFile(stub, R"PY(
+import os, sys
+root = sys.argv[1]
+marker = os.path.join(root, "launches.txt")
+n = int(open(marker).read()) if os.path.exists(marker) else 0
+open(marker, "w").write(str(n + 1))
+print("force=" + ("yes" if "--force" in sys.argv else "no"), flush=True)
+if n == 0:
+    print("Connection error: blip", flush=True)
+    print("Auto-pausing. You can resume later.", flush=True)
+else:
+    print("Upload complete: {}", flush=True)
+)PY");
+
+    UploadRunner runner;
+    runner.setLocalScriptPath(stub);
+    runner.setCloudAuth("https://api.example", "c", "t");
+    runner.setRobotId("Roofus#0001");
+    runner.setQueue({forced});
+
+    QStringList logs;
+    bool finished = false;
+    QEventLoop loop;
+    QObject::connect(&runner, &UploadRunner::logLine,
+                     [&](const QString& l) { logs << l; });
+    QObject::connect(&runner, &UploadRunner::queueFinished, [&](bool) {
+        finished = true;
+        loop.quit();
+    });
+    QTimer::singleShot(15000, &loop, &QEventLoop::quit);
+    runner.start();
+    loop.exec();
+
+    const QString joined = logs.join("\n");
+    EXPECT_TRUE(finished) << joined.toStdString();
+    EXPECT_TRUE(joined.contains("force=yes")) << joined.toStdString();
+    EXPECT_TRUE(joined.contains("force=no")) << joined.toStdString();
+    EXPECT_LT(joined.indexOf("force=yes"), joined.indexOf("force=no"));
 }
 
 TEST(UploadThumbDrive, LocalRunnerReportsMissingInterpreterAsFailure) {
