@@ -755,6 +755,14 @@ kept in sync by hand.
   New manifests also store `md5` beside `sha256` and `size_bytes` so the
   cloud check can compare an S3 ETag. Manifests without `md5` are
   compared on size only.
+- **`Content-MD5` is signed by `/presign`.** The script sends
+  `content_md5` (base64 MD5 of the bytes it is about to PUT). The
+  header is added to the PUT only when the response has
+  `md5_signed: true` — S3 rejects an unsigned `Content-MD5` with
+  403 `HeadersNotSigned`. A Lambda that does not sign still uploads:
+  the ETag check is the fallback, and one warning is logged per run.
+  The deployed Lambda source is `docs/roofus_presign_lambda.py`;
+  this repo does not build or deploy it.
 - **State on the stick, not the laptop.** The probe re-derives
   Done/Partial/None from on-disk truth on every dialog open / stick
   insertion.
@@ -829,6 +837,9 @@ clearing, `FailedToStart` handling).
 - The SSH fallback **must NOT** go through `ros2 run` — invoke
   `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`
   directly.
+- **Do NOT send `Content-MD5` unless `/presign` returned
+  `md5_signed: true`.** S3 answers 403 `HeadersNotSigned` and the
+  section stops.
 - **Do NOT pass `--force` on a retry or a resume.** It deletes
   `manifest.json`, `upload_state.json`, and their `.tmp` siblings.
   Only the first launch of a **Missing in cloud** row sets it.

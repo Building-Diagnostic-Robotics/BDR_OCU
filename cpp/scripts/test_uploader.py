@@ -3,7 +3,8 @@
 
 A local PUT server stands in for S3: it records the bytes and headers
 the script actually sends. The suite fails if a non-empty file is
-accepted without a matching Content-MD5 and ETag.
+accepted without an ETag that matches those bytes. Content-MD5 is
+required on the PUT only when /presign reports md5_signed.
 """
 
 import base64
@@ -147,6 +148,8 @@ class UploadCase(unittest.TestCase):
         with SERVER.lock:
             SERVER.puts.clear()
         self.complete_calls = []
+        self.presign_calls = []
+        self.md5_signed = True
         self.presign = unittest.mock.patch.object(
             uploader, "presign", side_effect=self._presign)
         self.complete = unittest.mock.patch.object(
@@ -162,10 +165,14 @@ class UploadCase(unittest.TestCase):
         uploader.UPLOAD_WORKERS = self._workers
         self.tmp.cleanup()
 
-    def _presign(self, robot_id, run_id, relpath, size_bytes):
+    def _presign(self, robot_id, run_id, relpath, size_bytes, content_md5):
+        self.presign_calls.append((relpath, size_bytes, content_md5))
         query = urllib.parse.urlencode(
             {"rel": relpath, "size": str(size_bytes)})
-        return {"upload_url": "http://127.0.0.1:%d/put?%s" % (PORT, query)}
+        return {
+            "upload_url": "http://127.0.0.1:%d/put?%s" % (PORT, query),
+            "md5_signed": self.md5_signed,
+        }
 
     def _complete(self, robot_id, run_id, manifest_relpath=uploader.MANIFEST_FILENAME):
         self.complete_calls.append((robot_id, run_id, manifest_relpath))
@@ -588,6 +595,41 @@ class PutTests(UploadCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("Manual pause detected.", out)
         self.assertEqual(self.puts(), [])
+
+    def test_presign_is_asked_to_sign_the_file_md5(self):
+        payload = b"abc"
+        write(os.path.join(self.root, "a.bin"), payload)
+        rc, out = self.run_upload()
+        self.assertEqual(rc, 0, out)
+        by_rel = {rel: (size, md5) for rel, size, md5 in self.presign_calls}
+        expect = base64.b64encode(hashlib.md5(payload).digest()).decode("ascii")
+        self.assertEqual(by_rel["a.bin"], (len(payload), expect))
+        put = next(rec for rec in self.puts() if rec["rel"] == "a.bin")
+        self.assertEqual(put["content_md5"], expect)
+        self.assertNotIn("did not sign Content-MD5", out)
+
+    def test_unsigned_presign_omits_content_md5(self):
+        self.md5_signed = False
+        write(os.path.join(self.root, "a.bin"), b"abc")
+        write(os.path.join(self.root, "b.bin"), b"defg")
+        rc, out = self.run_upload()
+        self.assertEqual(rc, 0, out)
+        self.assertGreaterEqual(len(self.puts()), 3)
+        for rec in self.puts():
+            self.assertIsNone(rec["content_md5"], rec["rel"])
+        self.assertEqual(out.count("did not sign Content-MD5"), 1)
+
+    def test_unsigned_presign_still_rejects_a_bad_etag(self):
+        self.md5_signed = False
+        SERVER.mode = "lie_empty"
+        write(os.path.join(self.root, "a.bin"), b"not-empty")
+        rc, out = self.run_upload()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("different bytes", out)
+        self.assertNotIn("Connection error:", out)
+        self.assertIsNone(self.puts()[0]["content_md5"])
+        self.assertFalse(os.path.exists(
+            os.path.join(self.root, "manifest.json")))
 
 
 if __name__ == "__main__":
