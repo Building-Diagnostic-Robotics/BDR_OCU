@@ -67,7 +67,7 @@ import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 try:
     import requests
@@ -100,6 +100,10 @@ CHUNK_BYTES = 8 * 1024 * 1024
 # Parallel workers share it.
 _unsigned_md5_lock = threading.Lock()
 _unsigned_md5_warned = False
+# Set for the duration of one upload_run. None means this stick has no
+# per-file record (copied before schema 2) and nothing is checked.
+_copy_record = None
+_stick_extra_warned = set()
 
 try:
     UPLOAD_WORKERS = max(1, int(os.environ.get("BDR_UPLOAD_WORKERS", "12")))
@@ -109,6 +113,9 @@ except ValueError:
 STATE_FILENAME = "upload_state.json"
 PAUSE_FILENAME = "pause.flag"
 MANIFEST_FILENAME = "manifest.json"
+# Written by the robot after it copies a mission to the stick. Schema 2
+# carries a per-file sha256 taken from the robot's own disk.
+THUMB_MANIFEST = "thumbsync_manifest.json"
 _BOOKKEEPING_NAMES = frozenset((
     STATE_FILENAME,
     PAUSE_FILENAME,
@@ -616,7 +623,7 @@ def put_verified_file(robot_id: str, run_id: str,
         raise RuntimeError(
             f"File exceeds 5GB single-PUT limit: {rel_norm} ({stamped} bytes)")
     try:
-        size, md5_hex, _sha = hash_file(full)
+        size, md5_hex, sha = hash_file(full)
     except OSError as exc:
         raise UploadIntegrityError(f"cannot read {rel_norm}: {exc}") from exc
     if size > MAX_FILE_BYTES:
@@ -632,6 +639,7 @@ def put_verified_file(robot_id: str, run_id: str,
             f"(read {size} bytes, file is now {current} bytes)")
     if size == 0:
         print(f"Warning: {rel_norm} is 0 bytes; uploading it empty.", flush=True)
+    _check_stick_copy(rel_norm, size, sha)
     _presign_and_put(robot_id, run_id, rel_norm, full, md5_hex, size)
     try:
         after = os.path.getsize(full)
@@ -656,11 +664,28 @@ def iter_files(root_dir: str):
             yield full, rel
 
 
+def _stick_extra(rel_norm: str) -> bool:
+    """True when the robot's record does not include this file.
+
+    thumbsync_manifest.json is the robot's own provenance and is still
+    uploaded. Each extra file is named once per run.
+    """
+    if _copy_record is None or rel_norm in _copy_record.by_rel:
+        return False
+    if rel_norm == THUMB_MANIFEST:
+        return False
+    if rel_norm not in _stick_extra_warned:
+        _stick_extra_warned.add(rel_norm)
+        print(f"Warning: {rel_norm} is not in the robot's copy record; "
+              f"not uploading it.", flush=True)
+    return True
+
+
 def data_files(data_root: str) -> List[Tuple[str, str]]:
     found: List[Tuple[str, str]] = []
     for full, rel in iter_files(data_root):
         rel_norm = rel.replace("\\", "/")
-        if is_sentinel(rel_norm):
+        if is_sentinel(rel_norm) or _stick_extra(rel_norm):
             continue
         found.append((full, rel_norm))
     return found
@@ -947,6 +972,143 @@ def _run_pending(data_root: str, robot_id: str, run_id: str,
     return None
 
 
+class CopyRecord(NamedTuple):
+    """Per-file sha256 the robot recorded for this one folder."""
+
+    by_rel: dict
+    mission_rel: str
+
+
+def _read_json_object(path: str):
+    try:
+        with open(path, "r") as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    return doc
+
+
+def _mission_relpath(manifest_path: str) -> str:
+    """`<date>/<building>/Mission_*` for the operator's recovery step."""
+    mission = os.path.dirname(os.path.abspath(manifest_path))
+    building = os.path.dirname(mission)
+    day = os.path.dirname(building)
+    parts = (os.path.basename(day), os.path.basename(building),
+             os.path.basename(mission))
+    if all(parts):
+        return "/".join(parts)
+    return mission
+
+
+def find_thumb_manifest(data_root: str) -> Optional[str]:
+    """This folder's thumbsync manifest, or None when the stick has none.
+
+    A mission folder carries its own. A section folder uses the sibling
+    Mission_* manifest that lists it. Two missions listing the same
+    section is an error: there is no safe record to trust.
+    """
+    root = os.path.abspath(data_root)
+    own = os.path.join(root, THUMB_MANIFEST)
+    if os.path.isfile(own):
+        return own
+    folder = os.path.basename(root)
+    try:
+        names = os.listdir(os.path.dirname(root))
+    except OSError:
+        return None
+    matches = []
+    for name in names:
+        if not name.startswith("Mission_"):
+            continue
+        path = os.path.join(os.path.dirname(root), name, THUMB_MANIFEST)
+        if not os.path.isfile(path):
+            continue
+        doc = _read_json_object(path)
+        sections = doc.get("sections") if doc else None
+        if isinstance(sections, list) and folder in sections:
+            matches.append(path)
+    if len(matches) > 1:
+        raise UploadIntegrityError(
+            f"More than one mission on the stick lists {folder}; "
+            "cannot tell which copy record to trust.")
+    if matches:
+        return matches[0]
+    return None
+
+
+def _parse_copy_files(files: dict, folder: str) -> dict:
+    prefix = folder + "/"
+    by_rel = {}
+    for key, rec in files.items():
+        if not isinstance(key, str) or not key.startswith(prefix):
+            continue
+        rel = key[len(prefix):]
+        if not rel or rel.startswith("/") or ".." in rel.split("/"):
+            raise UploadIntegrityError(
+                f"{THUMB_MANIFEST} has an invalid path {key!r}.")
+        if not isinstance(rec, dict):
+            raise UploadIntegrityError(
+                f"{THUMB_MANIFEST} entry for {key} is not an object.")
+        size = rec.get("size")
+        sha = rec.get("sha256")
+        sha_ok = (isinstance(sha, str) and len(sha) == 64
+                  and all(c in "0123456789abcdef" for c in sha.lower()))
+        if type(size) is not int or size < 0 or not sha_ok:
+            raise UploadIntegrityError(
+                f"{THUMB_MANIFEST} entry for {key} has no size and sha256.")
+        by_rel[rel] = (size, sha.lower())
+    return by_rel
+
+
+def load_copy_record(data_root: str) -> Optional[CopyRecord]:
+    """The robot's record for this folder, or None on a pre-schema-2 stick.
+
+    None means upload as before. A record is enforced: a bad manifest
+    raises instead of being treated as "no record".
+    """
+    path = find_thumb_manifest(data_root)
+    if path is None:
+        return None
+    doc = _read_json_object(path)
+    if doc is None:
+        raise UploadIntegrityError(
+            f"{THUMB_MANIFEST} is unreadable; not uploading.")
+    files = doc.get("files")
+    if not isinstance(files, dict):
+        return None
+    folder = os.path.basename(os.path.abspath(data_root))
+    return CopyRecord(_parse_copy_files(files, folder), _mission_relpath(path))
+
+
+def _stick_recovery(record: CopyRecord) -> str:
+    return (f"Delete {record.mission_rel} on the stick, then plug the stick "
+            f"into the robot to re-copy it.")
+
+
+def _check_stick_copy(rel_norm: str, size: int, sha: str) -> None:
+    if _copy_record is None:
+        return
+    expected = _copy_record.by_rel.get(rel_norm)
+    if expected is None:
+        return
+    if size == expected[0] and sha == expected[1]:
+        return
+    raise UploadIntegrityError(
+        f"Stick copy of {rel_norm} does not match the robot. "
+        + _stick_recovery(_copy_record))
+
+
+def missing_stick_files(data_root: str, record: CopyRecord) -> List[str]:
+    missing = []
+    for rel in record.by_rel:
+        path = os.path.join(data_root, *rel.split("/"))
+        if os.path.islink(path) or not os.path.isfile(path):
+            missing.append(rel)
+    return missing
+
+
 def upload_run(data_root: str, robot_id: str, run_id: str, *,
                force: bool = False) -> int:
     if not CLIENT_ID:
@@ -962,8 +1124,27 @@ def upload_run(data_root: str, robot_id: str, run_id: str, *,
         print(f"Connection error: data_root does not exist: {data_root}", flush=True)
         return 1
 
+    global _copy_record
+    _copy_record = None
+    _stick_extra_warned.clear()
     _reset_unsigned_md5_warning()
     remove_stale_temps(data_root)
+
+    try:
+        _copy_record = load_copy_record(data_root)
+    except UploadIntegrityError as exc:
+        print(f"Unexpected error: {exc}", flush=True)
+        return 1
+    if _copy_record is not None:
+        missing = missing_stick_files(data_root, _copy_record)
+        if missing:
+            shown = ", ".join(missing[:5])
+            extra = (f" and {len(missing) - 5} more"
+                     if len(missing) > 5 else "")
+            print(f"Unexpected error: Stick is missing {shown}{extra} "
+                  f"that the robot copied. {_stick_recovery(_copy_record)}",
+                  flush=True)
+            return 1
 
     if force:
         # Drop the finished-upload markers first, then take the normal

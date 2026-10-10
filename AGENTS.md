@@ -743,8 +743,20 @@ kept in sync by hand.
 - **Per-section `run_id`.** `run_id = "<date>/<building>/<section>"`
   (or `Mission_HHMMSS`). Atomic — one section failure ≠ whole-day
   failure. S3 layout `<client_id>/<robot_id>/<run_id>/<relpath>` mirrors
-  the stick 1:1. `thumbsync_manifest.json` is ordinary data to the
-  uploader and ships with the mission (useful provenance).
+  the stick 1:1. `thumbsync_manifest.json` ships with the mission
+  (useful provenance). Schema 2 adds a `files` map, sha256 of each
+  file hashed on the robot's disk and keyed from the building folder
+  (`Section_1_120924/Visual_data/x.jpg`). A stick without that map
+  (any copy made before schema 2) uploads exactly as before.
+- **A schema-2 record is enforced.** A file whose sha256 or size
+  disagrees is not uploaded, and neither is the rest of that section.
+  The message tells the operator to delete
+  `<date>/<building>/Mission_HHMMSS` on the stick and plug it into the
+  robot, which re-copies because the manifest is gone. A file the
+  robot recorded but the stick lacks stops the section before
+  anything is uploaded. A file on the stick that the robot did not
+  record is skipped, with one warning naming it.
+  `thumbsync_manifest.json` itself is still uploaded.
 - **Single PUT only.** Backend mints single-PUT presigns; per-file
   ceiling is 5 GB.
 - **Sequential targets, parallel files within a target.** Script's
@@ -837,6 +849,9 @@ clearing, `FailedToStart` handling).
 - The SSH fallback **must NOT** go through `ros2 run` — invoke
   `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`
   directly.
+- **Do NOT upload a schema-2 section whose stick bytes disagree
+  with `thumbsync_manifest.json`.** Delete that mission folder on
+  the stick and let the robot re-copy it. Do not re-copy by hand.
 - **Do NOT send `Content-MD5` unless `/presign` returned
   `md5_signed: true`.** S3 answers 403 `HeadersNotSigned` and the
   section stops.
