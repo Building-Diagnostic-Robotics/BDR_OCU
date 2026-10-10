@@ -263,5 +263,21 @@ inline double GestureState::takeScaleFactor() noexcept {
     return factor;
 }
 
+/**
+ * Bearing after a finger twist, for a canvas whose bearing is the compass
+ * direction at the top of the screen and whose imagery is painted with
+ * rotate(-bearing).
+ *
+ * `twist_deg` is clockwise on screen (Motion::twist_deg). Subtracting it
+ * is what makes the imagery follow the fingers: raising the bearing turns
+ * the content the other way. Canvases that store a plain clockwise view
+ * rotation (the alignment panes) add the twist instead and must not call
+ * this.
+ */
+inline double bearingAfterTwist(double bearing_deg,
+                                double twist_deg) noexcept {
+    return bearing_deg - twist_deg;
+}
+
 }  // namespace touch_gestures
 }  // namespace f2c_cpp
