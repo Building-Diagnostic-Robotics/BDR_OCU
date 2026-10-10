@@ -606,6 +606,12 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME upload_thumb_drive_tests COMMAND upload_thumb_drive_tests)
 
+        # uploader.py integrity checks (Content-MD5, ETag, resume). No Qt.
+        add_test(
+            NAME uploader_integrity_tests
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_uploader.py
+        )
+
         # Laptop↔robot ~/pilot_ws sanitizers + package map. Header listed
         # so AUTOMOC generates RepoSyncManager's moc (Q_OBJECT).
         add_executable(repo_sync_tests
@@ -691,7 +697,7 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME touch_gesture_state_tests COMMAND touch_gesture_state_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests)")
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests uploader_integrity_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()
