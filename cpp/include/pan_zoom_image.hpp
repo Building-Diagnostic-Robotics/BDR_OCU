@@ -70,6 +70,13 @@ public:
      */
     void setView(const QPointF& image_center, double scale);
 
+    /**
+     * Frames the view on a region of the image, and keeps it framed across
+     * resizes until the operator pans or zooms. Unlike `setView` this is safe
+     * to call before layout has sized the pane — the framing is applied as
+     * soon as there is a size to frame into.
+     */
+    void frameImageRect(const QRectF& image_rect);
     void setPickEnabled(bool enabled);
     /** Greys the pane out and refuses picks — used for "not your turn". */
     void setDimmed(bool dimmed);
@@ -115,6 +122,14 @@ public:
     /** Robot glyph at an image pixel, arrow along `heading_rad`. */
     void setRobotPose(const QPointF& origin_px, double heading_rad,
                       bool visible);
+    /**
+     * Where the map-collection GPS fix puts the robot: a dashed circle of
+     * `radius_px` image pixels (its uncertainty) with `label` beside it. Not a
+     * pick and not the fit — it is the independent position the picks are
+     * cross-checked against, so it stays up while they are made.
+     */
+    void setSeedMarker(const QPointF& center_px, double radius_px,
+                       const QString& label, bool visible);
     void clearOverlays();
     void fitToView();
 
@@ -168,6 +183,9 @@ private:
     // widget its real size, so a one-shot fit leaves the image tiny in the
     // corner of a pane that later grew.
     bool user_adjusted_ = false;
+    /** Region `frameImageRect` asked for; null once the operator takes over. */
+    QRectF frame_rect_;
+    bool applyFrameRect();
 
     bool pick_enabled_ = false;
     bool dimmed_ = false;
@@ -189,6 +207,10 @@ private:
     QPointF robot_origin_;
     double robot_heading_rad_ = 0.0;
     bool robot_visible_ = false;
+    QPointF seed_center_;
+    double seed_radius_px_ = 0.0;
+    QString seed_label_;
+    bool seed_visible_ = false;
 
     bool panning_ = false;
     QPoint last_pan_pos_;

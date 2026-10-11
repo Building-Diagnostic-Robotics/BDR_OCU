@@ -130,6 +130,21 @@ constexpr double kPickScreenPx = 1.5;
 // sigma -> 0 and steamroll every other pair, when in truth no amount of zoom
 // localises a roof corner in satellite imagery to a centimetre.
 constexpr double kPickFloorM = 0.12;
+// Both panes are top-down views of one roof, so the cloud can only be turned
+// in plane to meet the imagery, never mirrored. Metres are Y-up and pixels
+// Y-down, which makes that pure rotation an orientation-REVERSING matrix; every
+// solve in this file is held to that branch. See FitHandedness.
+constexpr FitHandedness kPcdToSatHandedness = FitHandedness::Reversing;
+// How far a fit may sit from the GPS seed before the operator is told. The
+// seed is independent of every pick, so it is the only check on the failure
+// residuals cannot see: a consistent set of picks onto the wrong roof, or onto
+// the right one turned round. Position is in seed sigmas. Heading is a fixed
+// angle and a loose one off anything but RTK: the bearing comes from a ~1 m
+// track, where a metre-grade fix can honestly be tens of degrees out, and an
+// advisory that fires on every ordinary fix teaches the operator to ignore it.
+constexpr double kSeedOriginWarnSigma = 3.0;
+constexpr double kSeedHeadingWarnRtkDeg = 15.0;
+constexpr double kSeedHeadingWarnDeg = 45.0;
 // A fitted scale this far from the imagery's own is not pick noise — across a
 // site of this size Mercator scale varies by ~5e-5 — so the fit is wrong and
 // must not be allowed to re-project the view. See plausibleForProjection.
@@ -1157,7 +1172,29 @@ void SatelliteScreen::devSeedDemoPlan() {
     applyModeVisibility();
 }
 
-void SatelliteScreen::devSeedDemoAlignment(bool review, bool skewed) {
+namespace {
+
+// Where the demo site sits. The fixture's stitch bounds, GPS fix and picks are
+// all derived from this one anchor so they agree with each other — a fixture
+// whose georeference contradicts its own picks would trip the scale guard and
+// the seed cross-check, and every shot would be of the failure path.
+constexpr double kDevSiteLat = 43.600664;
+constexpr double kDevSiteLon = -116.249774;
+
+/** Web Mercator extent of a north-up demo image whose `origin_px` is the site. */
+QRectF devStitchBounds(const QSize& size, const QPointF& origin_px,
+                       double px_per_m) {
+    const double norm_per_px =
+        1.0 / (px_per_m * geo::metersPerNormUnit(kDevSiteLat));
+    return QRectF(geo::lonToNormX(kDevSiteLon) - origin_px.x() * norm_per_px,
+                  geo::latToNormY(kDevSiteLat) - origin_px.y() * norm_per_px,
+                  size.width() * norm_per_px, size.height() * norm_per_px);
+}
+
+}  // namespace
+
+void SatelliteScreen::devSeedDemoAlignment(bool review, bool skewed,
+                                           int keep_pairs, int gps) {
     // The skewed seed's frame-to-frame transform, written out so the imagery
     // and the picks are generated from the same numbers. Metres of cloud map
     // to satellite pixels through a Y flip (northing up, pixels down) and a
@@ -1192,7 +1229,10 @@ void SatelliteScreen::devSeedDemoAlignment(bool review, bool skewed) {
     }
     sp.end();
     sat_image_ = sat;
-    site_manifest_.stitch_bounds = QRectF(0.25, 0.35, 0.0004, 0.0003);
+    // Cloud (0, 0) is the middle of the drawn building in both variants.
+    site_manifest_.stitch_bounds =
+        skewed ? devStitchBounds(sat.size(), QPointF(450.0, 350.0), kSkewPxPerM)
+               : devStitchBounds(sat.size(), QPointF(430.0, 310.0), 19.0);
 
     QRectF bounds(-14.0, -10.0, 28.0, 20.0);
     QImage pcd(560, 400, QImage::Format_ARGB32);
@@ -1204,11 +1244,25 @@ void SatelliteScreen::devSeedDemoAlignment(bool review, bool skewed) {
     pcd_image_ = pcd;
     pcd_bounds_m_ = bounds;
 
-    capture_gps_.valid = true;
-    capture_gps_.lat = 43.600664;
-    capture_gps_.lon = -116.249774;
-    capture_gps_.fix_type = QStringLiteral("rtk_fixed");
-    capture_gps_.hacc_m = 0.021;
+    // A fix a little off the true origin and a few degrees off the true
+    // heading, as a real one is: cloud +X runs east in the clean site and 22°
+    // south of east in the skewed one.
+    capture_gps_ = GpsFix{};
+    if (gps != 2) {
+        const geo::GeoPoint site{kDevSiteLat, kDevSiteLon};
+        const geo::GeoPoint fix = (gps == 3)
+                                      ? geo::geoFromEnu(site, 400.0, 0.0)
+                                      : geo::geoFromEnu(site, 0.6, -0.4);
+        capture_gps_.valid = true;
+        capture_gps_.lat = fix.lat;
+        capture_gps_.lon = fix.lon;
+        capture_gps_.fix_type = QStringLiteral("rtk");
+        capture_gps_.hacc_m = 0.021;
+        if (gps != 1) {
+            capture_gps_.heading_valid = true;
+            capture_gps_.heading_deg = skewed ? (90.0 + kSkewDeg - 5.0) : 94.0;
+        }
+    }
     if (plan_mode_ == PlanMode::Measured) {
         // Mirror onMapCaptured: measured mode anchors at the grid origin and
         // stays on the canvas — there is nothing to align against.
@@ -1248,6 +1302,9 @@ void SatelliteScreen::devSeedDemoAlignment(bool review, bool skewed) {
         // other pair is exact, so this is the only thing the residuals and
         // the outlier ring can be reporting.
         pairs[3].first += QPointF(52.0, -30.0);
+    }
+    if (keep_pairs >= 0 && keep_pairs < pairs.size()) {
+        pairs.resize(keep_pairs);
     }
     for (const auto& pair : pairs) {
         correspondences_.append(Correspondence{pair.first, pair.second});
@@ -1314,7 +1371,8 @@ void SatelliteScreen::devSeedDemoAlignmentEmpty() {
     sp.drawLine(0, 520, 900, 500);
     sp.end();
     sat_image_ = sat;
-    site_manifest_.stitch_bounds = QRectF(0.25, 0.35, 0.0004, 0.0003);
+    site_manifest_.stitch_bounds =
+        devStitchBounds(sat.size(), QPointF(430.0, 310.0), 19.0);
     pcd_image_ = QImage();
     correspondences_.clear();
     have_pending_sat_ = false;
@@ -5225,6 +5283,70 @@ int SatelliteScreen::minCorrespondences() const {
     return capture_gps_.valid ? 3 : 5;
 }
 
+StitchGeoRef SatelliteScreen::stitchGeoRef() const {
+    StitchGeoRef geo_ref;
+    if (!sat_image_.isNull() && site_manifest_.stitch_bounds.isValid()) {
+        geo_ref.bounds = site_manifest_.stitch_bounds;
+        geo_ref.image_size = sat_image_.size();
+    }
+    return geo_ref;
+}
+
+double SatelliteScreen::stitchPxPerM() const {
+    const StitchGeoRef geo_ref = stitchGeoRef();
+    if (!geo_ref.valid()) {
+        return 0.0;
+    }
+    // Mercator scale moves ~1e-4 across a site, far inside every tolerance
+    // that reads this, so the stitch centre stands for the whole image.
+    const double mpp = geo_ref.metresPerPixel(geo_ref.centreLatDeg());
+    return (mpp > 1e-9 && std::isfinite(mpp)) ? (1.0 / mpp) : 0.0;
+}
+
+SeedPlacement SatelliteScreen::currentSeedPlacement() const {
+    return placeSeed(
+        makeGpsSeed(capture_gps_.valid, capture_gps_.lat, capture_gps_.lon,
+                    capture_gps_.heading_valid, capture_gps_.heading_deg,
+                    capture_gps_.fix_type, capture_gps_.hacc_m),
+        stitchGeoRef());
+}
+
+namespace {
+
+/** Whether a fit sits further from the GPS seed than the seed's own error allows. */
+bool seedDisagrees(const SeedAgreement& agreement, const GpsFix& fix,
+                   double fit_rmse_m) {
+    if (!agreement.valid) {
+        return false;
+    }
+    const GpsSeed seed =
+        makeGpsSeed(fix.valid, fix.lat, fix.lon, fix.heading_valid,
+                    fix.heading_deg, fix.fix_type, fix.hacc_m);
+    const double origin_limit =
+        kSeedOriginWarnSigma *
+        std::hypot(seedPositionSigmaM(seed), std::max(fit_rmse_m, kPickFloorM));
+    if (agreement.origin_offset_m > origin_limit) {
+        return true;
+    }
+    const double heading_limit =
+        seed.fix_type.startsWith(QLatin1String("rtk"), Qt::CaseInsensitive)
+            ? kSeedHeadingWarnRtkDeg
+            : kSeedHeadingWarnDeg;
+    return agreement.has_heading && agreement.heading_delta_deg > heading_limit;
+}
+
+/** "3.2 ft and 4°", or just the distance when the seed carried no heading. */
+QString seedAgreementText(const SeedAgreement& agreement) {
+    QString text = units::formatLength(agreement.origin_offset_m, 1);
+    if (agreement.has_heading) {
+        text += QStringLiteral(" and %1°")
+                    .arg(agreement.heading_delta_deg, 0, 'f', 0);
+    }
+    return text;
+}
+
+}  // namespace
+
 double SatelliteScreen::pairSigmaM(const Correspondence& c,
                                    double px_per_m) const {
     // Satellite pixels only become metres once a scale is known; with none,
@@ -5256,11 +5378,16 @@ void SatelliteScreen::resetSatelliteView() {
     sat_view_xform_ = QTransform();
     sat_view_fit_ = Similarity2D{};
     preview_fit_ = Similarity2D{};
+    preview_source_ = PreviewSource::None;
     preview_held_ = false;
+    seed_ = SeedPlacement{};
+    seed_agreement_ = SeedAgreement{};
+    seed_view_framed_ = false;
     if (sat_pick_) {
         sat_pick_->setResidualLines(QVector<QLineF>());
         sat_pick_->setFlaggedMarker(-1);
         sat_pick_->setRobotPose(QPointF(), 0.0, false);
+        sat_pick_->setSeedMarker(QPointF(), 0.0, QString(), false);
     }
 }
 
@@ -5349,17 +5476,55 @@ bool SatelliteScreen::plausibleForProjection(const Similarity2D& fit) const {
     // When the imagery's own ground scale is known, a fit that disagrees with
     // it is provably wrong — no operator judgement needed — and must not be
     // allowed to move the view the next pick is made in.
-    if (site_manifest_.res_m > 0.0) {
-        const double expected = 1.0 / site_manifest_.res_m;
+    const double expected = stitchPxPerM();
+    if (expected > 0.0) {
         return std::abs(px_per_m - expected) / expected <= kScaleRejectFrac;
     }
     return true;
 }
 
+void SatelliteScreen::frameSatelliteOnSeed() {
+    if (seed_view_framed_ || !sat_pick_ || !seed_.hasPosition() ||
+        pcd_bounds_m_.width() <= 0.0 || pcd_bounds_m_.height() <= 0.0) {
+        return;
+    }
+    // The ground the point-cloud pane opens on, carried into the canvas the
+    // satellite pane is showing — so the two panes start on the same patch of
+    // roof instead of one showing the building and the other the whole block.
+    QRectF frame;
+    if (preview_fit_.valid) {
+        const QRectF b = pcd_bounds_m_;
+        for (const QPointF& corner :
+             {b.topLeft(), b.topRight(), b.bottomLeft(), b.bottomRight()}) {
+            const QPointF px = sat_view_xform_.map(preview_fit_.apply(corner));
+            frame |= QRectF(px, QSizeF(1.0, 1.0));
+        }
+    } else {
+        // Position only: nothing says which way the cloud lies, so frame the
+        // circle that contains it whichever way that turns out to be.
+        const double radius_px =
+            0.5 * std::hypot(pcd_bounds_m_.width(), pcd_bounds_m_.height()) *
+            stitchPxPerM();
+        const QPointF centre = sat_view_xform_.map(seed_.origin_px);
+        frame = QRectF(centre - QPointF(radius_px, radius_px),
+                       QSizeF(2.0 * radius_px, 2.0 * radius_px));
+    }
+    if (frame.width() < 1.0 || frame.height() < 1.0) {
+        return;
+    }
+    sat_pick_->frameImageRect(frame);
+    seed_view_framed_ = true;
+}
+
 void SatelliteScreen::updateSatelliteAlignmentView() {
     preview_fit_ = Similarity2D{};
+    preview_source_ = PreviewSource::None;
     preview_held_ = false;
+    seed_agreement_ = SeedAgreement{};
     invalidateAlignmentResiduals();
+    // Re-derived on every pass rather than cached at capture: it depends on
+    // the stitch as much as on the fix, and those two arrive in either order.
+    seed_ = currentSeedPlacement();
 
     // Two pairs determine a similarity exactly, so the imagery can be put into
     // the robot frame from the second pick onward; it then tightens with every
@@ -5376,23 +5541,49 @@ void SatelliteScreen::updateSatelliteAlignmentView() {
             pcd.append(c.pcd_m);
             sat.append(c.sat_px);
         }
-        double px_per_m = (site_manifest_.res_m > 0.0)
-                              ? (1.0 / site_manifest_.res_m)
-                              : 0.0;
+        double px_per_m = stitchPxPerM();
         if (px_per_m <= 0.0) {
-            const auto seed = estimateSimilarity2D(pcd, sat);
+            const auto seed = estimateSimilarity2D(pcd, sat, QVector<double>(),
+                                                   kPcdToSatHandedness);
             if (seed && seed->transform.valid) {
                 px_per_m = seed->transform.scalePxPerM();
             }
         }
-        const auto robust =
-            fitSimilarityRobust(pcd, sat, correspondenceSigmas(px_per_m));
+        RobustFitOptions options;
+        options.handedness = kPcdToSatHandedness;
+        const auto robust = fitSimilarityRobust(
+            pcd, sat, correspondenceSigmas(px_per_m), options);
         if (robust && robust->fit.transform.valid) {
             preview_fit_ = robust->fit.transform;
+            preview_source_ = PreviewSource::Picks;
             corr_residuals_m_ = robust->fit.residuals_m;
             corr_studentized_ = robust->studentized;
             corr_weakly_checked_ = robust->weakly_checked;
             corr_outlier_index_ = worstOutlierIndex(*robust);
+        }
+    }
+
+    // Below two pairs there is nothing to solve, but the GPS seed does not need
+    // pairs: position, heading and the imagery's own ground scale are exactly
+    // what a similarity takes. So the imagery arrives in the robot frame BEFORE
+    // the first pick — which is the point of driving a seed leg during
+    // collection — and the first pair is made between two views that already
+    // read the same way up.
+    //
+    // Only ever a fallback, never over a fit from picks: landmarks the operator
+    // can see beat a fix with metres of error in it. The first pick is the
+    // half-way case — it pins position far better than GPS and says nothing
+    // about heading — so it replaces the seed's translation and keeps the rest.
+    if (!preview_fit_.valid && seed_.status == SeedStatus::Oriented &&
+        !sat_image_.isNull() && !pcd_image_.isNull()) {
+        if (correspondences_.size() == 1) {
+            preview_fit_ = refitSeedThroughPair(
+                seed_.fit, correspondences_.first().pcd_m,
+                correspondences_.first().sat_px);
+            preview_source_ = PreviewSource::SeedPinned;
+        } else {
+            preview_fit_ = seed_.fit;
+            preview_source_ = PreviewSource::Seed;
         }
     }
 
@@ -5430,9 +5621,33 @@ void SatelliteScreen::updateSatelliteAlignmentView() {
         preview_held_ = true;
         invalidateAlignmentResiduals();
     }
+    // A fit that came from picks is measured against the seed that did not.
+    // Not for a held fit — it has already been called wrong on scale alone.
+    if (preview_fit_.valid && !preview_held_ &&
+        preview_source_ != PreviewSource::Seed) {
+        seed_agreement_ = compareToSeed(seed_, preview_fit_);
+    }
 
     if (!sat_pick_) {
         return;
+    }
+    // The fix itself, wherever the picks have taken the robot glyph since:
+    // seeing the two drift apart is the cross-check, made visible.
+    const bool show_seed = seed_.hasPosition() && !pcd_image_.isNull();
+    sat_pick_->setSeedMarker(
+        sat_view_xform_.map(seed_.origin_px),
+        // 2-sigma, in canvas pixels.
+        2.0 * seed_.sigma_px *
+            std::sqrt(std::abs(sat_view_xform_.determinant())),
+        show_seed ? QStringLiteral("GPS fix ±%1")
+                        .arg(units::formatLength(
+                            2.0 * seed_.sigma_px /
+                                std::max(1e-9, stitchPxPerM()),
+                            1))
+                  : QString(),
+        show_seed);
+    if (show_seed && preview_source_ != PreviewSource::Picks) {
+        frameSatelliteOnSeed();
     }
     // Clicked point -> where this fit puts the matching cloud point, both
     // carried into whatever frame the pane is currently showing. Two short
@@ -5601,6 +5816,52 @@ void SatelliteScreen::onMapCaptured(const MapCapture& capture) {
                                  .arg(capture_gps_.lat, 0, 'f', 6)
                                  .arg(capture_gps_.lon, 0, 'f', 6)
                            : QStringLiteral("no GPS fix")));
+    if (!measured) {
+        // One line saying what the fix turned out to be good for, because the
+        // picker's bar only has room for the outcome and not the reason.
+        const SeedPlacement seed = currentSeedPlacement();
+        QString outcome;
+        switch (seed.status) {
+            case SeedStatus::NoFix:
+                outcome = capture_gps_.valid
+                              ? QStringLiteral(
+                                    "fix rejected (type '%1', hacc %2) — "
+                                    "alignment starts un-oriented")
+                                    .arg(capture_gps_.fix_type,
+                                         units::formatLength(
+                                             capture_gps_.hacc_m, 1))
+                              : QStringLiteral(
+                                    "no fix during collection — alignment "
+                                    "starts un-oriented");
+                break;
+            case SeedStatus::NoGeoRef:
+                outcome = QStringLiteral(
+                    "site image has no georeference to place the fix on");
+                break;
+            case SeedStatus::OutsideImagery:
+                outcome = QStringLiteral(
+                    "fix lands outside the downloaded imagery — wrong site, "
+                    "or a wild fix; not used");
+                break;
+            case SeedStatus::PositionOnly:
+                outcome = QStringLiteral(
+                    "position only, no heading (seed drive skipped or too "
+                    "short) — marks the robot, cannot turn the imagery");
+                break;
+            case SeedStatus::Oriented:
+                outcome = QStringLiteral(
+                              "imagery pre-oriented: heading %1°, position ±%2 "
+                              "(%3)")
+                              .arg(capture_gps_.heading_deg, 0, 'f', 1)
+                              .arg(units::formatLength(
+                                       seed.sigma_px /
+                                           std::max(1e-9, stitchPxPerM()),
+                                       1),
+                                   capture_gps_.fix_type);
+                break;
+        }
+        appendLog(QStringLiteral("[align] GPS seed: %1").arg(outcome));
+    }
     updateAlignCardUi();
     if (!measured) {
         showCorrespondPage();
@@ -5869,11 +6130,41 @@ void SatelliteScreen::updateCorrespondenceUi() {
     // The studentised outlier test and leaveOneOutOutlier both abstain below 4
     // pairs, so a GPS-seeded 3-pair fit is solvable but unchecked. Say so —
     // otherwise a minimum-effort alignment looks as verified as a good one.
-    const QString requirement_note =
-        !capture_gps_.valid
-            ? QStringLiteral(" — no GPS seed")
-            : (required < 4 ? QStringLiteral(" — 4+ to check for a bad pick")
-                            : QString());
+    // Which GPS case this is has to be said too: "no seed" alone left the
+    // operator unable to tell a robot with no sky view from a plan downloaded
+    // for the wrong address, and those need opposite responses.
+    QString requirement_note;
+    if (!capture_gps_.valid) {
+        requirement_note = QStringLiteral(" — no GPS fix from collection");
+    } else if (seed_.status == SeedStatus::OutsideImagery) {
+        requirement_note = QStringLiteral(" — GPS fix unusable");
+    } else if (required < 4) {
+        requirement_note = QStringLiteral(" — 4+ to check for a bad pick");
+    }
+    // What the satellite pane is currently showing, in one clause. Without it
+    // a pane that opens already turned looks like a rendering fault, and one
+    // that opens north-up after a collection with no heading looks the same as
+    // one that was never seeded.
+    QString seed_note;
+    if (have_pcd && !aligned) {
+        if (preview_source_ == PreviewSource::Seed) {
+            seed_note = QStringLiteral(" · Imagery turned to match from GPS — "
+                                       "approximate until you pick");
+        } else if (preview_source_ == PreviewSource::SeedPinned) {
+            seed_note = QStringLiteral(" · Position from pair 1, heading still "
+                                       "from GPS");
+        } else if (seed_.status == SeedStatus::PositionOnly && pairs < 2) {
+            seed_note = QStringLiteral(" · GPS gave a position but no heading — "
+                                       "imagery is north-up, circle marks the "
+                                       "robot");
+        } else if (seed_.status == SeedStatus::OutsideImagery) {
+            // The amber advisory below carries this case; a second clause
+            // would push it off the end of the bar.
+        } else if (!seed_.hasPosition() && pairs < 2) {
+            seed_note = QStringLiteral(" · Imagery is north-up, the point cloud "
+                                       "is not — match by shape");
+        }
+    }
 
     // The ringed pair, named. Advisory: it is the operator's call whether a
     // pair is worth re-picking, and a fit is never blocked on this — but a ring
@@ -5896,6 +6187,19 @@ void SatelliteScreen::updateCorrespondenceUi() {
                 .arg(uiThemeTokens(dark_mode_).warning)
                 .arg(corr_outlier_index_ + 1)
                 .arg(corr_studentized_[corr_outlier_index_], 0, 'f', 1);
+    } else if (seedDisagrees(seed_agreement_, capture_gps_, 0.0)) {
+        // The one failure the residuals cannot see: picks that agree with each
+        // other and not with where the robot actually is.
+        advisory = QStringLiteral(
+                       " <span style='color:%1'>· These pairs put the robot %2 "
+                       "from its GPS fix — check them against the circle</span>")
+                       .arg(uiThemeTokens(dark_mode_).warning,
+                            seedAgreementText(seed_agreement_));
+    } else if (have_pcd && seed_.status == SeedStatus::OutsideImagery) {
+        advisory = QStringLiteral(
+                       " <span style='color:%1'>· GPS puts the robot off this "
+                       "imagery — wrong site?</span>")
+                       .arg(uiThemeTokens(dark_mode_).warning);
     }
 
     // Instruction (235:2385): prompt in light grey, requirement muted.
@@ -5904,10 +6208,10 @@ void SatelliteScreen::updateCorrespondenceUi() {
             ? QStringLiteral(
                   "<span style='color:%1'>Click matching features on both "
                   "views to create correspondence pairs</span> "
-                  "<span style='color:%2'>(min %3 pairs required%4)</span>%5")
+                  "<span style='color:%2'>(min %3 pairs required%4)%5</span>%6")
                   .arg(text, muted)
                   .arg(required)
-                  .arg(requirement_note, advisory)
+                  .arg(requirement_note, seed_note, advisory)
             : QStringLiteral(
                   "<span style='color:%1'>Capture a point cloud from the "
                   "robot</span> <span style='color:%2'>— then click matching "
@@ -5956,6 +6260,19 @@ void SatelliteScreen::updateCorrespondenceUi() {
             if (correspondences_.size() < 4) {
                 summary += QStringLiteral("\nNot checked for a bad pick (%1 pairs)")
                                .arg(correspondences_.size());
+            }
+            // The seed is the only evidence here that did not come from the
+            // picks, so it is the only line that can say "right roof".
+            if (seed_agreement_.valid) {
+                summary += seedDisagrees(seed_agreement_, capture_gps_,
+                                         align_rmse_m_)
+                               ? QStringLiteral("\nGPS fix disagrees by %1 — "
+                                                "check the robot marker")
+                                     .arg(seedAgreementText(seed_agreement_))
+                               : QStringLiteral("\nGPS fix agrees to %1")
+                                     .arg(seedAgreementText(seed_agreement_));
+            } else {
+                summary += QStringLiteral("\nNo GPS fix to check it against");
             }
             align_success_rmse_->setText(summary);
         }
@@ -6014,17 +6331,21 @@ void SatelliteScreen::onAlignClicked() {
     // a px/m to convert it. The manifest's own ground resolution is the honest
     // source; only if it is missing is a scale bootstrapped from an unweighted
     // seed fit, which is enough because sigma ratios move slowly with scale.
-    double px_per_m = (site_manifest_.res_m > 0.0)
-                          ? (1.0 / site_manifest_.res_m)
-                          : 0.0;
+    double px_per_m = stitchPxPerM();
     if (px_per_m <= 0.0) {
-        const auto seed = estimateSimilarity2D(pcd, sat);
+        const auto seed = estimateSimilarity2D(pcd, sat, QVector<double>(),
+                                               kPcdToSatHandedness);
         if (seed && seed->transform.valid) {
             px_per_m = seed->transform.scalePxPerM();
         }
     }
     const QVector<double> sigmas = correspondenceSigmas(px_per_m);
-    const auto fit = fitSimilarityRobust(pcd, sat, sigmas);
+    // Rotation only. Left free, the solver would also try the mirror image of
+    // the roof and keep it whenever it happened to fit a thin or noisy pick
+    // set better — and a mirrored anchor exports a mirrored ROI.
+    RobustFitOptions options;
+    options.handedness = kPcdToSatHandedness;
+    const auto fit = fitSimilarityRobust(pcd, sat, sigmas, options);
     if (!fit || !fit->fit.transform.valid) {
         const QString why = QStringLiteral(
             "Could not estimate a 2D transform. Spread the points around "
@@ -6039,14 +6360,25 @@ void SatelliteScreen::onAlignClicked() {
     // Weighted, so this is the residual measured against what each pick was
     // actually worth rather than against an assumption that all are equal.
     align_rmse_m_ = fit->fit.weighted_rmse_m;
-    appendLog(QStringLiteral("[align] fit from %1 pairs (%2), weighted RMSE %3, "
-                             "%4 px/m")
+    appendLog(QStringLiteral("[align] fit from %1 pairs (scale + in-plane "
+                             "rotation), weighted RMSE %2, %3 px/m (imagery is "
+                             "%4 px/m)")
                   .arg(correspondences_.size())
-                  .arg(pcd_to_sat_.reflected
-                           ? QStringLiteral("scale, rotation, reflection")
-                           : QStringLiteral("scale, rotation"))
                   .arg(units::formatLength(align_rmse_m_, 3))
-                  .arg(pcd_to_sat_.scalePxPerM(), 0, 'f', 2));
+                  .arg(pcd_to_sat_.scalePxPerM(), 0, 'f', 2)
+                  .arg(px_per_m, 0, 'f', 2));
+    const SeedAgreement agreement =
+        compareToSeed(currentSeedPlacement(), pcd_to_sat_);
+    if (agreement.valid) {
+        appendLog(QStringLiteral("[align] GPS fix %1 the fit: %2 apart")
+                      .arg(seedDisagrees(agreement, capture_gps_, align_rmse_m_)
+                               ? QStringLiteral("DISAGREES with")
+                               : QStringLiteral("agrees with"),
+                           seedAgreementText(agreement)));
+    } else {
+        appendLog(QStringLiteral(
+            "[align] no usable GPS fix — the fit has no independent check"));
+    }
     // The robust pass also reports which pairs disagree with the rest. The pane
     // rings the worst one and the instruction bar names it; the log carries the
     // numbers behind that, so an operator asking later why a fit looked off has
@@ -6075,7 +6407,7 @@ void SatelliteScreen::onAlignClicked() {
             weights.append((sigma > 1e-9) ? rho / (sigma * sigma) : rho);
         }
         const OutlierReport dropped = leaveOneOutOutlier(
-            pcd, sat, weights, kOutlierImprovementFrac);
+            pcd, sat, weights, kOutlierImprovementFrac, kPcdToSatHandedness);
         // `flagged` is the improvement threshold's own answer — without reading
         // it this logs a "worth dropping" line for gains too small to act on.
         // The pane rings the studentised worst, which need not be the pair whose

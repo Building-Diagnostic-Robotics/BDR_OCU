@@ -5,10 +5,12 @@
  * Maps PCD / robot_init meters -> satellite image pixels.
  *
  * PORTED from the parallel OCU under pilot_control/scripts/F2C/cpp (branch
- * `autonomy`, commit a287113). This note is the only intended difference —
- * keep the code identical to that copy. Alignment work still lands there, so
- * the next port stays a three-way diff only as long as neither side edits in
- * place. Fix bugs in both or in neither.
+ * `autonomy`, commit a287113), with ONE deliberate divergence: `FitHandedness`.
+ * Upstream always solves both the rotating and the mirroring branch and keeps
+ * whichever fits better, which lets a noisy or near-collinear pick set come
+ * back as a mirror image of the roof. This copy lets the caller pin the branch
+ * and the alignment screen always does. Everything else is identical to
+ * upstream — keep it that way, and carry `FitHandedness` back on the next sync.
  */
 
 #pragma once
@@ -18,6 +20,25 @@
 #include <optional>
 
 namespace f2c_cpp {
+
+/**
+ * Which orientation branch a fit may land on.
+ *
+ * Both alignment inputs are top-down views of the same roof, so the only
+ * physical freedom between them is an in-plane rotation: one can never be a
+ * mirror image of the other. The point cloud is carried in metres with Y up
+ * and the imagery in pixels with Y down, though, so that pure rotation is
+ * WRITTEN as an orientation-reversing matrix (determinant < 0). That is
+ * `Reversing`, and it is the only branch a metres -> raster fit should ever be
+ * allowed. `Preserving` (determinant > 0) is the same statement for two frames
+ * with the same Y sense.
+ *
+ * `Free` solves both and keeps the lower residual. It exists for callers that
+ * genuinely do not know their frames; given real picks it can return the
+ * mirrored roof, because two pairs fit either branch exactly and three
+ * near-collinear ones barely separate them.
+ */
+enum class FitHandedness { Free, Preserving, Reversing };
 
 struct Similarity2D {
     // Linear part: scale * R, or scale * R * diag(1, -1) when reflected.
@@ -63,14 +84,15 @@ struct SimilarityFit {
  * rather than as an error, so a caller that has not built weights yet keeps
  * working.
  *
- * Reflection is deliberately left free. Robot XY is right-handed and image
- * XY is Y-down, so the correct fit IS orientation-reversing; both branches
- * are solved and the lower weighted RMSE wins.
+ * `handedness` pins the orientation branch; see `FitHandedness`. The default
+ * is `Free` only so existing callers are unchanged — a metres -> raster fit
+ * should pass `Reversing`.
  */
 std::optional<SimilarityFit> estimateSimilarity2D(
     const QVector<QPointF>& pcd_points,
     const QVector<QPointF>& sat_points,
-    const QVector<double>& weights = QVector<double>());
+    const QVector<double>& weights = QVector<double>(),
+    FitHandedness handedness = FitHandedness::Free);
 
 /**
  * Leave-one-out refit, used to find the pair that is inconsistent with the
@@ -117,6 +139,8 @@ struct RobustFitOptions {
     double outlier_sigma = 3.5;
     int max_iterations = 8;
     double tolerance = 1e-6;
+    /** Orientation branch every inner solve is held to. */
+    FitHandedness handedness = FitHandedness::Free;
 };
 
 struct RobustFit {
@@ -179,6 +203,7 @@ OutlierReport leaveOneOutOutlier(
     const QVector<QPointF>& pcd_points,
     const QVector<QPointF>& sat_points,
     const QVector<double>& weights = QVector<double>(),
-    double flag_improvement_frac = 0.5);
+    double flag_improvement_frac = 0.5,
+    FitHandedness handedness = FitHandedness::Free);
 
 }  // namespace f2c_cpp

@@ -110,7 +110,7 @@ std::optional<SimilarityFit> umeyamaOnce(
     const QVector<QPointF>& sat_points,
     const QVector<double>& w,
     int n,
-    bool allow_reflection) {
+    bool reversing) {
     double wsum = 0.0;
     Eigen::Vector2d mu_src = Eigen::Vector2d::Zero();
     Eigen::Vector2d mu_dst = Eigen::Vector2d::Zero();
@@ -146,8 +146,11 @@ std::optional<SimilarityFit> umeyamaOnce(
     Eigen::Matrix2d u = svd.matrixU();
     Eigen::Matrix2d v = svd.matrixV();
     Eigen::Matrix2d d = Eigen::Matrix2d::Identity();
-    const bool svd_reflects = (u * v.transpose()).determinant() < 0.0;
-    if (svd_reflects && !allow_reflection) {
+    // Umeyama's constrained optimum: when the unconstrained rotation lands on
+    // the other branch, flip the SMALLER singular direction. Singular values
+    // come back sorted, so that is always index 1.
+    const bool svd_reverses = (u * v.transpose()).determinant() < 0.0;
+    if (svd_reverses != reversing) {
         d(1, 1) = -1.0;
     }
     const Eigen::Matrix2d r = u * d * v.transpose();
@@ -201,15 +204,19 @@ QVector<double> leverages(const QVector<QPointF>& pcd,
 std::optional<SimilarityFit> estimateSimilarity2D(
     const QVector<QPointF>& pcd_points,
     const QVector<QPointF>& sat_points,
-    const QVector<double>& weights) {
+    const QVector<double>& weights,
+    FitHandedness handedness) {
     const int n = std::min(pcd_points.size(), sat_points.size());
     if (n < 2) {
         return std::nullopt;
     }
     const QVector<double> w = normalizedWeights(weights, n);
 
-    // Compare proper rotation vs reflection. Image Y-down vs robot Y-up
-    // needs a reflection; forcing det(R)=+1 is what made earlier fits drift.
+    if (handedness != FitHandedness::Free) {
+        return umeyamaOnce(pcd_points, sat_points, w, n,
+                           handedness == FitHandedness::Reversing);
+    }
+    // Caller does not know its frames: solve both branches, keep the better.
     const auto with_reflect = umeyamaOnce(pcd_points, sat_points, w, n, true);
     const auto no_reflect = umeyamaOnce(pcd_points, sat_points, w, n, false);
     if (with_reflect && no_reflect) {
@@ -266,7 +273,8 @@ std::optional<RobustFit> fitSimilarityRobust(
         for (int i = 0; i < n; ++i) {
             w[i] = rho[i] / (sigma[i] * sigma[i]);
         }
-        fit = estimateSimilarity2D(pcd_points, sat_points, w);
+        fit = estimateSimilarity2D(pcd_points, sat_points, w,
+                                   options.handedness);
         if (!fit || !fit->transform.valid) {
             return std::nullopt;
         }
@@ -294,7 +302,8 @@ std::optional<RobustFit> fitSimilarityRobust(
     for (int i = 0; i < n; ++i) {
         w[i] = rho[i] / (sigma[i] * sigma[i]);
     }
-    fit = estimateSimilarity2D(pcd_points, sat_points, w);
+    fit = estimateSimilarity2D(pcd_points, sat_points, w,
+                                   options.handedness);
     if (!fit || !fit->transform.valid) {
         return std::nullopt;
     }
@@ -333,7 +342,8 @@ OutlierReport leaveOneOutOutlier(
     const QVector<QPointF>& pcd_points,
     const QVector<QPointF>& sat_points,
     const QVector<double>& weights,
-    double flag_improvement_frac) {
+    double flag_improvement_frac,
+    FitHandedness handedness) {
     OutlierReport report;
     const int n = std::min(pcd_points.size(), sat_points.size());
     // Dropping one must leave an over-determined set: at n = 3 the remaining
@@ -343,7 +353,8 @@ OutlierReport leaveOneOutOutlier(
     }
     const bool have_weights = (weights.size() == n);
 
-    const auto full = estimateSimilarity2D(pcd_points, sat_points, weights);
+    const auto full =
+        estimateSimilarity2D(pcd_points, sat_points, weights, handedness);
     if (!full || !full->transform.valid) {
         return report;
     }
@@ -370,7 +381,7 @@ OutlierReport leaveOneOutOutlier(
                 w.push_back(weights[i]);
             }
         }
-        const auto sub = estimateSimilarity2D(pcd, sat, w);
+        const auto sub = estimateSimilarity2D(pcd, sat, w, handedness);
         if (!sub || !sub->transform.valid) {
             report.rmse_without_m[skip] = std::numeric_limits<double>::max();
             continue;
