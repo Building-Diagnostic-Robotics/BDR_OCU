@@ -179,7 +179,13 @@ private:
     /// `uploading` is the only exemption. The dialog asks again with
     /// that flag forced false, so a scan that is still running after
     /// the upload finishes keeps the button disabled.
-    QString uploadUnavailableReason(bool uploading) const;
+    ///
+    /// `profile_checked` means the caller already holds valid robot
+    /// credentials, so robots.json is not read again. The open dialog
+    /// always passes it: it was opened with credentials that passed, and
+    /// the robot cannot change while it is up. The scan and copy checks
+    /// always run.
+    QString uploadUnavailableReason(bool uploading, bool profile_checked) const;
     void applyRobotSyncSnooze();
 
     /// Phase 7 OCU→runner handoff (locked Q1=A CLI args, Q3=B lockfile-

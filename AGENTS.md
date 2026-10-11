@@ -801,7 +801,10 @@ kept in sync by hand.
   upload is the only exemption, and it only reopens the dialog. A held
   notice does not skip the checks; the notice clears when the dialog
   opens or the click is blocked. The open dialog's Upload button asks
-  the same rule with uploading forced false. `goToStage3` seeds
+  the same rule with uploading forced false and `profile_checked`
+  true, so a refresh does not read `robots.json`. It re-asks on the
+  2 s cloud-probe tick, which picks up a copy that finishes while the
+  dialog is open. `goToStage3` seeds
   `refreshThumbCopyStatus()`. No SSH target is resolved any more.
 
 ### Decisions baked into the design
@@ -932,9 +935,9 @@ clearing, `FailedToStart` handling).
     — inactive, but the fallback the operator asked to keep.
   - `RobotRegistry::cloudApiBase()` and its three-tier resolution.
 - **Do NOT downgrade the launch-active gate** in `onUploadDataRequested`.
-  A running upload is the only exemption, and `uploadOpenBlock` is the
-  decision. A held notice must not skip it. The open dialog uses the
-  same rule.
+  The open dialog's gate must keep `profile_checked` true: it runs on
+  every button refresh, and reading `robots.json` there is GUI-thread
+  file I/O. The scan and copy checks must stay in it.
 - **Do NOT wait on the thumb-drive copy inside Complete Mission.**
   That gate is the Dashboard Upload card (`thumbCopyReady()`).
 - **Do NOT require `thumbsync_manifest.json` on `Section_*`.** The
