@@ -3893,9 +3893,12 @@ void AppShellWindow::startRobotCompleteLaunch(const ResolvedRobotSshTarget& ssh_
         return;
     }
 
+    // `\$`: the shell sshd starts on the robot expands the `bash -lc "..."`
+    // argument before the inner shell runs the preamble, so an unescaped `${...}`
+    // here logs the pre-preamble env (all `<unset>`).
     QString remote_script = QString::fromLatin1(kLaunchEnvPreamble) +
-        "echo \"[BDR app robot launch env] CYCLONEDDS_URI=${CYCLONEDDS_URI:-<unset>} "
-        "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-<unset>} ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-<unset>}\"; "
+        "echo \"[BDR app robot launch env] CYCLONEDDS_URI=\\${CYCLONEDDS_URI:-<unset>} "
+        "RMW_IMPLEMENTATION=\\${RMW_IMPLEMENTATION:-<unset>} ROS_DOMAIN_ID=\\${ROS_DOMAIN_ID:-<unset>}\"; "
         "ros2 launch pilot_control robot_complete.launch.py";
     const QString remote_cmd = QString("bash -lc \"%1\"").arg(remote_script.replace("\"", "\\\""));
 

@@ -79,6 +79,10 @@ QImage tintDensityRasterForLightCanvas(const QImage& raster);
  * The SSH stage does NOT wait for `ros2 launch` to exit — Fast-LIO, Livox and
  * the ODrive nodes routinely ignore the shutdown request, so the remote
  * script polls for a fresh manifest and then SIGINTs the launch tree itself.
+ *
+ * For the same reason, killing the local `ssh` leaves the robot running:
+ * cancel and timeout during collection go through Stopping, which runs
+ * `kMapCollectionStop` on the robot before `finished` is emitted.
  */
 class MapCaptureRunner : public QObject {
     Q_OBJECT
@@ -93,6 +97,7 @@ public:
         DownloadingPcd,
         DownloadingPose,
         Rendering,
+        Stopping,  // cancelled or timed out; stopping the robot-side run
     };
 
     /**
@@ -130,13 +135,24 @@ private:
     void startRendering();
     void onRenderFinished();
     void fail(const QString& message);
+    void killProcess();
+    void startRobotStop(const QString& reason);
+    /** Before the identity gate passes nothing has been launched, and the
+        host may not be the selected robot, so there is nothing to stop. */
+    bool robotRunMayBeLive() const {
+        return stage_ == Stage::Stopping ||
+               (stage_ == Stage::Collecting && collecting_announced_);
+    }
     QStringList sshBaseArgs() const;
+    QStringList robotStopArgs() const;
 
     // The spin takes ~40 s but the stack boot in front of it is the variable
     // part; 4 min covers a cold Livox/Fast-LIO start without hanging forever.
     static constexpr int kCollectTimeoutMs = 240000;
     static constexpr int kScpPcdTimeoutMs = 180000;
     static constexpr int kScpPoseTimeoutMs = 30000;
+    // SSH connect (10 s) + the stop script's own 10 s SIGINT grace.
+    static constexpr int kStopTimeoutMs = 30000;
 
     QProcess* proc_ = nullptr;
     QTimer* timeout_ = nullptr;
@@ -145,6 +161,7 @@ private:
     QFutureWatcher<MapCapture>* render_watcher_ = nullptr;
     Stage stage_ = Stage::Idle;
     bool cancelling_ = false;
+    QString stop_reason_;  // reported once Stopping finishes
 
     QString host_;
     QString ssh_user_;
@@ -155,7 +172,8 @@ private:
     QString remote_output_;
     /** The missing-file warning already happened; the next SSH collects. */
     bool identity_gate_cleared_ = false;
-    /** The "collecting" progress line has been shown for this SSH. */
+    /** The "collecting" progress line has been shown for this SSH, i.e. the
+        identity gate passed (or was skipped) and the launch may be up. */
     bool collecting_announced_ = false;
     QString remote_pcd_;
     QString remote_pose_;

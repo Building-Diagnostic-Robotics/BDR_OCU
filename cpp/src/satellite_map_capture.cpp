@@ -1,6 +1,7 @@
 #include "satellite_map_capture.hpp"
 
 #include "coverage_pipeline.hpp"
+#include "launch_env.hpp"
 #include "robot_registry.hpp"
 
 #include <QDateTime>
@@ -46,6 +47,7 @@ constexpr int kPointGray = 210;
 
 constexpr const char* kManifestBegin = "__MANIFEST_BEGIN__";
 constexpr const char* kManifestEnd = "__MANIFEST_END__";
+constexpr const char* kRobotBusy = "__ROBOT_BUSY__";
 constexpr char kCollectingProgress[] =
     "Collecting map on the robot (arm, 360° spin, GPS baseline)…";
 
@@ -369,6 +371,16 @@ MapCaptureRunner::MapCaptureRunner(QObject* parent) : QObject(parent) {
 }
 
 MapCaptureRunner::~MapCaptureRunner() {
+    // Detached: an in-process stop would die with this object and the robot
+    // would keep spinning after the app closes.
+    if (robotRunMayBeLive()) {
+        QProcess::startDetached(QStringLiteral("ssh"), robotStopArgs());
+    }
+    cancelling_ = true;
+    killProcess();
+}
+
+void MapCaptureRunner::killProcess() {
     if (proc_->state() != QProcess::NotRunning) {
         proc_->kill();
         proc_->waitForFinished(2000);
@@ -383,9 +395,21 @@ QStringList MapCaptureRunner::sshBaseArgs() const {
                          << QStringLiteral("%1@%2").arg(ssh_user_, host_);
 }
 
+QStringList MapCaptureRunner::robotStopArgs() const {
+    return sshBaseArgs() << QStringLiteral("bash -lc %1").arg(
+               shellQuote(QString::fromLatin1(kMapCollectionStop)));
+}
+
 bool MapCaptureRunner::start(const QString& host, const QString& ssh_user,
                              const QString& expected_robot_id,
                              const QString& local_dir, QString* error) {
+    if (stage_ == Stage::Stopping) {
+        if (error) {
+            *error = QStringLiteral(
+                "The previous map collection is still stopping on the robot.");
+        }
+        return false;
+    }
     if (busy()) {
         if (error) *error = QStringLiteral("A map collection is already running.");
         return false;
@@ -421,39 +445,51 @@ QString MapCaptureRunner::collectionScript(bool gate) const {
     // already on disk, prints it, then SIGINTs the tree itself.
     const QString manifest =
         QStringLiteral("/R_DATA/raw_maps/map_collection_latest.yaml");
-    // Same env preamble as the Stage 4/5 launch and Stage 6 Send scripts.
-    // `set -e`, never `set -u`: the ROS/colcon setup scripts read variables
-    // that are normally unset (AMENT_TRACE_SETUP_FILES, COLCON_TRACE, ...),
-    // so `set -u` aborts on the first `source` and nothing below it runs.
-    // `.bashrc` first so the robot's own env (RMW, Zenoh config) matches
-    // what every other launch gets.
+    // Same env preamble as the Stage 4/5 launch and Stage 6 Send scripts, so
+    // the collection stack and the robot zenohd share loopback CycloneDDS.
+    //
+    // Any other `ros2 launch` (director, robot_complete, a previous app's
+    // run) holds the same LiDAR, CAN bus and /cmd_vel, so refuse rather than
+    // fight it. A leftover map-collection tree is ours to clear: a cancel
+    // from an older build, or a lost link, leaves one spinning.
+    //
+    // The launch file name is quoted so this script's own command line does
+    // not match the stop fragment's pattern (see kMapCollectionStop). The
+    // poll gives the launch one more tick after it exits, since it shuts
+    // down as soon as map_collection_node writes the manifest.
     //
     // No `%%` anywhere in this literal: it goes through QString::arg, which
     // does NOT collapse `%%`, so `%%Y` would reach the robot verbatim and
     // stat would print the string "%Y" instead of the mtime. The identity
     // prefix is concatenated after arg(), because it contains `%s`.
-    const QString body = QStringLiteral(
-        "set -e; "
-        "if [ -f \"$HOME/.bashrc\" ]; then . \"$HOME/.bashrc\"; fi; "
-        "if [ -f /opt/ros/humble/setup.bash ]; then . /opt/ros/humble/setup.bash; fi; "
-        "if [ -f \"$HOME/pilot_ws/install/setup.bash\" ]; then . \"$HOME/pilot_ws/install/setup.bash\"; fi; "
-        "M=%1; "
-        "OLD=$(stat -c %Y \"$M\" 2>/dev/null || echo 0); "
-        "ros2 launch pilot_control robot_map_collection.launch.py "
-        "> /tmp/ocu_map_collection.log 2>&1 & LP=$!; "
-        "for i in $(seq 1 120); do "
-        "  sleep 2; "
-        "  NEW=$(stat -c %Y \"$M\" 2>/dev/null || echo 0); "
-        "  if [ \"$NEW\" -gt \"$OLD\" ] && grep -qE '^status: (done|failed)' \"$M\"; then "
-        "    echo %2; cat \"$M\"; echo %3; break; "
-        "  fi; "
-        "done; "
-        "kill -INT $LP >/dev/null 2>&1 || true; "
-        "disown $LP >/dev/null 2>&1 || true; "
-        "exit 0")
-                             .arg(manifest,
-                                  QLatin1String(kManifestBegin),
-                                  QLatin1String(kManifestEnd));
+    const QString script =
+        QString::fromLatin1(kLaunchEnvPreamble) +
+        QStringLiteral(
+            "if pgrep -af '[r]os2 launch' 2>/dev/null | grep -v robot_map_collection | grep -q .; then "
+            "  echo %4; pgrep -af '[r]os2 launch' | grep -v robot_map_collection || true; exit 0; "
+            "fi; ") +
+        QString::fromLatin1(kMapCollectionStop) +
+        QStringLiteral(
+            "M=%1; "
+            "OLD=$(stat -c %Y \"$M\" 2>/dev/null || echo 0); "
+            "ros2 launch pilot_control \"robot_map_collection.launch.py\" "
+            "> /tmp/ocu_map_collection.log 2>&1 & LP=$!; "
+            "GONE=; "
+            "for i in $(seq 1 120); do "
+            "  sleep 2; "
+            "  NEW=$(stat -c %Y \"$M\" 2>/dev/null || echo 0); "
+            "  if [ \"$NEW\" -gt \"$OLD\" ] && grep -qE '^status: (done|failed)' \"$M\"; then "
+            "    echo %2; cat \"$M\"; echo %3; break; "
+            "  fi; "
+            "  [ -n \"$GONE\" ] && break; "
+            "  kill -0 $LP 2>/dev/null || GONE=1; "
+            "done; "
+            "kill -INT $LP >/dev/null 2>&1 || true; "
+            "disown $LP >/dev/null 2>&1 || true; "
+            "exit 0");
+    const QString body = script.arg(manifest, QLatin1String(kManifestBegin),
+                                    QLatin1String(kManifestEnd),
+                                    QLatin1String(kRobotBusy));
     if (!gate) {
         return body;
     }
@@ -492,11 +528,15 @@ void MapCaptureRunner::runCommand(const QString& program,
 }
 
 void MapCaptureRunner::cancel() {
-    if (!busy() || cancelling_) {
+    if (!busy() || cancelling_ || stage_ == Stage::Stopping) {
+        return;
+    }
+    timeout_->stop();
+    if (robotRunMayBeLive()) {
+        startRobotStop(QStringLiteral("Map collection cancelled."));
         return;
     }
     cancelling_ = true;
-    timeout_->stop();
     if (proc_->state() != QProcess::NotRunning) {
         proc_->kill();
     }
@@ -504,6 +544,18 @@ void MapCaptureRunner::cancel() {
     MapCapture capture;
     capture.error = QStringLiteral("Map collection cancelled.");
     emit finished(capture);
+}
+
+void MapCaptureRunner::startRobotStop(const QString& reason) {
+    // The guard keeps the killed collect ssh's `finished` from being read
+    // as a Collecting result.
+    cancelling_ = true;
+    killProcess();
+    cancelling_ = false;
+    stop_reason_ = reason;
+    stage_ = Stage::Stopping;
+    emit progress(QStringLiteral("Stopping map collection on the robot…"));
+    runCommand(QStringLiteral("ssh"), robotStopArgs(), kStopTimeoutMs);
 }
 
 void MapCaptureRunner::fail(const QString& message) {
@@ -520,11 +572,22 @@ void MapCaptureRunner::onTimeout() {
     if (stage_ == Stage::Rendering || stage_ == Stage::Idle) {
         return;
     }
+    const QString message =
+        QStringLiteral("Timed out waiting for the robot during map "
+                       "collection. Check the link and try again.");
+    if (stage_ == Stage::Stopping) {
+        // Reported by onProcessFinished as an unconfirmed stop.
+        proc_->kill();
+        return;
+    }
+    if (robotRunMayBeLive()) {
+        startRobotStop(message);
+        return;
+    }
     if (proc_->state() != QProcess::NotRunning) {
         proc_->kill();
     }
-    fail(QStringLiteral("Timed out waiting for the robot during map "
-                        "collection. Check the link and try again."));
+    fail(message);
 }
 
 void MapCaptureRunner::onProcessFinished(int exit_code) {
@@ -536,6 +599,13 @@ void MapCaptureRunner::onProcessFinished(int exit_code) {
     const QString output = remote_output_;
 
     switch (stage_) {
+        case Stage::Stopping:
+            fail(exit_code == 0
+                     ? stop_reason_
+                     : QStringLiteral("%1 Could not confirm the robot "
+                                      "stopped — check it before retrying.")
+                           .arg(stop_reason_));
+            return;
         case Stage::Collecting: {
             const RobotIdentityReport id =
                 classifyRobotIdentity(expected_robot_id_, output);
@@ -564,6 +634,18 @@ void MapCaptureRunner::onProcessFinished(int exit_code) {
                 }
                 case CaptureIdentityDecision::ReadManifest:
                     break;
+            }
+            const int busy_at = output.indexOf(QLatin1String(kRobotBusy));
+            if (busy_at >= 0) {
+                const QString running =
+                    output.mid(busy_at + int(qstrlen(kRobotBusy))).trimmed();
+                fail(QStringLiteral(
+                         "Another launch is running on the robot; stop it "
+                         "before collecting a map.%1")
+                         .arg(running.isEmpty()
+                                  ? QString()
+                                  : QStringLiteral("\n") + running.left(300)));
+                return;
             }
             const int begin = output.indexOf(QLatin1String(kManifestBegin));
             const int end = output.indexOf(QLatin1String(kManifestEnd));
