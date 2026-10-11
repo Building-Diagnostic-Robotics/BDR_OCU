@@ -1142,3 +1142,41 @@ TEST(ThumbCopyGate, FinishedReportNeedsNoNote) {
     EXPECT_TRUE(thumbCopyIsReady(in));
     EXPECT_TRUE(thumbCopyStaleReportNote(in).isEmpty());
 }
+
+TEST(OffloadStatus, ByteFieldsAreOptional) {
+    const OffloadSnapshot missing = parseOffloadStatusJson(
+        R"({"state":"queued","queued":2})");
+    ASSERT_TRUE(missing.parse_ok);
+    EXPECT_FALSE(missing.robot_free_bytes.has_value());
+    EXPECT_FALSE(missing.robot_floor_bytes.has_value());
+    EXPECT_EQ(scansAtRiskOfDeletion(missing), 0);
+
+    const OffloadSnapshot nulls = parseOffloadStatusJson(
+        R"({"state":"queued","queued":2,"robot_free_bytes":null,"robot_floor_bytes":null})");
+    EXPECT_FALSE(nulls.robot_free_bytes.has_value());
+    EXPECT_EQ(scansAtRiskOfDeletion(nulls), 0);
+}
+
+TEST(OffloadStatus, UncopiedScansAtRiskOnlyUnderTwiceTheFloor) {
+    const OffloadSnapshot low = parseOffloadStatusJson(
+        R"({"state":"queued","queued":3,"robot_free_bytes":199,"robot_floor_bytes":100})");
+    EXPECT_EQ(low.robot_free_bytes, 199);
+    EXPECT_EQ(low.robot_floor_bytes, 100);
+    EXPECT_EQ(scansAtRiskOfDeletion(low), 3);
+
+    const OffloadSnapshot at_twice = parseOffloadStatusJson(
+        R"({"state":"queued","queued":3,"robot_free_bytes":200,"robot_floor_bytes":100})");
+    EXPECT_EQ(scansAtRiskOfDeletion(at_twice), 0);
+
+    const OffloadSnapshot roomy = parseOffloadStatusJson(
+        R"({"state":"idle","queued":3,"robot_free_bytes":500,"robot_floor_bytes":100})");
+    EXPECT_EQ(scansAtRiskOfDeletion(roomy), 0);
+
+    const OffloadSnapshot nothing_queued = parseOffloadStatusJson(
+        R"({"state":"idle","queued":0,"robot_free_bytes":10,"robot_floor_bytes":100})");
+    EXPECT_EQ(scansAtRiskOfDeletion(nothing_queued), 0);
+
+    const OffloadSnapshot bad = parseOffloadStatusJson(QByteArray("not json"));
+    EXPECT_FALSE(bad.parse_ok);
+    EXPECT_EQ(scansAtRiskOfDeletion(bad), 0);
+}

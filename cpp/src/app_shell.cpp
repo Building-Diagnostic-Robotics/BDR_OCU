@@ -1915,6 +1915,37 @@ void AppShellWindow::onStartNewScan() {
     // A single backdrop blur session spans both dialogs (mirrors the
     // PlannerScreen::showScanPreflightDialog pattern in
     // planner_screen.cpp:5202).
+    // Warn before the blur. A failed probe, or a robot that does not
+    // report free space, stays silent — a stale cache must not nag.
+    if (stage3_) {
+        const int at_risk = stage3_->uncopiedScansAtRisk();
+        if (at_risk > 0) {
+            const QString body = at_risk == 1
+                ? QStringLiteral(
+                      "1 mission isn't on the thumb drive yet and the "
+                      "robot is low on space. Plug RDATA_EXT into the "
+                      "robot and let the copy finish first, or the robot "
+                      "may have to delete it.")
+                : QStringLiteral(
+                      "%1 missions aren't on the thumb drive yet and the "
+                      "robot is low on space. Plug RDATA_EXT into the "
+                      "robot and let the copy finish first, or the robot "
+                      "may have to delete them.")
+                      .arg(at_risk);
+            // Last button is the primary. Cancel is primary, and closing
+            // the dialog (defaultIndex) is Cancel too.
+            const int choice = BdrMessageBox::custom(
+                this,
+                QStringLiteral("Missions not on the thumb drive"),
+                body,
+                {QStringLiteral("Continue anyway"),
+                 QStringLiteral("Cancel")},
+                /*defaultIndex=*/1);
+            if (choice != 0) {
+                return;
+            }
+        }
+    }
     QWidget* backdrop = nullptr;
     if (stage3_) {
         backdrop = stage3_;
