@@ -152,9 +152,7 @@ constexpr char kRobotIdentityPath[] = "/etc/pilot_robot_id";
     when the file is missing or empty. */
 constexpr char kRobotIdentityMarker[] = "BDR_ROBOT_ID:";
 
-/** Printed only after an exact match, by `/usr/bin/printf`, so the laptop
-    sees it before the rest of the script (a shell builtin would stay
-    buffered until the script exits). */
+/** Printed only after an exact match, before the rest of the script runs. */
 constexpr char kRobotIdentityOkMarker[] = "BDR_IDENTITY_OK";
 
 enum class RobotIdentityVerdict {
@@ -219,6 +217,15 @@ QString robotIdentityUnreadableText(const QString& expected_robot_id);
  */
 QString robotIdentityProbePrefix(const QString& expected_robot_id,
                                  const QString& id_path = QString());
+
+/**
+ * robotIdentityProbePrefix for the inside of a double-quoted
+ * `bash -lc "..."` (the robot launch). `\`, `$` and backquotes are
+ * escaped so the outer shell passes them through; `"` is left for the
+ * caller, which escapes it across the whole script.
+ */
+QString robotIdentityProbePrefixForDoubleQuotes(const QString& expected_robot_id,
+                                                const QString& id_path = QString());
 
 /**
  * Remote snippet. Prints the marker, then `exit 0` unless the trimmed file

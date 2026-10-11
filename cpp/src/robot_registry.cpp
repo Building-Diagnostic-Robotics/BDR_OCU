@@ -488,16 +488,28 @@ QString robotIdentityProbePrefix(const QString& expected_robot_id,
            QStringLiteral(" ]; then exit 0; fi; ");
 }
 
+QString robotIdentityProbePrefixForDoubleQuotes(const QString& expected_robot_id,
+                                                const QString& id_path) {
+    QString out;
+    const QString raw = robotIdentityProbePrefix(expected_robot_id, id_path);
+    out.reserve(raw.size() + 16);
+    for (const QChar c : raw) {
+        if (c == QLatin1Char('\\') || c == QLatin1Char('$') ||
+            c == QLatin1Char('`')) {
+            out += QLatin1Char('\\');
+        }
+        out += c;
+    }
+    return out;
+}
+
 QString robotIdentityMatchPrefix(const QString& expected_robot_id,
                                  const QString& id_path) {
-    // External printf flushes when that process exits, so the laptop sees
-    // the line while the spin is still running. A bash builtin would sit
-    // in the shell's block buffer until the whole script ended.
     return identityReadAndPrint(id_path) +
            QStringLiteral("if [ \"$_bdr_id\" != ") +
            shellSingleQuote(expected_robot_id.trimmed()) +
            QStringLiteral(" ] || [ -z \"$_bdr_id\" ]; then exit 0; fi; "
-                          "/usr/bin/printf 'BDR_IDENTITY_OK\\n' || true; ");
+                          "printf 'BDR_IDENTITY_OK\\n' || true; ");
 }
 
 }  // namespace f2c_cpp

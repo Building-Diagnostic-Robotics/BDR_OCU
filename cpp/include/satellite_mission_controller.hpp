@@ -140,10 +140,11 @@ public:
     void continueAfterIdentityWarning();
 
     /**
-     * Identity was rejected before anything was spawned. Drops the mission
-     * without a robot sweep: the pre-launch script already exited before
-     * pkill, and sweeping now would kill the other robot's stack. If a
-     * launch is already running, falls through to teardownMission.
+     * Identity was rejected. Drops the mission without a robot sweep: the
+     * rejected script exited before pkill / `ros2 launch`, and sweeping
+     * now would kill the other robot's stack. If the laptop launch is
+     * already running, falls through to teardownMission, which skips the
+     * robot sweep for the same reason.
      */
     void cancelUnlaunchedMission();
 
@@ -200,10 +201,14 @@ signals:
      * that path must not offer "launch anyway".
      */
     void robotSweepFailed(int exit_code);
-    /** `/etc/pilot_robot_id` names a different robot. Nothing was launched. */
+    /** `/etc/pilot_robot_id` names a different robot, seen by the
+        pre-launch sweep or by the check at the front of the robot launch
+        (the path a "launch anyway" takes). `ros2 launch` never ran there. */
     void robotIdentityBlocked(const QString& message);
-    /** The ID file is missing or empty. Spawn waits on
-        continueAfterIdentityWarning. */
+    /** The ID file is missing or empty. From the sweep, spawn waits on
+        continueAfterIdentityWarning; from the launch check (once per
+        mission, only if the sweep did not already warn) it is a notice
+        and continueAfterIdentityWarning is a no-op. */
     void robotIdentityUnchecked(const QString& message);
 
 private:
@@ -248,6 +253,15 @@ private:
     QStringList robot_output_tail_;
     bool robot_marker_seen_ = false;
     bool robot_launch_spoke_ = false;
+    /** The launch's BDR_ROBOT_ID line was classified. */
+    bool robot_identity_seen_ = false;
+    /** The operator was already told the ID file is missing. */
+    bool robot_identity_warned_ = false;
+    /** A mismatch was seen; teardown must not sweep this host. */
+    bool robot_identity_rejected_ = false;
+    QString robot_identity_message_;
+    /** Classifies the robot launch's BDR_ROBOT_ID line. */
+    void noteLaunchIdentity(const QString& line);
     qint64 robot_spawn_ms_ = 0;
     QFile* mission_log_ = nullptr;
     QString mission_log_path_;
