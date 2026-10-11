@@ -180,6 +180,18 @@ public:
     CoverageStatus coverageStatus() const;
     QString lastSegmentStatus() const;
     MotorStatus motorStatus() const;
+    /** Wall-clock ms of the latest swath / segment sample. 0 after
+        clearSnapshots(), so a queued signal from the previous mission
+        cannot count as contact. */
+    qint64 swathsWallMs() const;
+    qint64 segmentWallMs() const;
+    /**
+     * Drop odometry, coverage status, motor status, swaths and the
+     * segment string. Does not emit. Call on the GUI thread at mission
+     * start, teardown start and mission end so a finished run cannot
+     * keep looking live. Does not touch the autonomy-enable latch.
+     */
+    void clearSnapshots();
     /** True when both axes report IDLE on fresh controller_status. */
     bool motorsIdle() const;
     /** True when both axes report CLOSED_LOOP_CONTROL on fresh status. */
@@ -216,6 +228,8 @@ private:
     OdomSnapshot odom_;
     CoverageStatus status_;
     QString segment_status_;
+    qint64 swaths_wall_ms_ = 0;
+    qint64 segment_wall_ms_ = 0;
     MotorStatus motors_;
 };
 

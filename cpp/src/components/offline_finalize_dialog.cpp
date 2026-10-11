@@ -10,6 +10,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace f2c_cpp {
 
 OfflineFinalizeDialog::OfflineFinalizeDialog(LinkHealthMonitor* monitor,
@@ -228,13 +230,27 @@ void OfflineFinalizeDialog::refreshStatusLabels() {
                 lbl_link_status_->setText(
                     QStringLiteral("Link: LIVE (last contact %1s ago)").arg(since_sec));
                 break;
+            case LinkHealthMonitor::State::Connecting:
+                lbl_link_status_->setText(
+                    QStringLiteral("Link: CONNECTING (waiting for the robot)"));
+                break;
             case LinkHealthMonitor::State::Reconnecting:
                 lbl_link_status_->setText(
                     QStringLiteral("Link: RECONNECTING (last contact %1s ago)").arg(since_sec));
                 break;
             case LinkHealthMonitor::State::Disconnected:
-                lbl_link_status_->setText(
-                    QStringLiteral("Link: OFFLINE (last contact %1s ago)").arg(since_sec));
+                if (monitor_->hadContact()) {
+                    lbl_link_status_->setText(
+                        QStringLiteral("Link: OFFLINE (last contact %1s ago)").arg(since_sec));
+                } else {
+                    // Connecting timed out: the robot never answered this
+                    // mission, so there is no "last contact" to quote.
+                    const qint64 silent_sec =
+                        (std::max<qint64>(0, monitor_->msWithoutContact()) + 500) / 1000;
+                    lbl_link_status_->setText(
+                        QStringLiteral("Link: OFFLINE (no contact since launch, %1s)")
+                            .arg(silent_sec));
+                }
                 break;
             case LinkHealthMonitor::State::Idle:
                 lbl_link_status_->setText(QStringLiteral("Link: IDLE"));

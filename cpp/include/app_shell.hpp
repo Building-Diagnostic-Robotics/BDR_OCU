@@ -269,6 +269,10 @@ private:
     void loadExplorationRfConfigForActiveRobot();
     void requestExplorationRfProbe();
     void handleExplorationRfProbeFinished(int exit_code, QProcess::ExitStatus exit_status);
+    // Hands one probe result to Stage 6 and consumes the captured epoch.
+    // A FailedToStart never emits finished(), so the error handler calls
+    // this too; otherwise the pill stays SIGNAL — for the whole visit.
+    void deliverStage6RadioProbe(bool ok, int rssi_dbm);
     void requestExplorationStorageProbe();
     void handleExplorationStorageProbeFinished(int exit_code, QProcess::ExitStatus exit_status);
     void pushExplorationTelemetryToUiFast();
@@ -316,9 +320,8 @@ private:
     void showCommandDroppedToast(const QString& message);
     void hideCommandDroppedToast();
     // Returns true when the LinkHealthMonitor is armed AND we should
-    // hard-block any RPC to the robot.  Covers BOTH true OFFLINE
-    // (probe + ROS topics both gone — host unreachable) AND
-    // RECONNECTING (ROS topics stale but probe says host is up).
+    // hard-block any RPC to the robot.  Covers Connecting (armed, no
+    // contact yet this session), true OFFLINE, and RECONNECTING.
     // Used as a gate by the planner RPC paths so we don't
     // optimistically mutate local state (planner_estop_active_, etc.)
     // when the robot can't possibly have received the command.
@@ -329,6 +332,13 @@ private:
     // OfflineFinalizeDialog — RECONNECTING shouldn't pop the dialog
     // because the link might recover in seconds.
     bool isRobotLinkUnreachable() const;
+    // Stage 6 mission ended or its teardown started. Leaves the monitor
+    // alone while an exploration launch still owns it.
+    void releaseStage6LinkTracking();
+    // After arm() wipes the reachability mirror, copy a verdict the
+    // probe already has. arm() on the probe is a no-op when the host
+    // is unchanged, so it will not emit again on its own.
+    void pushKnownReachability();
     // Re-publish all "soft" state the robot needs to be in sync with
     // the OCU's current model.  Called once per Disconnected -> Healthy
     // transition so that a bot that rebooted mid-disconnect lands back
@@ -503,6 +513,10 @@ private:
     bool exploration_storage_probe_in_flight_ = false;
     qint64 exploration_last_storage_probe_at_ms_ = 0;
     int exploration_rf_rssi_dbm_ = 0;
+    // radioEpoch() captured when the SNMP probe started, or -1 when
+    // that probe was not for Stage 6. A reset between start and finish
+    // drops the result.
+    int stage6_radio_probe_epoch_ = -1;
 
     // Latest battery sample mirrored from DashboardScreen.  Populated
     // by onDashboardBatteryStateChanged.  `last_battery_stale_` starts

@@ -746,7 +746,37 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME touch_gesture_state_tests COMMAND touch_gesture_state_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests robot_registry_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests swath_preview_tests)")
+        # Stage 6 signal pill. Header-only, no Qt.
+        add_executable(radio_link_pill_tests
+            tests/radio_link_pill_tests.cpp
+            include/radio_link_pill.hpp
+        )
+        target_include_directories(radio_link_pill_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(radio_link_pill_tests PRIVATE
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME radio_link_pill_tests COMMAND radio_link_pill_tests)
+
+        # Per-mission link sessions. Own main(): QTimer needs one
+        # QCoreApplication for the whole binary.
+        add_executable(link_health_monitor_tests
+            tests/link_health_monitor_tests.cpp
+            src/link_health_monitor.cpp
+            include/link_health_monitor.hpp
+        )
+        target_include_directories(link_health_monitor_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(link_health_monitor_tests PRIVATE
+            ${QT_CORE_LIBS}
+            GTest::gtest
+        )
+        add_test(NAME link_health_monitor_tests COMMAND link_health_monitor_tests)
+
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests robot_registry_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests swath_preview_tests radio_link_pill_tests link_health_monitor_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

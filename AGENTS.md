@@ -137,9 +137,15 @@ safety nets so data never gets lost when the OCU disconnects.
   every frame; `AppShellWindow::onExplorationLiveSlowTick` polls it
   and stamps the source if a frame was delivered in the last 1 s).
 
-State derivation: any source < 2 s old → Healthy; 2-5 s → Degraded;
-all sources ≥ 5 s → Disconnected.  Armed at exploration launch start;
-disarmed at teardown.
+State derivation: no stamp since `arm()` and the session is younger
+than 120 s → Connecting; no stamp for 120 s
+(`LinkHealthMonitor::kConnectingTimeoutMs`) → Disconnected even if
+the probe says the host is up; any source < 10 s old → Healthy;
+stamps stale and the probe says the host is up → Reconnecting;
+stamps stale and the probe does not → Disconnected.
+`arm()` always starts a new session (it is not a no-op when already
+armed) in Connecting. Armed at launch start; disarmed when teardown
+starts, not after the sweep has already silenced the topics.
 
 ### OCU-side surfaces (layered connectivity model)
 
@@ -155,62 +161,74 @@ host is up" window is short enough to not trip the operator:
    (`ping -c 1 -W 1 <robot_host>`) on a 1 s cadence with TCP-22
    fallback via `QTcpSocket`. Pushed into the monitor via
    `setReachability()` after a 2-tick debounce.
-3. **FPV proof-of-life** — RTP/UDP video frames arriving at EITHER
-   `ExplorationScreen::lastFpvFrameWallMs()` OR
-   `PlannerScreen::lastScanFpvFrameWallMs()` count as a
+3. **FPV proof-of-life** — RTP/UDP video frames arriving at
+   `ExplorationScreen::lastFpvFrameWallMs()`,
+   `PlannerScreen::lastScanFpvFrameWallMs()`, or
+   `SatelliteScreen::lastScanFpvFrameWallMs()` count as a
    `Source::FpvFrame` stamp. Camera RTP keeps flowing through brief
    Microhard fades (it's stateless), so as long as ANY frames are
    decoding the bot is verifiably alive end-to-end, regardless of
    Zenoh peer state. Stamped on every 1 Hz slow tick if the most
-   recent frame is < 2 s old. **Must read from BOTH stages** — pre-
-   fix the slot only checked Stage 4, so once the operator advanced
-   to Stage 5 the FPV stamp went stale instantly even with the camera
-   live, producing false-positive RECONNECTING flap (terminal log
+   recent frame is < 2 s old **and** that frame is at or after
+   `armedAtMs()` — a frame from the previous mission must not skip
+   Connecting. **Must read from all three stages** — pre-fix this
+   slot only checked Stage 4, so once the operator advanced to Stage
+   5 the stamp went stale instantly even with the camera live,
+   producing false-positive RECONNECTING flap (terminal log
    2026-05-12T05:41).
 
-Combining them resolves four states:
+Combining them resolves five states:
 
+- `Connecting` — armed, no stamp yet this session, younger than 120 s.
+  Stage 4/5 commands are blocked, but this is not offline: no banner,
+  no OfflineFinalizeDialog, E-Stop stays available. Stage 4/5 pill
+  text is `BOT CONNECTING` with no counter. A host that answers pings
+  does not extend the wait. At 120 s with still no stamp the state
+  becomes Disconnected, so Complete Mission opens the offline dialog.
 - `Healthy` — topics fresh (always treated as connected).
 - `Reconnecting` — topics stale **but** probe says host is reachable.
   Operator-facing pill text is `BOT LIVE - SYNCING X s` because
   with the FPV stamp in place we'd typically only land here when
   RTP video has ALSO stopped — an honest "all our channels are
   briefly out, but the network is up" signal.
-- `Disconnected` — topics stale, probe failed, FPV gone. True offline.
+- `Disconnected` — this session already had contact, then the stamps
+  went stale and the probe failed, or 120 s passed with no stamp at
+  all. True offline.
 - `Idle` — pre-arm.
 
 #### Surfaces
 
 - Top-bar **BOT pill** in both Stage 4 + Stage 5 (next to the existing
   Battery / Signal / REC pills). States: BOT IDLE (grey, pre-launch),
-  BOT LIVE (green), BOT LIVE - SYNCING Xs (amber), BOT OFFLINE Xs
-  (red). Both SYNCING and OFFLINE tick an "Xs" counter so the
-  operator can see whether the recovery is making progress.
+  BOT CONNECTING (amber, no counter — armed, no contact yet this
+  session), BOT LIVE (green), BOT LIVE - SYNCING Xs (amber), BOT
+  OFFLINE Xs (red). SYNCING and OFFLINE tick an "Xs" counter.
+  Stage 6's pill is RSSI instead; see the Stage 6 rules.
 - Inline disconnect **banner** at the top of Stage 5 (Scan), and the
   amber map-halo on the `PlotWidget` / `ExplorationNavMapWidget` —
-  shown ONLY in true `Disconnected`. RECONNECTING deliberately does
-  not show banner / halo.
+  shown ONLY in true `Disconnected`. CONNECTING and RECONNECTING
+  deliberately do not show banner / halo.
 - Stage 5 `scan_tick_timer_` is NOT paused on link loss — operator
   wants the elapsed clock to keep ticking against real wall-clock.
   Stale telemetry is communicated via the per-widget grey-out
   (opacity 0.55) applied on every value derived from robot data.
 - Pause/Resume, Cancel, Discard, Start Mapping, Finish + Save Map,
-  Stop Pipeline, Complete Mission all hard-disable in BOTH
+  Stop Pipeline, Complete Mission all hard-disable in `Connecting`,
   `Reconnecting` and `Disconnected`. Tooltips swap between
   "Robot reconnecting…" and "Robot offline — wait for reconnect."
   based on `link_reachable_`.
 - **E-STOP BYPASS**: the Emergency Stop button stays enabled in
-  `Reconnecting` and is only disabled in true `Disconnected`. E-Stop
-  is the one command where dropping it is unacceptable — even if the
-  RPC lands 5-10 s late after Zenoh re-handshakes, that's better
-  than refusing to send it. Both the screen-side gate (`updateScanRunUi`
-  in `cpp/src/planner_screen.cpp`) and the AppShell-side gate
-  (`onPlannerEmergencyStopRequested`) use `isRobotLinkUnreachable()`
-  (strict) instead of `isRobotLinkOffline()`.
-- `isRobotLinkOffline()` returns true for Reconnecting + Disconnected
-  (general RPC gate). `isRobotLinkUnreachable()` returns true ONLY for
-  Disconnected (used by the Complete Mission flow + the E-Stop bypass
-  above).
+  `Connecting` and `Reconnecting` and is only disabled in true
+  `Disconnected`. E-Stop is the one command where dropping it is
+  unacceptable — even if the RPC lands 5-10 s late after Zenoh
+  re-handshakes, that's better than refusing to send it. Both the
+  screen-side gate (`updateScanRunUi` in `cpp/src/planner_screen.cpp`)
+  and the AppShell-side gate (`onPlannerEmergencyStopRequested`) use
+  `isRobotLinkUnreachable()` (strict) instead of `isRobotLinkOffline()`.
+- `isRobotLinkOffline()` returns true for Connecting + Reconnecting +
+  Disconnected (general RPC gate). `isRobotLinkUnreachable()` returns
+  true ONLY for Disconnected (used by the Complete Mission flow + the
+  E-Stop bypass above). Connecting is not unreachable.
 - `onPlannerEmergencyStopRequested`, `onPlannerScanPauseRequested`,
   and `onPlannerScanResumeRequested` early-return on
   `isRobotLinkOffline()` and surface a `showCommandDroppedToast()`
@@ -339,9 +357,10 @@ The recovery path:
 
 - **Do NOT remove or "simplify"** any of the following — they are
   load-bearing:
-  - `LinkHealthMonitor` class (states: Idle / Healthy /
+  - `LinkHealthMonitor` class (states: Idle / Connecting / Healthy /
     Reconnecting / Disconnected — do NOT re-introduce the dropped
-    Degraded/LAGGY tier).
+    Degraded/LAGGY tier, and do NOT make `arm()` a no-op when it is
+    already armed).
   - `RobotReachabilityProbe` and its ICMP → TCP-22 fallback chain.
     Removing the probe regresses the OCU to single-signal freshness
     and the false-positive offline flapping returns.
@@ -364,6 +383,11 @@ The recovery path:
 - The single freshness threshold is **10 s** in
   `LinkHealthMonitor::kStaleMaxMs`. Tighter values bring back the
   Zenoh-rediscovery false positives that motivated the layered model.
+- Connecting gives a launch **120 s**
+  (`LinkHealthMonitor::kConnectingTimeoutMs`) to produce a first
+  stamp, then becomes Disconnected even if the reachability probe
+  says the host is up. Do not drop that ceiling: a launch that never
+  speaks must not keep Complete Mission on the normal path.
 - Zenoh transport-layer keepalive lives in BOTH
   `pilot_ws/src/pilot_control/config/zenoh/zenohd_laptop.json5` AND
   `zenohd_robot.json5` (`transport.link.tx.lease = 4000`,
@@ -380,10 +404,13 @@ The recovery path:
   removing them lets a startup fade kill `zenohd` entirely and the
   OCU loses ALL ROS comm with no recovery path.
 - The FPV proof-of-life stamp (slow-tick block in `app_shell.cpp`)
-  MUST read from BOTH `stage4_->lastFpvFrameWallMs()` and
-  `stage5_->lastScanFpvFrameWallMs()` — using only one stage
+  MUST read from `stage4_->lastFpvFrameWallMs()`,
+  `stage5_->lastScanFpvFrameWallMs()` and
+  `stage6_->lastScanFpvFrameWallMs()`, and only when the frame is
+  at or after `LinkHealthMonitor::armedAtMs()`. Using only one stage
   produces false-positive RECONNECTING the moment the operator
-  changes screens.
+  changes screens; counting a frame from before `arm()` skips
+  Connecting on the next mission.
 - When adding a new ROS subscriber on the AppShell side, **always**
   stamp the appropriate `LinkHealthMonitor::Source` from its callback
   — otherwise the link monitor will go OFFLINE during a perfectly
@@ -841,7 +868,7 @@ kept in sync by hand.
   per-robot `cloud_client_id` + `cloud_device_token`. Optional sibling
   `cloud_config.json` overrides the API base; `kDefaultCloudApiBase` is
   the compiled-in fallback.
-- `.deb` `Depends:` now includes `python3, python3-requests, udisks2`;
+- `.deb` `Depends:` now includes `python3, python3-requests, udisks2, snmp`;
   `create_deb.sh` fails if `cpp/scripts/uploader.py` is missing.
 - Drive label defaults to `RDATA_EXT` (`ThumbDriveWatcher::kDefaultLabel`)
   and must match the director's `thumbdrive_copy_label` parameter.
@@ -1522,10 +1549,32 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  director can never read a stale `true`. A laptop-launch exit is handled
  like a robot-launch exit (heartbeat gone = dead run) — same
  `launchDied` signal, the modal names the side.
-- The BOT pill runs the layered link model: AppShell arms
- `link_monitor_` + `reachability_probe_` on `missionActiveChanged(true)`
- (probe host = the Send SSH target) and every Stage 6 ROS callback stamps
- the monitor. New subscribers must stamp too.
+- The Stage 6 top-bar pill is the **radio**, not the link monitor.
+ Whenever Stage 6 is showing it polls the Microhard RSSI (`snmpget`,
+ the same `robots.json` OID Stage 4 uses) and shows SIGNAL STRONG
+ (green, ≥ -65 dBm), SIGNAL WEAK (amber, ≥ -80), or NO LINK (red:
+ below -80, a reading of 0, a failed get with no sample newer
+ than 5 s, or `snmpget` failing to start). SIGNAL — until the first
+ probe of that visit finishes. A robot with no radio IP or RSSI OID
+ shows NO RADIO CONFIG (grey). A 0 is not a strong signal. Do not
+ paint this pill from odometry age or from `LinkHealthMonitor`.
+ The `.deb` depends on `snmp` so `snmpget` is installed.
+- Link tracking is still per mission, and a new mission must not
+ inherit the previous one. `arm()` clears stamps, reachability and
+ the state clock even if it was already armed, and starts in
+ Connecting. A ROS sample or FPV frame from before `armedAtMs()`
+ does not stamp and does not count as first contact.
+ `RosLink::clearSnapshots()` runs at teardown start and on every
+ mission start and end; it does not emit. Disarm on
+ `teardownBegan` (and again when the mission goes inactive), not
+ only after the ~40 s sweep, so the shutdown is not an outage.
+ Stage 6 does not disable controls from the link state. It uses the
+ monitor only to choose the Complete Mission path: true Disconnected
+ opens OfflineFinalizeDialog, and Connecting does not. After 120 s
+ with no stamp, Connecting becomes Disconnected, so a launch that
+ never reached the robot takes the offline path. Stage 6 E-Stop
+ stays enabled in every link state. Stage 4/5 still hard-block RPCs
+ in Connecting. New Stage 6 subscribers must still stamp the monitor.
 - ROI vertices/edge flags travel in RAW corner order — the robot-side
  manager resolves flags to segments BEFORE `Polygon.buffer(0)` (which may
  reorder rings). Marked edges get `roof_edge_clearance` (0.5 m default)
@@ -1858,7 +1907,10 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  mission must leave the plan PLANNED so it can be re-run. Only
  `markCurrentPlanCompleted()` writes the stamp, and only from the two
  finalize-success branches — abort-and-save is a third path that
- deliberately does **not** stamp. Do not raise the auto-prune above
+ deliberately does **not** stamp. The SSH branch stamps only when
+ `finalize_policy::offlineFinalizeLanded` sees `"finalized": true`:
+ `finalize_mission_local.py` also exits 0 for "no open mission found"
+ (a launch that never reached the robot), and that must stay PLANNED. Do not raise the auto-prune above
  `kCompletedPlansKept = 5` without operator signoff, and never let
  `pruneCompleted()` touch a PLANNED plan.
 - **Do not re-enable the rotate handle on an unselected marker.** The

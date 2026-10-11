@@ -4,7 +4,6 @@
 #include <QTimer>
 
 #include <algorithm>
-#include <limits>
 
 namespace f2c_cpp {
 
@@ -19,21 +18,25 @@ LinkHealthMonitor::LinkHealthMonitor(QObject* parent)
 LinkHealthMonitor::~LinkHealthMonitor() = default;
 
 void LinkHealthMonitor::arm() {
-    if (armed_) {
-        return;
-    }
+    const State old = state_;
     armed_ = true;
     last_seen_ms_.fill(0);
-    // Honest starting state until the first stamp + first probe land.
-    // We use Disconnected (not Reconnecting) because we have no
-    // reachability data yet — be conservative.
+    // Reachability from the previous session must not decide this one.
+    // AppShell pushes the probe's current verdict again after arm()
+    // when the probe is already past Idle.
     reachable_ = false;
     reachable_known_ = false;
-    state_ = State::Disconnected;
-    state_entered_at_ms_ = QDateTime::currentMSecsSinceEpoch();
-    timer_->start();
-    // Fire so consumers can immediately render "awaiting first contact".
-    emit linkStateChanged(State::Idle, State::Disconnected, 0);
+    // No stamp yet. Connecting, not Disconnected: the stack has not
+    // had a chance to speak, and Offline is reserved for a session
+    // that already had contact and then lost it.
+    state_ = State::Connecting;
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    state_entered_at_ms_ = now_ms;
+    armed_at_ms_ = now_ms;
+    if (!timer_->isActive()) {
+        timer_->start();
+    }
+    emit linkStateChanged(old, State::Connecting, 0);
 }
 
 void LinkHealthMonitor::disarm() {
@@ -48,6 +51,7 @@ void LinkHealthMonitor::disarm() {
     last_seen_ms_.fill(0);
     reachable_ = false;
     reachable_known_ = false;
+    armed_at_ms_ = 0;
     if (old != State::Idle) {
         emit linkStateChanged(old, State::Idle, 0);
     }
@@ -101,6 +105,18 @@ qint64 LinkHealthMonitor::msSinceLastSeen() const {
     return QDateTime::currentMSecsSinceEpoch() - newest;
 }
 
+qint64 LinkHealthMonitor::msWithoutContact() const {
+    if (!armed_) {
+        return -1;
+    }
+    const qint64 since = msSinceLastSeen();
+    if (since >= 0) {
+        return since;
+    }
+    return std::max<qint64>(0, QDateTime::currentMSecsSinceEpoch() -
+                                   armed_at_ms_);
+}
+
 qint64 LinkHealthMonitor::msInCurrentState() const {
     if (state_entered_at_ms_ == 0) {
         return 0;
@@ -129,27 +145,43 @@ const char* LinkHealthMonitor::sourceName(Source source) {
     return "unknown";
 }
 
-LinkHealthMonitor::State LinkHealthMonitor::derive(qint64 now_ms) const {
-    qint64 newest_age = std::numeric_limits<qint64>::max();
-    for (qint64 t : last_seen_ms_) {
-        if (t > 0) {
-            newest_age = std::min(newest_age, now_ms - t);
+LinkHealthMonitor::State LinkHealthMonitor::deriveLinkState(
+    qint64 now_ms, qint64 armed_at_ms, qint64 newest_stamp_ms,
+    bool reachable_known, bool reachable) {
+    if (newest_stamp_ms <= 0) {
+        // No contact this session. The launch gets one window to speak.
+        // Past it, a ping-reachable host is still a stack that never
+        // came up, and Complete Mission must take the offline path.
+        if (armed_at_ms > 0 &&
+            now_ms - armed_at_ms >= kConnectingTimeoutMs) {
+            return State::Disconnected;
         }
+        return State::Connecting;
     }
-    const bool fresh = (newest_age != std::numeric_limits<qint64>::max()) &&
-                       (newest_age < kStaleMaxMs);
-    if (fresh) {
+    const qint64 newest_age = now_ms - newest_stamp_ms;
+    if (newest_age < kStaleMaxMs) {
         // Topics flowing — call it healthy regardless of probe state.
         // (Probe might still be warming up; topic flow is the gold
         // standard for "I can talk to the robot end-to-end".)
         return State::Healthy;
     }
-    // Topics stale (or no stamps yet).  Defer to the network probe to
-    // distinguish "Zenoh hiccup, robot still up" from "really gone".
-    if (reachable_known_ && reachable_) {
+    // This session has had contact, and every stamp is now stale.
+    // Defer to the network probe to distinguish "Zenoh hiccup, robot
+    // still up" from "really gone". The no-contact timeout does not
+    // apply once a stamp has landed.
+    if (reachable_known && reachable) {
         return State::Reconnecting;
     }
     return State::Disconnected;
+}
+
+LinkHealthMonitor::State LinkHealthMonitor::derive(qint64 now_ms) const {
+    qint64 newest = 0;
+    for (qint64 t : last_seen_ms_) {
+        newest = std::max(newest, t);
+    }
+    return deriveLinkState(now_ms, armed_at_ms_, newest, reachable_known_,
+                           reachable_);
 }
 
 void LinkHealthMonitor::evaluate() {
@@ -164,11 +196,7 @@ void LinkHealthMonitor::evaluate() {
     const State old = state_;
     state_ = next;
     state_entered_at_ms_ = now_ms;
-    qint64 since = msSinceLastSeen();
-    if (since < 0) {
-        since = 0;
-    }
-    emit linkStateChanged(old, next, since);
+    emit linkStateChanged(old, next, std::max<qint64>(0, msWithoutContact()));
 }
 
 }  // namespace f2c_cpp
