@@ -152,6 +152,8 @@ bool RosLink::start(QString* error) {
                             swaths_.lines = lines;
                             swaths_.colors = colors;
                             swaths_.revision++;
+                            swaths_wall_ms_ =
+                                QDateTime::currentMSecsSinceEpoch();
                         }
                         emit swathsUpdated();
                     });
@@ -237,6 +239,8 @@ bool RosLink::start(QString* error) {
                         std::lock_guard<std::mutex> lock(mutex_);
                         segment_status_ =
                             QString::fromStdString(msg->data);
+                        segment_wall_ms_ =
+                            QDateTime::currentMSecsSinceEpoch();
                     }
                     emit segmentStatusUpdated();
                 });
@@ -487,6 +491,29 @@ QString RosLink::lastSegmentStatus() const {
 MotorStatus RosLink::motorStatus() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return motors_;
+}
+
+qint64 RosLink::swathsWallMs() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return swaths_wall_ms_;
+}
+
+qint64 RosLink::segmentWallMs() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return segment_wall_ms_;
+}
+
+void RosLink::clearSnapshots() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    grid_ = GridSnapshot{};
+    path_ = PolylineSet{};
+    swaths_ = PolylineSet{};
+    odom_ = OdomSnapshot{};
+    status_ = CoverageStatus{};
+    segment_status_.clear();
+    swaths_wall_ms_ = 0;
+    segment_wall_ms_ = 0;
+    motors_ = MotorStatus{};
 }
 
 bool RosLink::motorsIdle() const {

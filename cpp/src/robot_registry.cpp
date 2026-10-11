@@ -15,6 +15,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 
+#include "dev_flags.hpp"
 #include "settings_constants.hpp"
 
 namespace f2c_cpp {
@@ -138,6 +139,24 @@ std::optional<RobotProfile> RobotRegistry::findById(const QString& robot_id) con
     return std::nullopt;
 }
 
+QString RobotRegistry::pairedRobotId(QString* error) const {
+    if (!paired_robot_id_.isEmpty()) {
+        if (findById(paired_robot_id_).has_value()) {
+            return paired_robot_id_;
+        }
+        if (error) {
+            *error = QStringLiteral("This laptop is paired to %1, but %2 has no "
+                                    "entry for it.")
+                         .arg(paired_robot_id_, source_path_);
+        }
+        return QString();
+    }
+    if (robots_.size() == 1) {
+        return robots_.first().robot_id;
+    }
+    return QString();
+}
+
 bool RobotRegistry::load(QString* error) {
     QStringList candidates;
     candidates << defaultUserRegistryPath();
@@ -181,6 +200,7 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
     QJsonDocument doc = *doc_opt;
     QJsonArray arr;
     QString api_base_from_root;
+    QString paired_from_root;
 
     if (doc.isArray()) {
         arr = doc.array();
@@ -197,6 +217,7 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
         // block because the backend deployment is global; per-robot
         // x-client-id / x-device-token still differentiate callers.
         api_base_from_root = root.value("cloud_api_base").toString().trimmed();
+        paired_from_root = root.value("paired_robot_id").toString().trimmed();
     } else {
         if (error) *error = "Robot registry JSON must be an array or object.";
         loaded_ = false;
@@ -223,6 +244,7 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
 
     robots_ = parsed;
     source_path_ = path;
+    paired_robot_id_ = paired_from_root;
 
     // Resolve cloud_api_base in priority order:
     //   1. Top-level key in robots.json (loaded above).
@@ -249,49 +271,45 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
     return true;
 }
 
-bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* error_out) {
+bool resolveRobotSshTarget(const RobotRegistry& registry,
+                           const QString& robot_id,
+                           const QString& stored_override_ip,
+                           bool allow_dev_override,
+                           ResolvedRobotSshTarget* out,
+                           QString* error_out) {
     if (!out) {
         return false;
     }
     *out = ResolvedRobotSshTarget{};
 
-    QSettings settings(kSettingsOrgName, kSettingsAppName);
     const QString override_ip =
-        settings.value(QStringLiteral("robot_ip"), QString()).toString().trimmed();
+        allow_dev_override ? stored_override_ip.trimmed() : QString();
     if (!override_ip.isEmpty()) {
         out->host = override_ip;
         out->ssh_user = QStringLiteral("roofus");
+        out->robot_id = robot_id.trimmed();
         return true;
     }
 
-    const QString robot_id =
-        settings.value(QStringLiteral("setup/robot_id"), QString()).toString().trimmed();
-    if (robot_id.isEmpty()) {
+    const QString id = robot_id.trimmed();
+    if (id.isEmpty()) {
         if (error_out) {
-            *error_out = QStringLiteral(
-                "No robot is logged in. Complete setup login, or set the robot_ip "
-                "setting for development overrides.");
+            *error_out = allow_dev_override
+                ? QStringLiteral(
+                      "No robot selected. Choose one on the Get started screen, or set "
+                      "the robot_ip setting for development overrides.")
+                : QStringLiteral(
+                      "No robot selected. Choose one on the Get started screen.");
         }
         return false;
     }
 
-    RobotRegistry registry;
-    QString load_err;
-    if (!registry.load(&load_err)) {
-        if (error_out) {
-            *error_out = load_err.isEmpty()
-                ? QStringLiteral("Robot registry could not be loaded.")
-                : load_err;
-        }
-        return false;
-    }
-
-    const auto profile = registry.findById(robot_id);
+    const auto profile = registry.findById(id);
     if (!profile.has_value()) {
         if (error_out) {
             *error_out =
                 QStringLiteral("Robot \"%1\" not found in registry (%2).")
-                    .arg(robot_id, registry.sourcePath());
+                    .arg(id, registry.sourcePath());
         }
         return false;
     }
@@ -304,11 +322,182 @@ bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* err
     if (out->host.isEmpty()) {
         if (error_out) {
             *error_out =
-                QStringLiteral("Registry entry for \"%1\" has an empty host.").arg(robot_id);
+                QStringLiteral("Registry entry for \"%1\" has an empty host.").arg(id);
         }
         return false;
     }
+    out->robot_id = id;
     return true;
+}
+
+bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* error_out) {
+    if (!out) {
+        return false;
+    }
+    QSettings settings(kSettingsOrgName, kSettingsAppName);
+    const QString stored_override =
+        settings.value(QStringLiteral("robot_ip"), QString()).toString();
+    const QString robot_id =
+        settings.value(kSettingsRobotIdKey, QString()).toString();
+
+    // A dev override has to work even when robots.json cannot be read.
+    if constexpr (kDevMode) {
+        if (!stored_override.trimmed().isEmpty()) {
+            return resolveRobotSshTarget(RobotRegistry(), robot_id, stored_override,
+                                         true, out, error_out);
+        }
+    }
+
+    RobotRegistry registry;
+    QString load_err;
+    if (!registry.load(&load_err)) {
+        if (error_out) {
+            *error_out = load_err.isEmpty()
+                ? QStringLiteral("Robot registry could not be loaded.")
+                : load_err;
+        }
+        return false;
+    }
+    return resolveRobotSshTarget(registry, robot_id, stored_override, kDevMode,
+                                 out, error_out);
+}
+
+RetiredGeneralRobotKeys retireLegacyGeneralRobotKeys(QSettings& settings,
+                                                     bool release_build) {
+    RetiredGeneralRobotKeys retired;
+    if (!release_build) {
+        return retired;
+    }
+    retired.robot_ip =
+        settings.value(QStringLiteral("robot_ip"), QString()).toString().trimmed();
+    retired.robot_id =
+        settings.value(QStringLiteral("robot_id"), QString()).toString().trimmed();
+    if (settings.contains(QStringLiteral("robot_ip"))) {
+        settings.remove(QStringLiteral("robot_ip"));
+    }
+    if (settings.contains(QStringLiteral("robot_id"))) {
+        settings.remove(QStringLiteral("robot_id"));
+    }
+    settings.sync();
+    return retired;
+}
+
+namespace {
+
+QString shellSingleQuote(const QString& value) {
+    QString escaped = value;
+    escaped.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+    return QLatin1Char('\'') + escaped + QLatin1Char('\'');
+}
+
+QString identityReadAndPrint(const QString& id_path) {
+    const QString path = id_path.isEmpty() ? QLatin1String(kRobotIdentityPath)
+                                           : id_path;
+    // `head` fails on a missing file; `|| true` keeps a caller's `set -e`
+    // from aborting. GNU tr treats `\r` and `\n` as CR/LF, which keeps the
+    // marker on one line. sed applies the same trim as the classifier.
+    return QStringLiteral("_bdr_id=$( { head -c 256 ") + shellSingleQuote(path) +
+           QStringLiteral(
+               " | tr -d '\\r\\n' || true; } 2>/dev/null ); "
+               "_bdr_id=$(printf '%s' \"$_bdr_id\" | sed "
+               "'s/^[[:space:]]*//;s/[[:space:]]*$//'); "
+               "printf 'BDR_ROBOT_ID:%s\\n' \"$_bdr_id\"; ");
+}
+
+}  // namespace
+
+RobotIdentityReport classifyRobotIdentity(const QString& expected_robot_id,
+                                          const QString& remote_output) {
+    RobotIdentityReport report;
+    const QLatin1String marker(kRobotIdentityMarker);
+    const QStringList lines = remote_output.split(QLatin1Char('\n'));
+    for (QString line : lines) {
+        line = line.trimmed();
+        if (!line.startsWith(marker)) {
+            continue;
+        }
+        report.reported = line.mid(marker.size()).trimmed();
+        break;
+    }
+    if (report.reported.isEmpty()) {
+        report.verdict = RobotIdentityVerdict::Unreadable;
+        return report;
+    }
+    const QString expected = expected_robot_id.trimmed();
+    if (!expected.isEmpty() && report.reported == expected) {
+        report.verdict = RobotIdentityVerdict::Match;
+        return report;
+    }
+    report.verdict = RobotIdentityVerdict::Mismatch;
+    return report;
+}
+
+PreLaunchIdentityDecision decidePreLaunchIdentity(RobotIdentityVerdict verdict,
+                                                  int ssh_rc) {
+    if (verdict == RobotIdentityVerdict::Mismatch) {
+        return PreLaunchIdentityDecision::Block;
+    }
+    if (ssh_rc != 0) {
+        return PreLaunchIdentityDecision::SweepFailed;
+    }
+    if (verdict == RobotIdentityVerdict::Unreadable) {
+        return PreLaunchIdentityDecision::WarnThenSpawn;
+    }
+    return PreLaunchIdentityDecision::Spawn;
+}
+
+CaptureIdentityDecision decideCaptureIdentity(RobotIdentityVerdict verdict,
+                                              bool gate_cleared) {
+    if (verdict == RobotIdentityVerdict::Mismatch) {
+        return CaptureIdentityDecision::Block;
+    }
+    if (!gate_cleared && verdict == RobotIdentityVerdict::Unreadable) {
+        return CaptureIdentityDecision::WarnAndRecollect;
+    }
+    return CaptureIdentityDecision::ReadManifest;
+}
+
+QString robotIdentityMismatchText(const QString& expected_robot_id,
+                                  const QString& reported) {
+    const QString selected = expected_robot_id.trimmed().isEmpty()
+                                 ? QStringLiteral("no robot")
+                                 : expected_robot_id.trimmed();
+    const QString seen = reported.trimmed().isEmpty() ? QStringLiteral("nothing")
+                                                       : reported.trimmed();
+    return QStringLiteral("This robot reports %1, but %2 is selected.")
+        .arg(seen, selected);
+}
+
+QString robotIdentityUnreadableText(const QString& expected_robot_id) {
+    const QString selected = expected_robot_id.trimmed();
+    if (selected.isEmpty()) {
+        return QStringLiteral(
+                   "This robot has no ID on file (%1), so it was not confirmed.")
+            .arg(QLatin1String(kRobotIdentityPath));
+    }
+    return QStringLiteral(
+               "This robot has no ID on file (%1), so it was not confirmed to be %2.")
+        .arg(QLatin1String(kRobotIdentityPath), selected);
+}
+
+QString robotIdentityProbePrefix(const QString& expected_robot_id,
+                                 const QString& id_path) {
+    return identityReadAndPrint(id_path) +
+           QStringLiteral("if [ -n \"$_bdr_id\" ] && [ \"$_bdr_id\" != ") +
+           shellSingleQuote(expected_robot_id.trimmed()) +
+           QStringLiteral(" ]; then exit 0; fi; ");
+}
+
+QString robotIdentityMatchPrefix(const QString& expected_robot_id,
+                                 const QString& id_path) {
+    // External printf flushes when that process exits, so the laptop sees
+    // the line while the spin is still running. A bash builtin would sit
+    // in the shell's block buffer until the whole script ended.
+    return identityReadAndPrint(id_path) +
+           QStringLiteral("if [ \"$_bdr_id\" != ") +
+           shellSingleQuote(expected_robot_id.trimmed()) +
+           QStringLiteral(" ] || [ -z \"$_bdr_id\" ]; then exit 0; fi; "
+                          "/usr/bin/printf 'BDR_IDENTITY_OK\\n' || true; ");
 }
 
 }  // namespace f2c_cpp

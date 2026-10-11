@@ -165,6 +165,33 @@ OffloadSnapshot parseOffloadStatusJson(const QByteArray& json) {
     return out;
 }
 
+bool thumbCopyIsReady(const ThumbCopyInputs& in) {
+    if (in.stick_full) {
+        return true;
+    }
+    // The stick in hand is the copy record. A saved robot report must
+    // not block an office upload of a stick the robot already finished.
+    if (!in.robot_reachable && in.stick == StickSync::Complete) {
+        return true;
+    }
+    if (in.robot_copy_incomplete) {
+        return false;
+    }
+    return in.stick != StickSync::Incomplete;
+}
+
+QString thumbCopyStaleReportNote(const ThumbCopyInputs& in) {
+    if (in.stick_full || in.robot_reachable || !in.robot_copy_incomplete) {
+        return {};
+    }
+    if (in.stick != StickSync::Complete) {
+        return {};
+    }
+    return QStringLiteral(
+        "The robot's last report said a copy had not finished. "
+        "This stick is complete, so it can be uploaded.");
+}
+
 StickSync classifyStickSync(const QString& data_root) {
     const QDir root(data_root);
     if (data_root.isEmpty() || !root.exists()) {

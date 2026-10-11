@@ -86,10 +86,11 @@ public:
      * shuts its tree down in order) + name sweep of what ignores it, then
      * SIGTERM to the laptop launch.
      *
-     * Asynchronous — returns at once and reports through `teardownPhase`,
-     * then `missionStateChanged(false)` and `teardownFinished()` in that
-     * order. Callers that must navigate afterwards hang off the latter.
-     * Calling it twice is a no-op; so is calling it with nothing running.
+     * Asynchronous — returns at once and reports through `teardownBegan`,
+     * `teardownPhase`, then `missionStateChanged(false)` and
+     * `teardownFinished()` in that order. Callers that must navigate
+     * afterwards hang off the last of those. Calling it twice is a
+     * no-op; so is calling it with nothing running.
      */
     void teardownMission();
 
@@ -134,6 +135,18 @@ public:
      */
     void resumeAfterSweep(bool proceed);
 
+    /** After `robotIdentityUnchecked`. The sweep already ran (a missing
+        ID file falls through); this spawns the launches it parked. */
+    void continueAfterIdentityWarning();
+
+    /**
+     * Identity was rejected before anything was spawned. Drops the mission
+     * without a robot sweep: the pre-launch script already exited before
+     * pkill, and sweeping now would kill the other robot's stack. If a
+     * launch is already running, falls through to teardownMission.
+     */
+    void cancelUnlaunchedMission();
+
     /** True once the launch itself printed a line. Everything before
         BDR_LAUNCH_BEGIN is the login shell and does not count. */
     bool robotLaunchSpoke() const { return robot_launch_spoke_; }
@@ -159,6 +172,13 @@ signals:
     void missionStateChanged(bool active);
     /** Operator-facing launch progress; empty once the launches are up. */
     void launchPhase(const QString& text);
+    /**
+     * A teardown has actually started (the early-return guards passed),
+     * before the robot sweep kills the topics. Link tracking stops here
+     * so the shutdown is not reported as an outage. `missionStateChanged
+     * (false)` still fires when the chain finishes.
+     */
+    void teardownBegan();
     /** Operator-facing teardown progress; empty when it is done. */
     void teardownPhase(const QString& text);
     /** Teardown chain finished, after missionStateChanged(false). */
@@ -176,8 +196,15 @@ signals:
      * Pre-launch sweep returned non-zero. The script itself cannot fail
      * (`set +e` / `|| true`); this is ssh unreachable (255) or the 20 s
      * hang deadline (-1). Launches are parked until resumeAfterSweep.
+     * A robot-id mismatch is `robotIdentityBlocked`, not this signal —
+     * that path must not offer "launch anyway".
      */
     void robotSweepFailed(int exit_code);
+    /** `/etc/pilot_robot_id` names a different robot. Nothing was launched. */
+    void robotIdentityBlocked(const QString& message);
+    /** The ID file is missing or empty. Spawn waits on
+        continueAfterIdentityWarning. */
+    void robotIdentityUnchecked(const QString& message);
 
 private:
     /** Teardown chain; each step continues the next from its callback. */
@@ -187,9 +214,12 @@ private:
     /** One SSH round trip that leaves the robot with no Stage 6 stack
         running (see kRobotSweep). ~1 s when already clean. `kill_daemon`
         is pre-launch only — teardown must not take down a CLI daemon
-        that an in-flight `ros2 service call` still needs. */
-    void runRobotSweep(std::function<void(int rc, int elapsed_ms)> on_done,
-                       bool kill_daemon = false);
+        that an in-flight `ros2 service call` still needs. Pre-launch also
+        reads `/etc/pilot_robot_id` first and exits before pkill when it
+        is not the selected robot. */
+    void runRobotSweep(
+        std::function<void(int rc, int elapsed_ms, const QString& output)> on_done,
+        bool kill_daemon = false);
     void runLaptopSweep(std::function<void()> on_done);
     /** Second half of startMission, once both sweeps are clear. */
     void spawnLaunches();

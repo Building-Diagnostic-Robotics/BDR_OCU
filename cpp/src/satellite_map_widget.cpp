@@ -2438,8 +2438,14 @@ bool SatelliteMapWidget::handleTouchGesture(QTouchEvent* event) {
         // Twist before the pan and zoom: the bearing is part of the view
         // transform both of those solve against, so applying it first keeps
         // the anchor arithmetic in one frame instead of two.
+        // Bearing is the compass direction at the top of the screen, and
+        // the view paints the imagery rotated by -bearing, so a clockwise
+        // finger twist has to lower it or the map turns against the
+        // fingers. The alignment panes add the twist: they store a plain
+        // clockwise view rotation.
         if (motion.twist_deg != 0.0) {
-            setBearingDeg(bearing_deg_ + motion.twist_deg);
+            setBearingDeg(touch_gestures::bearingAfterTwist(
+                bearing_deg_, motion.twist_deg));
             moved = true;
         }
         // The midpoint travelling is a pan and the zoom anchors where the

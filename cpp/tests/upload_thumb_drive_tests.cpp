@@ -44,6 +44,9 @@ using f2c_cpp::groupUploadTargets;
 using f2c_cpp::uploadTargetsForRow;
 using f2c_cpp::classifyStickSync;
 using f2c_cpp::parseOffloadStatusJson;
+using f2c_cpp::ThumbCopyInputs;
+using f2c_cpp::thumbCopyIsReady;
+using f2c_cpp::thumbCopyStaleReportNote;
 using f2c_cpp::uploaderArguments;
 
 namespace {
@@ -943,4 +946,48 @@ TEST(OffloadStatus, UnpluggedFullStickStaysStickFull) {
     const OffloadSnapshot copying = parseOffloadStatusJson(
         R"({"state":"copying","queued":2,"mission":"a","jobs":{"a":{"state":"copying"},"b":{"state":"stick_full","error":"stick full: x"}}})");
     EXPECT_EQ(copying.state, OffloadCopyState::Copying);
+}
+
+ThumbCopyInputs copyInputs(bool reachable, bool incomplete, bool stick_full,
+                           StickSync stick) {
+    ThumbCopyInputs in;
+    in.robot_reachable = reachable;
+    in.robot_copy_incomplete = incomplete;
+    in.stick_full = stick_full;
+    in.stick = stick;
+    return in;
+}
+
+TEST(ThumbCopyGate, UnreachableRobotWithACompleteStickCanUpload) {
+    const ThumbCopyInputs in =
+        copyInputs(false, true, false, StickSync::Complete);
+    EXPECT_TRUE(thumbCopyIsReady(in));
+    EXPECT_FALSE(thumbCopyStaleReportNote(in).isEmpty());
+}
+
+TEST(ThumbCopyGate, UnreachableRobotWithAnIncompleteOrMissingStickBlocks) {
+    for (const StickSync stick :
+         {StickSync::Incomplete, StickSync::Absent, StickSync::Empty}) {
+        const ThumbCopyInputs in = copyInputs(false, true, false, stick);
+        EXPECT_FALSE(thumbCopyIsReady(in)) << static_cast<int>(stick);
+        EXPECT_TRUE(thumbCopyStaleReportNote(in).isEmpty());
+    }
+}
+
+TEST(ThumbCopyGate, ReachableRobotStillCopyingBlocksACompleteStick) {
+    const ThumbCopyInputs in = copyInputs(true, true, false, StickSync::Complete);
+    EXPECT_FALSE(thumbCopyIsReady(in));
+    EXPECT_TRUE(thumbCopyStaleReportNote(in).isEmpty());
+}
+
+TEST(ThumbCopyGate, FullStickStaysUploadableWithoutTheStaleNote) {
+    const ThumbCopyInputs in = copyInputs(false, true, true, StickSync::Absent);
+    EXPECT_TRUE(thumbCopyIsReady(in));
+    EXPECT_TRUE(thumbCopyStaleReportNote(in).isEmpty());
+}
+
+TEST(ThumbCopyGate, FinishedReportNeedsNoNote) {
+    const ThumbCopyInputs in = copyInputs(false, false, false, StickSync::Complete);
+    EXPECT_TRUE(thumbCopyIsReady(in));
+    EXPECT_TRUE(thumbCopyStaleReportNote(in).isEmpty());
 }

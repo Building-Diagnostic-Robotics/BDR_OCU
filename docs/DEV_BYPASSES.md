@@ -34,7 +34,7 @@ cmake --build build -j"$(nproc)"
   `-DBDR_DEV_MODE=ON`. No code changes required.
 
 **Semantics chosen (locked with operator):** dev mode still *attempts* robot
-calls (SSH login, robot launch, Start-Scan service chain) but their failure no
+calls (robot launch, Start-Scan service chain) but their failure no
 longer blocks navigation. **Dev mode CAN command a real robot if one is
 connected.** The New-Scan metadata modal still shows (Cancel proceeds).
 
@@ -42,7 +42,6 @@ connected.** The New-Scan metadata modal still shows (Cancel proceeds).
 
 | Stage | Gate | Site (`// BDR_REWIRE:` tagged) | Dev-mode behavior |
 |-------|------|--------------------------------|-------------------|
-| 1 → 2 | SSH login | `setup_screen.cpp` `submit()` failure path | Login attempted; failure still advances to Stage 2 |
 | 2 → 3 | Preflight Continue | `startup_screen.cpp` `kEnableLaunchDashboardPassthrough = kDevMode` | Continue enabled without a passing report |
 | 3 → 4 | Planner button unlock | `app_shell.cpp` `goToStage4()` | `setPlanningEnabled(true)` on Stage 4 entry |
 | 4 → 5 | "Open Mission Planner" needs saved map | `app_shell.cpp` `onExplorationStartPlanningRequested()` | Opens planner without a map (Release blocks + returns) |
@@ -59,36 +58,33 @@ enumerates all sites.
 
 ---
 
-## Stage 1 — Setup / Login (`cpp/src/setup_screen.cpp`)
+## Stage 1 — Get started (`cpp/src/setup_screen.cpp`)
 
-- [x] **Real authentication.** `SetupScreen::submit()` now calls
-      `loginToRobot()` (`cpp/src/robot_login.cpp`), which SSHes to the
-      robot and runs `pilot_control_auth login --pin-stdin --json`. On
-      failure, raw errors are recorded via `update::log::warn` and a
-      mapped operator-friendly message is shown in `lbl_error_` (see
-      `mapLoginErrorForOperator` in `setup_screen.cpp`). The button is
-      disabled and relabeled `LOGGING IN…` during the SSH round-trip.
-      `setup/robot_id` is persisted to QSettings only after a successful
-      login. The session token returned by the robot is parsed and
-      verified inside `loginToRobot` but discarded — see
-      `TODO(BDR_REWIRE)` in `robot_login.hpp` for the follow-up to plumb
-      it into the planner mission-upload path.
-- [x] **Robot-aware connection monitor.** `SetupScreen::checkConnection()`
-      now pings the host of the first robot in `robots.json`, cached at
-      construction. The indicator reflects radio-link reachability — a
-      single per-laptop concern, independent of whatever Robot ID the
-      operator types. If the registry is missing or empty the indicator
-      stays in DISCONNECTED rather than silently pinging a hardcoded
-      address. The `robot_ip` QSettings key is preserved as an
-      undocumented per-machine override.
-- [x] **Registry bootstrap.** `SetupScreen` constructs and loads a
-      `RobotRegistry` directly via `RobotRegistry::load()`, which probes
-      `~/.config/PilotControl/BDRCoveragePlanner/robots.json` first and
-      falls back to alongside-binary locations. `submit()` reloads the
-      registry on each login click (matches the existing pattern in
-      `AppShellWindow::loadExplorationRfConfigForActiveRobot`). No
-      injection seam needed for now since the registry file is ~hundreds
-      of bytes and load latency is negligible.
+- [x] **No robot login.** The robot PIN login is gone: nothing used its
+      token, and it made office planning and thumb-drive upload need a
+      live robot. `SetupScreen` picks the robot with
+      `RobotRegistry::pairedRobotId()` — the optional top-level
+      `paired_robot_id` in `robots.json`, else the only robot listed.
+      With several robots and no pairing it shows a picker, and the
+      Dashboard shows **Switch robot**. A `paired_robot_id` that names an
+      unlisted robot is an error, never a guess. **Get started** writes
+      `setup/robot_id` and opens the Dashboard; Pre-flight is reached from
+      the Dashboard and returns to it. `src/robot_login.cpp` stays
+      compiled but unused for one release. Tests:
+      `tests/robot_registry_tests.cpp`.
+- [x] **Robot identity check.** Send's pre-launch sweep and Capture
+      Point Cloud read `/etc/pilot_robot_id` and print it behind
+      `BDR_ROBOT_ID:`. `classifyRobotIdentity` is an exact match against
+      `setup/robot_id` (leading zeros and case count). A mismatch
+      hard-blocks, and the remote script exits before it pkills or arms,
+      so the wrong robot is left alone. A missing or empty file warns
+      and continues. Tests: `tests/robot_registry_tests.cpp`.
+- [x] **Connection monitor.** `SetupScreen::checkConnection()` pings the
+      selected robot's host. A dev build lets the `robot_ip` QSettings
+      key win, and the screen shows an amber notice while it is set. A
+      Release build ignores that key and deletes it, plus the leftover
+      general `robot_id`, once at startup (`retireLegacyGeneralRobotKeys`).
+      The indicator is advisory; Get started never waits on it.
 
 ## Stage 2 — Pre-flight Diagnostics (`cpp/src/startup_screen.cpp`)
 

@@ -11,8 +11,6 @@
 // to accidentally ship a gate-bypassed binary.
 //
 // What dev mode does (see docs/DEV_BYPASSES.md for the full site list):
-//   - Stage 1 login: SSH login is still attempted, but a failure no longer
-//     blocks advancing to Stage 2.
 //   - Stage 3 -> 4: the New Scan metadata modal still shows, but Cancel/X
 //     proceeds to Stage 4 instead of trapping the operator.
 //   - Stage 4: robot launch is still attempted, but the planner button is

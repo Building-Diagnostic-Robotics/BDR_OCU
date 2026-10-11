@@ -1,6 +1,7 @@
 #include "satellite_map_capture.hpp"
 
 #include "coverage_pipeline.hpp"
+#include "robot_registry.hpp"
 
 #include <QDateTime>
 #include <QDir>
@@ -45,6 +46,8 @@ constexpr int kPointGray = 210;
 
 constexpr const char* kManifestBegin = "__MANIFEST_BEGIN__";
 constexpr const char* kManifestEnd = "__MANIFEST_END__";
+constexpr char kCollectingProgress[] =
+    "Collecting map on the robot (arm, 360° spin, GPS baseline)…";
 
 QString shellQuote(const QString& value) {
     QString escaped = value;
@@ -354,6 +357,8 @@ MapCaptureRunner::MapCaptureRunner(QObject* parent) : QObject(parent) {
     timeout_ = new QTimer(this);
     timeout_->setSingleShot(true);
     connect(timeout_, &QTimer::timeout, this, &MapCaptureRunner::onTimeout);
+    connect(proc_, &QProcess::readyReadStandardOutput, this,
+            &MapCaptureRunner::noteOutput);
     connect(proc_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this](int code, QProcess::ExitStatus) {
                 onProcessFinished(code);
@@ -379,6 +384,7 @@ QStringList MapCaptureRunner::sshBaseArgs() const {
 }
 
 bool MapCaptureRunner::start(const QString& host, const QString& ssh_user,
+                             const QString& expected_robot_id,
                              const QString& local_dir, QString* error) {
     if (busy()) {
         if (error) *error = QStringLiteral("A map collection is already running.");
@@ -396,13 +402,19 @@ bool MapCaptureRunner::start(const QString& host, const QString& ssh_user,
     }
     host_ = host;
     ssh_user_ = ssh_user;
+    expected_robot_id_ = expected_robot_id.trimmed();
     local_dir_ = local_dir;
     remote_pcd_.clear();
     remote_pose_.clear();
     manifest_gps_ = GpsFix{};
     cancelling_ = false;
-    stage_ = Stage::Collecting;
+    identity_gate_cleared_ = false;
+    collecting_announced_ = false;
+    beginRemoteCollection(/*gate=*/true);
+    return true;
+}
 
+QString MapCaptureRunner::collectionScript(bool gate) const {
     // `ros2 launch` frequently never returns here: Fast-LIO, the Livox driver
     // and the ODrive nodes all ignore the shutdown request. So the remote
     // script backgrounds the launch, polls for a manifest NEWER than the one
@@ -416,10 +428,11 @@ bool MapCaptureRunner::start(const QString& host, const QString& ssh_user,
     // `.bashrc` first so the robot's own env (RMW, Zenoh config) matches
     // what every other launch gets.
     //
-    // No `%%` anywhere: this literal goes through QString::arg, which does
-    // NOT collapse `%%`, so `%%Y` would reach the robot verbatim and stat
-    // would print the string "%Y" instead of the mtime.
-    const QString script = QStringLiteral(
+    // No `%%` anywhere in this literal: it goes through QString::arg, which
+    // does NOT collapse `%%`, so `%%Y` would reach the robot verbatim and
+    // stat would print the string "%Y" instead of the mtime. The identity
+    // prefix is concatenated after arg(), because it contains `%s`.
+    const QString body = QStringLiteral(
         "set -e; "
         "if [ -f \"$HOME/.bashrc\" ]; then . \"$HOME/.bashrc\"; fi; "
         "if [ -f /opt/ros/humble/setup.bash ]; then . /opt/ros/humble/setup.bash; fi; "
@@ -438,20 +451,42 @@ bool MapCaptureRunner::start(const QString& host, const QString& ssh_user,
         "kill -INT $LP >/dev/null 2>&1 || true; "
         "disown $LP >/dev/null 2>&1 || true; "
         "exit 0")
-                              .arg(manifest,
-                                   QLatin1String(kManifestBegin),
-                                   QLatin1String(kManifestEnd));
+                             .arg(manifest,
+                                  QLatin1String(kManifestBegin),
+                                  QLatin1String(kManifestEnd));
+    if (!gate) {
+        return body;
+    }
+    // Exits before `set -e` / `ros2 launch` unless the ID file matches, so
+    // the motors are not armed on the wrong robot or on an unread file.
+    return robotIdentityMatchPrefix(expected_robot_id_) + body;
+}
 
+void MapCaptureRunner::beginRemoteCollection(bool gate) {
+    stage_ = Stage::Collecting;
+    collecting_announced_ = !gate;
+    const QString script = collectionScript(gate);
     QStringList args = sshBaseArgs();
-    args << QStringLiteral("bash -lc %1").arg(shellQuote(script));
-    emit progress(QStringLiteral(
-        "Collecting map on the robot (arm, 360° spin, GPS baseline)…"));
+    // Concatenate, don't arg(): the identity prefix contains `%s`, and a
+    // robot id could contain `%1`.
+    args << (QStringLiteral("bash -lc ") + shellQuote(script));
+    emit progress(gate ? QStringLiteral("Checking this is the selected robot…")
+                       : QString::fromLatin1(kCollectingProgress));
     runCommand(QStringLiteral("ssh"), args, kCollectTimeoutMs);
-    return true;
+}
+
+void MapCaptureRunner::noteOutput() {
+    remote_output_ += QString::fromUtf8(proc_->readAll());
+    if (stage_ == Stage::Collecting && !collecting_announced_ &&
+        remote_output_.contains(QLatin1String(kRobotIdentityOkMarker))) {
+        collecting_announced_ = true;
+        emit progress(QString::fromLatin1(kCollectingProgress));
+    }
 }
 
 void MapCaptureRunner::runCommand(const QString& program,
                                   const QStringList& args, int timeout_ms) {
+    remote_output_.clear();
     proc_->start(program, args);
     timeout_->start(timeout_ms);
 }
@@ -497,10 +532,39 @@ void MapCaptureRunner::onProcessFinished(int exit_code) {
         return;
     }
     timeout_->stop();
-    const QString output = QString::fromUtf8(proc_->readAll());
+    noteOutput();
+    const QString output = remote_output_;
 
     switch (stage_) {
         case Stage::Collecting: {
+            const RobotIdentityReport id =
+                classifyRobotIdentity(expected_robot_id_, output);
+            switch (decideCaptureIdentity(id.verdict, identity_gate_cleared_)) {
+                case CaptureIdentityDecision::Block: {
+                    const QString message =
+                        robotIdentityMismatchText(expected_robot_id_, id.reported) +
+                        QStringLiteral("\n\nMap collection was not started.");
+                    emit identityBlocked(message);
+                    if (cancelling_ || stage_ != Stage::Collecting) {
+                        return;
+                    }
+                    fail(message);
+                    return;
+                }
+                case CaptureIdentityDecision::WarnAndRecollect: {
+                    identity_gate_cleared_ = true;
+                    emit identityUnchecked(
+                        robotIdentityUnreadableText(expected_robot_id_) +
+                        QStringLiteral("\n\nMap collection will continue."));
+                    if (cancelling_ || stage_ != Stage::Collecting) {
+                        return;
+                    }
+                    beginRemoteCollection(/*gate=*/false);
+                    return;
+                }
+                case CaptureIdentityDecision::ReadManifest:
+                    break;
+            }
             const int begin = output.indexOf(QLatin1String(kManifestBegin));
             const int end = output.indexOf(QLatin1String(kManifestEnd));
             if (begin < 0 || end <= begin) {

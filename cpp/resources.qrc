@@ -23,11 +23,13 @@
     <file alias="scansetup/delete.svg">../App resource/icons/scan_plan_delete.svg</file>
     <!-- Stage 6 step 2 picker — exported from Figma I9tRcFEniAqnXD0yiMlo6W (235:2246 family). -->
     <file alias="satellite/scan_frame.svg">../App resource/icons/satellite_scan_frame.svg</file>
+    <file alias="setup/chevron_down.svg">../App resource/icons/setup_chevron_down.svg</file>
     <file alias="satellite/refresh.svg">../App resource/icons/satellite_refresh.svg</file>
     <file alias="satellite/align_info.svg">../App resource/icons/satellite_align_info.svg</file>
     <file alias="satellite/align.svg">../App resource/icons/satellite_align.svg</file>
     <file alias="satellite/align_success.svg">../App resource/icons/satellite_align_success.svg</file>
     <file alias="satellite/clear_pairs.svg">../App resource/icons/satellite_clear_pairs.svg</file>
+    <file alias="satellite/undo.svg">../App resource/icons/satellite_undo.svg</file>
     <file alias="satellite/footer_back.svg">../App resource/icons/satellite_footer_back.svg</file>
     <file alias="satellite/footer_next.svg">../App resource/icons/satellite_footer_next.svg</file>
     <file alias="satellite/clear_roi.svg">../App resource/icons/satellite_clear_roi.svg</file>

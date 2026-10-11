@@ -25,12 +25,14 @@ public:
     ~DashboardScreen() override;
 
     void setRobotId(const QString& robotId);
+    /** Shows "Switch robot" (back to Get started). Hidden on a paired laptop. */
+    void setRobotSwitchable(bool switchable);
     void setDarkMode(bool dark_mode);
     /** Re-read robot `/R_DATA/.offload/status.json` and the laptop stick. */
     void refreshThumbCopyStatus();
-    /** True when robot offload is idle and the laptop stick is not a
-     *  partial copy. Last probe is cached so a powered-off robot cannot
-     *  look "ready" if the last check said otherwise. */
+    /** True when the copy does not block Upload. A powered-off robot
+     *  still blocks on its last report, unless the plugged-in stick is
+     *  complete — that stick is the copy record. */
     bool thumbCopyReady() const;
     QString thumbCopyBlockReason() const;
 
@@ -41,7 +43,7 @@ public:
     void setPreflightResult(const QString& result);
 
 signals:
-    void logoutRequested();
+    void switchRobotRequested();
     void startNewScanRequested();
     void runDiagnosticsRequested();
     void viewRecordingsRequested();
@@ -62,7 +64,6 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private slots:
-    void onLogoutClicked();
     void onStartNewScanClicked();
     void onRunDiagnosticsClicked();
     void onViewRecordingsClicked();
@@ -122,6 +123,7 @@ private:
     void applyUploadBlinkFrame();
     bool robotCopyIncomplete() const;
     bool stickCopyIncomplete() const;
+    ThumbCopyInputs thumbCopyInputs() const;
     /// True when the live probe, or the cached state while the robot is
     /// offline, says the stick is under its free-space floor.
     bool offloadStickFull() const;

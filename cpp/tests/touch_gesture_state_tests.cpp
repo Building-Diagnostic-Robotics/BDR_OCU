@@ -13,6 +13,7 @@
 using f2c_cpp::touch_gestures::GestureState;
 using f2c_cpp::touch_gestures::Phase;
 using f2c_cpp::touch_gestures::Point;
+using f2c_cpp::touch_gestures::bearingAfterTwist;
 
 namespace {
 
@@ -321,6 +322,28 @@ TEST(TouchGestureState, ClearingTheDeadZoneReleasesTheBankedAngle) {
     feed(state, pinch(Point{0.0, 0.0}, 200.0));
     const double applied = twistOver(state, 30.0);
     EXPECT_NEAR(applied, 30.0, 1e-6);
+}
+
+// The satellite map paints imagery with rotate(-bearing), because bearing
+// is the compass direction at the top of the screen. A clockwise finger
+// twist must therefore lower the bearing, so the content follows the
+// fingers. The alignment panes do not use bearingAfterTwist.
+TEST(TouchGestureState, ClockwiseTwistTurnsMapContentClockwise) {
+    const auto contentDelta = [](double bearing, double twist) {
+        return -(bearingAfterTwist(bearing, twist) - bearing);
+    };
+
+    GestureState clockwise;
+    feed(clockwise, twisted(Point{0.0, 0.0}, 200.0, 0.0));
+    const double twist = twistOver(clockwise, 30.0);
+    ASSERT_NEAR(twist, 30.0, 1e-6);
+    EXPECT_NEAR(contentDelta(0.0, twist), twist, 1e-6);
+
+    GestureState counter;
+    feed(counter, twisted(Point{0.0, 0.0}, 200.0, 0.0));
+    const double other = twistOver(counter, -30.0);
+    ASSERT_NEAR(other, -30.0, 1e-6);
+    EXPECT_NEAR(contentDelta(10.0, other), other, 1e-6);
 }
 
 // Once engaged it stays engaged: re-arming the dead zone mid-twist would

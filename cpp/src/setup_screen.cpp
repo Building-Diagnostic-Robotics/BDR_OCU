@@ -1,26 +1,22 @@
 #include "setup_screen.hpp"
 #include "dev_flags.hpp"
-#include "robot_login.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
 #include "update/update_log.hpp"
 
 #include <algorithm>
-#include <QApplication>
 #include <QColor>
-#include <QEventLoop>
+#include <QComboBox>
 #include <QHBoxLayout>
-#include <QLabel>
-#include <QLineEdit>
 #include <QImage>
+#include <QLabel>
+#include <QPalette>
 #include <QPixmap>
 #include <QProcess>
-#include <QPalette>
 #include <QPushButton>
 #include <QSettings>
 #include <QStyle>
 #include <QTimer>
-#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace f2c_cpp {
@@ -30,37 +26,6 @@ namespace {
 constexpr int kConnectionIconInset = 16;
 constexpr int kFieldHeight = 56;
 constexpr int kFieldSpacing = 12;
-
-QString trimmed(const QString& s) {
-    return s.trimmed();
-}
-
-/** Adds a labeled line-edit row to parentLayout; returns the QLineEdit for the caller to store. */
-QLineEdit* addLabeledField(QWidget* panel, QVBoxLayout* parentLayout,
-                          const QString& labelText, const QString& placeholder,
-                          bool isPassword, const QString& initialText) {
-    auto* group = new QVBoxLayout();
-    group->setContentsMargins(0, 0, 0, 0);
-    group->setSpacing(kFieldSpacing);
-
-    auto* lbl = new QLabel(labelText, panel);
-    lbl->setObjectName("SetupFieldLabel");
-    group->addWidget(lbl);
-
-    auto* edit = new QLineEdit(panel);
-    edit->setObjectName("SetupLineEdit");
-    edit->setPlaceholderText(placeholder);
-    edit->setText(initialText);
-    if (isPassword) {
-        edit->setEchoMode(QLineEdit::Password);
-    }
-    edit->setClearButtonEnabled(false);
-    edit->setFixedHeight(kFieldHeight);
-    group->addWidget(edit);
-
-    parentLayout->addLayout(group);
-    return edit;
-}
 
 QPixmap tintWireframeToColor(const QPixmap& src, const QColor& color) {
     // Treat white pixels as transparent; map darker pixels to the provided color.
@@ -82,13 +47,23 @@ QPixmap tintWireframeToColor(const QPixmap& src, const QColor& color) {
     return QPixmap::fromImage(img);
 }
 
+QString robotIpOverride() {
+    // Release deletes the key at startup and must not honour it if a
+    // dev build wrote it back while this process is running.
+    if constexpr (!kDevMode) {
+        return {};
+    }
+    const QSettings settings(kSettingsOrgName, kSettingsAppName);
+    return settings.value(QStringLiteral("robot_ip"), QString()).toString().trimmed();
+}
+
 }  // namespace
 
 SetupScreen::SetupScreen(QWidget* parent)
     : QWidget(parent) {
     setObjectName("SetupScreenRoot");
 
-    // Root contains a top-left status + centered login panel.
+    // Root contains a top-left status + centered panel.
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(32, 32, 32, 32);
     root->setSpacing(0);
@@ -123,9 +98,7 @@ SetupScreen::SetupScreen(QWidget* parent)
     status_col->addWidget(lbl_connection_, 0, Qt::AlignLeft);
 
     status_row->addLayout(status_col);
-
     status_row->addStretch(1);
-
     root->addLayout(status_row);
 
     root->addStretch(1);
@@ -160,108 +133,118 @@ SetupScreen::SetupScreen(QWidget* parent)
 
     v->addSpacing(48);
 
-    // Load persisted Robot ID (Access Code is intentionally never persisted).
-    QSettings settings(kSettingsOrgName, kSettingsAppName);
-    const QString saved_robot_id = settings.value("setup/robot_id", "").toString();
+    // Which robot: paired / single entry -> fixed label, several -> picker.
+    RobotRegistry registry;
+    QString reg_err;
+    QString pair_err;
+    QStringList robot_ids;
+    if (registry.load(&reg_err)) {
+        robot_ids = registry.robotIds();
+        paired_robot_id_ = registry.pairedRobotId(&pair_err);
+        QHash<QString, QString> robot_by_token;
+        for (const RobotProfile& profile : registry.robots()) {
+            host_by_id_.insert(profile.robot_id, profile.host.trimmed());
+            const QString token = profile.cloud_device_token;
+            if (token.isEmpty()) {
+                continue;
+            }
+            if (robot_by_token.contains(token)) {
+                update::log::warn(
+                    "setup",
+                    QStringLiteral("robots %1 and %2 share a cloud_device_token; "
+                                   "uploads from both land under one device")
+                        .arg(robot_by_token.value(token), profile.robot_id));
+            } else {
+                robot_by_token.insert(token, profile.robot_id);
+            }
+        }
+        update::log::info(
+            "setup",
+            QStringLiteral("registry loaded: %1 robot(s), paired=%2 (from %3)")
+                .arg(robot_ids.size())
+                .arg(paired_robot_id_.isEmpty() ? QStringLiteral("none")
+                                                : paired_robot_id_)
+                .arg(registry.sourcePath()));
+    } else {
+        update::log::warn("setup",
+                          QStringLiteral("registry load failed: %1").arg(reg_err));
+    }
 
-    // Robot ID
-    txt_robot_id_ = addLabeledField(panel, v, "ROOFUS(Robot) ID", "Enter Robot ID",
-                                    false, saved_robot_id);
+    QString config_error;
+    if (!reg_err.isEmpty()) {
+        config_error = reg_err;
+    } else if (!pair_err.isEmpty()) {
+        config_error = pair_err;
+    } else if (robot_ids.isEmpty()) {
+        config_error = QStringLiteral("No robots are listed in %1.")
+                           .arg(registry.sourcePath());
+    }
+    if (!pair_err.isEmpty()) {
+        update::log::warn("setup", pair_err);
+    }
+
+    const bool pickable = config_error.isEmpty() && paired_robot_id_.isEmpty();
+
+    auto* field_label = new QLabel(pickable ? QStringLiteral("ROBOT")
+                                            : QStringLiteral("PAIRED ROBOT"),
+                                   panel);
+    field_label->setObjectName("SetupFieldLabel");
+    v->addWidget(field_label);
+    v->addSpacing(kFieldSpacing);
+
+    if (pickable) {
+        robot_picker_ = new QComboBox(panel);
+        robot_picker_->setObjectName("SetupRobotPicker");
+        robot_picker_->setFixedHeight(kFieldHeight);
+        for (const QString& id : robot_ids) {
+            robot_picker_->addItem(id.toUpper(), id);
+        }
+        const QSettings settings(kSettingsOrgName, kSettingsAppName);
+        const int last = robot_picker_->findData(
+            settings.value(kSettingsRobotIdKey, QString()).toString().trimmed());
+        robot_picker_->setCurrentIndex(last >= 0 ? last : 0);
+        connect(robot_picker_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &SetupScreen::checkConnection);
+        v->addWidget(robot_picker_);
+    } else {
+        lbl_robot_value_ = new QLabel(
+            paired_robot_id_.isEmpty() ? QStringLiteral("—") : paired_robot_id_.toUpper(),
+            panel);
+        lbl_robot_value_->setObjectName("SetupRobotValue");
+        lbl_robot_value_->setFixedHeight(kFieldHeight);
+        v->addWidget(lbl_robot_value_);
+    }
     v->addSpacing(32);
 
-    // Access Code (with VIEW/HIDE toggle and 6-digit PIN validation – legacy behaviour)
-    auto* code_group = new QVBoxLayout();
-    code_group->setContentsMargins(0, 0, 0, 0);
-    code_group->setSpacing(kFieldSpacing);
-    auto* lbl_code = new QLabel("ACCESS CODE", panel);
-    lbl_code->setObjectName("SetupFieldLabel");
-    code_group->addWidget(lbl_code);
-    auto* code_row = new QHBoxLayout();
-    code_row->setContentsMargins(0, 0, 0, 0);
-    code_row->setSpacing(10);
-    txt_access_code_ = new QLineEdit(panel);
-    txt_access_code_->setObjectName("SetupLineEdit");
-    txt_access_code_->setPlaceholderText("Enter Access Code");
-    txt_access_code_->setEchoMode(QLineEdit::Password);
-    txt_access_code_->setClearButtonEnabled(false);
-    txt_access_code_->setFixedHeight(kFieldHeight);
-    code_row->addWidget(txt_access_code_, 1);
-    btn_view_code_ = new QToolButton(panel);
-    btn_view_code_->setObjectName("SetupViewButton");
-    btn_view_code_->setText("VIEW");
-    btn_view_code_->setCheckable(true);
-    btn_view_code_->setFocusPolicy(Qt::NoFocus);
-    btn_view_code_->setToolTip("Show/hide access code");
-    btn_view_code_->setFixedHeight(kFieldHeight);
-    code_row->addWidget(btn_view_code_, 0, Qt::AlignVCenter);
-    code_group->addLayout(code_row);
-    v->addLayout(code_group);
-    v->addSpacing(32);
-
-    // Full-width LOGIN button
-    btn_login_ = new QPushButton("LOGIN", panel);
-    btn_login_->setObjectName("SetupLoginButton");
-    btn_login_->setEnabled(false);
-    btn_login_->setFixedHeight(kFieldHeight);
-    v->addWidget(btn_login_);
+    btn_start_ = new QPushButton("GET STARTED", panel);
+    btn_start_->setObjectName("SetupStartButton");
+    btn_start_->setFixedHeight(kFieldHeight);
+    btn_start_->setEnabled(!selectedRobotId().isEmpty());
+    v->addWidget(btn_start_);
 
     v->addSpacing(8);
 
-    // Error label (hidden unless needed)
-    lbl_error_ = new QLabel(panel);
+    // Visible so a laptop never ships with the dev override still set: it
+    // beats the pairing for this ping and for every robot SSH target.
+    lbl_override_ = new QLabel(panel);
+    lbl_override_->setObjectName("SetupNotice");
+    lbl_override_->setWordWrap(true);
+    lbl_override_->setVisible(false);
+    v->addWidget(lbl_override_);
+
+    lbl_error_ = new QLabel(config_error, panel);
     lbl_error_->setObjectName("SetupError");
-    lbl_error_->setVisible(false);
     lbl_error_->setWordWrap(true);
+    lbl_error_->setVisible(!config_error.isEmpty());
     v->addWidget(lbl_error_);
 
     root->addWidget(panel, 0, Qt::AlignHCenter);
     root->addStretch(2);
 
-    // Resolve the connection-monitor ping target from the robot registry
-    // (robots.json). The indicator reflects radio-link reachability — a
-    // single per-laptop concern, not tied to the typed Robot ID — so we
-    // pick the first profile and cache its host. If the registry is
-    // missing, we skip the ping rather than fall back to a hardcoded
-    // IP, which would silently mask real configuration problems.
-    {
-        RobotRegistry registry;
-        QString reg_err;
-        if (registry.load(&reg_err)) {
-            const auto profiles = registry.robots();
-            if (!profiles.isEmpty()) {
-                connection_target_host_ = profiles.first().host.trimmed();
-                update::log::info(
-                    "setup",
-                    QStringLiteral("registry loaded: %1 robot(s), ping target=%2 (from %3)")
-                        .arg(profiles.size())
-                        .arg(connection_target_host_)
-                        .arg(registry.sourcePath()));
-            } else {
-                update::log::warn(
-                    "setup",
-                    QStringLiteral("registry loaded but contains no robots: %1")
-                        .arg(registry.sourcePath()));
-            }
-        } else {
-            update::log::warn(
-                "setup",
-                QStringLiteral("registry load failed: %1").arg(reg_err));
-        }
-    }
-
     applyLocalStyle();
     startConnectionMonitor();
 
-    // Wiring
-    connect(txt_robot_id_, &QLineEdit::textChanged, this, &SetupScreen::updateUiState);
-    connect(txt_access_code_, &QLineEdit::textChanged, this, &SetupScreen::updateUiState);
-    connect(btn_view_code_, &QToolButton::clicked, this, &SetupScreen::toggleAccessCodeVisible);
-    connect(btn_login_, &QPushButton::clicked, this, &SetupScreen::submit);
-
-    connect(txt_access_code_, &QLineEdit::returnPressed, this, &SetupScreen::submit);
-    connect(txt_robot_id_, &QLineEdit::returnPressed, this, &SetupScreen::submit);
-
-    updateUiState();
+    connect(btn_start_, &QPushButton::clicked, this, &SetupScreen::submit);
 }
 
 void SetupScreen::setDarkMode(bool dark_mode) {
@@ -272,14 +255,22 @@ void SetupScreen::setDarkMode(bool dark_mode) {
     applyLocalStyle();
 }
 
-void SetupScreen::toggleAccessCodeVisible() {
-    const bool visible = btn_view_code_ && btn_view_code_->isChecked();
-    if (txt_access_code_) {
-        txt_access_code_->setEchoMode(visible ? QLineEdit::Normal : QLineEdit::Password);
+QString SetupScreen::selectedRobotId() const {
+    if (robot_picker_) {
+        return robot_picker_->currentData().toString();
     }
-    if (btn_view_code_) {
-        btn_view_code_->setText(visible ? "HIDE" : "VIEW");
+    return paired_robot_id_;
+}
+
+void SetupScreen::submit() {
+    const QString robot_id = selectedRobotId();
+    if (robot_id.isEmpty()) {
+        return;
     }
+    QSettings settings(kSettingsOrgName, kSettingsAppName);
+    settings.setValue(kSettingsRobotIdKey, robot_id);
+    update::log::info("setup", QStringLiteral("get started: robot_id=%1").arg(robot_id));
+    emit getStartedRequested(robot_id);
 }
 
 void SetupScreen::startConnectionMonitor() {
@@ -301,17 +292,21 @@ void SetupScreen::startConnectionMonitor() {
 }
 
 void SetupScreen::checkConnection() {
+    const QString override_ip = robotIpOverride();
+    if (lbl_override_) {
+        lbl_override_->setText(
+            QStringLiteral("Dev override active: robot_ip=%1").arg(override_ip));
+        lbl_override_->setVisible(!override_ip.isEmpty());
+    }
+
     if (!ping_proc_ || ping_proc_->state() != QProcess::NotRunning) {
         return;
     }
 
-    // Priority: optional QSettings override > registry-cached host. No
-    // hardcoded fallback by design — if no host can be resolved, we leave
+    // No hardcoded fallback by design — if no host can be resolved, we leave
     // the indicator in DISCONNECTED rather than silently ping a random IP.
-    QSettings settings(kSettingsOrgName, kSettingsAppName);
-    const QString override_ip = settings.value("robot_ip", "").toString().trimmed();
-    const QString target = !override_ip.isEmpty() ? override_ip : connection_target_host_;
-
+    const QString target =
+        !override_ip.isEmpty() ? override_ip : host_by_id_.value(selectedRobotId());
     if (target.isEmpty()) {
         updateConnectionUi(false);
         return;
@@ -396,37 +391,36 @@ void SetupScreen::applyLocalStyle() {
             letter-spacing: 1px;
         }
 
-        #SetupLineEdit {
+        #SetupRobotValue, #SetupRobotPicker {
             background-color: transparent;
             border: 2px solid rgba(22, 163, 74, 0.4);
             border-radius: 2px;
             padding: 0 12px;
             color: #E5E7EB;
             font-size: 18px;
-        }
-        #SetupLineEdit::placeholder {
-            color: #9CA3AF;
-        }
-        #SetupLineEdit:focus {
-            border: 2px solid #16a34a;
-        }
-
-        #SetupViewButton {
-            background-color: transparent;
-            border: 2px solid rgba(22, 163, 74, 0.55);
-            border-radius: 2px;
-            padding: 0 12px;
-            color: #16a34a;
-            font-size: 14px;
-            font-weight: 700;
+            font-weight: 600;
             letter-spacing: 1px;
         }
-        #SetupViewButton:checked {
-            background-color: rgba(22, 163, 74, 0.18);
+        #SetupRobotPicker:focus {
             border: 2px solid #16a34a;
         }
+        #SetupRobotPicker::drop-down {
+            border: none;
+            width: 44px;
+        }
+        #SetupRobotPicker::down-arrow {
+            image: url(:/assets/setup/chevron_down.svg);
+            width: 20px;
+            height: 20px;
+        }
+        #SetupRobotPicker QAbstractItemView {
+            background-color: #18181B;
+            color: #E5E7EB;
+            selection-background-color: rgba(22, 163, 74, 0.35);
+            font-size: 16px;
+        }
 
-        #SetupLoginButton {
+        #SetupStartButton {
             background-color: #16a34a;
             border: 1px solid #16a34a;
             border-radius: 2px;
@@ -435,16 +429,21 @@ void SetupScreen::applyLocalStyle() {
             font-weight: 700;
             letter-spacing: 1px;
         }
-        #SetupLoginButton:hover:enabled {
+        #SetupStartButton:hover:enabled {
             background-color: #22c55e;
             border-color: #22c55e;
         }
-        #SetupLoginButton:disabled {
+        #SetupStartButton:disabled {
             background-color: rgba(22, 163, 74, 0.35);
             border: 1px solid rgba(22, 163, 74, 0.35);
             color: rgba(255, 255, 255, 0.5);
         }
 
+        #SetupNotice {
+            color: #FBBF24;
+            font-size: 12px;
+            font-weight: 600;
+        }
         #SetupError {
             color: #ef4444;
             font-size: 12px;
@@ -463,30 +462,30 @@ void SetupScreen::applyLocalStyle() {
         /* White on the brand green is 3.4:1. The fill keeps the brand hue
            and the label goes dark instead — the app-wide `on_accent` rule
            for light mode. */
-        #SetupScreenRoot[theme="light"] #SetupLoginButton {
+        #SetupScreenRoot[theme="light"] #SetupStartButton {
             color: #18181B;
         }
         /* Disabled reads as unfilled rather than as faded-white-on-faded-
            green, which measured 1.2:1 and left the operator unable to tell
            what the button said. */
-        #SetupScreenRoot[theme="light"] #SetupLoginButton:disabled {
+        #SetupScreenRoot[theme="light"] #SetupStartButton:disabled {
             background-color: #DCFCE7;
             border: 1px solid #A7E8BF;
             color: #166534;
         }
-        #SetupScreenRoot[theme="light"] #SetupLineEdit {
+        #SetupScreenRoot[theme="light"] #SetupRobotValue,
+        #SetupScreenRoot[theme="light"] #SetupRobotPicker {
             color: #1F2937;
         }
-        #SetupScreenRoot[theme="light"] #SetupLineEdit::placeholder {
-            color: #6B7280;
+        #SetupScreenRoot[theme="light"] #SetupRobotPicker QAbstractItemView {
+            background-color: #FFFFFF;
+            color: #1F2937;
         }
-        #SetupScreenRoot[theme="light"] #SetupViewButton {
-            border-color: rgba(22, 163, 74, 0.6);
-            color: #166534;
+        #SetupScreenRoot[theme="light"] #SetupNotice {
+            color: #92400E;
         }
-        #SetupScreenRoot[theme="light"] #SetupViewButton:checked {
-            background-color: rgba(22, 163, 74, 0.12);
-            border-color: #16a34a;
+        #SetupScreenRoot[theme="light"] #SetupError {
+            color: #B91C1C;
         }
     )");
     style()->unpolish(this);
@@ -527,202 +526,4 @@ void SetupScreen::updateConnectionUi(bool connected) {
     }
 }
 
-std::pair<QString, QString> SetupScreen::getTrimmedCredentials() const {
-    const QString robot_id = trimmed(txt_robot_id_ ? txt_robot_id_->text() : QString());
-    const QString access_code = trimmed(txt_access_code_ ? txt_access_code_->text() : QString());
-    return {robot_id, access_code};
-}
-
-void SetupScreen::updateUiState() {
-    const auto [robot_id, access_code] = getTrimmedCredentials();
-    const bool ready = !robot_id.isEmpty() && !access_code.isEmpty();
-    if (btn_login_) {
-        btn_login_->setEnabled(ready);
-    }
-    if (lbl_error_) {
-        lbl_error_->setVisible(false);
-        lbl_error_->clear();
-    }
-}
-
-namespace {
-
-/**
- * Translates raw error strings from `loginToRobot()` (or the upstream
- * `pilot_control_auth` CLI / OpenSSH) into operator-facing copy.
- *
- * The raw strings are kept in the application log for support diagnostics;
- * what's returned here is what the operator sees in the red error label
- * under the LOGIN button. Unknown errors fall through verbatim so we
- * never lose information in the field — better an awkward error than a
- * silent one.
- */
-QString mapLoginErrorForOperator(const QString& raw) {
-    const QString s = raw.trimmed();
-    if (s.isEmpty()) {
-        return QStringLiteral("Login failed. Try again.");
-    }
-
-    // Robot-side errors emitted by pilot_control_auth (robot_auth_cli.py).
-    if (s.contains(QStringLiteral("Too many failed attempts"), Qt::CaseInsensitive)) {
-        return s;  // Already operator-friendly, includes the retry-after delay.
-    }
-    if (s.contains(QStringLiteral("Invalid PIN"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("PIN must be exactly 6 digits"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Incorrect access code.");
-    }
-    if (s.contains(QStringLiteral("robot_id does not match"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Robot ID is incorrect for this robot.");
-    }
-    if (s.contains(QStringLiteral("Auth state file is unreadable"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("Cannot create auth state"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("Cannot write auth state"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("Unsupported PIN hash format"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("Invalid PIN hash parameters"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Robot authentication is misconfigured. Contact support.");
-    }
-
-    // Client-side errors from loginToRobot itself.
-    if (s.contains(QStringLiteral("not found in registry"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Robot ID not in registry. Contact support.");
-    }
-    if (s.contains(QStringLiteral("Robot profile has no host"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Robot configuration is incomplete. Contact support.");
-    }
-    if (s.contains(QStringLiteral("Failed to start ssh"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Could not start network client.");
-    }
-    if (s.contains(QStringLiteral("Login timed out"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Robot unreachable. Check that the robot is powered on and the radio link is connected.");
-    }
-    if (s.contains(QStringLiteral("Robot auth response missing token"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("Invalid JSON from robot auth"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Robot returned an invalid response. Try again.");
-    }
-
-    // OpenSSH-level errors surfaced via stderr.
-    if (s.contains(QStringLiteral("Permission denied"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("publickey"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Laptop is not authorized to connect to this robot. Contact support.");
-    }
-    if (s.contains(QStringLiteral("No route to host"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("Connection refused"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("Connection timed out"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("Connection closed"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("Network is unreachable"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Robot unreachable. Check that the robot is powered on and the radio link is connected.");
-    }
-    if (s.contains(QStringLiteral("Host key verification failed"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Robot host key changed. Contact support.");
-    }
-    if (s.contains(QStringLiteral("command not found"), Qt::CaseInsensitive)
-        || s.contains(QStringLiteral("pilot_control_auth"), Qt::CaseInsensitive)) {
-        return QStringLiteral("Robot is missing authentication tooling. Contact support.");
-    }
-
-    return s;
-}
-
-}  // namespace
-
-void SetupScreen::submit() {
-    const auto [robot_id, access_code] = getTrimmedCredentials();
-
-    if (robot_id.isEmpty() || access_code.isEmpty()) {
-        if (lbl_error_) {
-            lbl_error_->setText("Please enter both Robot ID and Access Code.");
-            lbl_error_->setVisible(true);
-        }
-        return;
-    }
-
-    // Visual feedback: disable inputs and flip the button label so the
-    // operator knows the click registered. We force a synchronous repaint
-    // via processEvents (excluding user input to avoid re-entrancy from a
-    // double-click) before the blocking SSH call so the new state is
-    // visible during the typical sub-second login round-trip.
-    if (btn_login_) {
-        btn_login_->setEnabled(false);
-        btn_login_->setText(QStringLiteral("LOGGING IN…"));
-    }
-    if (txt_robot_id_) txt_robot_id_->setEnabled(false);
-    if (txt_access_code_) txt_access_code_->setEnabled(false);
-    if (lbl_error_) {
-        lbl_error_->setVisible(false);
-        lbl_error_->clear();
-    }
-    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-
-    // SSHes to the robot and runs `pilot_control_auth login --pin-stdin
-    // --json`, returning true iff the robot returned a signed token.
-    // robot_login.cpp owns ConnectTimeout=8s and a 12s wall-clock cap on
-    // the whole exchange, so worst-case UI freeze is ~12s on a fully
-    // unreachable robot.
-    RobotRegistry registry;
-    QString registry_error;
-    QString login_error;
-    bool ok = false;
-    QString resolved_host;
-
-    if (!registry.load(&registry_error)) {
-        login_error = registry_error.isEmpty()
-            ? QStringLiteral("Robot registry not configured.")
-            : registry_error;
-        update::log::warn(
-            "setup",
-            QStringLiteral("login: registry load failed: %1").arg(registry_error));
-    } else {
-        ok = loginToRobot(robot_id, access_code, registry, &login_error, &resolved_host);
-    }
-
-    // Restore inputs regardless of outcome — on success they're moot
-    // (we transition stages immediately) but on failure the operator
-    // needs to retry.
-    if (btn_login_) {
-        btn_login_->setText(QStringLiteral("LOGIN"));
-        btn_login_->setEnabled(true);
-    }
-    if (txt_robot_id_) txt_robot_id_->setEnabled(true);
-    if (txt_access_code_) txt_access_code_->setEnabled(true);
-
-    if (!ok) {
-        update::log::warn(
-            "setup",
-            QStringLiteral("login failed for robot_id=%1 host=%2: %3")
-                .arg(robot_id)
-                .arg(resolved_host.isEmpty() ? QStringLiteral("?") : resolved_host)
-                .arg(login_error));
-        // BDR_REWIRE: dev mode still ATTEMPTS the SSH login above, but a
-        // failure no longer blocks advancing to Stage 2 so the staged flow
-        // can be walked offline. Compiled out in Release.
-        if constexpr (kDevMode) {
-            update::log::warn(
-                "setup",
-                QStringLiteral("BDR_DEV_MODE: advancing past login failure for robot_id=%1")
-                    .arg(robot_id));
-            QSettings settings(kSettingsOrgName, kSettingsAppName);
-            settings.setValue("setup/robot_id", robot_id);
-            emit loginSubmitted(robot_id, access_code);
-            return;
-        }
-        if (lbl_error_) {
-            lbl_error_->setText(mapLoginErrorForOperator(login_error));
-            lbl_error_->setVisible(true);
-        }
-        return;
-    }
-
-    update::log::info(
-        "setup",
-        QStringLiteral("login ok: robot_id=%1 host=%2").arg(robot_id).arg(resolved_host));
-
-    // Persist the Robot ID only after a successful login so we don't
-    // pre-populate the field with a value that never authenticated.
-    QSettings settings(kSettingsOrgName, kSettingsAppName);
-    settings.setValue("setup/robot_id", robot_id);
-
-    emit loginSubmitted(robot_id, access_code);
-}
-
 }  // namespace f2c_cpp
-

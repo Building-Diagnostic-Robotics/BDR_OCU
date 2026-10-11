@@ -724,6 +724,34 @@ class PutTests(UploadCase):
         self.assertIn("a.bin", rels)
         self.assertEqual(out.count("photo.jpg"), 1)
 
+    def test_unreadable_sibling_manifest_blocks_the_section(self):
+        section = self.stick_section({"a.bin": b"abc"})
+        manifest = os.path.join(
+            os.path.dirname(section), "Mission_120000", uploader.THUMB_MANIFEST)
+        write(manifest, b"{not json")
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Copy record unreadable", out)
+        self.assertIn("October_09_2026/BNY/Mission_120000", out)
+        self.assertIn("plug the stick into the robot", out)
+        self.assertEqual(self.puts(), [])
+        self.assertFalse(os.path.exists(
+            os.path.join(section, uploader.MANIFEST_FILENAME)))
+
+    def test_readable_sibling_that_omits_the_section_still_uploads(self):
+        section = self.stick_section({"a.bin": b"abc"})
+        manifest = os.path.join(
+            os.path.dirname(section), "Mission_120000", uploader.THUMB_MANIFEST)
+        write(manifest, json.dumps({
+            "schema": 2,
+            "sections": ["Section_9"],
+            "files": {},
+        }).encode())
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("a.bin", {rec["rel"] for rec in self.puts()})
+        self.assertNotIn("unreadable", out)
+
     def test_old_stick_manifest_uploads_everything(self):
         section = self.stick_section(
             {"a.bin": b"abc", "b.bin": b"defg"}, legacy=True)

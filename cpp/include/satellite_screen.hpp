@@ -29,6 +29,7 @@
 #pragma once
 
 #include "estop_latch_policy.hpp"
+#include "radio_link_pill.hpp"
 #include "satellite_job_model.hpp"
 #include "satellite_map_capture.hpp"
 #include "satellite_tile_service.hpp"
@@ -140,11 +141,25 @@ public:
 
     /**
      * Attach the app's LinkHealthMonitor (owned by AppShellWindow). The
-     * screen stamps it from every ROS callback per the house rule and the
-     * BOT pill derives from its layered state while armed; without it (or
-     * pre-arm) the pill falls back to raw odometry age.
+     * screen stamps it from every ROS callback per the house rule. The
+     * top-bar pill does not read it — that pill is the radio RSSI.
      */
     void attachLinkHealthMonitor(LinkHealthMonitor* monitor);
+
+    /**
+     * One completed SNMP RSSI probe for the signal pill. `epoch` is the
+     * value of radioEpoch() when the probe was started; a probe that
+     * straddles resetRadioLink() is dropped.
+     */
+    void noteRadioProbe(int epoch, bool ok, int rssi_dbm);
+    /** Visit boundary. The next probe is the first one that counts. */
+    void resetRadioLink();
+    /**
+     * False when this robot has no radio IP or RSSI OID. The pill then
+     * reads NO RADIO CONFIG. A later true returns it to the live reading.
+     */
+    void setRadioConfigured(bool configured);
+    int radioEpoch() const { return radio_epoch_; }
 
     /** True while a mission launch is active (blocks app close, like scans). */
     bool missionActive() const;
@@ -162,9 +177,12 @@ signals:
     /** A satellite site finished downloading. AppShell stops the imagery
         reachability probe for the rest of the session. */
     void imageryDownloaded();
-    /** Mission launch lifecycle — AppShell arms/disarms the link monitor
-        and reachability probe on this. */
+    /** Mission launch lifecycle — AppShell arms the link monitor and
+        reachability probe on true, and disarms them on false. */
     void missionActiveChanged(bool active);
+    /** Teardown has started. AppShell disarms the link monitor here,
+        before the sweep kills the robot's topics. */
+    void missionTeardownBegan();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -500,6 +518,11 @@ private:
     /** Both push paths land here; resumes a pending Start Scan. */
     void onMetadataPushed(const QString& via);
     void updateBotPill();
+    void forgetMissionTelemetry();
+    /** A sample counts for this mission only when it arrived at or after
+        the monitor's current arm(). Older queued signals are painted if
+        the caller wants, but they must not stamp or count as first contact. */
+    bool linkSampleIsCurrent(qint64 wall_ms) const;
     void updateStatePill();
     void setBotPill(const QString& text, const QColor& color);
     void setStatePill(const QString& text, const QColor& color);
@@ -533,6 +556,8 @@ private:
      */
     void restyleOpenPrompts();
     void onRobotSweepFailed(int exit_code);
+    void onRobotIdentityBlocked(const QString& message);
+    void onRobotIdentityUnchecked(const QString& message);
 
     // Core services.
     TileService* tiles_ = nullptr;
@@ -576,8 +601,10 @@ private:
     QWidget* footer_bar_ = nullptr;
     QPushButton* back_button_ = nullptr;
     QPushButton* next_button_ = nullptr;
-    // Step 2 only (frame): "Clear pairs" beside Back, "Align (N pairs)"
-    // beside Next. Hidden on every other step and until a cloud exists.
+    // Step 2 only: "Undo last" and "Clear pairs" beside Back, "Align
+    // (N pairs)" beside Next. Hidden on every other step and until a
+    // cloud exists. Undo is not in the Figma frames.
+    QPushButton* undo_last_button_ = nullptr;
     QPushButton* clear_pairs_button_ = nullptr;
     QPushButton* align_button_ = nullptr;
     // The rail as a whole: hidden on the alignment step, whose frame is a
@@ -994,6 +1021,12 @@ private:
     bool last_batt_stale_ = true;
     QString bot_text_;
     QColor bot_color_;
+    RadioLinkSample radio_sample_;
+    int radio_epoch_ = 0;
+    // True until AppShell says this robot has no radio settings. The
+    // default keeps the constructor pill at SIGNAL — rather than
+    // NO RADIO CONFIG before the registry has been read.
+    bool radio_configured_ = true;
     QString state_text_;
     QColor state_color_;
     QString motors_text_;

@@ -254,8 +254,9 @@ DashboardScreen::DashboardScreen(QWidget* parent)
         btn_logout_->setIcon(QIcon(logoutPix));
         btn_logout_->setIconSize(QSize(20, 20));
     }
-    btn_logout_->setText(" Logout");
-    connect(btn_logout_, &QPushButton::clicked, this, &DashboardScreen::onLogoutClicked);
+    btn_logout_->setText(" Switch robot");
+    btn_logout_->setVisible(false);
+    connect(btn_logout_, &QPushButton::clicked, this, &DashboardScreen::switchRobotRequested);
     headerRow->addWidget(btn_logout_, 0, Qt::AlignRight | Qt::AlignVCenter);
 
     headerLayout->addLayout(headerRow);
@@ -475,8 +476,10 @@ void DashboardScreen::setDarkMode(bool dark_mode) {
     applyStyle();
 }
 
-void DashboardScreen::onLogoutClicked() {
-    emit logoutRequested();
+void DashboardScreen::setRobotSwitchable(bool switchable) {
+    if (btn_logout_) {
+        btn_logout_->setVisible(switchable);
+    }
 }
 
 void DashboardScreen::onStartNewScanClicked() {
@@ -1185,13 +1188,17 @@ bool DashboardScreen::offloadStickFull() const {
     return offload_cached_state_ == QLatin1String("stick_full");
 }
 
+ThumbCopyInputs DashboardScreen::thumbCopyInputs() const {
+    ThumbCopyInputs in;
+    in.robot_reachable = offload_probe_ok_;
+    in.robot_copy_incomplete = robotCopyIncomplete();
+    in.stick_full = offloadStickFull();
+    in.stick = stick_sync_;
+    return in;
+}
+
 bool DashboardScreen::thumbCopyReady() const {
-    // The copy did not happen, but Upload is how the operator frees the
-    // stick. Disabling the card here would leave it full.
-    if (offloadStickFull()) {
-        return true;
-    }
-    return !robotCopyIncomplete() && !stickCopyIncomplete();
+    return thumbCopyIsReady(thumbCopyInputs());
 }
 
 static QString stickFullOperatorMessage() {
@@ -1224,8 +1231,9 @@ QString DashboardScreen::thumbCopyBlockReason() const {
     }
     if (!offload_probe_ok_ && offload_cached_incomplete_) {
         return QStringLiteral(
-            "Sync incomplete — turn the robot on and wait for the copy "
-            "to finish.");
+            "The robot's last report said the copy to RDATA_EXT had not "
+            "finished. Connect to the robot so the Dashboard can check "
+            "again.");
     }
     if (stickCopyIncomplete()) {
         return QStringLiteral(
@@ -1432,9 +1440,10 @@ void DashboardScreen::refreshUploadAction() {
             tip += QLatin1Char('\n') + offload_.error;
         }
         btn_view_recordings_->setToolTip(tip);
+    } else if (blocked) {
+        btn_view_recordings_->setToolTip(thumbCopyBlockReason());
     } else {
-        btn_view_recordings_->setToolTip(
-            blocked ? thumbCopyBlockReason() : QString());
+        btn_view_recordings_->setToolTip(thumbCopyStaleReportNote(thumbCopyInputs()));
     }
 
     QString desc = QLatin1String(kUploadDefaultDesc);
@@ -1445,15 +1454,15 @@ void DashboardScreen::refreshUploadAction() {
          offload_cached_state_ == QLatin1String("waiting_for_drive"));
     if (stick_full) {
         desc = stickFullOperatorMessage();
-    } else if (waiting) {
+    } else if (waiting && !thumbCopyReady()) {
         desc = QStringLiteral("Plug RDATA_EXT into the robot");
     } else if (offload_probe_ok_ && offload_.copyIncomplete() &&
                offload_.state != OffloadCopyState::Error &&
                offload_.state != OffloadCopyState::StickFull) {
         desc = QStringLiteral("Syncing to thumb drive…");
-    } else if (robotCopyIncomplete()) {
+    } else if (!thumbCopyReady() && robotCopyIncomplete()) {
         desc = !offload_probe_ok_
-                   ? QStringLiteral("Sync incomplete — turn the robot on")
+                   ? QStringLiteral("Robot not connected — last copy unfinished")
                    : QStringLiteral("Thumb-drive copy incomplete");
     } else if (stickCopyIncomplete()) {
         desc = QStringLiteral("Thumb drive copy incomplete");
