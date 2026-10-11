@@ -2487,7 +2487,7 @@ void AppShellWindow::onExplorationStartScanRequested() {
         setExplorationLaunchFailed(
             resolve_err.isEmpty()
                 ? QStringLiteral(
-                      "Could not resolve robot SSH target (choose a robot on Get started or set robot_ip).")
+                      "Could not resolve robot SSH target (choose a robot on Get started).")
                 : resolve_err);
         return;
     }

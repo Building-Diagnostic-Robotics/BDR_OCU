@@ -823,11 +823,16 @@ kept in sync by hand.
   Operator-locked: Complete Mission first.
 - **Hard-blocked until the robot→stick copy is done.** The Upload
   card stays disabled (and blinks) while `OffloadStatus` says the
-  copy is incomplete. `stick_full` is the exception: the copy did not
-  start because the stick is under its free-space floor, the card
-  stays enabled, and the subtitle tells the operator to upload older
-  scans and cloud-check them. Complete Mission must not wait on that
-  copy, and `copy=stick_full` counts as save-done.
+  copy is incomplete. Two exceptions: `stick_full` (the copy did not
+  start because the stick is under its free-space floor; the subtitle
+  tells the operator to upload older scans and cloud-check them), and
+  a robot that cannot be reached while the plugged-in stick is
+  complete (`thumbsync_manifest.json` on every `Mission_*`). The
+  saved report does not block that stick; the tooltip says the last
+  report was unfinished. A reachable robot that is still copying, and
+  a stick that is incomplete or not plugged in, still block. Complete
+  Mission must not wait on the copy, and `copy=stick_full` counts as
+  save-done.
 
 ### Configuration
 

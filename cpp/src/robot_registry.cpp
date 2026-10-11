@@ -15,6 +15,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 
+#include "dev_flags.hpp"
 #include "settings_constants.hpp"
 
 namespace f2c_cpp {
@@ -270,49 +271,44 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
     return true;
 }
 
-bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* error_out) {
+bool resolveRobotSshTarget(const RobotRegistry& registry,
+                           const QString& robot_id,
+                           const QString& stored_override_ip,
+                           bool allow_dev_override,
+                           ResolvedRobotSshTarget* out,
+                           QString* error_out) {
     if (!out) {
         return false;
     }
     *out = ResolvedRobotSshTarget{};
 
-    QSettings settings(kSettingsOrgName, kSettingsAppName);
     const QString override_ip =
-        settings.value(QStringLiteral("robot_ip"), QString()).toString().trimmed();
+        allow_dev_override ? stored_override_ip.trimmed() : QString();
     if (!override_ip.isEmpty()) {
         out->host = override_ip;
         out->ssh_user = QStringLiteral("roofus");
         return true;
     }
 
-    const QString robot_id =
-        settings.value(QStringLiteral("setup/robot_id"), QString()).toString().trimmed();
-    if (robot_id.isEmpty()) {
+    const QString id = robot_id.trimmed();
+    if (id.isEmpty()) {
         if (error_out) {
-            *error_out = QStringLiteral(
-                "No robot selected. Choose one on the Get started screen, or set "
-                "the robot_ip setting for development overrides.");
+            *error_out = allow_dev_override
+                ? QStringLiteral(
+                      "No robot selected. Choose one on the Get started screen, or set "
+                      "the robot_ip setting for development overrides.")
+                : QStringLiteral(
+                      "No robot selected. Choose one on the Get started screen.");
         }
         return false;
     }
 
-    RobotRegistry registry;
-    QString load_err;
-    if (!registry.load(&load_err)) {
-        if (error_out) {
-            *error_out = load_err.isEmpty()
-                ? QStringLiteral("Robot registry could not be loaded.")
-                : load_err;
-        }
-        return false;
-    }
-
-    const auto profile = registry.findById(robot_id);
+    const auto profile = registry.findById(id);
     if (!profile.has_value()) {
         if (error_out) {
             *error_out =
                 QStringLiteral("Robot \"%1\" not found in registry (%2).")
-                    .arg(robot_id, registry.sourcePath());
+                    .arg(id, registry.sourcePath());
         }
         return false;
     }
@@ -325,11 +321,63 @@ bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* err
     if (out->host.isEmpty()) {
         if (error_out) {
             *error_out =
-                QStringLiteral("Registry entry for \"%1\" has an empty host.").arg(robot_id);
+                QStringLiteral("Registry entry for \"%1\" has an empty host.").arg(id);
         }
         return false;
     }
     return true;
+}
+
+bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* error_out) {
+    if (!out) {
+        return false;
+    }
+    QSettings settings(kSettingsOrgName, kSettingsAppName);
+    const QString stored_override =
+        settings.value(QStringLiteral("robot_ip"), QString()).toString();
+    const QString robot_id =
+        settings.value(kSettingsRobotIdKey, QString()).toString();
+
+    // A dev override has to work even when robots.json cannot be read.
+    if constexpr (kDevMode) {
+        if (!stored_override.trimmed().isEmpty()) {
+            return resolveRobotSshTarget(RobotRegistry(), robot_id, stored_override,
+                                         true, out, error_out);
+        }
+    }
+
+    RobotRegistry registry;
+    QString load_err;
+    if (!registry.load(&load_err)) {
+        if (error_out) {
+            *error_out = load_err.isEmpty()
+                ? QStringLiteral("Robot registry could not be loaded.")
+                : load_err;
+        }
+        return false;
+    }
+    return resolveRobotSshTarget(registry, robot_id, stored_override, kDevMode,
+                                 out, error_out);
+}
+
+RetiredGeneralRobotKeys retireLegacyGeneralRobotKeys(QSettings& settings,
+                                                     bool release_build) {
+    RetiredGeneralRobotKeys retired;
+    if (!release_build) {
+        return retired;
+    }
+    retired.robot_ip =
+        settings.value(QStringLiteral("robot_ip"), QString()).toString().trimmed();
+    retired.robot_id =
+        settings.value(QStringLiteral("robot_id"), QString()).toString().trimmed();
+    if (settings.contains(QStringLiteral("robot_ip"))) {
+        settings.remove(QStringLiteral("robot_ip"));
+    }
+    if (settings.contains(QStringLiteral("robot_id"))) {
+        settings.remove(QStringLiteral("robot_id"));
+    }
+    settings.sync();
+    return retired;
 }
 
 }  // namespace f2c_cpp

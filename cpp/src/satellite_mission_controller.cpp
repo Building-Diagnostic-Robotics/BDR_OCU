@@ -230,8 +230,8 @@ QStringList MissionController::recentRobotOutput(int max_lines) const {
 }
 
 RobotTarget MissionController::resolveRobotTarget(QString* error) {
-    // Same resolution the rest of the OCU uses: QSettings dev override
-    // (`robot_ip`) first, then the logged-in robot's registry entry.
+    // Same resolution the rest of the OCU uses. A dev build honours
+    // `robot_ip` ahead of the robot selected on Get started.
     RobotTarget target;
     ResolvedRobotSshTarget ssh_target;
     QString resolve_error;

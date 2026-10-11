@@ -1188,13 +1188,17 @@ bool DashboardScreen::offloadStickFull() const {
     return offload_cached_state_ == QLatin1String("stick_full");
 }
 
+ThumbCopyInputs DashboardScreen::thumbCopyInputs() const {
+    ThumbCopyInputs in;
+    in.robot_reachable = offload_probe_ok_;
+    in.robot_copy_incomplete = robotCopyIncomplete();
+    in.stick_full = offloadStickFull();
+    in.stick = stick_sync_;
+    return in;
+}
+
 bool DashboardScreen::thumbCopyReady() const {
-    // The copy did not happen, but Upload is how the operator frees the
-    // stick. Disabling the card here would leave it full.
-    if (offloadStickFull()) {
-        return true;
-    }
-    return !robotCopyIncomplete() && !stickCopyIncomplete();
+    return thumbCopyIsReady(thumbCopyInputs());
 }
 
 static QString stickFullOperatorMessage() {
@@ -1436,9 +1440,10 @@ void DashboardScreen::refreshUploadAction() {
             tip += QLatin1Char('\n') + offload_.error;
         }
         btn_view_recordings_->setToolTip(tip);
+    } else if (blocked) {
+        btn_view_recordings_->setToolTip(thumbCopyBlockReason());
     } else {
-        btn_view_recordings_->setToolTip(
-            blocked ? thumbCopyBlockReason() : QString());
+        btn_view_recordings_->setToolTip(thumbCopyStaleReportNote(thumbCopyInputs()));
     }
 
     QString desc = QLatin1String(kUploadDefaultDesc);
@@ -1449,13 +1454,13 @@ void DashboardScreen::refreshUploadAction() {
          offload_cached_state_ == QLatin1String("waiting_for_drive"));
     if (stick_full) {
         desc = stickFullOperatorMessage();
-    } else if (waiting) {
+    } else if (waiting && !thumbCopyReady()) {
         desc = QStringLiteral("Plug RDATA_EXT into the robot");
     } else if (offload_probe_ok_ && offload_.copyIncomplete() &&
                offload_.state != OffloadCopyState::Error &&
                offload_.state != OffloadCopyState::StickFull) {
         desc = QStringLiteral("Syncing to thumb drive…");
-    } else if (robotCopyIncomplete()) {
+    } else if (!thumbCopyReady() && robotCopyIncomplete()) {
         desc = !offload_probe_ok_
                    ? QStringLiteral("Robot not connected — last copy unfinished")
                    : QStringLiteral("Thumb-drive copy incomplete");

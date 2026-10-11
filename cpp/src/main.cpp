@@ -26,6 +26,7 @@
 
 #include "app_shell.hpp"
 #include "dev_flags.hpp"
+#include "robot_registry.hpp"
 #include "settings_constants.hpp"
 #include "ui_theme_constants.hpp"
 #include "update/update_lockfile.hpp"
@@ -268,6 +269,27 @@ int main(int argc, char* argv[])
     // Cross-process safety relies on each binary calling setProcessTag()
     // before any info/warn/error (concern #1, locked Phase 7).
     f2c_cpp::update::log::setProcessTag("ocu");
+
+    // Operator laptops still carry robot_ip from the old login screen.
+    // While it is set, every SSH call goes to that address instead of
+    // the robot selected on Get started. Release drops it once.
+    if constexpr (!kDevMode) {
+        QSettings legacy(f2c_cpp::kSettingsOrgName, f2c_cpp::kSettingsAppName);
+        const f2c_cpp::RetiredGeneralRobotKeys retired =
+            f2c_cpp::retireLegacyGeneralRobotKeys(legacy, true);
+        if (!retired.robot_ip.isEmpty()) {
+            f2c_cpp::update::log::info(
+                "setup",
+                QStringLiteral("removed stale robot_ip=%1; SSH uses the selected robot")
+                    .arg(retired.robot_ip));
+        }
+        if (!retired.robot_id.isEmpty()) {
+            f2c_cpp::update::log::info(
+                "setup",
+                QStringLiteral("removed stale general robot_id=%1")
+                    .arg(retired.robot_id));
+        }
+    }
 
     // BDR_REWIRE: loud dev-mode banner. Compiled out in Release.
     if constexpr (kDevMode) {

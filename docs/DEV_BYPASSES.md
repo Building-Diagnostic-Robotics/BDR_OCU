@@ -77,9 +77,11 @@ enumerates all sites.
       read the robot's ID over SSH on the Dashboard offload probe and
       block Send / map capture on a mismatch.
 - [x] **Connection monitor.** `SetupScreen::checkConnection()` pings the
-      selected robot's host (the `robot_ip` QSettings override wins, and
-      the screen shows an amber notice while it is set). The indicator is
-      advisory; Get started never waits on it.
+      selected robot's host. A dev build lets the `robot_ip` QSettings
+      key win, and the screen shows an amber notice while it is set. A
+      Release build ignores that key and deletes it, plus the leftover
+      general `robot_id`, once at startup (`retireLegacyGeneralRobotKeys`).
+      The indicator is advisory; Get started never waits on it.
 
 ## Stage 2 — Pre-flight Diagnostics (`cpp/src/startup_screen.cpp`)
 

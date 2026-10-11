@@ -12,6 +12,8 @@
 #include <QList>
 #include <QJsonObject>
 
+class QSettings;
+
 #include <optional>
 
 namespace f2c_cpp {
@@ -107,9 +109,37 @@ struct ResolvedRobotSshTarget {
 
 /**
  * Resolve robot SSH host/user from QSettings + robots.json.
- * Priority: non-empty `robot_ip` (dev override) → registry entry for `setup/robot_id`.
- * On success, `ssh_user` is never empty (defaults to "roofus").
+ * A dev build honours a non-empty `robot_ip` ahead of `setup/robot_id`.
+ * A Release build ignores that key. On success, `ssh_user` is never empty
+ * (defaults to "roofus").
  */
 bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* error_out = nullptr);
+
+/**
+ * The decision `resolveRobotSshTargetFromSettings` applies.
+ * `stored_override_ip` is used only when `allow_dev_override` is true, so a
+ * Release build cannot be pointed at a leftover address.
+ */
+bool resolveRobotSshTarget(const RobotRegistry& registry,
+                           const QString& robot_id,
+                           const QString& stored_override_ip,
+                           bool allow_dev_override,
+                           ResolvedRobotSshTarget* out,
+                           QString* error_out = nullptr);
+
+/** Values removed from the [General] group. Empty means the key was absent. */
+struct RetiredGeneralRobotKeys {
+    QString robot_ip;
+    QString robot_id;
+};
+
+/**
+ * A Release build deletes leftover [General] `robot_ip` and `robot_id`.
+ * `setup/robot_id` and any grouped `robot_id` (planner sessions) stay.
+ * `settings` must not be inside a group. A dev build (`release_build` false)
+ * changes nothing.
+ */
+RetiredGeneralRobotKeys retireLegacyGeneralRobotKeys(QSettings& settings,
+                                                     bool release_build);
 
 }  // namespace f2c_cpp

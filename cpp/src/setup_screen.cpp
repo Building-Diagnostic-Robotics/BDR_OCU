@@ -1,4 +1,5 @@
 #include "setup_screen.hpp"
+#include "dev_flags.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
 #include "update/update_log.hpp"
@@ -47,6 +48,11 @@ QPixmap tintWireframeToColor(const QPixmap& src, const QColor& color) {
 }
 
 QString robotIpOverride() {
+    // Release deletes the key at startup and must not honour it if a
+    // dev build wrote it back while this process is running.
+    if constexpr (!kDevMode) {
+        return {};
+    }
     const QSettings settings(kSettingsOrgName, kSettingsAppName);
     return settings.value(QStringLiteral("robot_ip"), QString()).toString().trimmed();
 }
