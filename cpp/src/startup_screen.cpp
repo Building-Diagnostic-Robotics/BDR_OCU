@@ -30,8 +30,8 @@ namespace {
 
 // BDR_REWIRE: Stage 2 Continue passthrough — allow launching the dashboard
 // without a passing preflight report. Always enabled (Release included): the
-// operator can always reach the dashboard after logging in regardless of the
-// preflight result. Pre-operation diagnostics are advisory, not a hard gate.
+// operator can always return to the dashboard regardless of the preflight
+// result. Pre-operation diagnostics are advisory, not a hard gate.
 constexpr bool kEnableLaunchDashboardPassthrough = true;
 
 QString trimmed(const QString& s) {
@@ -441,7 +441,7 @@ StartupScreen::StartupScreen(QWidget* parent)
 
     footer_layout->addStretch(1);
 
-    btn_launch_ = new QPushButton("Launch Dashboard", footer);
+    btn_launch_ = new QPushButton("Back to Dashboard", footer);
     btn_launch_->setObjectName("DiagLaunchButton");
     btn_launch_->setFixedHeight(48);
     btn_launch_->setEnabled(false);

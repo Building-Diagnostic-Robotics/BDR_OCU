@@ -20,17 +20,18 @@
  *     `AppShellWindow::onUploadDataRequested()` (called whenever the
  *     dashboard "Upload Data" quick-action fires).
  *  2. `showEvent` arms `ThumbDriveWatcher`. Once the stick is mounted,
- *     `UploadStateProbe` walks it and the dialog lists every section
- *     as a flat row (building, operator, date/time, size, status),
- *     classified None/Partial/Done from the sentinel files beside the data.
- *     Browse… lets the operator point at an unlabelled stick or a
- *     local copy.
- *  3. Operator selects sections, presses **Upload Data**. The dialog
- *     builds a queue of `UploadTarget`s (sequential per design
- *     decision) and feeds it to `UploadRunner`, which spawns one
- *     `python3 -u uploader.py …` subprocess per target.
+ *     `UploadStateProbe` walks it and the dialog lists one row per
+ *     building (operator, newest scan, summed size, rolled-up status).
+ *     Every Mission_* and Section_* folder of that building, on any
+ *     date, sits on the same row. Browse… lets the operator point at
+ *     an unlabelled stick or a local copy.
+ *  3. Operator selects buildings, presses **Upload Data**. The dialog
+ *     expands each ticked row into the folders that are not already
+ *     uploaded (oldest visit first) and feeds that queue to
+ *     `UploadRunner`, which spawns one `python3 -u uploader.py …`
+ *     subprocess per folder.
  *  4. Per-file events stream in via `UploadRunner::fileUploaded`;
- *     the tree row's per-section count + progress bar update live.
+ *     the building row's status and the progress bar update live.
  *  5. **Pause** touches `pause.flag`; the script exits cleanly at the
  *     next file boundary. Resume = re-press Upload.
  *  6. **Cancel** SIGTERMs the subprocess. State on disk is preserved
@@ -147,24 +148,35 @@ private slots:
     void onCloudProbeFinished(int exit_code, int /*QProcess::ExitStatus*/ status);
 
 private:
+    struct Selection {
+        int buildings = 0;
+        QList<UploadTarget> folders;
+    };
+
     void buildUi();
     void applyStyle();
     void repopulateTree();
-    QString formatWhen(const UploadTarget& target) const;
+    QString formatWhen(const QDateTime& when, const QString& date_folder) const;
     void refreshSelectionSummary();
     void refreshButtonStates();
     void refreshHeaderSubtitle();
     void resetProgress();
-    void setSectionRowStatus(QTreeWidgetItem* row, const UploadTarget& target);
-    QTreeWidgetItem* findSectionRow(const UploadTarget& target) const;
+    void applyBuildingRow(QTreeWidgetItem* row, const UploadBuildingRow& view,
+                          bool tick_if_missing);
+    void refreshRowForTarget(const UploadTarget& target, bool tick_if_missing);
+    QTreeWidgetItem* findBuildingRow(const QString& key) const;
     QString formatBytes(qint64 bytes) const;
-    QList<UploadTarget> selectedTargets() const;
+    Selection currentSelection() const;
+    int listedBuildingCount() const;
     void startProbe();
 
-    // S3 check of the 10 newest Uploaded rows. Read-only on the stick.
-    // A failure or an offline cloud leaves those rows Uploaded.
+    // S3 check of every finished folder that does not already carry a
+    // valid cloud_verified.json. Oldest first, in batches. A failure or
+    // an offline cloud leaves the unchecked folders Uploaded.
     void maybeStartCloudCheck();
-    void startCloudCheck(const QList<UploadTarget>& newest_done);
+    void launchNextCloudBatch();
+    /// True when a batch was handed to the verifier.
+    bool startCloudCheck(const QList<UploadTarget>& batch);
     void cancelCloudCheck(bool reschedule);
     void revertCheckingRows();
     void onCloudRunFinished(int generation, const QString& run_id, bool http_ok,
@@ -230,6 +242,8 @@ private:
     int cloud_check_for_probe_ = -1;
     int verify_generation_ = 0;
     bool manifests_ready_ = false;
+    /// Finished folders still waiting for a batch. Oldest first.
+    QList<UploadTarget> cloud_check_queue_;
     QStringList cloud_check_ids_;
     QHash<QString, QList<CloudObject>> cloud_listings_;
     QHash<QString, LoadedManifest> loaded_manifests_;

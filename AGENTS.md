@@ -91,6 +91,20 @@ Quick inventory of current bypass sites:
 | 4 | `ExplorationScreen` | `cpp/src/exploration_screen.cpp` |
 | 5 | `PlannerScreen` | `cpp/src/planner_screen.cpp` |
 
+**Stage 1 is "Get started", not a login.** The OCU never logs into the
+robot: SSH uses the laptop key, and the robot is chosen from
+`robots.json` by `RobotRegistry::pairedRobotId()` (top-level
+`paired_robot_id`, else the only robot listed; several robots and no
+pairing → a picker plus **Switch robot** on the Dashboard). Get started
+writes `setup/robot_id` and goes straight to the Dashboard, so office
+planning and thumb-drive upload need no robot. Pre-flight (Stage 2) is
+opened from the Dashboard and returns there. Rules: keep `findById`
+an exact match (`Roofus#001` and `Roofus#0001` are different robots);
+a `paired_robot_id` that is not listed is an error, never a fallback
+to another robot; do not bring back a PIN gate. `robot_login.cpp` is
+compiled but unused for one release, then delete it. Still owed: a
+robot identity check before Send / map capture (`docs/DEV_BYPASSES.md`).
+
 The monolithic legacy window **`CoverageGUI`** has been **removed** from the
 tree (`coverage_gui.hpp/.cpp` deleted). Live UI is `AppShellWindow` + staged
 screens; map/video/widgets live in `plot_widget.*`, `video_stream_widget.*`,
@@ -234,8 +248,8 @@ Combining them resolves four states:
     Then runs the existing teardown SSH (kills the launch tree →
     motors disarm via the controller's exit handlers).
   - **Cancel** keeps the operator on Stage 5; the robot-side
-    auto-finalize watchdog (10 min idle) is the safety net for an
-    abandoned mission.
+    auto-finalize watchdog (10 min with nothing recording) is the
+    safety net for an abandoned mission.
 
 ### Robot-side safety net (`data_collection_coordinator.py`)
 
@@ -246,16 +260,23 @@ Combining them resolves four states:
   clock) into `mission_config.json` while a mission is open.  Lets
   post-flight tooling and the OCU's reconnect path detect open-but-
   stale missions deterministically.
-- **Auto-finalize watchdog**: if no `/dc/*` service activity for >=
-  `mission_idle_timeout_sec` (default 10 min), the coordinator calls
-  `finalize_mission_callback` itself and stamps `finalized_via:
-  watchdog`.  Operator-abandoned, OCU-crashed, OCU-closed-without-
-  Complete-Mission — all the same recovery path so on-disk data is
-  always properly tagged.
+- **Auto-finalize watchdog**: a mission with nothing recording is
+  saved as partial after `mission_idle_timeout_sec` (default 10 min)
+  and stamped `finalized_via: watchdog`. That covers an abandoned
+  mission, an OCU crash between scans, and a scan left paused — a
+  latched E-Stop counts as paused, so leaving it for 10 minutes ends
+  that scan. A scan that is recording is never closed by the
+  watchdog: each heartbeat resets the idle clock while
+  `collection_started and not is_paused`, so a long sweep does not
+  build up idle time. The close is the same save End & Save runs, so
+  the section is renamed and the copy is queued. The tag is an
+  argument of the close that wins the lock, so a concurrent operator
+  save is not relabelled `watchdog`.
 - All operator-driven service handlers (`start`, `pause`, `resume`,
   `end_and_save`, `finalize_mission`, `cancel_scan`,
   `start_gnss_precapture`) call `mission_touch()` to bump the
-  watchdog's idle clock.
+  watchdog's idle clock. The heartbeat does the same while a scan is
+  recording and not paused.
 
 ### Programmatic Seek thermal USB reset (production-wired)
 
@@ -534,7 +555,7 @@ are missing. Modal is `show()`, not `exec()`.
   a flag-capable helper onto the robot.
 - Check-only queries `origin/<deploy>`, not the laptop's current
   branch, and must not overwrite `branch_` with laptop HEAD.
-- Arm after login / `goToStage3` when the SSH target is known — not
+- Arm after Get started / `goToStage3` when the SSH target is known — not
   at ctor before `setup/robot_id`.
 - Banner stays hidden while `isScanLaunchActive()` (no roof nag).
 - Paths are `~/pilot_ws` on both sides. No auto-clone.
@@ -676,8 +697,10 @@ kept in sync by hand.
   on a `QtConcurrent` worker (generation-counted so a stick swapped
   mid-scan is discarded, and a re-probe supersedes a running walk).
   Same classification as the SSH `find` probe: `manifest.json` → Done,
-  `upload_state.json` → Partial, neither → None; file count excludes the
-  three sentinels. `scanLocalDataRoot()` is the pure engine (tested).
+  `upload_state.json` → Partial, neither → None; file count excludes
+  the bookkeeping names, including `cloud_verified.json`. A Done folder
+  whose `cloud_verified.json` hash matches `manifest.json` starts as
+  Verified. `scanLocalDataRoot()` is the pure engine (tested).
 - **`UploadRunner`**: ThumbDrive mode runs `python3 -u <script>
   <data_path> <robot_id> <run_id> [--force]` as a plain `QProcess` with
   the creds in `QProcessEnvironment`; `resolveLocalScriptPath()` tries
@@ -692,28 +715,43 @@ kept in sync by hand.
   with the SSH mode.
 - **`CloudVerifier`** (`cpp/include/cloud_verifier.hpp`): every time the
   Upload dialog finishes a stick listing and the cloud is reachable, it
-  `POST`s `/verify` for the **10 newest** `Done` rows (sections and
-  missions, by scan time), **one `run_id` per request**, 30 s timeout.
-  The stick `manifest.json` is read off the GUI thread and compared to
-  the listing: a manifest file missing from S3, a size mismatch, or an
-  md5 mismatch (only when the manifest recorded `md5` — older manifests
-  are size-only) marks the row **Missing in cloud** (amber, ticked,
-  uploaded with `--force`). A full match shows **Uploaded · Verified**.
+  `POST`s `/verify` for **every Done folder that does not already have
+  a valid `cloud_verified.json`**, oldest first, in batches of 10,
+  **one `run_id` per request**, 30 s
+  timeout. A match writes `cloud_verified.json` next to `manifest.json`
+  (tmp, flush, rename) with the sha256 of the manifest file bytes; a
+  Missing result deletes that file. The stick `manifest.json` is read
+  off the GUI thread and
+  compared to the listing: a manifest file missing from S3, a size
+  mismatch, or an md5 mismatch (only when the manifest recorded `md5` —
+  older manifests are size-only) marks that folder **Missing in cloud**.
+  The building row then shows **Missing in cloud** (amber, ticked) and
+  only those folders upload with `--force`. A full match on every
+  folder shows **Uploaded · Verified**.
   A manifest whose `client_id` or `robot_id` differs from the logged-in
   robot is left **Uploaded** — the listing was for a different S3
   prefix, and marking it missing would re-upload it under the wrong
   owner. Empty owner fields are not a disagreement.
-  While the request is in flight the badge is **Uploaded · checking…**.
-  `manifest.json` itself must be in the listing. Extra S3 keys are
-  ignored, including `GPR_Output/` (produced in the cloud after upload,
-  not on the stick) and `_UPLOAD_COMPLETE.json`. Any non-200, timeout,
-  or offline result leaves every still-checking row as **Uploaded**.
+  While a request is in flight, a building whose folders are all
+  uploaded shows **Uploaded · checking…**. A building that still has a
+  new scan keeps Pending or Partial. `manifest.json` itself must be in
+  the listing. Extra S3 keys are ignored, including `GPR_Output/`
+  (produced in the cloud after upload, not on the stick) and
+  `_UPLOAD_COMPLETE.json`. Any non-200, timeout, or offline result
+  leaves every still-checking folder as **Uploaded**.
   The check does not write the stick and does not change the Dashboard
   card. `/verify` needs the Lambda timeout at 29 s and `s3:ListBucket`
   on the upload bucket; a 3 s timeout cannot list a real section.
 - **`UploadDialog`**: frameless modal from the Stage 3 "Upload Data"
-  card. Flat list (Building, Operator, Date, Size, Status) — metadata
+  card. One flat row per building slug, across every date on the stick
+  (Building, Operator, newest scan, summed size, status) — metadata
   from `session_config.json` / `mission_config.json`, no date combo.
+  A later scan of the same building stays on that row and shows
+  Pending until its new folders upload; already-uploaded folders are
+  not sent again. Ticking the row uploads the rest oldest-first, the
+  Mission folder before a Section that shares its timestamp. Fully
+  uploaded buildings stay listed and greyed. "Found N scans" counts
+  buildings.
   Header names the robot the upload is attributed to **and** the
   drive (`Drive: RDATA_EXT at /media/… · N GB free`). Banner + Upload
   gating = drive mounted AND cloud reachable (2 s `curl` HEAD, 2-miss
@@ -735,8 +773,8 @@ kept in sync by hand.
 
 - **One stick per robot.** The stick carries no robot identity (neither
   `mission_config.json` nor `thumbsync_manifest.json` has a robot id);
-  everything on it uploads under the robot the operator logged into at
-  Setup (`QSettings setup/robot_id`), exactly as the SSH path did. The
+  everything on it uploads under the robot selected on Get started
+  (`QSettings setup/robot_id`), exactly as the SSH path did. The
   dialog header shows that robot beside the drive so a mismatch is
   visible before Upload. If the fleet ever shares sticks, add a marker
   file robot-side — do not guess from folder names.
@@ -783,7 +821,11 @@ kept in sync by hand.
   Operator-locked: Complete Mission first.
 - **Hard-blocked until the robot→stick copy is done.** The Upload
   card stays disabled (and blinks) while `OffloadStatus` says the
-  copy is incomplete. Complete Mission must not wait on that copy.
+  copy is incomplete. `stick_full` is the exception: the copy did not
+  start because the stick is under its free-space floor, the card
+  stays enabled, and the subtitle tells the operator to upload older
+  scans and cloud-check them. Complete Mission must not wait on that
+  copy, and `copy=stick_full` counts as save-done.
 
 ### Configuration
 
@@ -842,8 +884,12 @@ clearing, `FailedToStart` handling).
   uses an opacity effect because it *replaces* its own shadow.
 - **Do NOT add IAM credentials to the OCU.**
 - **Do NOT make the dialog write anything to the stick except through
-  `uploader.py`** (`upload_state.json`, `manifest.json`, `pause.flag`).
-  The robot's `rdata_thumbdrive_sync.py` treats a destination with
+  `uploader.py`** (`upload_state.json`, `manifest.json`, `pause.flag`)
+  **and `cloud_verified.json`.** That file is the one exception: the
+  dialog writes it only after a cloud check matches, and deletes it
+  when the check says Missing. `uploader.py` deletes it when a
+  re-upload starts and never uploads it. The robot's
+  `rdata_thumbdrive_sync.py` treats a destination with
   `thumbsync_manifest.json` as done and never re-copies, so anything
   else the laptop leaves there is permanent.
 - The SSH fallback **must NOT** go through `ros2 run` — invoke

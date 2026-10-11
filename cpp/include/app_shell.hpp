@@ -100,7 +100,7 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private slots:
-    void onLoginSubmitted(const QString& robotId, const QString& accessCode);
+    void onGetStarted(const QString& robotId);
     void goToStage1();
     void goToStage2();
     void goToStage3();
@@ -451,7 +451,6 @@ private:
     QToolButton* window_close_ = nullptr;
 
     QString robot_id_;
-    QString access_code_;  // in-memory only
     bool dark_mode_ = false;
     bool dragging_ = false;
     QPoint drag_offset_;

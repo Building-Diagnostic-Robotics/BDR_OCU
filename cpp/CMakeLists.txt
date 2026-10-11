@@ -646,6 +646,21 @@ if(BDR_BUILD_TESTS)
             COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_uploader.py
         )
 
+        # robots.json pairing resolution for the Get started screen.
+        add_executable(robot_registry_tests
+            tests/robot_registry_tests.cpp
+            src/robot_registry.cpp
+        )
+        target_include_directories(robot_registry_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(robot_registry_tests PRIVATE
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME robot_registry_tests COMMAND robot_registry_tests)
+
         # Laptop↔robot ~/pilot_ws sanitizers + package map. Header listed
         # so AUTOMOC generates RepoSyncManager's moc (Q_OBJECT).
         add_executable(repo_sync_tests
@@ -731,7 +746,7 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME touch_gesture_state_tests COMMAND touch_gesture_state_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests swath_preview_tests)")
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests robot_registry_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests swath_preview_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

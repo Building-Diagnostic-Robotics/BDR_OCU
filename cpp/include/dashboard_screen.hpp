@@ -25,6 +25,8 @@ public:
     ~DashboardScreen() override;
 
     void setRobotId(const QString& robotId);
+    /** Shows "Switch robot" (back to Get started). Hidden on a paired laptop. */
+    void setRobotSwitchable(bool switchable);
     void setDarkMode(bool dark_mode);
     /** Re-read robot `/R_DATA/.offload/status.json` and the laptop stick. */
     void refreshThumbCopyStatus();
@@ -41,7 +43,7 @@ public:
     void setPreflightResult(const QString& result);
 
 signals:
-    void logoutRequested();
+    void switchRobotRequested();
     void startNewScanRequested();
     void runDiagnosticsRequested();
     void viewRecordingsRequested();
@@ -62,7 +64,6 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private slots:
-    void onLogoutClicked();
     void onStartNewScanClicked();
     void onRunDiagnosticsClicked();
     void onViewRecordingsClicked();
@@ -122,6 +123,9 @@ private:
     void applyUploadBlinkFrame();
     bool robotCopyIncomplete() const;
     bool stickCopyIncomplete() const;
+    /// True when the live probe, or the cached state while the robot is
+    /// offline, says the stick is under its free-space floor.
+    bool offloadStickFull() const;
     void refreshUptimeDisplay();
 
     QString robot_id_;

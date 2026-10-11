@@ -392,7 +392,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     setCentralWidget(central_root_);
 
     // OTA checker — polls GitHub Releases for new builds (locked spec Q2=A:
-    // start at app startup, before Stage 1 even completes login).
+    // start at app startup, before the operator leaves Get started).
     update_checker_ = new update::UpdateChecker(this);
     connect(update_checker_, &update::UpdateChecker::updateAvailable,
             this, [this](const update::VersionInfo& info) {
@@ -449,7 +449,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     stack_->addWidget(stage1_);
     stack_->setCurrentWidget(stage1_);
 
-    connect(stage1_, &SetupScreen::loginSubmitted, this, &AppShellWindow::onLoginSubmitted);
+    connect(stage1_, &SetupScreen::getStartedRequested, this, &AppShellWindow::onGetStarted);
 
     laptop_launch_proc_ = new QProcess(this);
     laptop_launch_proc_->setProcessChannelMode(QProcess::MergedChannels);
@@ -1182,15 +1182,18 @@ AppShellWindow::~AppShellWindow() {
     }
 }
 
-void AppShellWindow::onLoginSubmitted(const QString& robotId, const QString& accessCode) {
+void AppShellWindow::onGetStarted(const QString& robotId) {
+    const bool robot_changed = robotId != robot_id_;
     robot_id_ = robotId;
-    access_code_ = accessCode;
-    ensureStage2();
-    if (stage2_) {
+    // A preflight report belongs to the robot it ran against.
+    if (stage2_ && robot_changed) {
         stage2_->resetState();
-        stage2_->setRobotId(robot_id_);
     }
-    goToStage2();
+    ensureStage3();
+    if (stage3_) {
+        stage3_->setRobotSwitchable(stage1_->robotIsPickable());
+    }
+    goToStage3();
 }
 
 void AppShellWindow::goToStage1() {
@@ -1761,7 +1764,7 @@ void AppShellWindow::ensureStage2() {
     }
     stage2_ = new StartupScreen(this);
     stack_->addWidget(stage2_);
-    connect(stage2_, &StartupScreen::backRequested, this, &AppShellWindow::goToStage1);
+    connect(stage2_, &StartupScreen::backRequested, this, &AppShellWindow::goToStage3);
     connect(stage2_, &StartupScreen::continueRequested, this, &AppShellWindow::goToStage3);
     stage2_->setDarkMode(dark_mode_);
 }
@@ -1772,7 +1775,7 @@ void AppShellWindow::ensureStage3() {
     }
     stage3_ = new DashboardScreen(this);
     stack_->addWidget(stage3_);
-    connect(stage3_, &DashboardScreen::logoutRequested, this, &AppShellWindow::goToStage1);
+    connect(stage3_, &DashboardScreen::switchRobotRequested, this, &AppShellWindow::goToStage1);
     connect(stage3_, &DashboardScreen::runDiagnosticsRequested, this, &AppShellWindow::goToStage2);
     connect(stage3_, &DashboardScreen::startNewScanRequested, this, &AppShellWindow::onStartNewScan);
     connect(stage3_, &DashboardScreen::viewRecordingsRequested, this, &AppShellWindow::onUploadDataRequested);
@@ -2003,21 +2006,20 @@ void AppShellWindow::onUploadDataRequested() {
     }
 
     // The stick carries no robot identity: one stick per robot is the
-    // fleet rule, and everything on it uploads under the robot the
-    // operator logged into at Setup. The dialog header names that robot
-    // next to the drive so a mismatch is visible before Upload.
+    // fleet rule, and everything on it uploads under the robot selected
+    // on Get started. The dialog header names that robot next to the
+    // drive so a mismatch is visible before Upload.
     const QSettings settings(kSettingsOrgName, kSettingsAppName);
     const QString robot_id =
-        settings.value(QStringLiteral("setup/robot_id"), QString())
-            .toString().trimmed();
+        settings.value(kSettingsRobotIdKey, QString()).toString().trimmed();
     const auto profile = registry.findById(robot_id);
     if (!profile.has_value()) {
         BdrMessageBox::warning(
             this,
             tr("Upload unavailable"),
             robot_id.isEmpty()
-                ? tr("No robot is currently logged in. Select the robot this "
-                     "drive came from in Setup first.")
+                ? tr("No robot selected. Choose the robot this drive came "
+                     "from on the Get started screen first.")
                 : tr("No registry entry for the active robot."));
         return;
     }
@@ -2485,7 +2487,7 @@ void AppShellWindow::onExplorationStartScanRequested() {
         setExplorationLaunchFailed(
             resolve_err.isEmpty()
                 ? QStringLiteral(
-                      "Could not resolve robot SSH target (complete setup login or set robot_ip).")
+                      "Could not resolve robot SSH target (choose a robot on Get started or set robot_ip).")
                 : resolve_err);
         return;
     }

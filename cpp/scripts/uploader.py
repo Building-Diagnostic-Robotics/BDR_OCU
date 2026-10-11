@@ -116,12 +116,18 @@ MANIFEST_FILENAME = "manifest.json"
 # Written by the robot after it copies a mission to the stick. Schema 2
 # carries a per-file sha256 taken from the robot's own disk.
 THUMB_MANIFEST = "thumbsync_manifest.json"
+# Written by the OCU after a cloud check. Bookkeeping, never scan data.
+# A re-upload deletes it. A finished folder that no-ops keeps it: that
+# file is the robot's proof the scan is already in the cloud.
+CLOUD_VERIFIED_FILENAME = "cloud_verified.json"
 _BOOKKEEPING_NAMES = frozenset((
     STATE_FILENAME,
     PAUSE_FILENAME,
     MANIFEST_FILENAME,
+    CLOUD_VERIFIED_FILENAME,
     STATE_FILENAME + ".tmp",
     MANIFEST_FILENAME + ".tmp",
+    CLOUD_VERIFIED_FILENAME + ".tmp",
 ))
 
 
@@ -207,9 +213,9 @@ def is_sentinel(rel_norm: str) -> bool:
     """Bookkeeping files the uploader owns. Never uploaded as data.
 
     The `.tmp` siblings are the atomic-write leftovers of
-    `upload_state.json` and `manifest.json`. Any other `*.tmp` name is
-    data — rosbag and capture files must not be dropped by a broad
-    suffix rule.
+    `upload_state.json`, `manifest.json` and `cloud_verified.json`.
+    Any other `*.tmp` name is data — rosbag and capture files must
+    not be dropped by a broad suffix rule.
     """
     return _basename(rel_norm) in _BOOKKEEPING_NAMES
 
@@ -269,17 +275,50 @@ def should_pause(data_root: str) -> bool:
     return os.path.exists(pause_path(data_root))
 
 
-def remove_stale_temps(data_root: str) -> None:
-    """Drop atomic-write leftovers from a killed run. A live save uses
-    the same names, so this only runs when this process is the uploader."""
-    for name in (STATE_FILENAME + ".tmp", MANIFEST_FILENAME + ".tmp"):
+def remove_named(data_root: str, names) -> Optional[str]:
+    """Remove each name. Missing files are fine. Returns an error string
+    when a file is still there afterwards."""
+    errors = []
+    for name in names:
         path = os.path.join(data_root, name)
         try:
             os.remove(path)
         except FileNotFoundError:
-            pass
+            continue
         except OSError as exc:
-            print(f"Warning: could not remove {name}: {exc}", flush=True)
+            errors.append(f"could not remove {name}: {exc}")
+    if errors:
+        return "; ".join(errors)
+    return None
+
+
+def remove_stale_temps(data_root: str) -> None:
+    """Drop atomic-write leftovers from a killed run. A live save uses
+    the same names, so this only runs when this process is the uploader.
+
+    `cloud_verified.json` itself is not a leftover: a no-op re-run of a
+    finished folder must keep the robot's proof."""
+    err = remove_named(data_root, (
+        STATE_FILENAME + ".tmp",
+        MANIFEST_FILENAME + ".tmp",
+        CLOUD_VERIFIED_FILENAME + ".tmp",
+    ))
+    if err:
+        print(f"Warning: {err}", flush=True)
+
+
+def remove_cloud_verified(data_root: str) -> None:
+    """Drop the cloud-check proof and a torn temp file.
+
+    Called only when this run will rewrite the upload. A hash mismatch
+    would already make the robot ignore the file; deleting it means a
+    crash mid-upload cannot leave a stale proof behind."""
+    err = remove_named(data_root, (
+        CLOUD_VERIFIED_FILENAME,
+        CLOUD_VERIFIED_FILENAME + ".tmp",
+    ))
+    if err:
+        print(f"Warning: {err}", flush=True)
 
 
 def _discard_manifest(data_root: str) -> Optional[str]:
@@ -296,24 +335,17 @@ def _discard_manifest(data_root: str) -> Optional[str]:
 
 
 def discard_bookkeeping(data_root: str) -> Optional[str]:
-    """Remove the uploader's own state, manifest and `.tmp` siblings.
+    """Remove the uploader's own state, manifest, cloud proof and `.tmp`
+    siblings.
 
     Used by `--force` before a fresh upload. Scan data and `pause.flag`
     stay. Returns an error string when a file is still present.
     """
-    errors = []
-    for name in (MANIFEST_FILENAME, STATE_FILENAME,
-                 MANIFEST_FILENAME + ".tmp", STATE_FILENAME + ".tmp"):
-        path = os.path.join(data_root, name)
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            errors.append(f"could not remove {name}: {exc}")
-    if errors:
-        return "; ".join(errors)
-    return None
+    return remove_named(data_root, (
+        MANIFEST_FILENAME, STATE_FILENAME, CLOUD_VERIFIED_FILENAME,
+        MANIFEST_FILENAME + ".tmp", STATE_FILENAME + ".tmp",
+        CLOUD_VERIFIED_FILENAME + ".tmp",
+    ))
 
 
 def parse_cli(argv: List[str]) -> Optional[Tuple[str, str, str, bool]]:
@@ -1182,6 +1214,10 @@ def upload_run(data_root: str, robot_id: str, run_id: str, *,
         if disc:
             print(f"Unexpected error: {disc}", flush=True)
             return 1
+
+    # Past the "already uploaded" return, so this run will rewrite the
+    # manifest. The old proof must not outlive that.
+    remove_cloud_verified(data_root)
 
     state = load_state(data_root, robot_id, run_id)
     state["client_id"] = CLIENT_ID

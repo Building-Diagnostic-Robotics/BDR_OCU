@@ -22,6 +22,10 @@ enum class OffloadCopyState {
     Queued,
     Copying,
     WaitingForDrive,
+    /// The stick is mounted but under its free-space floor, so the
+    /// copy did not start. The copy is incomplete, and the Upload card
+    /// stays enabled: uploading is what frees the stick.
+    StickFull,
     Error,
 };
 

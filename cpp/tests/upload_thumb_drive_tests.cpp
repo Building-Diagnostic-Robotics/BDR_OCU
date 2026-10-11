@@ -12,8 +12,11 @@
 #include <gtest/gtest.h>
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDate>
 #include <QDir>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTime>
 #include <QEventLoop>
 #include <QFile>
@@ -27,8 +30,18 @@ using f2c_cpp::StickSync;
 using f2c_cpp::ThumbDriveWatcher;
 using f2c_cpp::UploadRunner;
 using f2c_cpp::UploadStateProbe;
+using f2c_cpp::CloudCheck;
+using f2c_cpp::UploadBuildingRow;
+using f2c_cpp::UploadRowBadge;
 using f2c_cpp::UploadStatus;
 using f2c_cpp::UploadTarget;
+using f2c_cpp::cloudCheckTargets;
+using f2c_cpp::fileSha256Hex;
+using f2c_cpp::readCloudVerified;
+using f2c_cpp::settleCloudVerified;
+using f2c_cpp::writeCloudVerified;
+using f2c_cpp::groupUploadTargets;
+using f2c_cpp::uploadTargetsForRow;
 using f2c_cpp::classifyStickSync;
 using f2c_cpp::parseOffloadStatusJson;
 using f2c_cpp::uploaderArguments;
@@ -543,4 +556,391 @@ TEST(OffloadStatus, StickClassifyAbsentEmptyIncompleteComplete) {
                   "/September_13_2026/Acme_HQ/Section_1_101500/a.bin",
               "x");
     EXPECT_EQ(classifyStickSync(orphans.path()), StickSync::Incomplete);
+}
+
+namespace {
+
+UploadTarget folder(const char* date, const char* slug, const char* section,
+                    UploadStatus status, const QDateTime& when,
+                    int done_files = 0, int total_files = 0) {
+    UploadTarget target;
+    target.date_folder = QString::fromLatin1(date);
+    target.building_slug = QString::fromLatin1(slug);
+    target.section_name = QString::fromLatin1(section);
+    target.run_id = target.date_folder + QLatin1Char('/') + target.building_slug +
+                    QLatin1Char('/') + target.section_name;
+    target.building_name = target.building_slug;
+    target.captured_at = when;
+    target.status = status;
+    target.completed_files = done_files;
+    target.total_files = total_files;
+    target.total_bytes = total_files;
+    return target;
+}
+
+QDateTime at(int year, int month, int day, int hour, int minute) {
+    return QDateTime(QDate(year, month, day), QTime(hour, minute));
+}
+
+const UploadBuildingRow* findRow(const QList<UploadBuildingRow>& rows, const QString& key) {
+    for (const UploadBuildingRow& row : rows) {
+        if (row.key == key) return &row;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+TEST(UploadBuildingRows, OneRowPerBuildingAcrossDates) {
+    QHash<QString, UploadTarget> targets;
+    const UploadTarget oct_mission =
+        folder("October_09_2026", "BNY_white_roof", "Mission_223126",
+               UploadStatus::Done, at(2026, 10, 9, 22, 31));
+    UploadTarget oct_section =
+        folder("October_09_2026", "BNY_white_roof", "Section_1_223200",
+               UploadStatus::Done, at(2026, 10, 9, 22, 32));
+    oct_section.operator_name = QStringLiteral("andrew");
+    UploadTarget dec_mission =
+        folder("December_10_2026", "BNY_white_roof", "Mission_140000",
+               UploadStatus::None, at(2026, 12, 10, 14, 0));
+    dec_mission.operator_name = QStringLiteral("blake");
+    dec_mission.total_bytes = 1800000;
+    UploadTarget dec_section =
+        folder("December_10_2026", "BNY_white_roof", "Section_1_142000",
+               UploadStatus::None, at(2026, 12, 10, 14, 20), 0, 10);
+    dec_section.building_name = QStringLiteral("BNY White Roof");
+    const UploadTarget other =
+        folder("October_09_2026", "BNY_white_roof_cliff1", "Section_1_103112",
+               UploadStatus::None, at(2026, 10, 9, 22, 31), 0, 4);
+
+    for (const UploadTarget& target :
+         {oct_mission, oct_section, dec_mission, dec_section, other}) {
+        targets.insert(target.run_id, target);
+    }
+
+    const QList<UploadBuildingRow> rows = groupUploadTargets(targets);
+    ASSERT_EQ(rows.size(), 2);
+    // Newest scan first. The December rescan is the newest for this slug.
+    EXPECT_EQ(rows.at(0).key, "BNY_white_roof");
+    EXPECT_EQ(rows.at(0).building_label, "BNY White Roof");
+    EXPECT_EQ(rows.at(0).operator_name, "blake");
+    EXPECT_EQ(rows.at(0).newest, at(2026, 12, 10, 14, 20));
+    EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Pending);
+    EXPECT_EQ(rows.at(0).badge_text, "Pending");
+    EXPECT_TRUE(rows.at(0).selectable);
+    EXPECT_TRUE(rows.at(0).tooltip.contains("Section_1_142000"));
+    EXPECT_TRUE(rows.at(0).tooltip.contains("Mission_223126"));
+    EXPECT_EQ(rows.at(0).run_ids.size(), 4);
+    EXPECT_GT(rows.at(0).total_bytes, dec_mission.total_bytes);
+
+    const QList<UploadTarget> queued = uploadTargetsForRow(targets, rows.at(0));
+    ASSERT_EQ(queued.size(), 2);
+    EXPECT_EQ(queued.at(0).section_name, "Mission_140000");
+    EXPECT_EQ(queued.at(1).section_name, "Section_1_142000");
+    EXPECT_FALSE(queued.at(0).force_reupload);
+    EXPECT_FALSE(queued.at(1).force_reupload);
+
+    const UploadBuildingRow* cliff = findRow(rows, "BNY_white_roof_cliff1");
+    ASSERT_NE(cliff, nullptr);
+    EXPECT_EQ(cliff->run_ids.size(), 1);
+}
+
+TEST(UploadBuildingRows, PartialPercentIgnoresUploadedFolders) {
+    QHash<QString, UploadTarget> targets;
+    UploadTarget done =
+        folder("October_09_2026", "Acme", "Section_1_100000",
+               UploadStatus::Done, at(2026, 10, 9, 10, 0), 1000, 1000);
+    done.total_bytes = 500;
+    UploadTarget partial =
+        folder("December_10_2026", "Acme", "Section_1_140000",
+               UploadStatus::Partial, at(2026, 12, 10, 14, 0), 5, 10);
+    partial.total_bytes = 50;
+    for (const UploadTarget& target : {done, partial}) {
+        targets.insert(target.run_id, target);
+    }
+
+    const QList<UploadBuildingRow> rows = groupUploadTargets(targets);
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Partial);
+    EXPECT_EQ(rows.at(0).partial_percent, 50);
+    EXPECT_EQ(rows.at(0).badge_text, "Partial · 50%");
+    EXPECT_EQ(rows.at(0).total_bytes, 550);
+    EXPECT_TRUE(rows.at(0).selectable);
+
+    const QList<UploadTarget> queued = uploadTargetsForRow(targets, rows.at(0));
+    ASSERT_EQ(queued.size(), 1);
+    EXPECT_EQ(queued.at(0).section_name, "Section_1_140000");
+}
+
+TEST(UploadBuildingRows, MissingBeatsPartialAndForcesReupload) {
+    QHash<QString, UploadTarget> targets;
+    UploadTarget missing =
+        folder("October_09_2026", "Acme", "Mission_100000",
+               UploadStatus::Done, at(2026, 10, 9, 10, 0));
+    missing.cloud_check = CloudCheck::Missing;
+    missing.force_reupload = false;
+    const UploadTarget partial =
+        folder("October_09_2026", "Acme", "Section_1_103000",
+               UploadStatus::Partial, at(2026, 10, 9, 10, 30), 1, 4);
+    targets.insert(missing.run_id, missing);
+    targets.insert(partial.run_id, partial);
+
+    const QList<UploadBuildingRow> rows = groupUploadTargets(targets);
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Missing);
+    EXPECT_EQ(rows.at(0).badge_text, "Missing in cloud");
+    EXPECT_TRUE(rows.at(0).selectable);
+
+    const QList<UploadTarget> queued = uploadTargetsForRow(targets, rows.at(0));
+    ASSERT_EQ(queued.size(), 2);
+    EXPECT_EQ(queued.at(0).section_name, "Mission_100000");
+    EXPECT_TRUE(queued.at(0).force_reupload);
+    EXPECT_EQ(queued.at(1).section_name, "Section_1_103000");
+    EXPECT_FALSE(queued.at(1).force_reupload);
+}
+
+TEST(UploadBuildingRows, VerifiedOnlyWhenEveryFolderMatches) {
+    QHash<QString, UploadTarget> targets;
+    UploadTarget mission =
+        folder("October_09_2026", "Acme", "Mission_100000",
+               UploadStatus::Done, at(2026, 10, 9, 10, 0));
+    UploadTarget section =
+        folder("October_09_2026", "Acme", "Section_1_103000",
+               UploadStatus::Done, at(2026, 10, 9, 10, 30));
+    mission.cloud_check = CloudCheck::Verified;
+    section.cloud_check = CloudCheck::Unchecked;
+    targets.insert(mission.run_id, mission);
+    targets.insert(section.run_id, section);
+
+    QList<UploadBuildingRow> rows = groupUploadTargets(targets);
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Uploaded);
+    EXPECT_FALSE(rows.at(0).selectable);
+    EXPECT_TRUE(uploadTargetsForRow(targets, rows.at(0)).isEmpty());
+
+    targets[section.run_id].cloud_check = CloudCheck::Verified;
+    rows = groupUploadTargets(targets);
+    EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Verified);
+    EXPECT_EQ(rows.at(0).badge_text, "Uploaded · Verified");
+    EXPECT_FALSE(rows.at(0).selectable);
+
+    targets[section.run_id].cloud_check = CloudCheck::Checking;
+    rows = groupUploadTargets(targets);
+    EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Checking);
+    EXPECT_FALSE(rows.at(0).selectable);
+}
+
+TEST(UploadBuildingRows, UploadOrderKeepsLaterVisitBehindItsPredecessor) {
+    QHash<QString, UploadTarget> targets;
+    const UploadTarget first_mission =
+        folder("October_09_2026", "Acme", "Mission_100000",
+               UploadStatus::None, at(2026, 10, 9, 10, 0));
+    const UploadTarget first_section =
+        folder("October_09_2026", "Acme", "Section_1_103000",
+               UploadStatus::None, at(2026, 10, 9, 10, 30));
+    const UploadTarget second_mission =
+        folder("October_09_2026", "Acme", "Mission_140000",
+               UploadStatus::None, at(2026, 10, 9, 14, 0));
+    const UploadTarget second_section =
+        folder("October_09_2026", "Acme", "Section_2_143000",
+               UploadStatus::None, at(2026, 10, 9, 14, 30));
+    // Same minute: mission still precedes the section.
+    const UploadTarget tied_mission =
+        folder("November_01_2026", "Acme", "Mission_090000",
+               UploadStatus::None, at(2026, 11, 1, 9, 0));
+    const UploadTarget tied_section =
+        folder("November_01_2026", "Acme", "Section_1_090000",
+               UploadStatus::None, at(2026, 11, 1, 9, 0));
+    for (const UploadTarget& target : {second_section, first_section, tied_section,
+                                      second_mission, tied_mission, first_mission}) {
+        targets.insert(target.run_id, target);
+    }
+
+    const QList<UploadBuildingRow> rows = groupUploadTargets(targets);
+    ASSERT_EQ(rows.size(), 1);
+    const QStringList& ids = rows.at(0).run_ids;
+    ASSERT_EQ(ids.size(), 6);
+    EXPECT_TRUE(ids.at(0).endsWith("Mission_100000"));
+    EXPECT_TRUE(ids.at(1).endsWith("Section_1_103000"));
+    EXPECT_TRUE(ids.at(2).endsWith("Mission_140000"));
+    EXPECT_TRUE(ids.at(3).endsWith("Section_2_143000"));
+    EXPECT_TRUE(ids.at(4).endsWith("Mission_090000"));
+    EXPECT_TRUE(ids.at(5).endsWith("Section_1_090000"));
+}
+
+TEST(UploadBuildingRows, EmptySlugDoesNotMerge) {
+    QHash<QString, UploadTarget> targets;
+    UploadTarget a = folder("October_09_2026", "", "Section_1_100000",
+                            UploadStatus::None, at(2026, 10, 9, 10, 0));
+    UploadTarget b = folder("October_09_2026", "", "Section_2_110000",
+                            UploadStatus::None, at(2026, 10, 9, 11, 0));
+    a.building_slug.clear();
+    b.building_slug.clear();
+    a.run_id = QStringLiteral("October_09_2026//Section_1_100000");
+    b.run_id = QStringLiteral("October_09_2026//Section_2_110000");
+    targets.insert(a.run_id, a);
+    targets.insert(b.run_id, b);
+
+    const QList<UploadBuildingRow> rows = groupUploadTargets(targets);
+    EXPECT_EQ(rows.size(), 2);
+
+    UploadTarget blank;
+    targets.insert(QString(), blank);
+    EXPECT_EQ(groupUploadTargets(targets).size(), 2);
+}
+
+TEST(UploadBuildingRows, CloudCheckReachesEveryFinishedFolderOldestFirst) {
+    QHash<QString, UploadTarget> targets;
+    QStringList expected;
+    // Twelve finished folders, oldest first. Past the old cap of ten.
+    // One is already proved, and one pending folder is not finished.
+    for (int day = 1; day <= 12; ++day) {
+        UploadTarget target = folder("January_01_2026", "site", "Section_1_120000",
+                                     UploadStatus::Done, at(2026, 1, day, 12, 0));
+        target.building_slug = QStringLiteral("b%1").arg(day);
+        target.run_id = QStringLiteral("January_%1_2026/b%1/Section_1_120000").arg(day);
+        target.date_folder = QStringLiteral("January_%1_2026").arg(day);
+        if (day == 4) target.cloud_check = CloudCheck::Verified;
+        targets.insert(target.run_id, target);
+        if (day != 4) expected << target.run_id;
+    }
+    UploadTarget pending = folder("January_01_2026", "pending", "Section_1_120000",
+                                  UploadStatus::None, at(2026, 1, 2, 8, 0));
+    pending.run_id = QStringLiteral("January_02_2026/pending/Section_1_120000");
+    targets.insert(pending.run_id, pending);
+
+    // Same minute: the mission folder is checked before the section.
+    UploadTarget mission = folder("March_01_2026", "tied", "Mission_090000",
+                                  UploadStatus::Done, at(2026, 3, 1, 9, 0));
+    UploadTarget section = folder("March_01_2026", "tied", "Section_1_090000",
+                                  UploadStatus::Done, at(2026, 3, 1, 9, 0));
+    targets.insert(mission.run_id, mission);
+    targets.insert(section.run_id, section);
+    expected << mission.run_id << section.run_id;
+
+    const QList<UploadTarget> checked = cloudCheckTargets(targets);
+    QStringList ids;
+    for (const UploadTarget& target : checked) ids << target.run_id;
+    EXPECT_EQ(ids, expected);
+    EXPECT_GT(ids.size(), 10);
+}
+
+TEST(CloudVerified, MatchWritesTheManifestHashAndMissingDeletesIt) {
+    QTemporaryDir tmp;
+    ASSERT_TRUE(tmp.isValid());
+    const QString folder = tmp.path() + "/section";
+    const QByteArray manifest = QByteArray("{\"files\":[{\"relpath\":\"a.bin\"}]}");
+    writeFile(folder + "/manifest.json", manifest);
+    writeFile(folder + "/cloud_verified.json.tmp", "torn");
+
+    ASSERT_TRUE(settleCloudVerified(folder, true, "client", "Roofus#0001", 3));
+    EXPECT_FALSE(QFileInfo::exists(folder + "/cloud_verified.json.tmp"));
+
+    const QByteArray expect = QCryptographicHash::hash(
+        manifest, QCryptographicHash::Sha256).toHex();
+    EXPECT_EQ(fileSha256Hex(folder + "/manifest.json"), expect);
+
+    const f2c_cpp::CloudVerifiedProof proof = readCloudVerified(folder);
+    EXPECT_TRUE(proof.valid);
+    EXPECT_EQ(proof.manifest_sha256, QString::fromLatin1(expect));
+
+    QFile written(folder + "/cloud_verified.json");
+    ASSERT_TRUE(written.open(QIODevice::ReadOnly));
+    const QJsonObject obj = QJsonDocument::fromJson(written.readAll()).object();
+    written.close();
+    EXPECT_EQ(obj.value(QStringLiteral("schema")).toInt(), 1);
+    EXPECT_EQ(obj.value(QStringLiteral("manifest_sha256")).toString(),
+              QString::fromLatin1(expect));
+    EXPECT_EQ(obj.value(QStringLiteral("client_id")).toString(), "client");
+    EXPECT_EQ(obj.value(QStringLiteral("robot_id")).toString(), "Roofus#0001");
+    EXPECT_EQ(obj.value(QStringLiteral("files")).toInt(), 3);
+
+    // The robot lowercases the stored hash. Upper case still counts.
+    QJsonObject upper = obj;
+    upper.insert(QStringLiteral("manifest_sha256"),
+                 QString::fromLatin1(expect).toUpper());
+    writeFile(folder + "/cloud_verified.json",
+              QJsonDocument(upper).toJson(QJsonDocument::Compact));
+    EXPECT_TRUE(readCloudVerified(folder).valid);
+
+    upper.insert(QStringLiteral("manifest_sha256"), QString(63, QLatin1Char('a')));
+    writeFile(folder + "/cloud_verified.json",
+              QJsonDocument(upper).toJson(QJsonDocument::Compact));
+    EXPECT_FALSE(readCloudVerified(folder).valid);
+
+    ASSERT_TRUE(writeCloudVerified(folder, "client", "Roofus#0001", 3));
+    writeFile(folder + "/manifest.json", manifest + " ");
+    EXPECT_FALSE(readCloudVerified(folder).valid);
+
+    ASSERT_TRUE(writeCloudVerified(folder, "client", "Roofus#0001", 3));
+    writeFile(folder + "/upload_state.json", "{}");
+    EXPECT_FALSE(readCloudVerified(folder).valid);
+    QFile::remove(folder + "/upload_state.json");
+
+    ASSERT_TRUE(settleCloudVerified(folder, false, QString(), QString(), 0));
+    EXPECT_FALSE(QFileInfo::exists(folder + "/cloud_verified.json"));
+    EXPECT_FALSE(QFileInfo::exists(folder + "/cloud_verified.json.tmp"));
+    EXPECT_FALSE(readCloudVerified(folder).valid);
+}
+
+TEST(CloudVerified, ProbeMarksAValidProofVerifiedAndIgnoresAChangedManifest) {
+    QTemporaryDir tmp;
+    ASSERT_TRUE(tmp.isValid());
+    const QString folder =
+        tmp.path() + "/September_13_2026/Acme_HQ/Mission_101400";
+    writeFile(folder + "/a.bin", "data");
+    writeFile(folder + "/manifest.json",
+              QByteArray("{\"files\":[{\"relpath\":\"a.bin\"}]}"));
+    ASSERT_TRUE(writeCloudVerified(folder, "client", "Roofus#0001", 1));
+    writeFile(folder + "/cloud_verified.json.tmp", "torn");
+
+    const QList<UploadTarget> proved =
+        UploadStateProbe::scanLocalDataRoot(tmp.path());
+    const UploadTarget* row = find(proved, "Mission_101400");
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->status, UploadStatus::Done);
+    EXPECT_EQ(row->cloud_check, CloudCheck::Verified);
+    // a.bin only. manifest.json, cloud_verified.json and its .tmp are
+    // bookkeeping, so they stay out of the file count.
+    EXPECT_EQ(row->total_files, 1);
+
+    writeFile(folder + "/manifest.json",
+              QByteArray("{\"files\":[{\"relpath\":\"a.bin\"},{\"relpath\":\"b.bin\"}]}"));
+    const QList<UploadTarget> stale =
+        UploadStateProbe::scanLocalDataRoot(tmp.path());
+    const UploadTarget* changed = find(stale, "Mission_101400");
+    ASSERT_NE(changed, nullptr);
+    EXPECT_EQ(changed->status, UploadStatus::Done);
+    EXPECT_EQ(changed->cloud_check, CloudCheck::Unchecked);
+    EXPECT_EQ(changed->total_files, 1);
+}
+
+TEST(OffloadStatus, StickFullIsIncompleteAndKeepsTheJobError) {
+    // Shape rdata_offload._write_status writes: no top-level error.
+    const OffloadSnapshot snap = parseOffloadStatusJson(
+        R"({"state":"stick_full","queued":1,"mission":null,"jobs":{"a":{"state":"stick_full","error":"stick full: need 12 GB, 3 GB free after deleting cloud-confirmed missions"}}})");
+    ASSERT_TRUE(snap.parse_ok);
+    EXPECT_EQ(snap.state, OffloadCopyState::StickFull);
+    EXPECT_TRUE(snap.copyIncomplete());
+    EXPECT_EQ(snap.error,
+              "stick full: need 12 GB, 3 GB free after deleting "
+              "cloud-confirmed missions");
+}
+
+TEST(OffloadStatus, UnpluggedFullStickStaysStickFull) {
+    // Stick pulled for the laptop: job flips to waiting_for_drive but
+    // keeps the stick-full error. Upload must stay reachable.
+    const OffloadSnapshot snap = parseOffloadStatusJson(
+        R"({"state":"waiting_for_drive","queued":1,"mission":null,"jobs":{"a":{"state":"waiting_for_drive","error":"stick full: need 12 GB, 3 GB free"}}})");
+    ASSERT_TRUE(snap.parse_ok);
+    EXPECT_EQ(snap.state, OffloadCopyState::StickFull);
+    EXPECT_EQ(snap.error, "stick full: need 12 GB, 3 GB free");
+
+    const OffloadSnapshot plain = parseOffloadStatusJson(
+        R"({"state":"waiting_for_drive","queued":1,"jobs":{"a":{"state":"waiting_for_drive","error":null}}})");
+    EXPECT_EQ(plain.state, OffloadCopyState::WaitingForDrive);
+
+    const OffloadSnapshot copying = parseOffloadStatusJson(
+        R"({"state":"copying","queued":2,"mission":"a","jobs":{"a":{"state":"copying"},"b":{"state":"stick_full","error":"stick full: x"}}})");
+    EXPECT_EQ(copying.state, OffloadCopyState::Copying);
 }
