@@ -27,6 +27,10 @@ namespace f2c_cpp {
 //        Tells us "is the host on the network at all?".
 //
 //   Combining them lets us distinguish:
+//     - Connecting     → armed, but nothing has been stamped since
+//                        this arm(), and the session is younger than
+//                        kConnectingTimeoutMs. The launch is still
+//                        coming up. Not Offline yet.
 //     - Healthy        → topics are fresh (always treated as
 //                        connected; reachability irrelevant).
 //     - Reconnecting   → topics stale, but probe says host is up.
@@ -34,7 +38,10 @@ namespace f2c_cpp {
 //                        a brief radio fade.  Block commands but
 //                        keep visual treatment soft (no banner / halo,
 //                        amber pill, grey-out).
-//     - Disconnected   → topics stale AND probe failed.  True offline:
+//     - Disconnected   → topics stale AND probe failed, after this
+//                        session has already had contact — or no stamp
+//                        at all for kConnectingTimeoutMs, even when the
+//                        probe says the host is up. True offline:
 //                        red pill, banner, halo, OfflineFinalizeDialog.
 //     - Idle           → pre-arm state during dashboard / preflight.
 //
@@ -44,11 +51,17 @@ namespace f2c_cpp {
 //   intermediate state we actually care about is RECONNECTING, which
 //   is driven by the probe rather than by topic age.
 //
-// The monitor stays Healthy/Reconnecting/Disconnected until it is
-// `arm()`ed.  Pre-arm (no scan running) it reports Idle so the UI
-// doesn't false-positive during the dashboard / pre-flight flow.  Call
-// `arm()` when the exploration / scan launch is up and `disarm()` when
-// it tears down.
+// Pre-arm (no scan running) it reports Idle. `arm()` opens a session
+// in Connecting — no contact yet, which is not Offline. The first
+// stamp of that session moves it to Healthy. If that first stamp
+// never arrives, Connecting becomes Disconnected after
+// kConnectingTimeoutMs; a host that still answers pings does not
+// extend the wait. `disarm()` returns to
+// Idle. `arm()` always opens a new session, even if one is already
+// running: a mission must not inherit the previous mission's verdict
+// or its "seconds in this state" clock. Call `arm()` when a launch
+// starts and `disarm()` when teardown starts, not after the sweep
+// has already killed the topics.
 class LinkHealthMonitor : public QObject {
     Q_OBJECT
 
@@ -65,6 +78,10 @@ public:
 
     enum class State {
         Idle,           // pre-arm: no scan in progress, monitor inert
+        Connecting,     // armed, no stamp yet, under kConnectingTimeoutMs.
+                        // Not offline: the stack has not had a chance
+                        // to speak. Past the timeout this is
+                        // Disconnected instead.
         Healthy,        // any tracked source < kStaleMaxMs old
         Reconnecting,   // sources stale, but probe reports reachable
         Disconnected,   // sources stale AND probe reports unreachable
@@ -74,12 +91,14 @@ public:
     explicit LinkHealthMonitor(QObject* parent = nullptr);
     ~LinkHealthMonitor() override;
 
-    // Begin tracking link health.  Resets all source timestamps.
-    // Idempotent.
+    // Open a tracking session. Clears every source timestamp, the
+    // reachability mirror and the state clock, then reports Connecting.
+    // Not a no-op when already armed — that was how a finished mission
+    // left the next one in Offline with a running timer.
     void arm();
 
     // Stop emitting linkStateChanged and revert to Idle.
-    // Idempotent.  Use when the launch tree tears down.
+    // Idempotent. Use when teardown starts, before the sweep kills topics.
     void disarm();
 
     // Stamp `now()` for the given source.  Cheap; safe to call from any
@@ -103,9 +122,22 @@ public:
     State state() const { return state_; }
     bool isArmed() const { return armed_; }
 
+    // Wall-clock ms of the current arm(), or 0 when disarmed. A stamp
+    // or an FPV frame from before this belongs to the previous session.
+    qint64 armedAtMs() const { return armed_at_ms_; }
+
     // Milliseconds since the most recent stamp from any tracked source.
     // Returns -1 if no source has ever been stamped since arm().
     qint64 msSinceLastSeen() const;
+
+    // How long the robot has been silent: msSinceLastSeen(), or the time
+    // since arm() when this session has had no stamp. -1 when disarmed.
+    // Feeds the OFFLINE counters, so a connecting timeout reads "120 s",
+    // not "0 s".
+    qint64 msWithoutContact() const;
+
+    // True once any source has been stamped since arm().
+    bool hadContact() const { return msSinceLastSeen() >= 0; }
 
     // Milliseconds since the monitor entered the current `state_`.
     // Useful for "Robot offline 12s" UI strings.
@@ -123,6 +155,22 @@ public:
     // so field-test feedback can adjust without touching call sites.
     static constexpr qint64 kStaleMaxMs = 10000;
 
+    // How long an armed session may sit with no stamp before it is
+    // Disconnected. A reachable host does not extend it: the stack never
+    // spoke, so Complete Mission takes the offline path instead of the
+    // save-and-disarm wait. Once any stamp has landed, this ceiling no
+    // longer applies. Stage 6's "no data from the robot" prompt is a
+    // separate, later clock (180 s); that prompt only asks whether to
+    // keep waiting, this decides the Complete Mission path.
+    static constexpr qint64 kConnectingTimeoutMs = 120000;
+
+    // Pure decision derive() uses. newest_stamp_ms == 0 means this
+    // session has had no stamp. Tests call this with a synthetic clock
+    // so the 120 s ceiling does not need a real wait.
+    static State deriveLinkState(qint64 now_ms, qint64 armed_at_ms,
+                                 qint64 newest_stamp_ms, bool reachable_known,
+                                 bool reachable);
+
 signals:
     // Fires when state transitions across one of the thresholds.
     // `since_ms` is the "ms since most-recent-stamp" at the moment of
@@ -137,6 +185,7 @@ private:
     bool armed_ = false;
     State state_ = State::Idle;
     qint64 state_entered_at_ms_ = 0;
+    qint64 armed_at_ms_ = 0;
     std::array<qint64, static_cast<size_t>(Source::kCount)> last_seen_ms_{};
 
     // Network-layer reachability mirror, pushed in by AppShell from

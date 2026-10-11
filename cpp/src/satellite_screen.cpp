@@ -12,6 +12,8 @@
 
 #include "satellite_screen.hpp"
 
+#include <algorithm>
+
 #include "alignment_geometry.hpp"
 #include "async_process.hpp"
 #include "dev_flags.hpp"
@@ -37,6 +39,7 @@
 #include "settings_constants.hpp"
 #include "ui_theme_constants.hpp"
 #include "units_system.hpp"
+#include "window_controls_metrics.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -88,9 +91,17 @@ constexpr int kTopStatusBatteryMinWidth = 52;
 constexpr int kTopStatusPillMinWidth = 69;
 constexpr int kTopStatusMotorsChipMinWidth = 96;
 constexpr int kTopStatusMotorsChipHeight = 20;
+constexpr int kTopBarSideMargin = 24;
+constexpr int kTopBarSpacing = 8;
 // Floating window controls (theme toggle + min/max/close) overlay the
-// top-right corner — same reservation Stage 4/5 make.
-constexpr int kTopStatusWindowControlsReservedWidth = 184;
+// top-right corner. The spacer after the status chips is sized so the
+// MOTORS chip ends kWindowControlsClearance short of the theme toggle:
+// right margin + row spacing + spacer = controls footprint + clearance.
+constexpr int kTopStatusWindowControlsReservedWidth =
+    kWindowControlsFootprint + kWindowControlsClearance - kTopBarSideMargin -
+    kTopBarSpacing;
+static_assert(kTopStatusWindowControlsReservedWidth > 0,
+              "top bar margins exceed the window-controls footprint");
 constexpr int kLeftRailWidth = 288;
 constexpr int kSearchBarWidth = 420;   // 238:4509
 constexpr int kSearchRowHeight = 40;
@@ -612,21 +623,34 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // RosLink::start): the swaths are the coverage picture, as in the legacy
     // autonomy screen.
     connect(ros_, &RosLink::swathsUpdated, this, [this] {
-        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
-        noteRobotTopic();
+        if (linkSampleIsCurrent(ros_->swathsWallMs())) {
+            if (link_monitor_) {
+                link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+            }
+            noteRobotTopic();
+        }
         map_->setSwaths(ros_->swathsSnapshot());
     });
     connect(ros_, &RosLink::odomUpdated, this, [this] {
-        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::Odom);
-        noteRobotTopic();
-        map_->setOdom(ros_->odomSnapshot());
+        const OdomSnapshot odom = ros_->odomSnapshot();
+        if (linkSampleIsCurrent(odom.wall_ms)) {
+            if (link_monitor_) {
+                link_monitor_->stamp(LinkHealthMonitor::Source::Odom);
+            }
+            noteRobotTopic();
+        }
+        map_->setOdom(odom);
         updateScanTelemetry();
     });
     connect(ros_, &RosLink::statusUpdated, this, [this] {
-        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
-        noteRobotTopic();
-        updateStatePill();
         const CoverageStatus status = ros_->coverageStatus();
+        if (linkSampleIsCurrent(status.wall_ms)) {
+            if (link_monitor_) {
+                link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+            }
+            noteRobotTopic();
+        }
+        updateStatePill();
         if (status.state == QLatin1String("ERROR") &&
             mission_->missionActive() && !director_failed_) {
             // Status is 1 Hz; log each distinct error once, not every tick.
@@ -643,14 +667,20 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         refreshScanRunUi();
     });
     connect(ros_, &RosLink::motorStatusUpdated, this, [this] {
-        if (link_monitor_) {
-            link_monitor_->stamp(LinkHealthMonitor::Source::ControllerStatus);
+        const MotorStatus motors = ros_->motorStatus();
+        const qint64 wall = std::max(motors.left_wall_ms, motors.right_wall_ms);
+        if (linkSampleIsCurrent(wall)) {
+            if (link_monitor_) {
+                link_monitor_->stamp(LinkHealthMonitor::Source::ControllerStatus);
+            }
+            noteRobotTopic();
         }
-        noteRobotTopic();
         updateMotorsChip();
     });
     connect(ros_, &RosLink::segmentStatusUpdated, this, [this] {
-        if (link_monitor_) link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+        if (linkSampleIsCurrent(ros_->segmentWallMs()) && link_monitor_) {
+            link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
+        }
         if (segment_label_) {
             segment_label_->setText(
                 QStringLiteral("Segment: %1").arg(ros_->lastSegmentStatus()));
@@ -675,8 +705,13 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // ---- Mission lifecycle ----
     connect(mission_, &MissionController::logLine, this,
             &SatelliteScreen::appendLog);
+    connect(mission_, &MissionController::teardownBegan, this, [this] {
+        forgetMissionTelemetry();
+        emit missionTeardownBegan();
+    });
     connect(mission_, &MissionController::missionStateChanged, this,
             [this](bool active) {
+                forgetMissionTelemetry();
                 map_->setEditLocked(active);
                 refreshScanParamsCard();
                 top_back_button_->setEnabled(!active);
@@ -856,7 +891,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &QShortcut::setEnabled);
 
     setStatePill(QStringLiteral("NO MISSION"), QColor(mutedColor(true)));
-    setBotPill(QStringLiteral("BOT —"), QColor(mutedColor(true)));
+    setBotPill(QStringLiteral("SIGNAL —"), QColor(mutedColor(true)));
     setMotorsChip(QStringLiteral("MOTORS —"), QColor(mutedColor(true)));
     refreshScanRunUi();
 
@@ -1394,8 +1429,8 @@ QWidget* SatelliteScreen::buildTopBar() {
     top_bar->setAttribute(Qt::WA_StyledBackground, true);
     top_bar->setFixedHeight(kTopBarHeight);
     auto* layout = new QHBoxLayout(top_bar);
-    layout->setContentsMargins(24, 0, 24, 0);
-    layout->setSpacing(8);
+    layout->setContentsMargins(kTopBarSideMargin, 0, kTopBarSideMargin, 0);
+    layout->setSpacing(kTopBarSpacing);
 
     // Back button — the Stage 4/5 SVG construction (back_vector_a/b).
     auto* back = new QPushButton(top_bar);
@@ -1474,7 +1509,7 @@ QWidget* SatelliteScreen::buildTopBar() {
         &lbl_top_battery_));
     status_layout->addWidget(makeStatusItem(
         status_host, QStringLiteral(":/assets/missionplanner/status_dot.svg"),
-        8, QStringLiteral("BOT —"), kTopStatusPillMinWidth, muted_style,
+        8, QStringLiteral("SIGNAL —"), kTopStatusPillMinWidth, muted_style,
         &lbl_bot_dot_, &lbl_bot_text_));
     status_layout->addWidget(makeStatusItem(
         status_host, QStringLiteral(":/assets/missionplanner/status_dot.svg"),
@@ -6387,7 +6422,7 @@ void SatelliteScreen::onDirectorWatchTick() {
         return;
     }
     if (scan_autonomy_ran_) {
-        // A mid-run status gap is a link matter (BOT pill), not a boot one.
+        // A mid-run status gap is a link matter (signal pill), not a boot one.
         return;
     }
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -7593,13 +7628,23 @@ void SatelliteScreen::executeCompleteMissionSshFallback() {
         async_proc::run(this, QStringLiteral("ssh"), args,
                         kOfflineFinalizeTimeoutMs,
                         [this](int code, const QString& out) {
-                            if (code == 0) {
-                                // rc=0 means finalize_mission_local.py wrote
-                                // mission_finalized_at — the same guarantee
-                                // as the RPC.
+                            if (finalize_policy::offlineFinalizeLanded(
+                                    code, out.toStdString())) {
+                                // The script wrote mission_finalized_at —
+                                // the same guarantee as the RPC.
                                 appendLog(QStringLiteral(
                                     "[mission] offline finalize done"));
                                 markCurrentPlanCompleted();
+                            } else if (code == 0) {
+                                // rc=0 without a finalize: no open mission
+                                // on the robot (the launch never got that
+                                // far). Nothing is on disk, so the plan
+                                // stays PLANNED.
+                                appendLog(QStringLiteral(
+                                              "[mission] offline finalize "
+                                              "found no open mission — plan "
+                                              "left PLANNED %1")
+                                              .arg(out.trimmed()));
                             } else {
                                 appendLog(QStringLiteral(
                                               "[mission] offline finalize "
@@ -7902,48 +7947,78 @@ void SatelliteScreen::setMotorsChip(const QString& text, const QColor& color) {
             .arg(color.name()));
 }
 
+void SatelliteScreen::forgetMissionTelemetry() {
+    if (ros_) {
+        ros_->clearSnapshots();
+    }
+    if (map_) {
+        map_->clearTelemetry();
+    }
+    updateMotorsChip();
+}
+
+bool SatelliteScreen::linkSampleIsCurrent(qint64 wall_ms) const {
+    if (wall_ms <= 0 || !link_monitor_ || !link_monitor_->isArmed()) {
+        return false;
+    }
+    return wall_ms >= link_monitor_->armedAtMs();
+}
+
+void SatelliteScreen::noteRadioProbe(int epoch, bool ok, int rssi_dbm) {
+    if (epoch != radio_epoch_) {
+        return;
+    }
+    applyRadioProbe(&radio_sample_, ok, rssi_dbm,
+                    QDateTime::currentMSecsSinceEpoch());
+    updateBotPill();
+}
+
+void SatelliteScreen::resetRadioLink() {
+    ++radio_epoch_;
+    radio_sample_ = RadioLinkSample{};
+    updateBotPill();
+}
+
+void SatelliteScreen::setRadioConfigured(bool configured) {
+    if (radio_configured_ == configured) {
+        return;
+    }
+    radio_configured_ = configured;
+    updateBotPill();
+}
+
 void SatelliteScreen::updateBotPill() {
-    // Preferred: the app's layered link model (topic freshness + network
-    // reachability) while a mission has the monitor armed. Wording matches
-    // the Stage 4/5 BOT pill states.
-    if (link_monitor_ && link_monitor_->isArmed()) {
-        const qint64 in_state_s = link_monitor_->msInCurrentState() / 1000;
-        switch (link_monitor_->state()) {
-            case LinkHealthMonitor::State::Healthy:
-                setBotPill(QStringLiteral("BOT LIVE"), QColor(kAccent));
-                return;
-            case LinkHealthMonitor::State::Reconnecting:
-                setBotPill(QStringLiteral("BOT LIVE - SYNCING %1s")
-                               .arg(in_state_s),
-                           QColor(kAmber));
-                return;
-            case LinkHealthMonitor::State::Disconnected:
-                setBotPill(QStringLiteral("BOT OFFLINE %1s").arg(in_state_s),
-                           QColor(kEstopRed));
-                return;
-            case LinkHealthMonitor::State::Idle:
-                break;  // fall through to the odometry-age fallback
-        }
-    }
-    // Fallback (no monitor / pre-arm): raw odometry age.
-    if (!ros_->isRunning()) {
-        setBotPill(QStringLiteral("BOT —"), QColor(mutedColor(dark_mode_)));
+    // The pill is the radio. Link state chooses the Complete Mission
+    // path and does not paint here, so a finished mission cannot leave
+    // a growing OFFLINE timer behind.
+    if (!radio_configured_) {
+        setBotPill(QString::fromUtf8(radioLinkLabel(RadioLinkPill::NoConfig)),
+                   QColor(mutedColor(dark_mode_)));
         return;
     }
-    const OdomSnapshot odom = ros_->odomSnapshot();
-    if (!odom.valid) {
-        setBotPill(QStringLiteral("BOT —"), QColor(mutedColor(dark_mode_)));
-        return;
-    }
-    const qint64 age_ms = QDateTime::currentMSecsSinceEpoch() - odom.wall_ms;
-    if (age_ms < 2500) {
-        setBotPill(QStringLiteral("BOT LIVE"), QColor(kAccent));
-    } else if (age_ms < 10000) {
-        setBotPill(QStringLiteral("BOT SYNCING %1s").arg(age_ms / 1000),
-                   QColor(kAmber));
-    } else {
-        setBotPill(QStringLiteral("BOT OFFLINE %1s").arg(age_ms / 1000),
-                   QColor(kEstopRed));
+    const RadioLinkPill pill = classifyRadioLink(
+        radio_sample_, QDateTime::currentMSecsSinceEpoch());
+    switch (pill) {
+        case RadioLinkPill::Strong:
+            setBotPill(QString::fromUtf8(radioLinkLabel(pill)),
+                       QColor(kAccent));
+            return;
+        case RadioLinkPill::Weak:
+            setBotPill(QString::fromUtf8(radioLinkLabel(pill)),
+                       QColor(kAmber));
+            return;
+        case RadioLinkPill::NoLink:
+            setBotPill(QString::fromUtf8(radioLinkLabel(pill)),
+                       QColor(kEstopRed));
+            return;
+        case RadioLinkPill::NoConfig:
+            setBotPill(QString::fromUtf8(radioLinkLabel(pill)),
+                       QColor(mutedColor(dark_mode_)));
+            return;
+        case RadioLinkPill::Unknown:
+            setBotPill(QString::fromUtf8(radioLinkLabel(pill)),
+                       QColor(mutedColor(dark_mode_)));
+            return;
     }
 }
 
@@ -8198,7 +8273,7 @@ QString SatelliteScreen::stopGuidance(const CoverageStatus& status) {
     if (state == QLatin1String("STALE_INPUT")) {
         return QStringLiteral(
             "A director input went stale: %1.\n\nOdometry, terrain evidence "
-            "or the MPC stopped reporting. Check the BOT pill and the MOTORS "
+            "or the MPC stopped reporting. Check the signal pill and the MOTORS "
             "chip. If the stack does not recover in a few seconds, Cancel "
             "Scan and relaunch.").arg(status.stale);
     }

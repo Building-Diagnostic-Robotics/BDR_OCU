@@ -75,6 +75,7 @@
 #include "update/update_state.hpp"
 #include "update/update_log.hpp"
 #include "update/update_types.hpp"
+#include "window_controls_metrics.hpp"
 
 namespace f2c_cpp {
 
@@ -718,7 +719,15 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     connect(exploration_rf_probe_proc_,
             &QProcess::errorOccurred,
             this,
-            [this](QProcess::ProcessError) { exploration_rf_probe_in_flight_ = false; });
+            [this](QProcess::ProcessError error) {
+                exploration_rf_probe_in_flight_ = false;
+                // FailedToStart does not emit finished(). A missing
+                // snmpget would otherwise leave the Stage 6 pill at
+                // SIGNAL — for the whole visit.
+                if (error == QProcess::FailedToStart) {
+                    deliverStage6RadioProbe(false, 0);
+                }
+            });
 
     exploration_storage_probe_proc_ = new QProcess(this);
     exploration_storage_probe_proc_->setProcessChannelMode(QProcess::MergedChannels);
@@ -1319,8 +1328,12 @@ void AppShellWindow::goToStage6() {
     }
     // Seed the top-bar battery pill from the dashboard's last sample —
     // same reasoning as the Stage 4/5 transitions.
+    loadExplorationRfConfigForActiveRobot();
+    stage6_->resetRadioLink();
+    stage6_->setRadioConfigured(exploration_rf_config_ready_);
     stage6_->setTopBatteryState(last_battery_pct_, last_battery_stale_);
     stack_->setCurrentWidget(stage6_);
+    requestExplorationRfProbe();
 }
 
 void AppShellWindow::ensureStage6() {
@@ -1333,12 +1346,16 @@ void AppShellWindow::ensureStage6() {
             &AppShellWindow::goToStage3);
     connect(stage6_, &SatelliteScreen::imageryDownloaded, imagery_probe_,
             &ImageryReachabilityProbe::noteImageryDownloaded);
-    // Layered link model for the Stage 6 BOT pill: the screen stamps the
-    // monitor from its ROS callbacks; AppShell arms the monitor + the
-    // ICMP/TCP-22 reachability probe for the mission's lifetime. The probe
-    // must target the same host Send SSHes to (house rule — otherwise the
-    // layered model probes the wrong IP forever).
+    // The Stage 6 pill is RSSI. The monitor tracks the mission and
+    // chooses the Complete Mission path; it does not disable Stage 6
+    // controls. Armed when the launch starts, released when teardown
+    // starts (and again when the mission goes inactive). The reachability
+    // probe must target the same host Send SSHes to.
     stage6_->attachLinkHealthMonitor(link_monitor_);
+    connect(stage6_, &SatelliteScreen::missionTeardownBegan, this, [this] {
+        releaseStage6LinkTracking();
+        refreshRobotSyncBanner();
+    });
     connect(stage6_, &SatelliteScreen::missionActiveChanged, this,
             [this](bool active) {
                 if (active) {
@@ -1350,26 +1367,11 @@ void AppShellWindow::ensureStage6() {
                         resolveRobotSshTargetFromSettings(&target)) {
                         reachability_probe_->arm(target.host);
                     }
+                    pushKnownReachability();
                     refreshRobotSyncBanner();
                     return;
                 }
-                // Don't tear down link tracking that an exploration launch
-                // still owns.
-                const bool exploration_active =
-                    exploration_launch_in_progress_ ||
-                    exploration_launch_ready_ || laptop_launch_started_ ||
-                    robot_launch_started_;
-                if (!exploration_active) {
-                    if (link_monitor_) {
-                        link_monitor_->disarm();
-                    }
-                    if (reachability_probe_) {
-                        reachability_probe_->disarm();
-                    }
-                    if (repo_sync_) {
-                        repo_sync_->clearRobotReachable();
-                    }
-                }
+                releaseStage6LinkTracking();
                 refreshRobotSyncBanner();
             });
     stage6_->setDarkMode(dark_mode_);
@@ -2184,11 +2186,11 @@ void AppShellWindow::setupWindowControls() {
     window_controls_->setObjectName("WindowControls");
     auto* controls_layout = new QHBoxLayout(window_controls_);
     controls_layout->setContentsMargins(0, 0, 0, 0);
-    controls_layout->setSpacing(4);
+    controls_layout->setSpacing(kWindowControlsSpacing);
 
     window_theme_host_ = new QWidget(window_controls_);
     window_theme_host_->setObjectName("WindowThemeToggleHost");
-    window_theme_host_->setFixedSize(48, 24);
+    window_theme_host_->setFixedSize(kWindowThemeToggleWidth, kWindowThemeToggleHeight);
 
     window_theme_toggle_ = new QToolButton(window_theme_host_);
     window_theme_toggle_->setObjectName("WindowThemeToggle");
@@ -2226,7 +2228,7 @@ void AppShellWindow::setupWindowControls() {
     connect(window_theme_toggle_, &QToolButton::clicked, this, &AppShellWindow::onWindowThemeToggleClicked);
 
     controls_layout->addWidget(window_theme_host_);
-    controls_layout->addSpacing(32);
+    controls_layout->addSpacing(kWindowToggleToButtonsGap);
 
     window_minimize_ = new QToolButton(window_controls_);
     window_minimize_->setObjectName("WindowMinimize");
@@ -2235,7 +2237,7 @@ void AppShellWindow::setupWindowControls() {
     window_minimize_->setIcon(QIcon(loadSvgPixmap(
         QStringLiteral(":/assets/missionplanner/window_minimize.svg"), 16, 16)));
     window_minimize_->setIconSize(QSize(16, 16));
-    window_minimize_->setFixedSize(32, 32);
+    window_minimize_->setFixedSize(kWindowButtonSize, kWindowButtonSize);
     window_minimize_->setCursor(Qt::PointingHandCursor);
     connect(window_minimize_, &QToolButton::clicked, this, &AppShellWindow::onWindowMinimizeClicked);
     controls_layout->addWidget(window_minimize_);
@@ -2247,7 +2249,7 @@ void AppShellWindow::setupWindowControls() {
     window_maximize_->setIcon(QIcon(loadSvgPixmap(
         QStringLiteral(":/assets/missionplanner/window_maximize.svg"), 14, 14)));
     window_maximize_->setIconSize(QSize(14, 14));
-    window_maximize_->setFixedSize(32, 32);
+    window_maximize_->setFixedSize(kWindowButtonSize, kWindowButtonSize);
     window_maximize_->setCursor(Qt::PointingHandCursor);
     connect(window_maximize_, &QToolButton::clicked, this, &AppShellWindow::onWindowMaximizeClicked);
     controls_layout->addWidget(window_maximize_);
@@ -2259,7 +2261,7 @@ void AppShellWindow::setupWindowControls() {
     window_close_->setIcon(QIcon(loadSvgPixmap(
         QStringLiteral(":/assets/missionplanner/window_close.svg"), 16, 16)));
     window_close_->setIconSize(QSize(16, 16));
-    window_close_->setFixedSize(32, 32);
+    window_close_->setFixedSize(kWindowButtonSize, kWindowButtonSize);
     window_close_->setCursor(Qt::PointingHandCursor);
     connect(window_close_, &QToolButton::clicked, this, &AppShellWindow::onWindowCloseClicked);
     controls_layout->addWidget(window_close_);
@@ -2276,9 +2278,9 @@ void AppShellWindow::updateWindowControlsPosition() {
         return;
     }
 
-    const int margin = 24;
     window_controls_->adjustSize();
-    const int x = std::max(0, central_root_->width() - window_controls_->width() - margin);
+    const int x = std::max(0, central_root_->width() - window_controls_->width() -
+                                  kWindowControlsRightMargin);
     const int y = std::max(0, (kTitleBarHeight - window_controls_->height()) / 2);
     window_controls_->move(x, y);
     window_controls_->raise();
@@ -4779,17 +4781,47 @@ bool AppShellWindow::isRobotLinkOffline() const {
     if constexpr (kDevMode) {
         return false;
     }
-    // Hard-block RPCs in BOTH true OFFLINE and the RECONNECTING soft
-    // window (operator confirmed Q1=a).  An RPC fired during
-    // RECONNECTING would race with the Zenoh peer-rediscovery and
-    // either drop on the floor or land 5-10 s late, neither of which
-    // is acceptable mid-scan.
+    // Hard-block RPCs in Connecting (no contact yet this session), true
+    // OFFLINE, and the RECONNECTING soft window. An RPC fired before the
+    // stack is up, or during RECONNECTING, would drop or land late.
     if (!link_monitor_ || !link_monitor_->isArmed()) {
         return false;
     }
     const auto s = link_monitor_->state();
     return s == LinkHealthMonitor::State::Disconnected ||
-           s == LinkHealthMonitor::State::Reconnecting;
+           s == LinkHealthMonitor::State::Reconnecting ||
+           s == LinkHealthMonitor::State::Connecting;
+}
+
+void AppShellWindow::releaseStage6LinkTracking() {
+    // Don't tear down link tracking that an exploration launch still owns.
+    const bool exploration_active =
+        exploration_launch_in_progress_ || exploration_launch_ready_ ||
+        laptop_launch_started_ || robot_launch_started_;
+    if (exploration_active) {
+        return;
+    }
+    if (link_monitor_) {
+        link_monitor_->disarm();
+    }
+    if (reachability_probe_) {
+        reachability_probe_->disarm();
+    }
+    if (repo_sync_) {
+        repo_sync_->clearRobotReachable();
+    }
+}
+
+void AppShellWindow::pushKnownReachability() {
+    if (!link_monitor_ || !link_monitor_->isArmed() || !reachability_probe_) {
+        return;
+    }
+    const auto st = reachability_probe_->state();
+    if (st == RobotReachabilityProbe::State::Reachable) {
+        link_monitor_->setReachability(true, true);
+    } else if (st == RobotReachabilityProbe::State::Unreachable) {
+        link_monitor_->setReachability(false, true);
+    }
 }
 
 bool AppShellWindow::isRobotLinkUnreachable() const {
@@ -4886,6 +4918,16 @@ void AppShellWindow::onLinkStateChanged(LinkHealthMonitor::State old_state,
             connected = true;
             reachable = true;
             break;
+        case State::Connecting:
+            // Armed, no stamp yet this session. Stage 4/5 only — Stage 6's
+            // pill is RSSI. Block RPCs, but this is not Offline: no banner,
+            // and E-Stop stays available (reachable stays true).
+            text = QStringLiteral("BOT CONNECTING");
+            planner_tone = PlannerScreen::ValueTone::Warning;
+            expl_tone = ExplorationScreen::ValueTone::Warning;
+            connected = false;
+            reachable = true;
+            break;
         case State::Healthy:
             text = QStringLiteral("BOT LIVE");
             planner_tone = PlannerScreen::ValueTone::Good;
@@ -4933,11 +4975,18 @@ void AppShellWindow::onLinkStateChanged(LinkHealthMonitor::State old_state,
     // (passing through Reconnecting is irrelevant — the controller
     // owns its own pause/resume across heartbeat loss; see
     // onRobotLinkRecovered).
-    if (new_state == State::Disconnected && old_state != State::Disconnected) {
+    if (new_state == State::Connecting && old_state != State::Connecting) {
+        qInfo("[AppShell] LinkHealth: state CONNECTING (waiting for first contact this session)");
+    } else if (new_state == State::Disconnected && old_state != State::Disconnected) {
         link_disconnect_started_at_ms_ = QDateTime::currentMSecsSinceEpoch();
         link_recovery_resync_pending_ = true;
-        qWarning("[AppShell] LinkHealth: state OFFLINE (%lld ms since last seen)",
-                 static_cast<long long>(since_ms));
+        if (link_monitor_ && !link_monitor_->hadContact()) {
+            qWarning("[AppShell] LinkHealth: state OFFLINE (no contact in %lld ms since launch)",
+                     static_cast<long long>(since_ms));
+        } else {
+            qWarning("[AppShell] LinkHealth: state OFFLINE (%lld ms since last seen)",
+                     static_cast<long long>(since_ms));
+        }
     } else if (new_state == State::Reconnecting && old_state == State::Healthy) {
         // Informational only — no visual banner, no resync hook.
         // Helps post-mortem grep for "we entered the soft window".
@@ -5578,8 +5627,15 @@ void AppShellWindow::requestExplorationRfProbe() {
     if (!exploration_rf_probe_proc_) {
         return;
     }
-    if (!stage4_ || stack_->currentWidget() != stage4_) {
+    const bool on_stage4 = stage4_ && stack_->currentWidget() == stage4_;
+    const bool on_stage6 = stage6_ && stack_->currentWidget() == stage6_;
+    if (!on_stage4 && !on_stage6) {
         return;
+    }
+    if (on_stage6 && stage6_) {
+        // No radio IP or OID: say so. A probe that cannot be built is
+        // not "still waiting on the first sample".
+        stage6_->setRadioConfigured(exploration_rf_config_ready_);
     }
     if (exploration_rf_probe_in_flight_ ||
         exploration_rf_probe_proc_->state() != QProcess::NotRunning) {
@@ -5609,6 +5665,7 @@ void AppShellWindow::requestExplorationRfProbe() {
 
     exploration_rf_probe_in_flight_ = true;
     exploration_last_rf_probe_at_ms_ = now_ms;
+    stage6_radio_probe_epoch_ = on_stage6 ? stage6_->radioEpoch() : -1;
     exploration_rf_probe_proc_->start("snmpget", args);
 }
 
@@ -5617,16 +5674,19 @@ void AppShellWindow::handleExplorationRfProbeFinished(int exit_code,
     Q_UNUSED(exit_code);
     exploration_rf_probe_in_flight_ = false;
     if (!exploration_rf_probe_proc_) {
+        deliverStage6RadioProbe(false, 0);
         return;
     }
 
     if (exit_status != QProcess::NormalExit || exploration_rf_probe_proc_->exitCode() != 0) {
+        deliverStage6RadioProbe(false, 0);
         return;
     }
 
     const QString output =
         QString::fromUtf8(exploration_rf_probe_proc_->readAllStandardOutput()).trimmed();
     if (output.isEmpty()) {
+        deliverStage6RadioProbe(false, 0);
         return;
     }
 
@@ -5634,12 +5694,33 @@ void AppShellWindow::handleExplorationRfProbeFinished(int exit_code,
     const QString rssi_line = lines.isEmpty() ? output : lines.constLast();
     int parsed_rssi_dbm = 0;
     if (!parseTrailingInteger(rssi_line, &parsed_rssi_dbm)) {
+        deliverStage6RadioProbe(false, 0);
+        return;
+    }
+
+    // 0 is "no peer", not a strong signal. Leaving it as a fresh metric
+    // would paint 0 dBm green, because 0 sits above the -65 dBm band.
+    if (parsed_rssi_dbm == 0) {
+        exploration_rf_rssi_dbm_ = 0;
+        exploration_rf_metric_ready_ = false;
+        exploration_last_rf_success_at_ms_ = 0;
+        deliverStage6RadioProbe(true, 0);
         return;
     }
 
     exploration_rf_rssi_dbm_ = parsed_rssi_dbm;
     exploration_rf_metric_ready_ = true;
     exploration_last_rf_success_at_ms_ = QDateTime::currentMSecsSinceEpoch();
+    deliverStage6RadioProbe(true, parsed_rssi_dbm);
+}
+
+void AppShellWindow::deliverStage6RadioProbe(bool ok, int rssi_dbm) {
+    const int epoch = stage6_radio_probe_epoch_;
+    stage6_radio_probe_epoch_ = -1;
+    if (epoch < 0 || !stage6_) {
+        return;
+    }
+    stage6_->noteRadioProbe(epoch, ok, rssi_dbm);
 }
 
 void AppShellWindow::requestExplorationStorageProbe() {
@@ -5749,14 +5830,15 @@ void AppShellWindow::onExplorationLiveSlowTick() {
     // end-to-end and the link counts as Healthy regardless of Zenoh
     // peer state.
     //
-    // CRITICAL: read from BOTH stages.  Stage 4 (Exploration) has its
-    // own FPV widget; Stage 5 (Mission Planner / Scan) has a separate
-    // `scan_camera_view_` instance.  Pre-fix this slot only read
-    // stage4_, so once the operator advanced to Stage 5 the stamp went
-    // stale instantly even with the camera streaming live frames into
-    // stage5_'s widget — that produced the false-positive RECONNECTING
-    // flap during normal Zenoh peer-rediscovery on Stage 5 (terminal
-    // log lines 386-389, 2026-05-12 session).
+    // CRITICAL: read from every stage that owns an FPV widget. Stage 4
+    // (Exploration), Stage 5 (Scan) and Stage 6 each have their own.
+    // Pre-fix this slot only read stage4_, so once the operator advanced
+    // to Stage 5 the stamp went stale instantly even with the camera
+    // streaming live frames into stage5_'s widget — that produced the
+    // false-positive RECONNECTING flap during normal Zenoh
+    // peer-rediscovery on Stage 5 (terminal log lines 386-389,
+    // 2026-05-12 session). Frames from before the current arm() are
+    // ignored: they belong to the previous session.
     if (link_monitor_ && link_monitor_->isArmed()) {
         const qint64 stage4_last =
             stage4_ ? stage4_->lastFpvFrameWallMs() : 0;
@@ -5766,7 +5848,10 @@ void AppShellWindow::onExplorationLiveSlowTick() {
             stage6_ ? stage6_->lastScanFpvFrameWallMs() : 0;
         const qint64 fpv_last =
             std::max(stage4_last, std::max(stage5_last, stage6_last));
-        if (fpv_last > 0) {
+        // A frame from before this arm() belongs to the previous session.
+        // Counting it would leave Connecting immediately and look like the
+        // new stack was already up.
+        if (fpv_last >= link_monitor_->armedAtMs()) {
             const qint64 age = QDateTime::currentMSecsSinceEpoch() - fpv_last;
             if (age <= 2000) {
                 link_monitor_->stamp(LinkHealthMonitor::Source::FpvFrame);
@@ -5781,8 +5866,9 @@ void AppShellWindow::onExplorationLiveSlowTick() {
         const auto state = link_monitor_->state();
         if (state == LinkHealthMonitor::State::Disconnected ||
             state == LinkHealthMonitor::State::Reconnecting) {
-            const qint64 since = link_monitor_->msSinceLastSeen();
-            onLinkStateChanged(state, state, since >= 0 ? since : 0);
+            onLinkStateChanged(
+                state, state,
+                std::max<qint64>(0, link_monitor_->msWithoutContact()));
         }
     }
 }
@@ -5876,6 +5962,7 @@ void AppShellWindow::pushExplorationTelemetryToUiSlow() {
     // Mapping:
     //   Healthy      -> "Connected"   Good
     //   Reconnecting -> "Reconnecting" Warning
+    //   Connecting   -> "Connecting"  Warning
     //   Disconnected -> "Offline"     Error
     //   Idle         -> leave as "Signal unavailable" (pre-launch)
     if (!rf_metric_fresh && link_monitor_) {
@@ -5884,6 +5971,10 @@ void AppShellWindow::pushExplorationTelemetryToUiSlow() {
             case LinkHealthMonitor::State::Healthy:
                 top_status.signal_text = QStringLiteral("Connected");
                 top_status.signal_tone = SharedTopStatusTone::Good;
+                break;
+            case LinkHealthMonitor::State::Connecting:
+                top_status.signal_text = QStringLiteral("Connecting");
+                top_status.signal_tone = SharedTopStatusTone::Warning;
                 break;
             case LinkHealthMonitor::State::Reconnecting:
                 top_status.signal_text = QStringLiteral("Reconnecting");
