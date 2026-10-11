@@ -1224,8 +1224,9 @@ QString DashboardScreen::thumbCopyBlockReason() const {
     }
     if (!offload_probe_ok_ && offload_cached_incomplete_) {
         return QStringLiteral(
-            "Sync incomplete — turn the robot on and wait for the copy "
-            "to finish.");
+            "The robot's last report said the copy to RDATA_EXT had not "
+            "finished. Connect to the robot so the Dashboard can check "
+            "again.");
     }
     if (stickCopyIncomplete()) {
         return QStringLiteral(
@@ -1453,7 +1454,7 @@ void DashboardScreen::refreshUploadAction() {
         desc = QStringLiteral("Syncing to thumb drive…");
     } else if (robotCopyIncomplete()) {
         desc = !offload_probe_ok_
-                   ? QStringLiteral("Sync incomplete — turn the robot on")
+                   ? QStringLiteral("Robot not connected — last copy unfinished")
                    : QStringLiteral("Thumb-drive copy incomplete");
     } else if (stickCopyIncomplete()) {
         desc = QStringLiteral("Thumb drive copy incomplete");
