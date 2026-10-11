@@ -1197,6 +1197,13 @@ ThumbCopyInputs DashboardScreen::thumbCopyInputs() const {
     return in;
 }
 
+int DashboardScreen::uncopiedScansAtRisk() const {
+    if (!offload_probe_ok_) {
+        return 0;
+    }
+    return scansAtRiskOfDeletion(offload_);
+}
+
 bool DashboardScreen::thumbCopyReady() const {
     return thumbCopyIsReady(thumbCopyInputs());
 }

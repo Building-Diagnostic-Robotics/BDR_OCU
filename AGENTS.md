@@ -871,6 +871,13 @@ kept in sync by hand.
   a stick that is incomplete or not plugged in, still block. Complete
   Mission must not wait on the copy, and `copy=stick_full` counts as
   save-done.
+- **Start New Scan warns when uncopied missions are near the floor.**
+  `DashboardScreen::uncopiedScansAtRisk()` is the queued-job count, and
+  non-zero only on a fresh probe with `queued > 0` and
+  `robot_free_bytes` under twice `robot_floor_bytes`. Missing or null
+  byte fields (older robots) and a failed probe stay silent — the
+  cached offload state is not used. Cancel is the primary button;
+  closing the dialog does not start the scan.
 
 ### Configuration
 

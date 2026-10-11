@@ -6,6 +6,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QJsonValue>
+
+#include <limits>
 
 namespace f2c_cpp {
 
@@ -40,6 +43,18 @@ OffloadCopyState stateFromString(const QString& raw) {
         return OffloadCopyState::Error;
     }
     return OffloadCopyState::Unknown;
+}
+
+std::optional<qint64> readByteCount(const QJsonValue& value) {
+    if (!value.isDouble()) {
+        return std::nullopt;
+    }
+    const double bytes = value.toDouble();
+    if (bytes < 0.0 ||
+        bytes > static_cast<double>(std::numeric_limits<qint64>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<qint64>(bytes);
 }
 
 }  // namespace
@@ -82,6 +97,10 @@ OffloadSnapshot parseOffloadStatusJson(const QByteArray& json) {
     }
     out.mission = obj.value(QStringLiteral("mission")).toString();
     out.error = obj.value(QStringLiteral("error")).toString();
+    out.robot_free_bytes =
+        readByteCount(obj.value(QStringLiteral("robot_free_bytes")));
+    out.robot_floor_bytes =
+        readByteCount(obj.value(QStringLiteral("robot_floor_bytes")));
 
     // The worker's top-level `state` is a coarse rollup: any non-current,
     // non-waiting queue is written as "error", including jobs that are
@@ -190,6 +209,24 @@ QString thumbCopyStaleReportNote(const ThumbCopyInputs& in) {
     return QStringLiteral(
         "The robot's last report said a copy had not finished. "
         "This stick is complete, so it can be uploaded.");
+}
+
+int scansAtRiskOfDeletion(const OffloadSnapshot& snap) {
+    if (!snap.parse_ok || snap.queued <= 0 || !snap.robot_free_bytes ||
+        !snap.robot_floor_bytes) {
+        return 0;
+    }
+    const qint64 free = *snap.robot_free_bytes;
+    const qint64 floor = *snap.robot_floor_bytes;
+    if (floor <= 0) {
+        return 0;
+    }
+    // Under twice the floor. free >= floor && free - floor >= floor is
+    // free >= 2 * floor without overflowing.
+    if (free >= floor && free - floor >= floor) {
+        return 0;
+    }
+    return snap.queued;
 }
 
 StickSync classifyStickSync(const QString& data_root) {

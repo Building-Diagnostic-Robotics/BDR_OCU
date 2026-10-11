@@ -12,6 +12,8 @@
 #include <QDateTime>
 #include <QString>
 
+#include <optional>
+
 class QByteArray;
 
 namespace f2c_cpp {
@@ -36,6 +38,10 @@ struct OffloadSnapshot {
     QDateTime updated_at;
     /// First per-job `error` (the worker has no top-level error field).
     QString error;
+    /// Free space on /R_DATA, and the robot's free-space floor.
+    /// Unset when the field is missing or null (older robots).
+    std::optional<qint64> robot_free_bytes;
+    std::optional<qint64> robot_floor_bytes;
     bool parse_ok = false;
 
     /// True while any job is unfinished. Idle + queued==0 is done.
@@ -43,6 +49,12 @@ struct OffloadSnapshot {
 };
 
 OffloadSnapshot parseOffloadStatusJson(const QByteArray& json);
+
+/// Queued copies the robot may delete to make room, or 0.
+/// Only a parsed snapshot with both byte fields set, queued work, and
+/// free space under twice the floor counts. A missing field is not a
+/// warning.
+int scansAtRiskOfDeletion(const OffloadSnapshot& snap);
 
 enum class StickSync {
     Absent = 0,     ///< Mount path missing / not a directory.

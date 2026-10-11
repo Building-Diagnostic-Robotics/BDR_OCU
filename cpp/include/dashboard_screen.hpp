@@ -39,6 +39,10 @@ public:
      *  the operator after the dialog was hidden. Empty restores the
      *  offload subtitle. */
     void setBackgroundUploadStatus(const QString& status);
+    /** Queued copies the robot may have to delete. 0 when the last
+     *  probe failed, the byte fields are missing, or free space is at
+     *  least twice the floor. Never reads the cached offload state. */
+    int uncopiedScansAtRisk() const;
 
     // Latest Stage 2 preflight rollup: "READY" / "WARN" / "FAIL" / "".
     // Folded into the Stage 3 System Status card alongside live battery
