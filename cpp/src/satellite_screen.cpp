@@ -6483,9 +6483,15 @@ void SatelliteScreen::onRobotIdentityBlocked(const QString& message) {
     if (!mission_->missionActive()) {
         return;
     }
+    // From the launch-side check the laptop link is already up, so the
+    // cancel is a teardown and the step change waits for it.
+    after_teardown_ = [this] { setSelectedStep(Step::ScanParameters); };
     mission_->cancelUnlaunchedMission();
-    if (!mission_->missionActive()) {
-        setSelectedStep(Step::ScanParameters);
+    if (!mission_->tearingDown()) {
+        after_teardown_ = nullptr;
+        if (!mission_->missionActive()) {
+            setSelectedStep(Step::ScanParameters);
+        }
     }
 }
 

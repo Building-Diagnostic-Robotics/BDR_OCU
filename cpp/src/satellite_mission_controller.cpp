@@ -134,6 +134,12 @@ void MissionController::hookProcessLogging(QProcess* proc, const QString& tag) {
                         while (robot_output_tail_.size() > kRobotOutputTailMax) {
                             robot_output_tail_.removeFirst();
                         }
+                        if (!robot_identity_seen_ &&
+                            trimmed.startsWith(
+                                QLatin1String(kRobotIdentityMarker))) {
+                            robot_identity_seen_ = true;
+                            noteLaunchIdentity(trimmed);
+                        }
                         if (!robot_marker_seen_) {
                             if (trimmed.contains(
                                     QLatin1String(kLaunchBeginMarker))) {
@@ -147,7 +153,7 @@ void MissionController::hookProcessLogging(QProcess* proc, const QString& tag) {
             });
     connect(proc,
             QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, tag](int code, QProcess::ExitStatus) {
+            this, [this, tag, is_robot](int code, QProcess::ExitStatus) {
                 emit logLine(QStringLiteral("[%1] launch exited (rc=%2)")
                                  .arg(tag)
                                  .arg(code));
@@ -155,7 +161,11 @@ void MissionController::hookProcessLogging(QProcess* proc, const QString& tag) {
                 // stays quiet; otherwise the screen turns it into an
                 // operator-facing failure.
                 if (mission_active_ && !tearing_down_) {
-                    emit launchDied(tag, code);
+                    if (is_robot && robot_identity_rejected_) {
+                        emit robotIdentityBlocked(robot_identity_message_);
+                    } else {
+                        emit launchDied(tag, code);
+                    }
                 }
             });
     // A spawn failure emits errorOccurred and never `finished`, so without
@@ -172,6 +182,41 @@ void MissionController::hookProcessLogging(QProcess* proc, const QString& tag) {
                     emit launchDied(tag, -1);
                 }
             });
+}
+
+void MissionController::noteLaunchIdentity(const QString& line) {
+    const RobotIdentityReport id = classifyRobotIdentity(target_.robot_id, line);
+    switch (id.verdict) {
+        case RobotIdentityVerdict::Match:
+            return;
+        case RobotIdentityVerdict::Mismatch:
+            robot_identity_rejected_ = true;
+            robot_identity_message_ =
+                robotIdentityMismatchText(target_.robot_id, id.reported) +
+                QStringLiteral("\n\nLaunch was not started.");
+            emit logLine(QStringLiteral("[send] %1").arg(robot_identity_message_));
+            return;
+        case RobotIdentityVerdict::Unreadable:
+            break;
+    }
+    if (robot_identity_warned_) {
+        return;
+    }
+    robot_identity_warned_ = true;
+    const QString message = robotIdentityUnreadableText(target_.robot_id) +
+                            QStringLiteral("\n\nLaunch is continuing.");
+    emit logLine(QStringLiteral("[send] %1").arg(message));
+    // Queued: the screen answers with a modal, which must not run inside
+    // this readyRead handler.
+    const int seq = mission_seq_;
+    QMetaObject::invokeMethod(
+        this,
+        [this, seq, message] {
+            if (mission_seq_ == seq && mission_active_) {
+                emit robotIdentityUnchecked(message);
+            }
+        },
+        Qt::QueuedConnection);
 }
 
 void MissionController::openMissionLog() {
@@ -291,6 +336,10 @@ bool MissionController::startMission(const RoiPolygon& poly,
     robot_launch_spoke_ = false;
     robot_spawn_ms_ = 0;
     parked_launch_seq_ = -1;
+    robot_identity_seen_ = false;
+    robot_identity_warned_ = false;
+    robot_identity_rejected_ = false;
+    robot_identity_message_.clear();
     if (!poly.valid() || !robot.valid) {
         if (error) *error = QStringLiteral("ROI and robot placement are both required.");
         return false;
@@ -333,7 +382,12 @@ bool MissionController::startMission(const RoiPolygon& poly,
     //
     // `[...]` is safe here: no spaces (one argv), the inner -lc string is
     // double-quoted (no glob), and `set -f` covers a dropped quote layer.
-    QString remote_script = QString::fromLatin1(kLaunchEnvPreamble) +
+    //
+    // The identity check runs again here because "Launch anyway" after a
+    // failed sweep reaches this command with no ID ever read.
+    QString remote_script =
+        robotIdentityProbePrefixForDoubleQuotes(target_.robot_id) +
+        QString::fromLatin1(kLaunchEnvPreamble) +
         QStringLiteral("set -f; echo %1; ").arg(QLatin1String(kLaunchBeginMarker));
     const bool any_roof_edge =
         std::any_of(poly.roof_edges.begin(), poly.roof_edges.end(),
@@ -387,6 +441,7 @@ bool MissionController::startMission(const RoiPolygon& poly,
                         robotIdentityMismatchText(target_.robot_id, id.reported) +
                         QStringLiteral("\n\nLaunch was not started.");
                     emit logLine(QStringLiteral("[send] %1").arg(message));
+                    robot_identity_rejected_ = true;
                     emit launchPhase(QString());
                     emit robotIdentityBlocked(message);
                     return;
@@ -401,6 +456,7 @@ bool MissionController::startMission(const RoiPolygon& poly,
                         robotIdentityUnreadableText(target_.robot_id) +
                         QStringLiteral("\n\nLaunch will continue.");
                     emit logLine(QStringLiteral("[send] %1").arg(message));
+                    robot_identity_warned_ = true;
                     parked_launch_seq_ = seq;
                     emit robotIdentityUnchecked(message);
                     return;
@@ -693,6 +749,13 @@ void MissionController::teardownStep(TeardownStep step) {
             // carrying it (robot_proc_). Killing the local ssh instead would
             // hang up the pty and SIGHUP the launch — an instant death that
             // orphans every node.
+            if (robot_identity_rejected_) {
+                // That host is another robot; its stack is not ours to kill.
+                emit logLine(QStringLiteral(
+                    "[teardown] robot sweep skipped — wrong robot"));
+                teardownStep(ReapRobot);
+                return;
+            }
             emit teardownPhase(QStringLiteral("Stopping the robot software…"));
             runRobotSweep([this](int, int, const QString&) {
                 teardownStep(ReapRobot);

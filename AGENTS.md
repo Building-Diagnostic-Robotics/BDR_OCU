@@ -1707,6 +1707,15 @@ an optional Advanced dropdown for pinning a dated mosaic release.
   success, and a rejected check must not be followed by a robot sweep
   (that sweep would kill the other robot's stack). A missing or empty
   file warns and continues. Do not arm first and compare after.
+  The robot launch command carries the same check
+  (`robotIdentityProbePrefixForDoubleQuotes`), because "Launch anyway"
+  after a failed sweep reaches it with no ID read. It sits inside the
+  double-quoted `bash -lc "..."`, so `$`, `\` and backquotes must stay
+  escaped or the outer shell runs the comparison and every robot passes
+  (`LaunchPrefixSurvivesTheDoubleQuotedLayer`). A mismatch there sets
+  `robot_identity_rejected_`, the robot exit becomes
+  `robotIdentityBlocked` instead of `launchDied`, and teardown skips the
+  robot sweep.
 - **Launch is Scan Parameters Next**, not a Send button. Back from the scan page
  while the stack is up (and Start Scan has never run) confirms teardown;
  once autonomy has run, Back is disabled — Cancel / Complete are the exits.

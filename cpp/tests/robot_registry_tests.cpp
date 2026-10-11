@@ -28,6 +28,7 @@ using f2c_cpp::resolveRobotSshTarget;
 using f2c_cpp::robotIdentityMatchPrefix;
 using f2c_cpp::robotIdentityMismatchText;
 using f2c_cpp::robotIdentityProbePrefix;
+using f2c_cpp::robotIdentityProbePrefixForDoubleQuotes;
 using f2c_cpp::robotIdentityUnreadableText;
 using f2c_cpp::retireLegacyGeneralRobotKeys;
 
@@ -391,4 +392,59 @@ TEST(RobotIdentityShell, AQuoteInTheIdStillMatches) {
     EXPECT_EQ(run.rc, 0);
     EXPECT_TRUE(run.out.contains(QStringLiteral("FELL_THROUGH")));
     EXPECT_EQ(classifyRobotIdentity(id, run.out).verdict, RobotIdentityVerdict::Match);
+}
+
+namespace {
+
+// The robot launch quoting: the remote login shell parses
+// `bash -lc "<script with \" escaped>"`, so the script crosses one
+// double-quoted layer before the inner bash runs it.
+ShellRun runThroughDoubleQuotedLaunch(QString script) {
+    script.replace(QLatin1Char('"'), QLatin1String("\\\""));
+    return runBash(QStringLiteral("bash -c \"%1\"").arg(script));
+}
+
+}  // namespace
+
+TEST(RobotIdentityShell, LaunchPrefixSurvivesTheDoubleQuotedLayer) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString path = writeId(dir, " Roofus#0003\r\n");
+    const QString tail = QStringLiteral("printf 'FELL_THROUGH\\n'");
+
+    const ShellRun ok = runThroughDoubleQuotedLaunch(
+        robotIdentityProbePrefixForDoubleQuotes(QStringLiteral("Roofus#0003"), path) +
+        tail);
+    EXPECT_EQ(ok.rc, 0);
+    EXPECT_TRUE(ok.out.contains(QStringLiteral("FELL_THROUGH")));
+    EXPECT_EQ(classifyRobotIdentity(QStringLiteral("Roofus#0003"), ok.out).verdict,
+              RobotIdentityVerdict::Match);
+
+    const ShellRun blocked = runThroughDoubleQuotedLaunch(
+        robotIdentityProbePrefixForDoubleQuotes(QStringLiteral("Roofus#0002"), path) +
+        tail);
+    EXPECT_EQ(blocked.rc, 0);
+    EXPECT_FALSE(blocked.out.contains(QStringLiteral("FELL_THROUGH")));
+    const auto report = classifyRobotIdentity(QStringLiteral("Roofus#0002"), blocked.out);
+    EXPECT_EQ(report.verdict, RobotIdentityVerdict::Mismatch);
+    EXPECT_EQ(report.reported, QStringLiteral("Roofus#0003"));
+
+    // Unescaped, the outer shell runs `$(...)` and `$_bdr_id` itself, and
+    // the inner bash never sees the comparison it was meant to run.
+    const ShellRun unescaped = runThroughDoubleQuotedLaunch(
+        robotIdentityProbePrefix(QStringLiteral("Roofus#0002"), path) + tail);
+    EXPECT_TRUE(unescaped.out.contains(QStringLiteral("FELL_THROUGH")));
+}
+
+TEST(RobotIdentityShell, LaunchPrefixLetsAMissingFileThrough) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const ShellRun run = runThroughDoubleQuotedLaunch(
+        robotIdentityProbePrefixForDoubleQuotes(
+            QStringLiteral("Roofus#0003"), dir.filePath(QStringLiteral("missing"))) +
+        QStringLiteral("printf 'FELL_THROUGH\\n'"));
+    EXPECT_EQ(run.rc, 0);
+    EXPECT_TRUE(run.out.contains(QStringLiteral("FELL_THROUGH")));
+    EXPECT_EQ(classifyRobotIdentity(QStringLiteral("Roofus#0003"), run.out).verdict,
+              RobotIdentityVerdict::Unreadable);
 }
