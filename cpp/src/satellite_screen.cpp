@@ -655,6 +655,9 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     });
     connect(ros_, &RosLink::statusUpdated, this, [this] {
         const CoverageStatus status = ros_->coverageStatus();
+        // Before anything else reads the run state: a topple trip latches
+        // the E-Stop, and everything below paints from that state.
+        maybeHandleTopple(status);
         if (linkSampleIsCurrent(status.wall_ms)) {
             if (link_monitor_) {
                 link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
@@ -757,6 +760,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     metadata_pushed_ = false;
                     stop_prompt_key_.clear();
                     stop_dwell_samples_ = 0;
+                    topple_seq_seen_ = topple_notice_policy::kUnseen;
                     scan_run_state_ = ScanRunState::Idle;
                     scan_autonomy_ran_ = false;
                     manual_override_ = false;
@@ -8691,6 +8695,58 @@ void SatelliteScreen::maybePromptStop(const CoverageStatus& status) {
             setManualOverride(true);
         }
     });
+    centerSatPrompt(box, this);
+    box->show();
+}
+
+void SatelliteScreen::maybeHandleTopple(const CoverageStatus& status) {
+    if (!status.valid) {
+        return;
+    }
+    const auto decision =
+        topple_notice_policy::onTripSeq(topple_seq_seen_, status.tip_seq);
+    topple_seq_seen_ = decision.seen;
+    if (!decision.engage || !mission_->missionActive()) {
+        return;
+    }
+    // The robot has already done its half: tip_guard idles both drive axes
+    // and publishes autonomy_enable=false itself, so the stop never waited on
+    // this screen or the radio. onEstop() re-asserts both (idempotent) and
+    // adds the part only the OCU owns — the latch. Recovery is therefore the
+    // ordinary one: Clear E-Stop, then Resume, or Motors: Arm to drive away.
+    appendLog(QStringLiteral("[TOPPLE] trip %1 reported by the robot — %2")
+                  .arg(status.tip_seq)
+                  .arg(status.tip_detail.isEmpty()
+                           ? QStringLiteral("no detail")
+                           : status.tip_detail));
+    onEstop();
+    if (topple_prompt_open_) {
+        return;
+    }
+    topple_prompt_open_ = true;
+    QString body = QStringLiteral(
+        "The robot's topple guard tripped and stopped the robot: both drive "
+        "motors are disarmed and autonomy is off. The E-Stop is latched.");
+    if (!status.tip_detail.isEmpty()) {
+        body += QStringLiteral("\n\n%1.").arg(status.tip_detail);
+    }
+    if (status.tip_cells > 0) {
+        body += QStringLiteral(
+            "\n\nThis spot is now a no-go area for the planner.");
+    }
+    body += QStringLiteral(
+        "\n\nTo recover: press Clear E-Stop, then either Resume, or use "
+        "Motors: Arm and take manual control to drive the robot away from "
+        "this spot.");
+    // Modeless, like the stop prompt: exec() would nest a loop under a live
+    // launch. It only informs — the E-Stop button is the control.
+    auto* box = makeSatPrompt(
+        this, QStringLiteral("Topple detected — E-Stop engaged"), body,
+        QStringLiteral("OK"), QStringLiteral("Dismiss"));
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setModal(false);
+    connect(box, &QDialog::finished, this,
+            [this](int) { topple_prompt_open_ = false; });
     centerSatPrompt(box, this);
     box->show();
 }

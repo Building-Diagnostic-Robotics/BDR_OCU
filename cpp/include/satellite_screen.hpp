@@ -29,6 +29,7 @@
 #pragma once
 
 #include "estop_latch_policy.hpp"
+#include "topple_notice_policy.hpp"
 #include "radio_link_pill.hpp"
 #include "satellite_job_model.hpp"
 #include "satellite_map_capture.hpp"
@@ -457,6 +458,9 @@ private:
         modal per distinct (state, reason) once kStopDwellSamples consecutive
         samples are stopped. The corner pill updates on the first sample. */
     void maybePromptStop(const CoverageStatus& status);
+    /** A new topple trip in /coverage/status latches the E-Stop and says
+     *  why. The robot has already stopped itself; this is the OCU half. */
+    void maybeHandleTopple(const CoverageStatus& status);
     static bool isStopState(const QString& state);
     static QString stopHeadline(const CoverageStatus& status);
     static QString stopGuidance(const CoverageStatus& status);
@@ -913,6 +917,9 @@ private:
     bool stop_prompt_open_ = false;
     QString stop_prompt_key_;   // last (state|stop|stale) explained
     int stop_dwell_samples_ = 0;  // consecutive stopped status samples
+    // Last /coverage/status tip_seq acted on (topple_notice_policy).
+    int topple_seq_seen_ = topple_notice_policy::kUnseen;
+    bool topple_prompt_open_ = false;
     bool revisit_hold_ = false;  // WAITING_REVISIT latched (prompt edge)
     bool director_failed_ = false;
     // Director-boot bookkeeping. The only hard "death" signal is a launch

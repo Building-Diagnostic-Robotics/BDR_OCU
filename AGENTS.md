@@ -1798,6 +1798,15 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  `onEstop()` directly, never `onEstopButtonClicked()`: if the key toggled,
  an operator mashing a panic key an even number of times would release the
  stop they were applying. Clearing stays mouse-only.
+ - **A topple trip engages this same E-Stop.** The robot's `tip_guard`
+ E-Stops itself on a trip (drive axes IDLE + `autonomy_enable=false`) and
+ the director counts it as `tip_seq` in `/coverage/status`.
+ `maybeHandleTopple()` runs first in the `statusUpdated` handler: on a new
+ count (`topple_notice_policy::onTripSeq`, a counter so a trip between two
+ 1 Hz lines is not missed) it calls `onEstop()` and shows a modeless
+ "Topple detected — E-Stop engaged" notice. There is no topple-specific
+ recovery: Clear E-Stop, then Resume or Motors: Arm. Do not add a second
+ clear path or gate anything on the guard's readiness.
  (`estop_latch_policy_tests` makes that hazard executable.) Three details
  are load-bearing:
  - `Qt::ApplicationShortcut`, not a `keyPressEvent`. Qt matches shortcuts
