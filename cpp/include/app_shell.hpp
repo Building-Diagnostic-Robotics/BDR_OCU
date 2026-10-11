@@ -173,7 +173,10 @@ private:
     void onRobotSyncSnapshot(const RepoSyncSnapshot& snap);
     void showRobotSyncDialog();
     void refreshBannerHostVisibility();
+    void refreshUpdateBanner();
     void refreshRobotSyncBanner();
+    /// Get started or Dashboard, and no scan pipeline running.
+    bool bannersAllowedNow() const;
     bool isScanLaunchActive() const;
     /// Empty when Upload Data may open or a new upload may start.
     /// `uploading` is the only exemption. The dialog asks again with
@@ -439,10 +442,11 @@ private:
     // `onUploadDataRequested()` for the seeding contract.
     UploadDialog* upload_dialog_ = nullptr;
 
-    // OTA update plumbing. Banner sits above the stage stack so it persists
-    // across stage transitions; checker polls GitHub Releases on a 5-min
-    // cadence and toggles banner visibility.
+    // OTA update plumbing. The checker polls GitHub Releases on a 5-min
+    // cadence. The banner shows only on Get started and the Dashboard,
+    // and only while no scan pipeline is running.
     UpdateBanner* update_banner_ = nullptr;
+    bool has_pending_update_ = false;
     /// Margin host wrapping `update_banner_`. Tracked so it can be hidden
     /// alongside the banner — otherwise its reserved top margin leaves a
     /// thin strip at the top of the window when no update is available.

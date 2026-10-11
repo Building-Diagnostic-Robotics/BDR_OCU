@@ -363,8 +363,8 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     root_layout->setContentsMargins(0, 0, 0, 0);
     root_layout->setSpacing(0);
 
-    // OTA banner sits above the stage stack so it persists across stage
-    // transitions. Hidden by default; UpdateChecker drives visibility.
+    // OTA banner sits above the stage stack. Hidden unless Get started or
+    // the Dashboard is showing and no scan pipeline is running.
     update_banner_ = new UpdateBanner(central_root_);
     update_banner_->setDarkMode(dark_mode_);
     update_banner_->hide();
@@ -402,13 +402,13 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                                   QStringLiteral("update available: tag=%1 sha=%2")
                                       .arg(info.tag).arg(info.commitSha));
                 update_banner_->setVersionInfo(info);
-                if (update_banner_host_) update_banner_host_->show();
-                update_banner_->show();
+                has_pending_update_ = true;
+                refreshUpdateBanner();
             });
     connect(update_checker_, &update::UpdateChecker::noUpdateAvailable,
             this, [this]() {
-                update_banner_->hide();
-                refreshBannerHostVisibility();
+                has_pending_update_ = false;
+                refreshUpdateBanner();
             });
     connect(update_checker_, &update::UpdateChecker::checkFailed,
             this, [](const QString& reason) {
@@ -452,6 +452,8 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     stack_->setCurrentWidget(stage1_);
 
     connect(stage1_, &SetupScreen::getStartedRequested, this, &AppShellWindow::onGetStarted);
+    connect(stack_, &QStackedWidget::currentChanged, this,
+            [this](int) { refreshRobotSyncBanner(); });
 
     laptop_launch_proc_ = new QProcess(this);
     laptop_launch_proc_->setProcessChannelMode(QProcess::MergedChannels);
@@ -1497,10 +1499,8 @@ void AppShellWindow::showUpdateModal(const update::VersionInfo& info) {
                     "appshell",
                     QStringLiteral("snooze 4h: until_ms=%1")
                         .arg(until_ms));
-                if (update_banner_) {
-                    update_banner_->hide();
-                }
-                refreshBannerHostVisibility();
+                has_pending_update_ = false;
+                refreshUpdateBanner();
             });
 
     // Phase 7: spawn the external bdr-update-runner, wait for it to
@@ -1532,12 +1532,27 @@ bool AppShellWindow::isScanLaunchActive() const {
            satellite_mission_active;
 }
 
+bool AppShellWindow::bannersAllowedNow() const {
+    const QWidget* page = stack_ ? stack_->currentWidget() : nullptr;
+    const bool on_home = page == stage1_ || (stage3_ && page == stage3_);
+    return on_home && !isScanLaunchActive();
+}
+
+void AppShellWindow::refreshUpdateBanner() {
+    if (update_banner_) {
+        update_banner_->setVisible(has_pending_update_ && bannersAllowedNow());
+    }
+    refreshBannerHostVisibility();
+}
+
 void AppShellWindow::refreshBannerHostVisibility() {
     if (!update_banner_host_) {
         return;
     }
-    const bool ota = update_banner_ && update_banner_->isVisible();
-    const bool robot = robot_sync_banner_ && robot_sync_banner_->isVisible();
+    // isHidden, not isVisible: isVisible is false under a hidden host, so
+    // the host could never be shown.
+    const bool ota = update_banner_ && !update_banner_->isHidden();
+    const bool robot = robot_sync_banner_ && !robot_sync_banner_->isHidden();
     update_banner_host_->setVisible(ota || robot);
 }
 
@@ -1602,10 +1617,10 @@ void AppShellWindow::refreshRobotSyncBanner() {
     const bool snoozed =
         snooze > 0 && QDateTime::currentMSecsSinceEpoch() < snooze;
     const bool show =
-        snap.offer_update && !snoozed && !isScanLaunchActive();
+        snap.offer_update && !snoozed && bannersAllowedNow();
     robot_sync_banner_->setSnapshot(snap);
     robot_sync_banner_->setVisible(show);
-    refreshBannerHostVisibility();
+    refreshUpdateBanner();
 }
 
 void AppShellWindow::onRobotSyncSnapshot(const RepoSyncSnapshot& snap) {

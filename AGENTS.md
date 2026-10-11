@@ -431,7 +431,8 @@ The recovery path:
 
 Operator-driven over-the-air updater. The OCU polls GitHub Releases
 (`latest` tag), shows a non-intrusive banner when a new commit SHA
-appears, and on operator confirmation hands off to an external
+appears (Get started and Dashboard only, and never while a scan
+pipeline is running), and on operator confirmation hands off to an external
 `bdr-update-runner` binary that downloads, verifies SHA256, dpkg-installs
 the new `.deb`, and `execv`s the OCU back. A 60 s health-probe watchdog
 in the OCU's `main()` automatically rolls back to the previous `.deb` if
@@ -514,6 +515,10 @@ exactly one of seven states. The full state-transition diagram lives in
   means every other laptop in the fleet silently receives NO updates — this
   is a temporary state and must go back to `[]` once the fix is confirmed.
   Check this file before concluding "OTA is broken" for some laptop.
+- The update banner shows only on Get started and the Dashboard, and
+  only while `isScanLaunchActive()` is false. `has_pending_update_`
+  remembers the offer; `refreshUpdateBanner()` is the only show/hide.
+  Do not show the banner from `updateAvailable` directly.
 - `update/auto_check_enabled=false` is the per-laptop pin:
   `UpdateChecker::start()` returns before scheduling anything. Both
   controls only *offer*; neither installs. They cannot reach an OCU
@@ -585,7 +590,9 @@ are missing. Modal is `show()`, not `exec()`.
   branch, and must not overwrite `branch_` with laptop HEAD.
 - Arm after Get started / `goToStage3` when the SSH target is known — not
   at ctor before `setup/robot_id`.
-- Banner stays hidden while `isScanLaunchActive()` (no roof nag).
+- Banner shows only on Get started and the Dashboard, and stays hidden
+  while `isScanLaunchActive()` (no roof nag). `bannersAllowedNow()` is
+  the shared gate with the OTA banner.
 - Paths are `~/pilot_ws` on both sides. No auto-clone.
 - `prepareRobot()` skips `LaptopState` and starts at `Stage::Prepare`.
 
