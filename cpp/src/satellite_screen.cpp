@@ -6284,13 +6284,18 @@ void SatelliteScreen::updateCorrespondenceUi() {
 
 void SatelliteScreen::setAlignStatus(const QString& status) {
     const bool busy = map_capture_ && map_capture_->busy();
+    // Cancel is a no-op while the runner stops the robot-side run.
+    const bool stopping =
+        map_capture_ &&
+        map_capture_->stage() == MapCaptureRunner::Stage::Stopping;
     if (align_status_) {
         align_status_->setText(status);
     }
     if (collect_map_button_) {
         collect_map_button_->setText(
-            busy ? QStringLiteral("Cancel Collection")
-                 : QStringLiteral("Collect Map from Robot"));
+            stopping ? QStringLiteral("Stopping…")
+            : busy   ? QStringLiteral("Cancel Collection")
+                     : QStringLiteral("Collect Map from Robot"));
     }
     // Point-cloud pane empty state: the title carries progress while a
     // capture runs, the CTA flips to Cancel, and the hint changes from
@@ -6302,8 +6307,10 @@ void SatelliteScreen::setAlignStatus(const QString& status) {
                 : QStringLiteral("Point cloud not yet captured"));
     }
     if (capture_button_) {
-        capture_button_->setText(busy ? QStringLiteral("Cancel Capture")
-                                      : QStringLiteral("Capture Point Cloud"));
+        capture_button_->setText(
+            stopping ? QStringLiteral("Stopping…")
+            : busy   ? QStringLiteral("Cancel Capture")
+                     : QStringLiteral("Capture Point Cloud"));
         capture_button_->setEnabled(!mission_->missionActive());
     }
     if (pcd_empty_hint_) {

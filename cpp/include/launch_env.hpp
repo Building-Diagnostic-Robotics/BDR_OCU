@@ -16,8 +16,11 @@ namespace f2c_cpp {
 /**
  * Sources the ROS + workspace env and pins the DDS config. `set -e`, never
  * `set -u`: the ROS/colcon setup scripts read variables that are normally
- * unset. `.bashrc` first so the robot's own env (RMW, Zenoh config)
- * matches what an interactive launch would get.
+ * unset. `bash -lc` is not interactive, so the stock `.bashrc` returns
+ * before its exports: the DDS lines below are what keep the robot's nodes
+ * and its zenohd on loopback CycloneDDS. Without them CycloneDDS binds to
+ * whatever interface it picks (Wi-Fi included) and nodes fall back to
+ * Fast DDS.
  */
 inline constexpr const char* kLaunchEnvPreamble =
     "set -e; "
@@ -44,5 +47,34 @@ inline constexpr const char* kLaptopLaunchSweep =
     "sleep 1; "
     "pkill -x zenohd >/dev/null 2>&1 || true; "
     "pkill -x host_teleop >/dev/null 2>&1 || true";
+
+/**
+ * Robot-side stop for a map-collection tree. Killing the local `ssh` does
+ * not reach it: the collect script backgrounds `ros2 launch`, so the run
+ * outlives the session, and a second Collect would put two stacks on the
+ * same LiDAR, CAN bus and /cmd_vel. SIGINT first so map_collection_node
+ * disarms and the ODrive nodes idle their axes, then kill by name the nodes
+ * known to ignore shutdown -- but only when no other `ros2 launch` is up,
+ * since a director or robot_complete tree runs the same node names.
+ *
+ * Patterns are bracketed so they cannot match the shell running them, and
+ * any script that also starts the launch must keep that command line from
+ * containing `ros2 launch pilot_control robot_map_collection` verbatim, or
+ * the SIGINT below lands on the script itself.
+ */
+inline constexpr const char* kMapCollectionStop =
+    "pkill -INT -f '[r]os2 launch pilot_control robot_map_collection' >/dev/null 2>&1 || true; "
+    "for i in $(seq 1 100); do "
+    "  pgrep -f '[r]os2 launch pilot_control robot_map_collection' >/dev/null 2>&1 || break; "
+    "  sleep 0.1; "
+    "done; "
+    "if ! pgrep -af '[r]os2 launch' 2>/dev/null | grep -v robot_map_collection | grep -q .; then "
+    "  pkill -f '[m]ap_collection_node' >/dev/null 2>&1 || true; "
+    "  pkill -f '[f]astlio_mapping' >/dev/null 2>&1 || true; "
+    "  pkill -f '[l]ivox_ros_driver2_node' >/dev/null 2>&1 || true; "
+    "  pkill -f '[o]drive_can_node' >/dev/null 2>&1 || true; "
+    "  pkill -f '[d]iff_drive_controller' >/dev/null 2>&1 || true; "
+    "fi; "
+    "pkill -9 -f '[r]os2 launch pilot_control robot_map_collection' >/dev/null 2>&1 || true; ";
 
 }  // namespace f2c_cpp

@@ -1,5 +1,6 @@
 #include "startup_screen.hpp"
 #include "dev_flags.hpp"
+#include "launch_env.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
 #include "ui_theme_constants.hpp"
@@ -592,15 +593,10 @@ void StartupScreen::startDiagnostics(bool scroll_to_results) {
         .arg(local_ip, indoor ? ", indoor mode (skip GPS)" : ""));
     appendLog("[info] Command: ros2 run pilot_control startup_preflight");
 
-    // Build remote command (best-effort env setup on robot)
-    QString script = QString(
-        "set -e; "
-        "if [ -f /opt/ros/humble/setup.bash ]; then source /opt/ros/humble/setup.bash; "
-        "elif [ -f /opt/ros/foxy/setup.bash ]; then source /opt/ros/foxy/setup.bash; "
-        "elif [ -f /opt/ros/galactic/setup.bash ]; then source /opt/ros/galactic/setup.bash; "
-        "fi; "
-        "if [ -f \"$HOME/pilot_ws/install/setup.bash\" ]; then source \"$HOME/pilot_ws/install/setup.bash\"; fi; "
-        "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; export ROS_DOMAIN_ID=0; "
+    // Same env as the robot launch: preflight looks for /livox/imu before
+    // starting its own Livox driver, so it has to share that launch's
+    // loopback CycloneDDS to see it.
+    QString script = QString::fromLatin1(kLaunchEnvPreamble) + QString(
         "ros2 run pilot_control startup_preflight --ros-args "
         "-p rf_target_ip:=%1 "
         "-p skip_motion_test:=false"
