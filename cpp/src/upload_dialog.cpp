@@ -1660,6 +1660,11 @@ void UploadDialog::onDriveStateChanged(ThumbDriveWatcher::State state,
 }
 
 void UploadDialog::onCloudProbeTick() {
+    // The scan and stick-copy gate can change while the dialog is open
+    // (the Dashboard re-polls the robot's copy every 5 s) and nothing
+    // here is told. Re-ask on this tick so Upload does not stay
+    // disabled with a reason that no longer holds.
+    if (isVisible()) refreshButtonStates();
     if (cloud_api_base_.isEmpty()) {
         cloud_reachable_ = false;
         cloud_probe_seen_response_ = true;

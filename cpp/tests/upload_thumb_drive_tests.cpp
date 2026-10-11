@@ -100,6 +100,21 @@ TEST(UploadOpenPolicy, ScanBeatsCopyAndCopyBeatsProfile) {
     EXPECT_EQ(uploadOpenBlock(copy), UploadOpenBlock::CopyNotReady);
 }
 
+TEST(UploadOpenPolicy, SkippedProfileReadStillChecksScanAndCopy) {
+    // The open dialog passes profile_valid=true instead of re-reading
+    // robots.json on every refresh. The scan and copy checks still run.
+    UploadOpenInputs scan;
+    scan.scan_active = true;
+    scan.copy_ready = true;
+    scan.profile_valid = true;
+    EXPECT_EQ(uploadOpenBlock(scan), UploadOpenBlock::ScanActive);
+
+    UploadOpenInputs copy;
+    copy.copy_ready = false;
+    copy.profile_valid = true;
+    EXPECT_EQ(uploadOpenBlock(copy), UploadOpenBlock::CopyNotReady);
+}
+
 TEST(UploadOpenPolicy, ReadyInputsOpen) {
     UploadOpenInputs in;
     in.copy_ready = true;

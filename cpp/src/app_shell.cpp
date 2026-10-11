@@ -2051,14 +2051,15 @@ UploadRobotAuth resolveUploadRobotAuth() {
 
 }  // namespace
 
-QString AppShellWindow::uploadUnavailableReason(bool uploading) const {
+QString AppShellWindow::uploadUnavailableReason(bool uploading,
+                                                bool profile_checked) const {
     const bool copy_ready = !stage3_ || stage3_->thumbCopyReady();
     UploadRobotAuth auth;
-    if (!uploading) {
+    if (!uploading && !profile_checked) {
         auth = resolveUploadRobotAuth();
     }
     const UploadOpenInputs in{uploading, isScanLaunchActive(), copy_ready,
-                              uploading || auth.valid};
+                              uploading || profile_checked || auth.valid};
     switch (uploadOpenBlock(in)) {
         case UploadOpenBlock::None:
             return {};
@@ -2089,18 +2090,18 @@ void AppShellWindow::onUploadDataRequested() {
     // for an action that will not open it.
     const bool uploading =
         upload_dialog_ && upload_dialog_->isUploading();
-    const QString blocked = uploadUnavailableReason(uploading);
-    if (!blocked.isEmpty()) {
-        if (upload_dialog_) upload_dialog_->clearPendingNotice();
-        BdrMessageBox::warning(this, tr("Upload unavailable"), blocked);
-        return;
-    }
 
     // Credentials for a queue that is not already running. A running
     // upload keeps the robot it started with; re-reading the registry
     // here must not retarget it.
     const UploadRobotAuth auth = uploading ? UploadRobotAuth{}
                                            : resolveUploadRobotAuth();
+    const QString blocked = uploadUnavailableReason(uploading, auth.valid);
+    if (!blocked.isEmpty()) {
+        if (upload_dialog_) upload_dialog_->clearPendingNotice();
+        BdrMessageBox::warning(this, tr("Upload unavailable"), blocked);
+        return;
+    }
 
     if (!upload_dialog_) {
         upload_dialog_ = new UploadDialog(this);
@@ -2116,8 +2117,10 @@ void AppShellWindow::onUploadDataRequested() {
     upload_dialog_->setDarkMode(dark_mode_);
     // Same gate as the card click, with uploading forced false, so the
     // button disables if the upload finishes while a scan is still up.
-    upload_dialog_->setUploadBlockReason(
-        [this]() { return uploadUnavailableReason(false); });
+    // The dialog asks on every refresh, so it must not read robots.json.
+    upload_dialog_->setUploadBlockReason([this]() {
+        return uploadUnavailableReason(false, /*profile_checked=*/true);
+    });
     // Don't retarget a queue that is already uploading. setRobotId
     // would put the remaining folders under a different robot if the
     // operator had switched, and setSource is ignored while busy.
