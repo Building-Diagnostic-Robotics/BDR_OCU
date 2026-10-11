@@ -975,6 +975,17 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     stage6_->devSeedDemoAlignment(
                         shot_mode.startsWith(QStringLiteral("review")),
                         shot_mode.endsWith(QStringLiteral("_outlier")));
+                } else if (shot_mode.startsWith(QStringLiteral("two_pairs"))) {
+                    // The live re-projection at its first step: two pairs on
+                    // the skewed site, which is the smallest set that turns
+                    // the imagery. `two_pairs` has no GPS fix, so nothing but
+                    // the picks can have turned it; `two_pairs_seed` has one.
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
+                    stage6_->devSeedDemoPlan();
+                    stage6_->devSeedDemoAlignment(
+                        false, true, 2,
+                        shot_mode.endsWith(QStringLiteral("_seed")) ? 0 : 2);
                 } else if (shot_mode.startsWith(QStringLiteral("seed"))) {
                     // GPS pre-alignment, before the picks take over: the
                     // skewed site, so a seeded pane is visibly turned.

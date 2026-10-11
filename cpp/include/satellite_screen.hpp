@@ -393,10 +393,10 @@ private:
     /** Swaps the pane's image while holding the operator's viewpoint. */
     void applySatelliteView(const QImage& image, const QTransform& xform);
     /**
-     * Whether a fit may move the view. Two pairs fit a similarity exactly, so
-     * an early mismatched pick produces a confident nonsense transform;
-     * checking its scale against the imagery's own catches that without
-     * needing operator judgement.
+     * Whether a fit may move the view: valid, with a finite positive scale.
+     * There is no scale check against the imagery — a fit from picks always
+     * re-projects, because following the picks is what makes the next one
+     * easy to place.
      */
     bool plausibleForProjection(const Similarity2D& fit) const;
     /** Georeference of the loaded stitch; invalid until a site image is in. */
@@ -820,8 +820,8 @@ private:
     /** Fit the pane's current canvas was warped by, to skip a needless re-warp. */
     Similarity2D sat_view_fit_;
     /**
-     * The latest fit was rejected as implausible, so the pane is showing the
-     * previous projection. Nothing derived from the rejected fit may be drawn
+     * The latest fit was degenerate, so the pane is showing the previous
+     * projection. Nothing derived from the rejected fit may be drawn
      * while this holds, and the instruction bar says why the view is parked.
      */
     bool preview_held_ = false;

@@ -1395,15 +1395,13 @@ stitch as much as the fix and those arrive in either order.
  as good as its fix type usually is, never perfect.
 - **`stitchPxPerM()` is the imagery's ground scale; `site_manifest_.res_m`
  is not.** `res_m` is Esri's `SRC_RES`, the SOURCE's native GSD (0.3 m is
- typical), while a z19 stitch pixel covers ~0.22 m at 43°N. The scale guard
- (`plausibleForProjection`) used to compare against `1 / res_m`, which put
- every correct fit ~30% outside a 10% tolerance: the live re-projection sat
- on "Map held" on real sites, and the dev fixtures never showed it because
- they carried no `res_m`. Do not read `res_m` in the alignment path again.
+ typical), while a z19 stitch pixel covers ~0.22 m at 43°N. The pick sigmas,
+ the seed fit and the seed circle all read `stitchPxPerM()`. Do not read
+ `res_m` in the alignment path again.
 - **The dev fixtures are self-consistent on purpose.** `devStitchBounds`
  derives the stitch extent, the GPS fix and the picks from one anchor. A
- fixture whose georeference contradicts its own picks trips the scale guard
- and the seed cross-check, and every shot becomes the failure path.
+ fixture whose georeference contradicts its own picks trips the seed
+ cross-check, and every shot becomes the failure path.
 - **The seed marker stays up while picking.** The dashed circle
  (`PanZoomImageWidget::setSeedMarker`, 2-sigma) is the fix; the green glyph
  is the current fit. Seeing them drift apart is the cross-check made
@@ -1416,6 +1414,8 @@ stitch as much as the fix and those arrive in either order.
  capture, through `PanZoomImageWidget::frameImageRect` — not `setView`,
  which silently no-ops before layout has sized the pane and would leave the
  imagery as a thumbnail in the corner.
+- `two_pairs` (no GPS fix) and `two_pairs_seed` shot modes render the
+ first pick-driven turn: two pairs on the skewed site.
 - `seed`, `seed_pair`, `seed_position`, `seed_none`, `seed_outside` shot
  modes render each case.
 
@@ -1458,21 +1458,17 @@ instruction bar then read.
  `sqrt(|determinant|)` of `sat_view_xform_` as well. They differ only
  when the canvas hit `kAlignedSatMaxDim`, but conflating them
  mis-weights exactly the picks that are least trustworthy.
-- **`plausibleForProjection` is a guard, not a nicety.** Two pairs fit a
- similarity exactly, so an early mismatched pick yields a *confident*
- nonsense transform; swinging the imagery by it would wreck the view the
- next pick is made in. A fit whose scale is more than
- `kScaleRejectFrac` from the manifest's own `res_m` holds the last good
- projection instead. With no `res_m` there is nothing to check against
- and the fit is allowed through. A hold sets `preview_held_`, and
- **everything derived from the rejected fit then goes off screen** —
- residual spurs, robot glyph, and the diagnostics behind the outlier
- ring (`invalidateAlignmentResiduals`) — because a pane that sits still
- while a robot marker is flung off it reads as a rendering fault, and a
- ring naming the worst pair of a fit we just called wrong is worse than
- no ring. The hold is **announced** in `#SatCorrBar`: silently freezing
- the imagery is the same silent-refusal class as a disabled button with
- no reason.
+- **A fit from picks always re-projects — there is no scale guard.**
+ `plausibleForProjection` only rejects a degenerate fit (invalid, or no
+ finite positive scale). It used to hold the view when the fitted scale
+ was more than 10% (`kScaleRejectFrac`) from the imagery's own, and on
+ real roofs that parked the pane on ordinary picks; the operator asked
+ for it gone (2026-10-11) because the imagery following the picks is
+ what makes the next pair easy to place. Do not re-add a scale check. A
+ bad pair now shows as a swung view and a long residual spur, and Undo
+ last puts it back. `preview_held_` and the "Map held" clause in
+ `#SatCorrBar` remain for the degenerate case only; while held, nothing
+ derived from the rejected fit is drawn (`invalidateAlignmentResiduals`).
 - **The re-projected canvas carries no palette.** Rotation leaves the
  canvas corners empty and they are filled `Qt::transparent`, so the
  pane's own matte shows through and a theme toggle needs no repaint
@@ -1577,8 +1573,9 @@ residual, with `← OUTLIER` / `← can't be checked (isolated)` suffixes and a
 Delete-selected button; the Figma correspondence frames here have no list,
 so the same information became the pane ring plus one instruction-bar
 clause. The *policy* is upstream's (`worstOutlierIndex`, the leave-one-out
-call, `plausibleForProjection`, `kScaleRejectFrac`,
-`kOutlierImprovementFrac`, `kAlignedSatMaxDim`) and should stay identical;
+call, `plausibleForProjection` — with the scale guard removed in both
+trees — `kOutlierImprovementFrac`, `kAlignedSatMaxDim`) and should stay
+identical;
 only the presentation diverges. Upstream's `preview_rmse_m_` has no
 counterpart because there is no status label to put it in.
 
@@ -1940,7 +1937,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
  (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|
  correspond_outlier|review_outlier|seed|seed_pair|seed_position|seed_none|
- seed_outside|roi|edges|params|run|plan|plan_confirm|revisit_align|
+ seed_outside|two_pairs|two_pairs_seed|roi|edges|params|run|plan|plan_confirm|revisit_align|
  revisit_search`,
  `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog

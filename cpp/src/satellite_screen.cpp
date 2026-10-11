@@ -145,10 +145,6 @@ constexpr FitHandedness kPcdToSatHandedness = FitHandedness::Reversing;
 constexpr double kSeedOriginWarnSigma = 3.0;
 constexpr double kSeedHeadingWarnRtkDeg = 15.0;
 constexpr double kSeedHeadingWarnDeg = 45.0;
-// A fitted scale this far from the imagery's own is not pick noise — across a
-// site of this size Mercator scale varies by ~5e-5 — so the fit is wrong and
-// must not be allowed to re-project the view. See plausibleForProjection.
-constexpr double kScaleRejectFrac = 0.10;
 // Removing one pair has to cut the weighted RMSE by more than this for that
 // pair to be called an outlier rather than the set simply being loose.
 constexpr double kOutlierImprovementFrac = 0.5;
@@ -1176,7 +1172,7 @@ namespace {
 
 // Where the demo site sits. The fixture's stitch bounds, GPS fix and picks are
 // all derived from this one anchor so they agree with each other — a fixture
-// whose georeference contradicts its own picks would trip the scale guard and
+// whose georeference contradicts its own picks would trip
 // the seed cross-check, and every shot would be of the failure path.
 constexpr double kDevSiteLat = 43.600664;
 constexpr double kDevSiteLon = -116.249774;
@@ -5473,13 +5469,12 @@ bool SatelliteScreen::plausibleForProjection(const Similarity2D& fit) const {
     if (!(px_per_m > 1e-9) || !std::isfinite(px_per_m)) {
         return false;
     }
-    // When the imagery's own ground scale is known, a fit that disagrees with
-    // it is provably wrong — no operator judgement needed — and must not be
-    // allowed to move the view the next pick is made in.
-    const double expected = stitchPxPerM();
-    if (expected > 0.0) {
-        return std::abs(px_per_m - expected) / expected <= kScaleRejectFrac;
-    }
+    // Deliberately no check against the imagery's own ground scale. There used
+    // to be one (10%), and on real roofs it parked the view on ordinary picks:
+    // the imagery then stopped following the pairs, which is the one thing that
+    // makes the next pair easy to place. A fit from picks always re-projects;
+    // a bad pair shows up as a swung view and a long residual spur, and Undo
+    // puts it back.
     return true;
 }
 
@@ -5611,13 +5606,10 @@ void SatelliteScreen::updateSatelliteAlignmentView() {
             }
         }
     } else {
-        // An implausible fit holds the last good projection rather than swinging
-        // the imagery somewhere useless. Nothing derived from it may be drawn
-        // either — a stable pane with a robot glyph flung off it looks like a
-        // rendering fault — and the operator has to be told the view is parked,
-        // or the imagery simply stops responding to picks with no explanation.
-        // That includes the residual diagnostics: a ring naming the worst pair
-        // of a fit we have just called wrong is worse than no ring.
+        // Only a degenerate fit (no finite scale) lands here now. It holds the
+        // last good projection, and nothing derived from it may be drawn — a
+        // stable pane with a robot glyph flung off it looks like a rendering
+        // fault — and the operator has to be told the view is parked.
         preview_held_ = true;
         invalidateAlignmentResiduals();
     }
@@ -6175,8 +6167,8 @@ void SatelliteScreen::updateCorrespondenceUi() {
         // Otherwise the imagery just stops turning and the operator has no way
         // to tell a parked view from a working one.
         advisory = QStringLiteral(
-                       " <span style='color:%1'>· Map held — the latest pair "
-                       "disagrees with the imagery's own scale; re-pick it</span>")
+                       " <span style='color:%1'>· Map held — the pairs do not "
+                       "give a usable fit; re-pick the latest one</span>")
                        .arg(uiThemeTokens(dark_mode_).warning);
     } else if (corr_outlier_index_ >= 0 &&
                corr_outlier_index_ < corr_studentized_.size()) {
