@@ -717,8 +717,10 @@ kept in sync by hand.
   poll, pure file I/O — `/dev/disk/by-label/RDATA_EXT` → device →
   `/proc/self/mounts` mount point; device present but unmounted →
   one `udisksctl mount -b` per insertion; fallbacks
-  `/media/$USER/RDATA_EXT`, `/run/media/$USER/RDATA_EXT`; an operator
-  **Browse…** path wins while it exists. States Absent /
+  `/media/$USER/RDATA_EXT`, `/run/media/$USER/RDATA_EXT`, `/media/RDATA_EXT`,
+  `/mnt/RDATA_EXT` — and only when `/proc/self/mounts` lists that path.
+  A directory with the label as its name is not a source, and there is
+  no folder picker. States Absent /
   PresentUnmounted / Mounted; `freeBytes()` via `QStorageInfo`.
 - **`UploadStateProbe`** (`cpp/include/upload_runner.hpp`): ThumbDrive
   mode is a `QDirIterator` walk of `<mount>/<date>/<building>/<section>`
@@ -792,10 +794,15 @@ kept in sync by hand.
   top-level `state: "error"` is remapped from per-job state (queued
   jobs look like errors). Cache keys are per `robot_id`
   (`dashboard/offload_incomplete/<id>`, `dashboard/offload_state/<id>`).
-- **`AppShellWindow::onUploadDataRequested`**: hard launch-active block,
-  `robots.json` lookup by `setup/robot_id`, `setSource(ThumbDrive)`,
-  plus `thumbCopyReady()`. `goToStage3` seeds `refreshThumbCopyStatus()`.
-  No SSH target is resolved any more.
+- **`AppShellWindow::onUploadDataRequested`**: hard launch-active block
+  via `isScanLaunchActive()` (Stage 6 included, same composite as
+  close), `robots.json` lookup by `setup/robot_id`, `setSource(ThumbDrive)`,
+  plus `thumbCopyReady()`. `uploadOpenBlock` is that decision. A running
+  upload is the only exemption, and it only reopens the dialog. A held
+  notice does not skip the checks; the notice clears when the dialog
+  opens or the click is blocked. The open dialog's Upload button asks
+  the same rule with uploading forced false. `goToStage3` seeds
+  `refreshThumbCopyStatus()`. No SSH target is resolved any more.
 
 ### Decisions baked into the design
 
@@ -847,8 +854,11 @@ kept in sync by hand.
   Done/Partial/None from on-disk truth on every dialog open / stick
   insertion.
 - **Hard-blocked while a scan is alive.** `onUploadDataRequested`
-  reuses the `launch_active` composite the close-event guard uses.
-  Operator-locked: Complete Mission first.
+  uses `isScanLaunchActive()`, the same composite the close-event
+  guard uses, including a Stage 6 mission. Operator-locked: Complete
+  Mission first. A running upload may reopen the dialog; it must not
+  start another upload, and a held notice is not an exemption. The
+  Upload button inside the open dialog applies the same block.
 - **Hard-blocked until the robot→stick copy is done.** The Upload
   card stays disabled (and blinks) while `OffloadStatus` says the
   copy is incomplete. Two exceptions: `stick_full` (the copy did not
@@ -881,7 +891,16 @@ kept in sync by hand.
   via `rm -f` inside the SSH command) — the script never removes it, and
   before this fix a resume re-paused at its first file.
 - **Cancel** SIGTERMs the process. State on disk is preserved.
-- **Closing the dialog while busy** routes through `requestPause()`.
+- **Closing the dialog while busy hides it.** The upload keeps running.
+  The drive watcher stays armed so pulling the stick still pauses, and
+  the Dashboard Upload card shows progress. A stick pull while hidden
+  stays "Upload paused — drive removed"; the SIGTERM that follows a
+  failed pause-flag write is not reported as a failure. Quitting the
+  OCU asks first, then `pauseForShutdown()` (pause flag, 10 s, then
+  SIGTERM). A retry wait has no process, so that path cancels
+  immediately instead of sitting out the 10 s. An update is refused
+  while an upload is running; the handoff still pauses before
+  `qApp->quit()` if one starts during the lockfile poll.
 
 ### Tests
 
@@ -901,12 +920,21 @@ clearing, `FailedToStart` handling).
     progress.
   - The depth-3 walk (`<date>/<building>/<section>`) in both probes.
   - `ThumbDriveWatcher`'s by-label → `/proc/self/mounts` resolution and
-    the one-attempt-per-device `udisksctl` mount.
+    the one-attempt-per-device `udisksctl` mount. Fallback paths count
+    only when `isMountPoint` says they are real mounts. Do not add a
+    folder picker.
+  - Hiding `UploadDialog` must not call `requestPause()`. Quit is the
+    only close path that pauses, and it goes through `pauseForShutdown()`.
+    A retry wait cancels immediately. The update handoff refuses while
+    an upload is running and pauses before `qApp->quit()`.
   - The pause-flag clear before launch.
   - `UploadSource::RobotSsh` and `setRemote()`/`setRemoteScriptPath()`
     — inactive, but the fallback the operator asked to keep.
   - `RobotRegistry::cloudApiBase()` and its three-tier resolution.
 - **Do NOT downgrade the launch-active gate** in `onUploadDataRequested`.
+  A running upload is the only exemption, and `uploadOpenBlock` is the
+  decision. A held notice must not skip it. The open dialog uses the
+  same rule.
 - **Do NOT wait on the thumb-drive copy inside Complete Mission.**
   That gate is the Dashboard Upload card (`thumbCopyReady()`).
 - **Do NOT require `thumbsync_manifest.json` on `Section_*`.** The

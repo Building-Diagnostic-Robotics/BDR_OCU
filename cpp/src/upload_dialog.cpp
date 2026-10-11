@@ -7,12 +7,15 @@
 
 #include <algorithm>
 
+#include <utility>
+
 #include <QAbstractItemView>
+#include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QDebug>
 #include <QDir>
-#include <QFileDialog>
+#include <QEventLoop>
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
@@ -45,6 +48,14 @@ constexpr int kBuildingKeyRole = Qt::UserRole + 1;
 // One /verify request per folder. A batch keeps a slow stick from
 // starting hundreds of listings at once; the rest follow oldest-first.
 constexpr int kCloudVerifyBatch = 10;
+// Quit waits this long for the files already in flight to finish
+// before SIGTERM. One file can be up to 5 GB, so this is a ceiling,
+// not a guarantee that every in-flight PUT completes.
+constexpr int kShutdownPauseMs = 10000;
+
+const QString kHoldDriveRemoved = QStringLiteral("Upload paused — drive removed");
+const QString kHoldResume = QStringLiteral("Upload paused — press Upload to resume");
+const QString kHoldFailed = QStringLiteral("Upload failed — open Upload Data");
 
 QString scansFoundText(int count) {
     return QStringLiteral("Found %1 scan%2.")
@@ -156,7 +167,6 @@ void UploadDialog::setSource(UploadSource source) {
     source_ = source;
     if (probe_) probe_->setSource(source_);
     if (runner_) runner_->setSource(source_);
-    if (btn_browse_) btn_browse_->setVisible(isThumbDrive());
     refreshHeaderSubtitle();
     refreshButtonStates();
 }
@@ -283,19 +293,6 @@ void UploadDialog::buildUi() {
     connect(btn_refresh_, &QPushButton::clicked,
             this, &UploadDialog::onRefreshClicked);
     filter_row->addWidget(btn_refresh_, 0);
-
-    // ThumbDrive only: point at an unlabelled stick or a local copy.
-    btn_browse_ = new QPushButton(QStringLiteral("Browse…"), card);
-    btn_browse_->setObjectName("UploadDialogSecondary");
-    btn_browse_->setCursor(Qt::PointingHandCursor);
-    btn_browse_->setMinimumHeight(34);
-    btn_browse_->setToolTip(
-        QStringLiteral("Choose the data folder manually if the drive is not "
-                       "labelled RDATA_EXT."));
-    btn_browse_->setVisible(isThumbDrive());
-    connect(btn_browse_, &QPushButton::clicked,
-            this, &UploadDialog::onBrowseClicked);
-    filter_row->addWidget(btn_browse_, 0);
 
     filter_row->addStretch(1);
 
@@ -678,9 +675,20 @@ void UploadDialog::applyStyle() {
 
 void UploadDialog::showEvent(QShowEvent* event) {
     QDialog::showEvent(event);
+    // The operator is looking at the dialog now. The card notice has
+    // done its job. A running upload has no notice to clear, and
+    // clearing one would wipe the progress subtitle.
+    if (!(runner_ && runner_->isBusy())) {
+        clearPendingNotice();
+    }
     refreshHeaderSubtitle();
     refreshButtonStates();
     armConnectivityProbes();
+    // A running upload keeps the listing and the progress panel the
+    // operator hid. A fresh walk would clear the tree underneath it.
+    if (runner_ && runner_->isBusy()) {
+        return;
+    }
     // Kick a probe each time the dialog opens. Operators expect a fresh
     // listing every time they hit the dashboard quick-action. (Arming
     // the drive watcher may already have started one via
@@ -693,11 +701,19 @@ void UploadDialog::showEvent(QShowEvent* event) {
 void UploadDialog::closeEvent(QCloseEvent* event) {
     cancelCloudCheck(false);
     if (runner_ && runner_->isBusy()) {
-        // Graceful pause per the design spec — the script will finish
-        // its in-flight files, write upload_state.json, and exit.
-        runner_->requestPause();
+        // Hide, don't pause. The runner is a child of this dialog and
+        // the dialog stays alive on the shell, so the process keeps
+        // uploading. The drive watcher stays armed: pulling the stick
+        // still pauses. The cloud probe stops — leaving it running is
+        // what used to treat "dialog hidden" as "cloud down".
+        stopCloudProbe();
+        // A stale failure count must not turn the first curl after
+        // reopen into "cloud down" and pause the upload we just hid.
+        cloud_probe_failures_ = 0;
+        if (reachability_probe_) reachability_probe_->disarm();
+    } else {
+        disarmConnectivityProbes();
     }
-    disarmConnectivityProbes();
     // QDialog::closeEvent calls reject() while the dialog is still
     // visible. The flag stops that from calling close() again.
     in_close_ = true;
@@ -857,21 +873,6 @@ void UploadDialog::onRefreshClicked() {
     startProbe();
 }
 
-void UploadDialog::onBrowseClicked() {
-    if (!drive_watcher_) return;
-    const QString start = drive_mount_.isEmpty()
-                              ? QStringLiteral("/media/%1").arg(qEnvironmentVariable("USER"))
-                              : drive_mount_;
-    const QString chosen = QFileDialog::getExistingDirectory(
-        this,
-        QStringLiteral("Choose the scan data folder (the drive root holding "
-                       "<date>/<building>/Section_… folders)"),
-        QDir(start).exists() ? start : QDir::homePath(),
-        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
-    if (chosen.isEmpty()) return;
-    drive_watcher_->setManualPath(chosen);   // triggers onDriveStateChanged
-}
-
 QString UploadDialog::formatWhen(const QDateTime& when,
                                 const QString& date_folder) const {
     if (when.isValid()) {
@@ -1026,6 +1027,31 @@ void UploadDialog::refreshSelectionSummary() {
     }
 }
 
+namespace {
+
+/// The scan/copy/profile gate applies only once the runner is idle.
+/// While an upload is running the button is hidden and asking the
+/// gate would read "a scan is active" over a dialog we opened on purpose.
+QString idleUploadGate(bool busy, const std::function<QString()>& gate) {
+    if (busy || !gate) return {};
+    return gate();
+}
+
+}  // namespace
+
+void UploadDialog::setUploadBlockReason(std::function<QString()> reason) {
+    upload_block_reason_ = std::move(reason);
+}
+
+void UploadDialog::clearPendingNotice() {
+    if (background_hold_.isEmpty()) return;
+    background_hold_.clear();
+    publishBackgroundActivity();
+    if (!isVisible() && !(runner_ && runner_->isBusy()) && drive_watcher_) {
+        drive_watcher_->stop();
+    }
+}
+
 void UploadDialog::refreshButtonStates() {
     const bool busy = runner_ && runner_->isBusy();
     const bool any_selected = currentSelection().buildings > 0;
@@ -1035,21 +1061,20 @@ void UploadDialog::refreshButtonStates() {
     const bool has_creds = !cloud_client_id_.isEmpty() &&
                            !cloud_device_token_.isEmpty();
     const bool online = isFullyOnline();
+    const QString blocked = idleUploadGate(busy, upload_block_reason_);
 
     if (btn_upload_) {
-        btn_upload_->setEnabled(!busy && any_selected && has_source &&
-                                has_creds && online);
+        btn_upload_->setEnabled(blocked.isEmpty() && !busy && any_selected &&
+                                has_source && has_creds && online);
         btn_upload_->setVisible(!busy);
-        if (!online && any_selected && has_source && has_creds) {
+        if (!blocked.isEmpty()) {
+            btn_upload_->setToolTip(blocked);
+        } else if (!online && any_selected && has_source && has_creds) {
             btn_upload_->setToolTip(
                 QStringLiteral("Upload disabled — see banner for connectivity status."));
         } else {
             btn_upload_->setToolTip(QString());
         }
-    }
-    if (btn_browse_) {
-        btn_browse_->setVisible(isThumbDrive());
-        btn_browse_->setEnabled(!busy);
     }
     if (btn_pause_) {
         btn_pause_->setVisible(busy);
@@ -1062,7 +1087,8 @@ void UploadDialog::refreshButtonStates() {
     if (btn_close_footer_) {
         btn_close_footer_->setEnabled(true);
         btn_close_footer_->setText(
-            busy ? QStringLiteral("Close (pauses)") : QStringLiteral("Close"));
+            busy ? QStringLiteral("Hide (keeps uploading)")
+                 : QStringLiteral("Close"));
     }
     if (btn_select_all_) {
         btn_select_all_->setEnabled(!busy && any_targets);
@@ -1149,6 +1175,13 @@ QString UploadDialog::formatBytes(qint64 bytes) const {
 // ---------------------------------------------------------------------------
 
 void UploadDialog::onUploadClicked() {
+    const QString blocked = idleUploadGate(runner_ && runner_->isBusy(),
+                                           upload_block_reason_);
+    if (!blocked.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Upload unavailable"), blocked);
+        refreshButtonStates();
+        return;
+    }
     const Selection sel = currentSelection();
     if (sel.folders.isEmpty()) return;
     // Stop the check before launch. Rows already marked missing keep
@@ -1172,6 +1205,7 @@ void UploadDialog::onUploadClicked() {
         return;
     }
 
+    background_hold_.clear();
     runner_->setSource(source_);
     runner_->setQueue(sel.folders);
     active_queue_index_ = -1;
@@ -1190,6 +1224,7 @@ void UploadDialog::onUploadClicked() {
     }
     runner_->start();
     refreshButtonStates();
+    publishBackgroundActivity();
 }
 
 void UploadDialog::onPauseClicked() {
@@ -1236,6 +1271,75 @@ void UploadDialog::onCloseClicked() {
     close();
 }
 
+bool UploadDialog::isUploading() const {
+    return runner_ && runner_->isBusy();
+}
+
+void UploadDialog::pauseForShutdown() {
+    if (!runner_ || !runner_->isBusy()) return;
+    // Stops onQueueFinished from rescanning the stick, and onTargetFailed
+    // from raising a modal, while this wait is on the stack.
+    shutting_down_ = true;
+    published_background_status_ = QStringLiteral("Pausing upload…");
+    emit backgroundStatusChanged(published_background_status_);
+    // A retry wait has no process. requestPause() is a no-op then, and
+    // sitting out the 10 s ceiling would freeze quit for nothing.
+    if (runner_->isRetryScheduled()) {
+        runner_->requestCancel();
+        return;
+    }
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    runner_->requestPause();
+    if (runner_->isBusy()) {
+        QEventLoop loop;
+        QTimer timer;
+        timer.setSingleShot(true);
+        connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+        connect(runner_, &UploadRunner::queueFinished, &loop, &QEventLoop::quit);
+        timer.start(kShutdownPauseMs);
+        // Process the script's exit, but don't deliver clicks. The OCU is
+        // on its way out and a second Upload press here would start another
+        // queue under the wait.
+        loop.exec(QEventLoop::ExcludeUserInputEvents);
+
+        if (runner_->isBusy()) {
+            // The in-flight files did not finish inside the ceiling. The
+            // state file already lists everything that completed; the rest
+            // upload again from the start on the next resume.
+            runner_->requestCancel();
+        }
+    }
+    QApplication::restoreOverrideCursor();
+}
+
+void UploadDialog::noteDriveRemoved() {
+    const bool first = background_hold_ != kHoldDriveRemoved;
+    background_hold_ = kHoldDriveRemoved;
+    if (first && !isVisible()) {
+        emit uploadAttentionRequested(QStringLiteral(
+            "Thumb drive removed. Upload paused — plug it back in and press Upload."));
+    }
+}
+
+void UploadDialog::publishBackgroundActivity() {
+    // The quit wait owns the card text until the process is gone.
+    if (shutting_down_) return;
+    QString status;
+    if (!background_hold_.isEmpty()) {
+        status = background_hold_;
+    } else if (runner_ && runner_->isBusy()) {
+        status = active_files_total_ > 0
+                     ? QStringLiteral("Uploading · %1 / %2 files")
+                           .arg(active_files_done_)
+                           .arg(active_files_total_)
+                     : QStringLiteral("Uploading…");
+    }
+    if (status == published_background_status_) return;
+    published_background_status_ = status;
+    emit backgroundStatusChanged(status);
+}
+
 // ---------------------------------------------------------------------------
 // Runner signal handlers
 // ---------------------------------------------------------------------------
@@ -1273,6 +1377,7 @@ void UploadDialog::onTargetStarted(int index, int total,
     }
     refreshRowForTarget(target, false);
     refreshButtonStates();
+    publishBackgroundActivity();
 }
 
 void UploadDialog::onFileUploaded(const UploadTarget& target,
@@ -1298,6 +1403,7 @@ void UploadDialog::onFileUploaded(const UploadTarget& target,
         cached.status = UploadStatus::Partial;
         refreshRowForTarget(target, false);
     }
+    publishBackgroundActivity();
 }
 
 void UploadDialog::onFileSkipped(const UploadTarget& target,
@@ -1330,13 +1436,41 @@ void UploadDialog::onTargetPaused(const UploadTarget& target,
 
 void UploadDialog::onTargetFailed(const UploadTarget& target,
                                   const QString& error) {
+    // The launch already marked the folder Partial. Leave that; the
+    // rescan after the queue stops replaces it from disk.
+    refreshRowForTarget(target, false);
+    if (shutting_down_) return;
+    // Pulling the stick SIGTERMs the script, which arrives here as a
+    // crash. The hold was already set to "drive removed" (or "press
+    // Upload to resume" if it came back). A failure modal or the
+    // failed-hold would erase that.
+    if (background_hold_ == kHoldDriveRemoved ||
+        background_hold_ == kHoldResume) {
+        if (lbl_progress_detail_) {
+            lbl_progress_detail_->setText(background_hold_);
+        }
+        publishBackgroundActivity();
+        return;
+    }
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
             QStringLiteral("Failed: %1").arg(error));
     }
-    // The launch already marked the folder Partial. Leave that; the
-    // rescan after the queue stops replaces it from disk.
-    refreshRowForTarget(target, false);
+    // The dialog is hidden behind the dashboard. A modal here covers
+    // whatever the operator is doing; the card and a toast carry it.
+    if (!isVisible()) {
+        background_hold_ = kHoldFailed;
+        publishBackgroundActivity();
+        QString brief = error;
+        const int nl = brief.indexOf(QLatin1Char('\n'));
+        if (nl >= 0) brief.truncate(nl);
+        if (brief.size() > 140) {
+            brief = brief.left(137) + QStringLiteral("…");
+        }
+        emit uploadAttentionRequested(
+            QStringLiteral("Upload stopped: %1").arg(brief));
+        return;
+    }
     QMessageBox::warning(this,
                          QStringLiteral("Upload failed"),
                          QStringLiteral(
@@ -1362,14 +1496,38 @@ void UploadDialog::onTargetCompleted(const UploadTarget& target) {
 
 void UploadDialog::onQueueFinished(bool cancelled) {
     if (shutting_down_) return;
+    if (cancelled) {
+        background_hold_.clear();
+    }
     if (lbl_progress_caption_) {
         lbl_progress_caption_->setText(
             cancelled ? QStringLiteral("Upload cancelled.")
-                      : QStringLiteral("Upload finished."));
+                      : (background_hold_.isEmpty()
+                             ? QStringLiteral("Upload finished.")
+                             : background_hold_));
     }
     if (progress_bar_) {
         progress_bar_->setRange(0, qMax(1, active_files_total_));
         progress_bar_->setValue(progress_bar_->maximum());
+    }
+    publishBackgroundActivity();
+    // Hidden: the dashboard card is the surface. Let the next open
+    // rescan. A drive-removed pause keeps the watcher armed so plugging
+    // the stick back can change the card from "drive removed" to
+    // "press Upload to resume".
+    if (!isVisible()) {
+        const bool watch_for_stick =
+            background_hold_ == kHoldDriveRemoved ||
+            background_hold_ == kHoldResume;
+        if (watch_for_stick) {
+            stopCloudProbe();
+            cloud_probe_failures_ = 0;
+            if (reachability_probe_) reachability_probe_->disarm();
+        } else {
+            disarmConnectivityProbes();
+        }
+        refreshButtonStates();
+        return;
     }
     refreshSelectionSummary();
     refreshButtonStates();
@@ -1428,13 +1586,7 @@ void UploadDialog::armConnectivityProbes() {
     refreshConnectivityBanner();
 }
 
-void UploadDialog::disarmConnectivityProbes() {
-    if (reachability_probe_) {
-        reachability_probe_->disarm();
-    }
-    if (drive_watcher_) {
-        drive_watcher_->stop();
-    }
+void UploadDialog::stopCloudProbe() {
     if (cloud_probe_timer_) {
         cloud_probe_timer_->stop();
     }
@@ -1447,6 +1599,16 @@ void UploadDialog::disarmConnectivityProbes() {
         cloud_probe_proc_->deleteLater();
         cloud_probe_proc_ = nullptr;
     }
+}
+
+void UploadDialog::disarmConnectivityProbes() {
+    if (reachability_probe_) {
+        reachability_probe_->disarm();
+    }
+    if (drive_watcher_) {
+        drive_watcher_->stop();
+    }
+    stopCloudProbe();
     cloud_probe_failures_ = 0;
     cloud_probe_seen_response_ = false;
     cloud_reachable_ = false;
@@ -1477,8 +1639,11 @@ void UploadDialog::onDriveStateChanged(ThumbDriveWatcher::State state,
     if (!isThumbDrive()) return;
 
     // Pauses the runner if the stick vanished mid-upload; refreshes the
-    // banner and Upload gating either way.
+    // banner and Upload gating either way. A busy runner keeps its
+    // listing — startProbe() clears the tree, and the queue does not
+    // need a new walk to finish the files already in flight.
     handleConnectivityTransition();
+    if (runner_ && runner_->isBusy()) return;
 
     if (drive_mounted_ && (!was_mounted || drive_mount_ != old_mount)) {
         // Fresh stick (or a different one): list it.
@@ -1583,6 +1748,9 @@ void UploadDialog::handleConnectivityTransition() {
                         ? QStringLiteral("Drive removed — pausing safely…")
                         : QStringLiteral("Connectivity lost — pausing safely…"));
             }
+            if (isThumbDrive() && !drive_mounted_) {
+                noteDriveRemoved();
+            }
         }
     } else {
         // Online again.  Re-enable retries; do NOT auto-resume the
@@ -1591,8 +1759,16 @@ void UploadDialog::handleConnectivityTransition() {
         offline_pause_active_ = false;
         maybeStartCloudCheck();
     }
+    if (isThumbDrive() && drive_mounted_ &&
+        background_hold_ == kHoldDriveRemoved) {
+        background_hold_ = kHoldResume;
+        // The card now says to press Upload. No need to keep polling
+        // until the operator opens the dialog.
+        if (!isVisible() && drive_watcher_) drive_watcher_->stop();
+    }
     refreshConnectivityBanner();
     refreshButtonStates();
+    publishBackgroundActivity();
 }
 
 void UploadDialog::refreshConnectivityBanner() {
@@ -1612,10 +1788,9 @@ void UploadDialog::refreshConnectivityBanner() {
             msg = drive_state_ == ThumbDriveWatcher::State::PresentUnmounted
                       ? QStringLiteral("%1 drive detected but not mounted — "
                                        "mounting… If this persists, open it "
-                                       "in Files or use Browse….").arg(label)
+                                       "in Files.").arg(label)
                       : QStringLiteral("Insert the %1 thumb drive from the "
-                                       "robot, or use Browse… to pick the "
-                                       "data folder.").arg(label);
+                                       "robot.").arg(label);
             if (!cloud_reachable_ && cloud_probe_seen_response_) {
                 msg += QStringLiteral(" Cloud is also unreachable.");
             }

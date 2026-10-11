@@ -35,6 +35,10 @@ public:
      *  complete — that stick is the copy record. */
     bool thumbCopyReady() const;
     QString thumbCopyBlockReason() const;
+    /** Upload-card subtitle while an upload is running or waiting on
+     *  the operator after the dialog was hidden. Empty restores the
+     *  offload subtitle. */
+    void setBackgroundUploadStatus(const QString& status);
 
     // Latest Stage 2 preflight rollup: "READY" / "WARN" / "FAIL" / "".
     // Folded into the Stage 3 System Status card alongside live battery
@@ -201,6 +205,7 @@ private:
     QTimer* upload_blink_timer_ = nullptr;
     bool upload_blink_active_ = false;
     bool upload_blink_dimmed_ = false;
+    QString background_upload_status_;
 };
 
 }  // namespace f2c_cpp

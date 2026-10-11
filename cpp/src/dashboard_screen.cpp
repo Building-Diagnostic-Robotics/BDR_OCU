@@ -1427,14 +1427,25 @@ void DashboardScreen::onOffloadProbeFinished() {
     refreshUploadAction();
 }
 
+void DashboardScreen::setBackgroundUploadStatus(const QString& status) {
+    if (status == background_upload_status_) return;
+    background_upload_status_ = status;
+    refreshUploadAction();
+}
+
 void DashboardScreen::refreshUploadAction() {
     if (!btn_view_recordings_) {
         return;
     }
     const bool blocked = !thumbCopyReady();
     const bool stick_full = offloadStickFull();
-    btn_view_recordings_->setEnabled(!blocked);
-    if (stick_full) {
+    const bool background = !background_upload_status_.isEmpty();
+    // A hidden upload has to stay clickable so the operator can reopen
+    // the dialog. The offload gate still blocks a fresh upload.
+    btn_view_recordings_->setEnabled(background || !blocked);
+    if (background) {
+        btn_view_recordings_->setToolTip(background_upload_status_);
+    } else if (stick_full) {
         QString tip = stickFullOperatorMessage();
         if (offload_probe_ok_ && !offload_.error.isEmpty()) {
             tip += QLatin1Char('\n') + offload_.error;
@@ -1447,31 +1458,37 @@ void DashboardScreen::refreshUploadAction() {
     }
 
     QString desc = QLatin1String(kUploadDefaultDesc);
-    const bool waiting =
-        (offload_probe_ok_ &&
-         offload_.state == OffloadCopyState::WaitingForDrive) ||
-        (!offload_probe_ok_ &&
-         offload_cached_state_ == QLatin1String("waiting_for_drive"));
-    if (stick_full) {
-        desc = stickFullOperatorMessage();
-    } else if (waiting && !thumbCopyReady()) {
-        desc = QStringLiteral("Plug RDATA_EXT into the robot");
-    } else if (offload_probe_ok_ && offload_.copyIncomplete() &&
-               offload_.state != OffloadCopyState::Error &&
-               offload_.state != OffloadCopyState::StickFull) {
-        desc = QStringLiteral("Syncing to thumb drive…");
-    } else if (!thumbCopyReady() && robotCopyIncomplete()) {
-        desc = !offload_probe_ok_
-                   ? QStringLiteral("Robot not connected — last copy unfinished")
-                   : QStringLiteral("Thumb-drive copy incomplete");
-    } else if (stickCopyIncomplete()) {
-        desc = QStringLiteral("Thumb drive copy incomplete");
+    if (background) {
+        desc = background_upload_status_;
+    } else {
+        const bool waiting =
+            (offload_probe_ok_ &&
+             offload_.state == OffloadCopyState::WaitingForDrive) ||
+            (!offload_probe_ok_ &&
+             offload_cached_state_ == QLatin1String("waiting_for_drive"));
+        if (stick_full) {
+            desc = stickFullOperatorMessage();
+        } else if (waiting && !thumbCopyReady()) {
+            desc = QStringLiteral("Plug RDATA_EXT into the robot");
+        } else if (offload_probe_ok_ && offload_.copyIncomplete() &&
+                   offload_.state != OffloadCopyState::Error &&
+                   offload_.state != OffloadCopyState::StickFull) {
+            desc = QStringLiteral("Syncing to thumb drive…");
+        } else if (!thumbCopyReady() && robotCopyIncomplete()) {
+            desc = !offload_probe_ok_
+                       ? QStringLiteral("Robot not connected — last copy unfinished")
+                       : QStringLiteral("Thumb-drive copy incomplete");
+        } else if (stickCopyIncomplete()) {
+            desc = QStringLiteral("Thumb drive copy incomplete");
+        }
     }
 
     if (auto* label = findChild<QLabel*>(QStringLiteral("DashboardBtnRecordingsDesc"))) {
         label->setText(desc);
     }
-    setUploadSyncBlink(blocked);
+    // A running upload is not an unfinished copy. Blinking both at once
+    // reads as "still blocked" over a card that is actually working.
+    setUploadSyncBlink(blocked && !background);
 }
 
 void DashboardScreen::setUploadSyncBlink(bool blink) {
@@ -1484,6 +1501,7 @@ void DashboardScreen::setUploadSyncBlink(bool blink) {
         btn_view_recordings_->setGraphicsEffect(nullptr);
     }
     if (!blink) {
+        if (!upload_blink_active_) return;
         if (upload_blink_timer_) {
             upload_blink_timer_->stop();
         }

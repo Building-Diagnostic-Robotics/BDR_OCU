@@ -89,7 +89,9 @@ protected:
     // closeEvent: gated shutdown for the OCU's main window.
     // If the exploration launch tree is alive on the robot (operator
     // already pressed Start Mapping / past Stage 4), the close is
-    // intercepted and a confirmation dialog is shown.  Acceptance runs
+    // intercepted and a confirmation dialog is shown. A cloud upload
+    // that is still running gets its own confirm first: quitting pauses
+    // it (files in progress get up to 10 s to finish). Acceptance runs
     // the same SYNCHRONOUS teardown as Complete Mission so the robot's
     // unified_data_collector gets a chance to call
     // seekcamera_manager_destroy() before the OCU process exits.
@@ -114,9 +116,11 @@ private slots:
     /// `UploadDialog` which waits for the RDATA_EXT thumb drive (the
     /// robot's offload copy of `/R_DATA/`) in the laptop, walks it, and
     /// runs `cpp/scripts/uploader.py` locally for any section/mission
-    /// the operator selects. Hard-blocks while a scan/launch tree is
-    /// alive (same `launch_active` rule the close guard uses) —
-    /// operators must finish the mission first.
+    /// the operator selects. Hard-blocks while a scan is alive
+    /// (`isScanLaunchActive()`, the same composite the close guard
+    /// uses, including a Stage 6 mission). A running upload is the only
+    /// exemption, and it only reopens the dialog — it does not start
+    /// another upload.
     void onUploadDataRequested();
     void onExplorationStartScanRequested();
     void onExplorationFinishSaveMapRequested();
@@ -171,6 +175,11 @@ private:
     void refreshBannerHostVisibility();
     void refreshRobotSyncBanner();
     bool isScanLaunchActive() const;
+    /// Empty when Upload Data may open or a new upload may start.
+    /// `uploading` is the only exemption. The dialog asks again with
+    /// that flag forced false, so a scan that is still running after
+    /// the upload finishes keeps the button disabled.
+    QString uploadUnavailableReason(bool uploading) const;
     void applyRobotSyncSnooze();
 
     /// Phase 7 OCU→runner handoff (locked Q1=A CLI args, Q3=B lockfile-

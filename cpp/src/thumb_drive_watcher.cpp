@@ -82,12 +82,6 @@ void ThumbDriveWatcher::setLabel(const QString& label) {
     if (isActive()) evaluate();
 }
 
-void ThumbDriveWatcher::setManualPath(const QString& path) {
-    manual_path_ = QDir::cleanPath(path.trimmed());
-    if (manual_path_ == QLatin1String(".")) manual_path_.clear();
-    if (isActive()) evaluate();
-}
-
 void ThumbDriveWatcher::start() {
     if (!timer_->isActive()) timer_->start();
     evaluate();
@@ -130,18 +124,27 @@ QString ThumbDriveWatcher::mountPointForDevice(const QString& device,
     return found;
 }
 
-void ThumbDriveWatcher::evaluate() {
-    // 1. Operator override wins while it exists.
-    if (!manual_path_.isEmpty()) {
-        if (usableDataRoot(manual_path_)) {
-            applyState(State::Mounted, manual_path_);
-            return;
+bool ThumbDriveWatcher::isMountPoint(const QString& path,
+                                     const QString& mounts_text) {
+    if (path.isEmpty()) return false;
+    const QString cleaned = QDir::cleanPath(path);
+    const QStringList lines = mounts_text.split(QLatin1Char('\n'),
+                                                Qt::SkipEmptyParts);
+    for (const QString& line : lines) {
+        const QStringList fields = line.split(QLatin1Char(' '),
+                                              Qt::SkipEmptyParts);
+        if (fields.size() < 2) continue;
+        if (QDir::cleanPath(unescapeMountField(fields.at(1))) == cleaned) {
+            return true;
         }
-        // A manual path that vanished (stick pulled) falls through to
-        // auto-detection rather than pinning the dialog to a dead path.
     }
+    return false;
+}
 
-    // 2. Label → device → mount point.
+void ThumbDriveWatcher::evaluate() {
+    // 1. Label → device → mount point. The only source. A folder the
+    // operator picked, or a directory that happens to be named
+    // RDATA_EXT, is not a stick.
     const QString by_label =
         QStringLiteral("/dev/disk/by-label/") + label_;
     const QFileInfo link(by_label);
@@ -171,7 +174,9 @@ void ThumbDriveWatcher::evaluate() {
         }
     }
 
-    // 3. Conventional desktop automount paths.
+    // 2. Conventional desktop automount paths. Same rule: the path has
+    // to be an actual mount, not a directory someone created by hand.
+    const QString mounts = readProcMounts();
     const QString user = qEnvironmentVariable("USER");
     const QStringList candidates = {
         QStringLiteral("/media/%1/%2").arg(user, label_),
@@ -180,7 +185,7 @@ void ThumbDriveWatcher::evaluate() {
         QStringLiteral("/mnt/%1").arg(label_),
     };
     for (const QString& c : candidates) {
-        if (usableDataRoot(c)) {
+        if (isMountPoint(c, mounts) && usableDataRoot(c)) {
             applyState(State::Mounted, c);
             return;
         }
@@ -197,7 +202,7 @@ void ThumbDriveWatcher::requestMount(const QString& device) {
     // udisksctl mounts as the calling user via polkit — the same call the
     // robot's rdata_thumbdrive_sync.py makes. Best-effort: on failure
     // the state stays PresentUnmounted and the dialog tells the operator
-    // to mount it from the file manager or Browse… to it.
+    // to open the drive in Files.
     mount_proc_ = new QProcess(this);
     connect(mount_proc_,
             QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
