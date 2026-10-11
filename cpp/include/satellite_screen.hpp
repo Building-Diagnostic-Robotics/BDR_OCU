@@ -506,6 +506,8 @@ private:
      */
     void restyleOpenPrompts();
     void onRobotSweepFailed(int exit_code);
+    void onRobotIdentityBlocked(const QString& message);
+    void onRobotIdentityUnchecked(const QString& message);
 
     // Core services.
     TileService* tiles_ = nullptr;

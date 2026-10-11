@@ -72,10 +72,13 @@ enumerates all sites.
       the Dashboard and returns to it. `src/robot_login.cpp` stays
       compiled but unused for one release. Tests:
       `tests/robot_registry_tests.cpp`.
-- [ ] **Robot identity check (follow-up).** Nothing yet confirms the
-      robot answering at the registry host is the selected robot. Planned:
-      read the robot's ID over SSH on the Dashboard offload probe and
-      block Send / map capture on a mismatch.
+- [x] **Robot identity check.** Send's pre-launch sweep and Capture
+      Point Cloud read `/etc/pilot_robot_id` and print it behind
+      `BDR_ROBOT_ID:`. `classifyRobotIdentity` is an exact match against
+      `setup/robot_id` (leading zeros and case count). A mismatch
+      hard-blocks, and the remote script exits before it pkills or arms,
+      so the wrong robot is left alone. A missing or empty file warns
+      and continues. Tests: `tests/robot_registry_tests.cpp`.
 - [x] **Connection monitor.** `SetupScreen::checkConnection()` pings the
       selected robot's host. A dev build lets the `robot_ip` QSettings
       key win, and the screen shows an amber notice while it is set. A

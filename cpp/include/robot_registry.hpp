@@ -105,6 +105,9 @@ private:
 struct ResolvedRobotSshTarget {
     QString host;
     QString ssh_user;
+    /** `setup/robot_id` when one is selected. Empty when a dev override
+        resolved a host and no robot was chosen. */
+    QString robot_id;
 };
 
 /**
@@ -141,5 +144,89 @@ struct RetiredGeneralRobotKeys {
  */
 RetiredGeneralRobotKeys retireLegacyGeneralRobotKeys(QSettings& settings,
                                                      bool release_build);
+
+/** File the robot's own setup writes. Send and map capture read it over SSH. */
+constexpr char kRobotIdentityPath[] = "/etc/pilot_robot_id";
+
+/** One stdout line: `BDR_ROBOT_ID:` plus the trimmed file, or the prefix alone
+    when the file is missing or empty. */
+constexpr char kRobotIdentityMarker[] = "BDR_ROBOT_ID:";
+
+/** Printed only after an exact match, by `/usr/bin/printf`, so the laptop
+    sees it before the rest of the script (a shell builtin would stay
+    buffered until the script exits). */
+constexpr char kRobotIdentityOkMarker[] = "BDR_IDENTITY_OK";
+
+enum class RobotIdentityVerdict {
+    Match,
+    Mismatch,
+    Unreadable,
+};
+
+struct RobotIdentityReport {
+    RobotIdentityVerdict verdict = RobotIdentityVerdict::Unreadable;
+    /** Trimmed file contents. Empty when `verdict` is Unreadable. */
+    QString reported;
+};
+
+/**
+ * Exact match of the trimmed `BDR_ROBOT_ID:` payload against
+ * `expected_robot_id`. Leading zeros and case count (`Roofus#001` and
+ * `Roofus#0001` are different). A missing marker, or a payload that is
+ * empty after trimming, is Unreadable — never a match.
+ */
+RobotIdentityReport classifyRobotIdentity(const QString& expected_robot_id,
+                                          const QString& remote_output);
+
+/** What the pre-launch sweep should do with that report. A mismatch blocks
+    even when `ssh_rc` is non-zero: the marker is the robot's own id, and
+    offering "launch anyway" would start the stack on the wrong machine.
+    Unreadable only warns when the SSH itself succeeded. */
+enum class PreLaunchIdentityDecision {
+    Spawn,
+    Block,
+    WarnThenSpawn,
+    SweepFailed,
+};
+
+PreLaunchIdentityDecision decidePreLaunchIdentity(RobotIdentityVerdict verdict,
+                                                  int ssh_rc);
+
+/** What map collection should do. `gate_cleared` is the second SSH, after
+    the operator was warned that the file was missing — that run is allowed
+    to proceed. A mismatch blocks on either run. */
+enum class CaptureIdentityDecision {
+    ReadManifest,
+    Block,
+    WarnAndRecollect,
+};
+
+CaptureIdentityDecision decideCaptureIdentity(RobotIdentityVerdict verdict,
+                                              bool gate_cleared);
+
+/** "This robot reports X, but Y is selected." */
+QString robotIdentityMismatchText(const QString& expected_robot_id,
+                                  const QString& reported);
+
+/** Missing or empty ID file. Names `expected_robot_id` when there is one. */
+QString robotIdentityUnreadableText(const QString& expected_robot_id);
+
+/**
+ * Remote snippet. Prints the marker, then `exit 0` when the trimmed file
+ * is non-empty and not exactly `expected_robot_id`, so the caller’s pkill
+ * never runs on the wrong robot. A missing or empty file falls through.
+ * An empty `id_path` reads `kRobotIdentityPath`.
+ */
+QString robotIdentityProbePrefix(const QString& expected_robot_id,
+                                 const QString& id_path = QString());
+
+/**
+ * Remote snippet. Prints the marker, then `exit 0` unless the trimmed file
+ * is a non-empty exact match, and on a match prints `kRobotIdentityOkMarker`.
+ * Map collection uses this so `ros2 launch` (which arms the motors) runs
+ * only after the id matches.
+ */
+QString robotIdentityMatchPrefix(const QString& expected_robot_id,
+                                 const QString& id_path = QString());
 
 }  // namespace f2c_cpp

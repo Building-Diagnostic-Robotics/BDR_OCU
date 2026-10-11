@@ -95,9 +95,15 @@ public:
         Rendering,
     };
 
-    /** `local_dir` receives the downloaded pcd/pose and the re-origined pcd. */
+    /**
+     * `local_dir` receives the downloaded pcd/pose and the re-origined pcd.
+     * `expected_robot_id` is checked against `/etc/pilot_robot_id` before
+     * the robot is armed. A mismatch finishes with an error and never
+     * launches. A missing file warns (`identityUnchecked`) and then collects.
+     */
     bool start(const QString& host, const QString& ssh_user,
-               const QString& local_dir, QString* error = nullptr);
+               const QString& expected_robot_id, const QString& local_dir,
+               QString* error = nullptr);
     void cancel();
     bool busy() const { return stage_ != Stage::Idle; }
     Stage stage() const { return stage_; }
@@ -105,10 +111,18 @@ public:
 signals:
     void progress(const QString& message);
     void finished(const MapCapture& capture);
+    /** The ID file names a different robot. Collection did not start. */
+    void identityBlocked(const QString& message);
+    /** The ID file is missing or empty. The slot runs before the motors
+        arm, so a modal warning here is seen first. */
+    void identityUnchecked(const QString& message);
 
 private:
     void runCommand(const QString& program, const QStringList& args,
                     int timeout_ms);
+    void noteOutput();
+    QString collectionScript(bool gate) const;
+    void beginRemoteCollection(bool gate);
     void onProcessFinished(int exit_code);
     void onTimeout();
     void startDownloadPcd();
@@ -134,7 +148,15 @@ private:
 
     QString host_;
     QString ssh_user_;
+    QString expected_robot_id_;
     QString local_dir_;
+    /** Stdout accumulated for the command in flight. `readyRead` consumes
+        the buffer, so `onProcessFinished` must not call `readAll` itself. */
+    QString remote_output_;
+    /** The missing-file warning already happened; the next SSH collects. */
+    bool identity_gate_cleared_ = false;
+    /** The "collecting" progress line has been shown for this SSH. */
+    bool collecting_announced_ = false;
     QString remote_pcd_;
     QString remote_pose_;
     QString local_pcd_;

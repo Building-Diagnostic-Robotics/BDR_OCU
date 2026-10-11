@@ -287,6 +287,7 @@ bool resolveRobotSshTarget(const RobotRegistry& registry,
     if (!override_ip.isEmpty()) {
         out->host = override_ip;
         out->ssh_user = QStringLiteral("roofus");
+        out->robot_id = robot_id.trimmed();
         return true;
     }
 
@@ -325,6 +326,7 @@ bool resolveRobotSshTarget(const RobotRegistry& registry,
         }
         return false;
     }
+    out->robot_id = id;
     return true;
 }
 
@@ -378,6 +380,124 @@ RetiredGeneralRobotKeys retireLegacyGeneralRobotKeys(QSettings& settings,
     }
     settings.sync();
     return retired;
+}
+
+namespace {
+
+QString shellSingleQuote(const QString& value) {
+    QString escaped = value;
+    escaped.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+    return QLatin1Char('\'') + escaped + QLatin1Char('\'');
+}
+
+QString identityReadAndPrint(const QString& id_path) {
+    const QString path = id_path.isEmpty() ? QLatin1String(kRobotIdentityPath)
+                                           : id_path;
+    // `head` fails on a missing file; `|| true` keeps a caller's `set -e`
+    // from aborting. GNU tr treats `\r` and `\n` as CR/LF, which keeps the
+    // marker on one line. sed applies the same trim as the classifier.
+    return QStringLiteral("_bdr_id=$( { head -c 256 ") + shellSingleQuote(path) +
+           QStringLiteral(
+               " | tr -d '\\r\\n' || true; } 2>/dev/null ); "
+               "_bdr_id=$(printf '%s' \"$_bdr_id\" | sed "
+               "'s/^[[:space:]]*//;s/[[:space:]]*$//'); "
+               "printf 'BDR_ROBOT_ID:%s\\n' \"$_bdr_id\"; ");
+}
+
+}  // namespace
+
+RobotIdentityReport classifyRobotIdentity(const QString& expected_robot_id,
+                                          const QString& remote_output) {
+    RobotIdentityReport report;
+    const QLatin1String marker(kRobotIdentityMarker);
+    const QStringList lines = remote_output.split(QLatin1Char('\n'));
+    for (QString line : lines) {
+        line = line.trimmed();
+        if (!line.startsWith(marker)) {
+            continue;
+        }
+        report.reported = line.mid(marker.size()).trimmed();
+        break;
+    }
+    if (report.reported.isEmpty()) {
+        report.verdict = RobotIdentityVerdict::Unreadable;
+        return report;
+    }
+    const QString expected = expected_robot_id.trimmed();
+    if (!expected.isEmpty() && report.reported == expected) {
+        report.verdict = RobotIdentityVerdict::Match;
+        return report;
+    }
+    report.verdict = RobotIdentityVerdict::Mismatch;
+    return report;
+}
+
+PreLaunchIdentityDecision decidePreLaunchIdentity(RobotIdentityVerdict verdict,
+                                                  int ssh_rc) {
+    if (verdict == RobotIdentityVerdict::Mismatch) {
+        return PreLaunchIdentityDecision::Block;
+    }
+    if (ssh_rc != 0) {
+        return PreLaunchIdentityDecision::SweepFailed;
+    }
+    if (verdict == RobotIdentityVerdict::Unreadable) {
+        return PreLaunchIdentityDecision::WarnThenSpawn;
+    }
+    return PreLaunchIdentityDecision::Spawn;
+}
+
+CaptureIdentityDecision decideCaptureIdentity(RobotIdentityVerdict verdict,
+                                              bool gate_cleared) {
+    if (verdict == RobotIdentityVerdict::Mismatch) {
+        return CaptureIdentityDecision::Block;
+    }
+    if (!gate_cleared && verdict == RobotIdentityVerdict::Unreadable) {
+        return CaptureIdentityDecision::WarnAndRecollect;
+    }
+    return CaptureIdentityDecision::ReadManifest;
+}
+
+QString robotIdentityMismatchText(const QString& expected_robot_id,
+                                  const QString& reported) {
+    const QString selected = expected_robot_id.trimmed().isEmpty()
+                                 ? QStringLiteral("no robot")
+                                 : expected_robot_id.trimmed();
+    const QString seen = reported.trimmed().isEmpty() ? QStringLiteral("nothing")
+                                                       : reported.trimmed();
+    return QStringLiteral("This robot reports %1, but %2 is selected.")
+        .arg(seen, selected);
+}
+
+QString robotIdentityUnreadableText(const QString& expected_robot_id) {
+    const QString selected = expected_robot_id.trimmed();
+    if (selected.isEmpty()) {
+        return QStringLiteral(
+                   "This robot has no ID on file (%1), so it was not confirmed.")
+            .arg(QLatin1String(kRobotIdentityPath));
+    }
+    return QStringLiteral(
+               "This robot has no ID on file (%1), so it was not confirmed to be %2.")
+        .arg(QLatin1String(kRobotIdentityPath), selected);
+}
+
+QString robotIdentityProbePrefix(const QString& expected_robot_id,
+                                 const QString& id_path) {
+    return identityReadAndPrint(id_path) +
+           QStringLiteral("if [ -n \"$_bdr_id\" ] && [ \"$_bdr_id\" != ") +
+           shellSingleQuote(expected_robot_id.trimmed()) +
+           QStringLiteral(" ]; then exit 0; fi; ");
+}
+
+QString robotIdentityMatchPrefix(const QString& expected_robot_id,
+                                 const QString& id_path) {
+    // External printf flushes when that process exits, so the laptop sees
+    // the line while the spin is still running. A bash builtin would sit
+    // in the shell's block buffer until the whole script ended.
+    return identityReadAndPrint(id_path) +
+           QStringLiteral("if [ \"$_bdr_id\" != ") +
+           shellSingleQuote(expected_robot_id.trimmed()) +
+           QStringLiteral(" ] || [ -z \"$_bdr_id\" ]; then exit 0; fi; "
+                          "/usr/bin/printf 'BDR_IDENTITY_OK\\n' || true; ");
 }
 
 }  // namespace f2c_cpp

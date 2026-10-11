@@ -102,8 +102,9 @@ opened from the Dashboard and returns there. Rules: keep `findById`
 an exact match (`Roofus#001` and `Roofus#0001` are different robots);
 a `paired_robot_id` that is not listed is an error, never a fallback
 to another robot; do not bring back a PIN gate. `robot_login.cpp` is
-compiled but unused for one release, then delete it. Still owed: a
-robot identity check before Send / map capture (`docs/DEV_BYPASSES.md`).
+compiled but unused for one release, then delete it. Send and
+Capture Point Cloud read `/etc/pilot_robot_id` and refuse to arm when
+it is not exactly `setup/robot_id` (`docs/DEV_BYPASSES.md`).
 
 The monolithic legacy window **`CoverageGUI`** has been **removed** from the
 tree (`coverage_gui.hpp/.cpp` deleted). Live UI is `AppShellWindow` + staged
@@ -1698,6 +1699,14 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  (flushed per line, newest `kMissionLogsKept = 10` kept). Do not also write
  from `hookProcessLogging` — process output would land twice — and do not
  re-log `recentRobotOutput()` at failure time for the same reason.
+- **Send and Capture Point Cloud check `/etc/pilot_robot_id`.** The
+  pre-launch sweep and the map-collection script print `BDR_ROBOT_ID:`
+  and exit before pkill or `ros2 launch` unless it is exactly
+  `setup/robot_id`. `classifyRobotIdentity` /
+  `decidePreLaunchIdentity` are the decision — a zero SSH exit is not
+  success, and a rejected check must not be followed by a robot sweep
+  (that sweep would kill the other robot's stack). A missing or empty
+  file warns and continues. Do not arm first and compare after.
 - **Launch is Scan Parameters Next**, not a Send button. Back from the scan page
  while the stack is up (and Start Scan has never run) confirms teardown;
  once autonomy has run, Back is disabled — Cancel / Complete are the exits.
