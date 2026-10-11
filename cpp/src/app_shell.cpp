@@ -767,7 +767,8 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     // loop for design iteration without a robot or an operator. Optional:
     // BDR_DEV_STAGE6_SHOT_DARK=1 (dark theme), BDR_DEV_STAGE6_SHOT_MODE=
     // measured|measured_map|scan|correspond|review|correspond_outlier|
-    // review_outlier|roi|plan|plan_confirm|revisit_align|revisit_search
+    // review_outlier|seed|seed_pair|seed_position|seed_none|seed_outside|
+    // roi|plan|plan_confirm|revisit_align|revisit_search
     // (default: planning-only satellite trim). See docs/DEV_BYPASSES.md.
     if (!qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
         const QString shot_path =
@@ -964,6 +965,25 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                     stage6_->devSeedDemoAlignment(
                         shot_mode.startsWith(QStringLiteral("review")),
                         shot_mode.endsWith(QStringLiteral("_outlier")));
+                } else if (shot_mode.startsWith(QStringLiteral("seed"))) {
+                    // GPS pre-alignment, before the picks take over: the
+                    // skewed site, so a seeded pane is visibly turned.
+                    //   seed          position + heading, nothing picked
+                    //   seed_pair     one pair (position re-pinned)
+                    //   seed_position position only
+                    //   seed_none     no fix during collection
+                    //   seed_outside  fix lands off the imagery
+                    stage6_->configureForScan(
+                        SatelliteScreen::PlanMode::Satellite);
+                    stage6_->devSeedDemoPlan();
+                    const int gps =
+                        shot_mode == QStringLiteral("seed_position") ? 1
+                        : shot_mode == QStringLiteral("seed_none")   ? 2
+                        : shot_mode == QStringLiteral("seed_outside") ? 3
+                                                                       : 0;
+                    stage6_->devSeedDemoAlignment(
+                        false, true,
+                        shot_mode == QStringLiteral("seed_pair") ? 1 : 0, gps);
                 } else if (shot_mode == QStringLiteral("params")) {
                     stage6_->configureForScan(
                         SatelliteScreen::PlanMode::Satellite);

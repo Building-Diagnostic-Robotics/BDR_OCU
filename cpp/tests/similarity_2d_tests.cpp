@@ -16,6 +16,7 @@
 #include <cmath>
 
 using f2c_cpp::estimateSimilarity2D;
+using f2c_cpp::FitHandedness;
 using f2c_cpp::leaveOneOutOutlier;
 using f2c_cpp::SimilarityFit;
 
@@ -186,4 +187,96 @@ TEST(Similarity2D, RejectsDegenerate) {
     const QVector<QPointF> pcd{{1.0, 1.0}, {1.0, 1.0}};
     const QVector<QPointF> sat{{0.0, 0.0}, {4.0, 0.0}};
     EXPECT_FALSE(estimateSimilarity2D(pcd, sat).has_value());
+}
+
+// ---- handedness (this repo's addition; see FitHandedness) -------------------
+//
+// Both alignment inputs are top-down views of one roof. The cloud may be
+// turned to meet the imagery but never mirrored, and for metres (Y up) into
+// pixels (Y down) that is the orientation-REVERSING branch.
+
+namespace {
+
+double determinantOf(const SimilarityFit& f) {
+    return f.transform.a00 * f.transform.a11 - f.transform.a01 * f.transform.a10;
+}
+
+}  // namespace
+
+TEST_F(WeightedFit, PinnedBranchRecoversTheSameExactFit) {
+    const auto pinned = estimateSimilarity2D(pcd, sat, QVector<double>(),
+                                             FitHandedness::Reversing);
+    ASSERT_TRUE(pinned.has_value());
+    EXPECT_NEAR(pinned->rmse_m, 0.0, 1e-9);
+    EXPECT_LT(determinantOf(*pinned), 0.0);
+    EXPECT_NEAR(headingOf(*pinned), headingOf(*exact), 1e-9);
+}
+
+TEST(Handedness, NearCollinearNoisyPicksCannotComeBackMirrored) {
+    // Three picks along one parapet, with a little noise across it. Left free,
+    // the solver fits the mirror image slightly better and returns it: the roof
+    // flipped across the line of the picks. Pinned, it cannot.
+    const QVector<QPointF> pcd{{-30.0, 0.4}, {0.0, -0.5}, {30.0, 0.3}};
+    QVector<QPointF> sat;
+    for (const QPointF& m : pcd) {
+        sat.append(truth(m));
+    }
+    // Noise ACROSS the line, opposite in sign to the cloud's own wobble, which
+    // is exactly what makes the mirrored branch the better least-squares fit.
+    const double c = std::cos(kHeading), s = std::sin(kHeading);
+    const QPointF across(-s * kPxPerM, -c * kPxPerM);  // +1 m of robot Y, in px
+    sat[0] -= 0.8 * across;
+    sat[1] += 1.0 * across;
+    sat[2] -= 0.6 * across;
+
+    const auto free_fit = estimateSimilarity2D(pcd, sat);
+    ASSERT_TRUE(free_fit.has_value());
+    ASSERT_GT(determinantOf(*free_fit), 0.0)
+        << "fixture no longer provokes the mirror; it proves nothing";
+
+    const auto pinned = estimateSimilarity2D(pcd, sat, QVector<double>(),
+                                             FitHandedness::Reversing);
+    ASSERT_TRUE(pinned.has_value());
+    EXPECT_LT(determinantOf(*pinned), 0.0);
+    EXPECT_TRUE(pinned->transform.reflected);
+    // And it is still the right way round along the line it can observe.
+    EXPECT_NEAR(headingOf(*pinned), std::atan2(-s, c), 0.05);
+}
+
+TEST(Handedness, TwoPairsFitExactlyOnThePinnedBranch) {
+    // Two pairs fit BOTH branches with zero residual, so nothing but the pin
+    // decides which one the live preview shows from the second pick.
+    const QVector<QPointF> pcd{{-12.0, 5.0}, {9.0, -7.0}};
+    const QVector<QPointF> sat{truth(pcd[0]), truth(pcd[1])};
+    const auto pinned = estimateSimilarity2D(pcd, sat, QVector<double>(),
+                                             FitHandedness::Reversing);
+    ASSERT_TRUE(pinned.has_value());
+    EXPECT_NEAR(pinned->rmse_m, 0.0, 1e-9);
+    EXPECT_LT(determinantOf(*pinned), 0.0);
+    // A third point neither pair saw lands where the truth puts it.
+    const QPointF probe(4.0, 20.0);
+    const QPointF got = pinned->transform.apply(probe);
+    EXPECT_NEAR(got.x(), truth(probe).x(), 1e-6);
+    EXPECT_NEAR(got.y(), truth(probe).y(), 1e-6);
+}
+
+TEST(Handedness, PreservingIsTheOppositeBranch) {
+    const QVector<QPointF> pcd{{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    QVector<QPointF> sat;
+    for (const QPointF& m : pcd) {
+        sat.append(QPointF(100.0 + 3.0 * m.x(), 50.0 + 3.0 * m.y()));
+    }
+    const auto proper = estimateSimilarity2D(pcd, sat, QVector<double>(),
+                                             FitHandedness::Preserving);
+    ASSERT_TRUE(proper.has_value());
+    EXPECT_GT(determinantOf(*proper), 0.0);
+    EXPECT_NEAR(proper->rmse_m, 0.0, 1e-9);
+    // Held to the wrong branch the same data cannot be fitted: that is the
+    // constraint doing its job, not a failure of the solver.
+    const auto forced = estimateSimilarity2D(pcd, sat, QVector<double>(),
+                                             FitHandedness::Reversing);
+    if (forced.has_value()) {
+        EXPECT_LT(determinantOf(*forced), 0.0);
+        EXPECT_GT(forced->rmse_m, 1.0);
+    }
 }

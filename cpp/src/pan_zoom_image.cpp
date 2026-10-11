@@ -2,6 +2,7 @@
 
 #include "satellite_palette.hpp"
 
+#include <QFontMetricsF>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
@@ -64,9 +65,17 @@ void PanZoomImageWidget::setImage(const QImage& image) {
         update();
         return;
     }
+    // A requested framing is in image pixels, so it only outlives an image of
+    // the same size — and there it must, or a refresh that lands before the
+    // pane has been laid out would silently drop it.
+    const QRectF keep_frame = same_frame ? frame_rect_ : QRectF();
     user_adjusted_ = false;
     view_fitted_ = false;
     fitToView();
+    if (!keep_frame.isNull()) {
+        frame_rect_ = keep_frame;
+        applyFrameRect();
+    }
     update();
 }
 
@@ -186,6 +195,16 @@ void PanZoomImageWidget::setRobotPose(const QPointF& origin_px,
     update();
 }
 
+void PanZoomImageWidget::setSeedMarker(const QPointF& center_px,
+                                       double radius_px, const QString& label,
+                                       bool visible) {
+    seed_center_ = center_px;
+    seed_radius_px_ = radius_px;
+    seed_label_ = label;
+    seed_visible_ = visible;
+    update();
+}
+
 void PanZoomImageWidget::setResidualLines(const QVector<QLineF>& lines) {
     residual_lines_ = lines;
     update();
@@ -206,6 +225,7 @@ void PanZoomImageWidget::clearOverlays() {
     flagged_number_ = -1;
     pending_visible_ = false;
     robot_visible_ = false;
+    seed_visible_ = false;
     status_text_.clear();
     update();
 }
@@ -228,7 +248,29 @@ void PanZoomImageWidget::setView(const QPointF& image_center, double scale) {
     // Same contract as pan and zoom: this IS a framing, so a later resize must
     // not re-fit over it.
     user_adjusted_ = true;
+    frame_rect_ = QRectF();
     update();
+}
+
+void PanZoomImageWidget::frameImageRect(const QRectF& image_rect) {
+    frame_rect_ = image_rect;
+    applyFrameRect();
+}
+
+bool PanZoomImageWidget::applyFrameRect() {
+    if (image_.isNull() || frame_rect_.width() < 1.0 ||
+        frame_rect_.height() < 1.0 || width() < 2 || height() < 2) {
+        return false;
+    }
+    const QRectF rect = frame_rect_;
+    setView(rect.center(), 0.9 * std::min(width() / rect.width(),
+                                          height() / rect.height()));
+    // setView treats itself as the operator's framing. This one is ours: it
+    // has to follow the pane through layout, and yield only to a real pan or
+    // zoom.
+    frame_rect_ = rect;
+    user_adjusted_ = false;
+    return true;
 }
 
 QRectF PanZoomImageWidget::viewRect() const {
@@ -237,6 +279,12 @@ QRectF PanZoomImageWidget::viewRect() const {
 
 void PanZoomImageWidget::fitToView() {
     user_adjusted_ = false;
+    // A pending framing wins over the whole-image fit: this is also the path
+    // layout and the first paint take, and they must not undo a framing that
+    // was requested before the pane had a size.
+    if (!frame_rect_.isNull() && applyFrameRect()) {
+        return;
+    }
     if (image_.isNull()) {
         return;
     }
@@ -427,6 +475,39 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
         drawMarker(pending_marker_, markers_.size() + 1, true);
     }
 
+    if (seed_visible_) {
+        const QPointF center = imageToScreen(seed_center_);
+        // A good fix is centimetres, which would draw as a dot nobody can
+        // find; the floor keeps the mark visible without claiming an
+        // uncertainty the receiver did not report.
+        const double radius = std::max(14.0, seed_radius_px_ * scale_);
+        // Matte under the stroke, as on the outlier ring: the circle lands on
+        // imagery and has to read on a tan roof as well as a dark one.
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(satpal::cardBg(), 4));
+        painter.drawEllipse(center, radius, radius);
+        QPen pen(satpal::info(), 2, Qt::DashLine);
+        painter.setPen(pen);
+        painter.drawEllipse(center, radius, radius);
+        painter.drawLine(center - QPointF(5, 0), center + QPointF(5, 0));
+        painter.drawLine(center - QPointF(0, 5), center + QPointF(0, 5));
+        if (!seed_label_.isEmpty()) {
+            QFont font(QStringLiteral("Arimo"), 8, QFont::Bold);
+            painter.setFont(font);
+            const QRectF text_rect =
+                QFontMetricsF(font)
+                    .boundingRect(seed_label_)
+                    .adjusted(-5, -3, 5, 3)
+                    .translated(center + QPointF(radius * 0.72 + 8,
+                                                 radius * 0.72 + 12));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(satpal::cardBg());
+            painter.drawRoundedRect(text_rect, 4, 4);
+            painter.setPen(satpal::text());
+            painter.drawText(text_rect, Qt::AlignCenter, seed_label_);
+        }
+    }
+
     if (robot_visible_) {
         const QPointF origin = imageToScreen(robot_origin_);
         // A fixed pixel-size glyph, so unlike the markers it does not pass
@@ -541,7 +622,9 @@ void PanZoomImageWidget::paintEvent(QPaintEvent* event) {
 
 void PanZoomImageWidget::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
-    if (!view_fitted_ || !user_adjusted_) {
+    if (!user_adjusted_ && !frame_rect_.isNull()) {
+        applyFrameRect();
+    } else if (!view_fitted_ || !user_adjusted_) {
         fitToView();
     }
     layoutResetRotation();

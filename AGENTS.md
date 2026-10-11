@@ -1229,10 +1229,11 @@ across plans or visits. A cancelled Back keeps everything.
  Neither pane picks until both images exist.
 3. **Align** runs `fitSimilarityRobust` (see the robust paragraph below;
  `estimateSimilarity2D` survives only as the unweighted seed that
- bootstraps a px/m when the manifest has no `res_m`). Minimum pairs is
- **3 with a GPS seed, 5 without** (`SatelliteScreen::minCorrespondences`) —
- the seed independently pins position and usually heading, so the fit only
- has to find scale.
+ bootstraps a px/m when the stitch has no georeference). Minimum pairs is
+ **3 with a recorded GPS fix, 5 without** (`SatelliteScreen::minCorrespondences`,
+ keyed to `capture_gps_.valid` — operator-locked; a fix that is rejected or
+ lands off the imagery still counts, and is called out in the bar instead).
+ The fit is never solved from the seed; see "GPS pre-alignment".
 4. **Anchor** (same click, `applyAlignmentAnchor`) turns the fit into a
  surveyed robot anchor: robot_init (0,0) maps to a stitch pixel, and the
  manifest's `stitch_bounds` (normalized Web Mercator) turns that pixel into
@@ -1261,8 +1262,8 @@ one. Below 4 pairs the card also says the fit was never checked for a bad
 pick, because the studentised test abstains there and the instruction bar
 that says so is off screen by the time the card is up.
 Sigma needs a px/m to make the satellite term metric:
-the manifest's `res_m` is the honest source, and only when it is missing
-is a scale bootstrapped from an unweighted seed fit.
+`stitchPxPerM()` is the honest source, and only when the stitch has no
+georeference is a scale bootstrapped from an unweighted seed fit.
 
 The robust pass also reports `outliers`, `weakly_checked`, `studentized`
 and `min_detectable_m`. `worstOutlierIndex` reduces that to the one pair
@@ -1281,6 +1282,70 @@ a bad pick" in the instruction bar.
 The ring carries a matte halo under the amber stroke. Two of the eight
 marker colours are themselves amber and the ring lands on the imagery, so
 without it a tan roof or pair 3 swallows the mark.
+
+### GPS pre-alignment (step 2, before and beside the picks)
+
+`gps_prealign.{hpp,cpp}` turns the map-collection fix into a starting
+similarity, so the satellite pane opens already in the robot frame.
+`updateSatelliteAlignmentView()` owns it: `seed_` is re-derived on every pass
+(`currentSeedPlacement()`), never cached at capture, because it depends on the
+stitch as much as the fix and those arrive in either order.
+
+- **`preview_source_` is the hand-over**: `Seed` (0 pairs — the seed fit),
+ `SeedPinned` (1 pair — `refitSeedThroughPair`: translation from the pick,
+ rotation and scale still from GPS), `Picks` (2+ — the robust fit alone).
+ The seed is only ever a fallback; it is never blended into a pick fit.
+- **`SeedStatus` is the case handling, and each case has a different
+ operator message** in `#SatCorrBar` and the mission log: `NoFix`,
+ `NoGeoRef`, `OutsideImagery`, `PositionOnly`, `Oriented`. Do not collapse
+ them back to "no GPS seed" — `OutsideImagery` usually means the plan was
+ downloaded for the wrong address, and that needs the opposite response to a
+ robot with no sky view.
+- **`gps_valid: true` is not a usable fix.** The robot sets it whenever any
+ sample arrived, including NO_FIX ones carrying zeros. `makeGpsSeed` rejects
+ fix type `none`, non-finite or out-of-range coordinates, exact (0, 0), and
+ `hacc_m > kSeedMaxHaccM`. A missing covariance (`hacc_m == 0`) is assumed
+ as good as its fix type usually is, never perfect.
+- **`stitchPxPerM()` is the imagery's ground scale; `site_manifest_.res_m`
+ is not.** `res_m` is Esri's `SRC_RES`, the SOURCE's native GSD (0.3 m is
+ typical), while a z19 stitch pixel covers ~0.22 m at 43°N. The scale guard
+ (`plausibleForProjection`) used to compare against `1 / res_m`, which put
+ every correct fit ~30% outside a 10% tolerance: the live re-projection sat
+ on "Map held" on real sites, and the dev fixtures never showed it because
+ they carried no `res_m`. Do not read `res_m` in the alignment path again.
+- **The dev fixtures are self-consistent on purpose.** `devStitchBounds`
+ derives the stitch extent, the GPS fix and the picks from one anchor. A
+ fixture whose georeference contradicts its own picks trips the scale guard
+ and the seed cross-check, and every shot becomes the failure path.
+- **The seed marker stays up while picking.** The dashed circle
+ (`PanZoomImageWidget::setSeedMarker`, 2-sigma) is the fix; the green glyph
+ is the current fit. Seeing them drift apart is the cross-check made
+ visible, and `seedDisagrees` turns the same thing into the amber clause and
+ the success card's last line. Heading is checked loosely off anything but
+ RTK (`kSeedHeadingWarnDeg = 45`): the bearing comes from a ~1 m track, and
+ an advisory that fires on every ordinary fix trains the operator to ignore
+ it.
+- `frameSatelliteOnSeed()` frames the pane on the cloud's extent ONCE per
+ capture, through `PanZoomImageWidget::frameImageRect` — not `setView`,
+ which silently no-ops before layout has sized the pane and would leave the
+ imagery as a thumbnail in the corner.
+- `seed`, `seed_pair`, `seed_position`, `seed_none`, `seed_outside` shot
+ modes render each case.
+
+### No mirror: the fit is rotation only
+
+Both panes are top-down views of one roof, so the cloud can be turned to
+meet the imagery but never mirrored. Metres are Y-up and pixels Y-down, so
+that pure rotation is WRITTEN as an orientation-reversing matrix
+(determinant < 0) — `Similarity2D::reflected == true` is the normal, correct
+state and does not mean the roof was flipped. Every solve in
+`satellite_screen.cpp` passes `kPcdToSatHandedness`
+(`FitHandedness::Reversing`): the preview, Align, the px/m bootstrap and
+`leaveOneOutOutlier`. Upstream solves both branches and keeps the lower
+residual, which returns the mirrored roof for near-collinear or noisy picks
+(`Handedness.NearCollinearNoisyPicksCannotComeBackMirrored` reproduces it),
+and a mirrored anchor exports a mirrored ROI. Do not pass `Free` here, and do
+not add a new solve call without the constant.
 
 ### Live re-projection (step 2 satellite pane only)
 
@@ -1391,14 +1456,21 @@ instruction bar then read.
 `pilot_control/scripts/F2C/cpp/` (pilot_ws branch `autonomy`) is a **live
 parallel OCU** where alignment work is developed. `similarity_2d.*` and
 `alignment_geometry.*` are ports of that tree at commit `a287113`, and
-their file headers name it. Keep the **code** identical to upstream —
-the provenance note is the only intended difference — so the next port
-stays a three-way diff instead of archaeology. Fix bugs in both copies
+their file headers name it. Keep the **code** identical to upstream so the
+next port stays a three-way diff instead of archaeology. The intended
+differences are the provenance notes, the canvas crop in
+`alignment_geometry.*` (below), and `FitHandedness` in `similarity_2d.*`
+(the default is `Free`, so upstream callers and tests are unaffected) —
+both are owed a port back. `gps_prealign.*` is an adaptation, not a port:
+upstream georeferences a frozen ArcGIS view through a flat-earth constant,
+this copy a north-up Web Mercator stitch, and the `SeedStatus` cases and
+`refitSeedThroughPair` exist only here. Fix bugs in both copies
 or in neither. The tests are the deliberate exception: upstream uses a
 hand-rolled `int main()` / `printf` harness and this repo is uniformly
 GoogleTest, so `similarity_2d_tests`, `robust_fit_tests`,
 `canvas_extent_tests`, `aligned_canvas_tests` and `pick_loop_tests` are
-converted rather than copied.
+converted rather than copied. `gps_prealign_tests` is written for this
+copy's API.
 
 `alignedCanvasFor` is consumed by `renderAlignedSatellite` (see "Live
 re-projection" above). `canvas_extent_tests` transcribes an extent rule
@@ -1741,7 +1813,8 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  accepted is not the same as the axes having moved.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
  (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|
- correspond_outlier|review_outlier|roi|edges|params|run|plan|plan_confirm|revisit_align|
+ correspond_outlier|review_outlier|seed|seed_pair|seed_position|seed_none|
+ seed_outside|roi|edges|params|run|plan|plan_confirm|revisit_align|
  revisit_search`,
  `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog

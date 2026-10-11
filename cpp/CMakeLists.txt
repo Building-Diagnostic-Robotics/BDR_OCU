@@ -153,6 +153,7 @@ set(HEADERS
     include/swath_preview.hpp
     include/alignment_geometry.hpp
     include/similarity_2d.hpp
+    include/gps_prealign.hpp
     include/pan_zoom_image.hpp
     include/satellite_map_capture.hpp
     include/components/scan_setup_dialog.hpp
@@ -290,6 +291,7 @@ set(GUI_SOURCES
     src/satellite_job_model.cpp
     src/swath_preview.cpp
     src/similarity_2d.cpp
+    src/gps_prealign.cpp
     src/alignment_geometry.cpp
     src/pan_zoom_image.cpp
     src/satellite_map_capture.cpp
@@ -525,6 +527,25 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME robust_fit_tests COMMAND robust_fit_tests)
 
+        # Pure geometry: QtCore for QPointF/QRectF, Eigen through
+        # similarity_2d. No widget, network or robot.
+        add_executable(gps_prealign_tests
+            tests/gps_prealign_tests.cpp
+            src/gps_prealign.cpp
+            src/similarity_2d.cpp
+        )
+        target_include_directories(gps_prealign_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${EIGEN3_INCLUDE_DIRS}
+        )
+        target_link_libraries(gps_prealign_tests PRIVATE
+            Eigen3::Eigen
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME gps_prealign_tests COMMAND gps_prealign_tests)
+
         # The alignment-geometry tests are identical in shape and differ only
         # in which invariant they cover, so they are declared in a loop rather
         # than as three copies of the same block. They need QT_GUI_LIBS, not
@@ -731,7 +752,7 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME touch_gesture_state_tests COMMAND touch_gesture_state_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests swath_preview_tests)")
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests gps_prealign_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests touch_gesture_state_tests swath_preview_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

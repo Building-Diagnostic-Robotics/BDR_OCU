@@ -177,15 +177,38 @@ still wins; the setback is not a safety system.
    **Clear pairs** beside Back and **Align (N pairs)** beside Next. Ctrl+Z
    undoes the last pick.
 
-   You need **3 pairs if the collection got a GPS fix, 5 if it did not**. The
-   fix independently pins position and usually heading, which leaves the fit
-   only needing scale; without it the fit has to find everything from the
-   picks and wants the redundancy. Spread the picks around the site — four
-   points clustered in one corner solve badly regardless of count.
+   **GPS pre-alignment.** If the collection got a GPS fix with a heading,
+   the satellite image opens **already turned to match the point cloud** and
+   framed on the same patch of roof, before you pick anything. A dashed blue
+   circle marks the fix and its uncertainty; the green arrow is where the
+   robot is currently believed to be. This is a starting view, not the
+   answer — it is as good as the fix, which is metres on an ordinary one.
+   The instruction bar says which case you are in:
 
-   From the **second pair on, the satellite image turns to line up with the
-   point cloud** and keeps correcting itself as you add pairs, so each new
-   feature is picked against imagery that already roughly agrees. Short red
+   | Collection gave | Satellite pane opens | Pairs needed |
+   |---|---|---|
+   | Position and heading | Turned to match, framed on the cloud | 3 |
+   | Position, no heading (seed drive skipped or too short) | North-up, circle on the robot | 3 |
+   | A fix the OCU rejected (no-fix status, far too coarse) | North-up, as downloaded | 3 |
+   | A fix that lands off the downloaded imagery | North-up, amber "wrong site?" | 3 |
+   | No fix recorded at all | North-up, as downloaded | 5 |
+
+   The last row usually means the plan was downloaded for a different
+   address than the roof the robot is on. Check that before hunting for
+   matching features.
+
+   The fit is solved from your picks alone; the fix is never mixed into it.
+   A recorded fix lowers the minimum from 5 pairs to 3. Spread the picks around the site —
+   four points clustered in one corner solve badly regardless of count.
+
+   The **first pair** re-pins the robot's position (one pick beats metres of
+   GPS error) while the heading still comes from GPS. From the **second pair
+   on, the picks take over completely**: the satellite image turns to line up
+   with the point cloud and keeps correcting itself as you add pairs, so each
+   new feature is picked against imagery that already roughly agrees. If the
+   picks end up putting the robot well away from the GPS circle, the bar says
+   so in amber — the picks may be consistent with each other and still be on
+   the wrong part of the roof. Short red
    spurs show where the current fit misses each pair. Your zoom and framing
    survive each correction; a black (or grey, in light mode) margin around
    the imagery is the rotated picture's padding and cannot be picked in. If
@@ -204,12 +227,15 @@ still wins; the setback is not a safety system.
    projection rather than swinging somewhere useless. Re-pick that pair and
    it resumes.
 
-5. **Align** solves a 2D similarity (scale, rotation, optional reflection,
-   translation) and commits it in the same click: an **Alignment
+5. **Align** solves a 2D similarity (scale, in-plane rotation, translation —
+   never a mirror image: both panes are top-down views of the same roof) and
+   commits it in the same click: an **Alignment
    Successful** card covers the point cloud, the robot's origin is drawn on
    the satellite image, and Next enables. The card's **Fit consistency** is
    how well your picks agree with each other, not a survey accuracy — and
-   below 4 pairs it says the fit was never checked for a bad pick. The origin becomes a
+   below 4 pairs it says the fit was never checked for a bad pick. Its last
+   line compares the result with the GPS fix (**agrees to** / **disagrees
+   by**), or says there was no fix to check against. The origin becomes a
    surveyed lat/lon anchor saved with the plan, and every ROI vertex
    exported at Send inherits that accuracy. Check the marker sits where the
    robot actually stood; if it does not, **Clear pairs** and pick again.

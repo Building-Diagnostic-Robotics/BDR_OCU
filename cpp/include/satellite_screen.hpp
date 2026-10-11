@@ -32,6 +32,7 @@
 #include "satellite_job_model.hpp"
 #include "satellite_map_capture.hpp"
 #include "satellite_tile_service.hpp"
+#include "gps_prealign.hpp"
 #include "similarity_2d.hpp"
 
 #include "satellite_ros_link.hpp"
@@ -110,7 +111,14 @@ public:
         rotation between the two frames plus one deliberately bad pick, so
         the re-projection, the residual spurs and the outlier ring all have
         something to show. */
-    void devSeedDemoAlignment(bool review, bool skewed = false);
+    /**
+     * `keep_pairs` trims the seeded picks (-1 keeps them all) so the GPS
+     * pre-alignment states — nothing picked, one pair — can be shot.
+     * `gps`: 0 = position + heading, 1 = position only, 2 = no fix,
+     * 3 = a fix that lands off the imagery.
+     */
+    void devSeedDemoAlignment(bool review, bool skewed = false,
+                              int keep_pairs = -1, int gps = 0);
     /** Dev shot only: step 2 before any capture (site + capture CTA). */
     void devSeedDemoAlignmentEmpty();
     /** Dev shot only: aligned, then step 3 with the demo polygon closed. */
@@ -373,14 +381,33 @@ private:
      * needing operator judgement.
      */
     bool plausibleForProjection(const Similarity2D& fit) const;
+    /** Georeference of the loaded stitch; invalid until a site image is in. */
+    StitchGeoRef stitchGeoRef() const;
+    /**
+     * Stitch pixels per ground metre, from the stitch's own Web Mercator
+     * extent. 0 when the image carries no georeference. This — not the
+     * manifest's `res_m`, which is the imagery SOURCE's native GSD and can be
+     * a third off what a z19 pixel actually covers — is the scale a fit has
+     * to agree with.
+     */
+    double stitchPxPerM() const;
+    /** This capture's GPS fix resolved against the loaded stitch. */
+    SeedPlacement currentSeedPlacement() const;
+    /**
+     * Frames the satellite pane on the ground the point-cloud pane shows, the
+     * first time a GPS seed places the cloud. After that the operator owns
+     * the viewpoint, as with every later re-projection.
+     */
+    void frameSatelliteOnSeed();
     void updateAlignCardUi();
     /** Loads the job's stitched site.jpg + manifest for picking. Empty on ok. */
     QString loadSiteImage();
     /**
-     * Correspondences needed before Align unlocks. A GPS seed independently
-     * pins position and (usually) heading, so three well-spread pairs are
-     * enough to solve scale; without it the fit has to find everything from
-     * the picks alone and needs the extra redundancy.
+     * Correspondences needed before Align unlocks: 3 when the collection
+     * recorded a GPS fix, 5 when it did not. Keyed to the fix being recorded,
+     * not to whether the seed turned out usable — operator-locked. A recorded
+     * fix that is rejected or lands off the imagery still gets its own
+     * message in the bar; it just does not raise the minimum.
      */
     int minCorrespondences() const;
     /**
@@ -731,6 +758,23 @@ private:
      * is only written by Align and is what the anchor and Send read.
      */
     Similarity2D preview_fit_;
+    /** What `preview_fit_` was built from; drives what the bar tells the operator. */
+    enum class PreviewSource {
+        None,
+        /** GPS position + heading, nothing picked yet. */
+        Seed,
+        /** One pair: position from the pick, heading still from GPS. */
+        SeedPinned,
+        /** Two or more pairs: the picks alone. */
+        Picks,
+    };
+    PreviewSource preview_source_ = PreviewSource::None;
+    /** This capture's fix against the loaded stitch, refreshed with the preview. */
+    SeedPlacement seed_;
+    /** `preview_fit_` (or the solved fit) measured against `seed_`. */
+    SeedAgreement seed_agreement_;
+    /** The pane has been framed on the seed once; see frameSatelliteOnSeed. */
+    bool seed_view_framed_ = false;
     /** Per-pair miss under `preview_fit_`, in PCD metres, in pick order. */
     QVector<double> corr_residuals_m_;
     /** Per-pair leverage-corrected residual over its own expected precision. */
