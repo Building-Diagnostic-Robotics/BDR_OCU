@@ -76,6 +76,16 @@ public:
      */
     QString cloudApiBase() const { return cloud_api_base_; }
 
+    /**
+     * The robot this laptop operates: the optional top-level
+     * "paired_robot_id" when set, else the only robot in the file.
+     * Empty when several robots are listed and none is named (the caller
+     * offers a picker). Also empty, with `error` set, when
+     * "paired_robot_id" names a robot the file does not list — guessing
+     * there would point every SSH call at the wrong robot.
+     */
+    QString pairedRobotId(QString* error = nullptr) const;
+
     QString sourcePath() const { return source_path_; }
 
     static QString slugifyRobotId(const QString& robot_id);
@@ -85,6 +95,7 @@ private:
     QList<RobotProfile> robots_;
     QString source_path_;
     QString cloud_api_base_;
+    QString paired_robot_id_;
     bool loaded_ = false;
 };
 

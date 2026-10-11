@@ -38,8 +38,8 @@ sudo dpkg -i build/bdr-coverage-planner_1.0.0_amd64.deb
 
 | Stage | Class | Purpose |
 |-------|-------|---------|
-| 1 | `SetupScreen` | Initial config (robot selection, settings) |
-| 2 | `StartupScreen` | Pre-flight checks / login |
+| 1 | `SetupScreen` | Get started: pick the paired robot from `robots.json` (no login) |
+| 2 | `StartupScreen` | Pre-flight checks, opened from the Dashboard |
 | 3 | `DashboardScreen` | Robot status overview |
 | 4 | `ExplorationScreen` | Live scan operation with teleop |
 | 5 | `PlannerScreen` | Post-scan coverage path planning |

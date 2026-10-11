@@ -254,8 +254,9 @@ DashboardScreen::DashboardScreen(QWidget* parent)
         btn_logout_->setIcon(QIcon(logoutPix));
         btn_logout_->setIconSize(QSize(20, 20));
     }
-    btn_logout_->setText(" Logout");
-    connect(btn_logout_, &QPushButton::clicked, this, &DashboardScreen::onLogoutClicked);
+    btn_logout_->setText(" Switch robot");
+    btn_logout_->setVisible(false);
+    connect(btn_logout_, &QPushButton::clicked, this, &DashboardScreen::switchRobotRequested);
     headerRow->addWidget(btn_logout_, 0, Qt::AlignRight | Qt::AlignVCenter);
 
     headerLayout->addLayout(headerRow);
@@ -475,8 +476,10 @@ void DashboardScreen::setDarkMode(bool dark_mode) {
     applyStyle();
 }
 
-void DashboardScreen::onLogoutClicked() {
-    emit logoutRequested();
+void DashboardScreen::setRobotSwitchable(bool switchable) {
+    if (btn_logout_) {
+        btn_logout_->setVisible(switchable);
+    }
 }
 
 void DashboardScreen::onStartNewScanClicked() {

@@ -1,19 +1,25 @@
 #pragma once
 
+#include <QHash>
 #include <QPixmap>
 #include <QProcess>
 #include <QString>
 #include <QWidget>
-#include <utility>
 
+class QComboBox;
 class QLabel;
-class QLineEdit;
 class QPushButton;
-class QToolButton;
 class QTimer;
 
 namespace f2c_cpp {
 
+/**
+ * Stage 1 "Get started". The robot comes from robots.json (see
+ * `RobotRegistry::pairedRobotId`), not from a typed ID and PIN, so the
+ * Dashboard — and with it planning and thumb-drive upload — opens with the
+ * robot powered off. A laptop whose file lists several robots and names
+ * none gets a picker instead.
+ */
 class SetupScreen : public QWidget {
     Q_OBJECT
 
@@ -21,28 +27,27 @@ public:
     explicit SetupScreen(QWidget* parent = nullptr);
     void setDarkMode(bool dark_mode);
 
+    /** True when the operator chooses the robot here (several robots, none paired). */
+    bool robotIsPickable() const { return robot_picker_ != nullptr; }
+
 signals:
-    void loginSubmitted(const QString& robotId, const QString& accessCode);
+    void getStartedRequested(const QString& robotId);
 
 private slots:
-    void updateUiState();
-    void toggleAccessCodeVisible();
     void submit();
     void startConnectionMonitor();
     void checkConnection();
     void onPingFinished(int exitCode, QProcess::ExitStatus exitStatus);
 
 private:
-    /** Returns trimmed robot ID and access code; single source of truth for validation. */
-    std::pair<QString, QString> getTrimmedCredentials() const;
-
+    QString selectedRobotId() const;
     void applyLocalStyle();
     void updateConnectionUi(bool connected);
 
-    QLineEdit* txt_robot_id_ = nullptr;
-    QLineEdit* txt_access_code_ = nullptr;
-    QToolButton* btn_view_code_ = nullptr;
-    QPushButton* btn_login_ = nullptr;
+    QLabel* lbl_robot_value_ = nullptr;
+    QComboBox* robot_picker_ = nullptr;
+    QPushButton* btn_start_ = nullptr;
+    QLabel* lbl_override_ = nullptr;
     QLabel* lbl_error_ = nullptr;
 
     QLabel* lbl_connection_ = nullptr;
@@ -53,11 +58,10 @@ private:
     QPixmap wireframe_connected_;
     QPixmap wireframe_disconnected_;
 
-    /// Cached host IP of the first robot in robots.json, resolved once at
-    /// construction. Drives the connection-status indicator (top-left
-    /// CONNECTED/DISCONNECTED) which reflects radio-link reachability —
-    /// independent of whatever Robot ID the operator has typed.
-    QString connection_target_host_;
+    QString paired_robot_id_;
+    /// robot_id -> host, so the CONNECTED indicator pings the robot that
+    /// Get started will actually select.
+    QHash<QString, QString> host_by_id_;
 
     bool dark_mode_ = false;
     bool last_connection_state_valid_ = false;
@@ -65,4 +69,3 @@ private:
 };
 
 }  // namespace f2c_cpp
-

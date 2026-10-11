@@ -91,6 +91,20 @@ Quick inventory of current bypass sites:
 | 4 | `ExplorationScreen` | `cpp/src/exploration_screen.cpp` |
 | 5 | `PlannerScreen` | `cpp/src/planner_screen.cpp` |
 
+**Stage 1 is "Get started", not a login.** The OCU never logs into the
+robot: SSH uses the laptop key, and the robot is chosen from
+`robots.json` by `RobotRegistry::pairedRobotId()` (top-level
+`paired_robot_id`, else the only robot listed; several robots and no
+pairing → a picker plus **Switch robot** on the Dashboard). Get started
+writes `setup/robot_id` and goes straight to the Dashboard, so office
+planning and thumb-drive upload need no robot. Pre-flight (Stage 2) is
+opened from the Dashboard and returns there. Rules: keep `findById`
+an exact match (`Roofus#001` and `Roofus#0001` are different robots);
+a `paired_robot_id` that is not listed is an error, never a fallback
+to another robot; do not bring back a PIN gate. `robot_login.cpp` is
+compiled but unused for one release, then delete it. Still owed: a
+robot identity check before Send / map capture (`docs/DEV_BYPASSES.md`).
+
 The monolithic legacy window **`CoverageGUI`** has been **removed** from the
 tree (`coverage_gui.hpp/.cpp` deleted). Live UI is `AppShellWindow` + staged
 screens; map/video/widgets live in `plot_widget.*`, `video_stream_widget.*`,
@@ -540,7 +554,7 @@ are missing. Modal is `show()`, not `exec()`.
   a flag-capable helper onto the robot.
 - Check-only queries `origin/<deploy>`, not the laptop's current
   branch, and must not overwrite `branch_` with laptop HEAD.
-- Arm after login / `goToStage3` when the SSH target is known — not
+- Arm after Get started / `goToStage3` when the SSH target is known — not
   at ctor before `setup/robot_id`.
 - Banner stays hidden while `isScanLaunchActive()` (no roof nag).
 - Paths are `~/pilot_ws` on both sides. No auto-clone.
@@ -758,8 +772,8 @@ kept in sync by hand.
 
 - **One stick per robot.** The stick carries no robot identity (neither
   `mission_config.json` nor `thumbsync_manifest.json` has a robot id);
-  everything on it uploads under the robot the operator logged into at
-  Setup (`QSettings setup/robot_id`), exactly as the SSH path did. The
+  everything on it uploads under the robot selected on Get started
+  (`QSettings setup/robot_id`), exactly as the SSH path did. The
   dialog header shows that robot beside the drive so a mismatch is
   visible before Upload. If the fleet ever shares sticks, add a marker
   file robot-side — do not guess from folder names.

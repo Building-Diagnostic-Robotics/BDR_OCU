@@ -138,6 +138,24 @@ std::optional<RobotProfile> RobotRegistry::findById(const QString& robot_id) con
     return std::nullopt;
 }
 
+QString RobotRegistry::pairedRobotId(QString* error) const {
+    if (!paired_robot_id_.isEmpty()) {
+        if (findById(paired_robot_id_).has_value()) {
+            return paired_robot_id_;
+        }
+        if (error) {
+            *error = QStringLiteral("This laptop is paired to %1, but %2 has no "
+                                    "entry for it.")
+                         .arg(paired_robot_id_, source_path_);
+        }
+        return QString();
+    }
+    if (robots_.size() == 1) {
+        return robots_.first().robot_id;
+    }
+    return QString();
+}
+
 bool RobotRegistry::load(QString* error) {
     QStringList candidates;
     candidates << defaultUserRegistryPath();
@@ -181,6 +199,7 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
     QJsonDocument doc = *doc_opt;
     QJsonArray arr;
     QString api_base_from_root;
+    QString paired_from_root;
 
     if (doc.isArray()) {
         arr = doc.array();
@@ -197,6 +216,7 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
         // block because the backend deployment is global; per-robot
         // x-client-id / x-device-token still differentiate callers.
         api_base_from_root = root.value("cloud_api_base").toString().trimmed();
+        paired_from_root = root.value("paired_robot_id").toString().trimmed();
     } else {
         if (error) *error = "Robot registry JSON must be an array or object.";
         loaded_ = false;
@@ -223,6 +243,7 @@ bool RobotRegistry::loadFromFile(const QString& path, QString* error) {
 
     robots_ = parsed;
     source_path_ = path;
+    paired_robot_id_ = paired_from_root;
 
     // Resolve cloud_api_base in priority order:
     //   1. Top-level key in robots.json (loaded above).
@@ -269,8 +290,8 @@ bool resolveRobotSshTargetFromSettings(ResolvedRobotSshTarget* out, QString* err
     if (robot_id.isEmpty()) {
         if (error_out) {
             *error_out = QStringLiteral(
-                "No robot is logged in. Complete setup login, or set the robot_ip "
-                "setting for development overrides.");
+                "No robot selected. Choose one on the Get started screen, or set "
+                "the robot_ip setting for development overrides.");
         }
         return false;
     }
