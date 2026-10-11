@@ -7,6 +7,7 @@
 
 #include "offload_status.hpp"
 #include "thumb_drive_watcher.hpp"
+#include "upload_open_policy.hpp"
 #include "upload_runner.hpp"
 
 #include <gtest/gtest.h>
@@ -49,6 +50,62 @@ using f2c_cpp::ThumbCopyInputs;
 using f2c_cpp::thumbCopyIsReady;
 using f2c_cpp::thumbCopyStaleReportNote;
 using f2c_cpp::uploaderArguments;
+using f2c_cpp::UploadOpenBlock;
+using f2c_cpp::UploadOpenInputs;
+using f2c_cpp::uploadOpenBlock;
+
+TEST(UploadOpenPolicy, RunningUploadReopensDespiteEveryOtherBlock) {
+    UploadOpenInputs in;
+    in.uploading = true;
+    in.scan_active = true;
+    in.copy_ready = false;
+    in.profile_valid = false;
+    EXPECT_EQ(uploadOpenBlock(in), UploadOpenBlock::None);
+}
+
+TEST(UploadOpenPolicy, NoticeIsNotAnInputSoAnActiveScanIsRefused) {
+    // A held notice (drive removed, failed) is deliberately not a flag.
+    // Without a running upload, a scan blocks.
+    UploadOpenInputs in;
+    in.scan_active = true;
+    in.copy_ready = true;
+    in.profile_valid = true;
+    EXPECT_EQ(uploadOpenBlock(in), UploadOpenBlock::ScanActive);
+}
+
+TEST(UploadOpenPolicy, IncompleteCopyBlocksAFreshUpload) {
+    UploadOpenInputs in;
+    in.copy_ready = false;
+    in.profile_valid = true;
+    EXPECT_EQ(uploadOpenBlock(in), UploadOpenBlock::CopyNotReady);
+}
+
+TEST(UploadOpenPolicy, MissingProfileBlocks) {
+    UploadOpenInputs in;
+    in.copy_ready = true;
+    in.profile_valid = false;
+    EXPECT_EQ(uploadOpenBlock(in), UploadOpenBlock::ProfileInvalid);
+}
+
+TEST(UploadOpenPolicy, ScanBeatsCopyAndCopyBeatsProfile) {
+    UploadOpenInputs scan;
+    scan.scan_active = true;
+    scan.copy_ready = false;
+    scan.profile_valid = false;
+    EXPECT_EQ(uploadOpenBlock(scan), UploadOpenBlock::ScanActive);
+
+    UploadOpenInputs copy;
+    copy.copy_ready = false;
+    copy.profile_valid = false;
+    EXPECT_EQ(uploadOpenBlock(copy), UploadOpenBlock::CopyNotReady);
+}
+
+TEST(UploadOpenPolicy, ReadyInputsOpen) {
+    UploadOpenInputs in;
+    in.copy_ready = true;
+    in.profile_valid = true;
+    EXPECT_EQ(uploadOpenBlock(in), UploadOpenBlock::None);
+}
 
 namespace {
 

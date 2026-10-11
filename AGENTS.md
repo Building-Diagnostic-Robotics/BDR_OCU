@@ -767,10 +767,15 @@ kept in sync by hand.
   top-level `state: "error"` is remapped from per-job state (queued
   jobs look like errors). Cache keys are per `robot_id`
   (`dashboard/offload_incomplete/<id>`, `dashboard/offload_state/<id>`).
-- **`AppShellWindow::onUploadDataRequested`**: hard launch-active block,
-  `robots.json` lookup by `setup/robot_id`, `setSource(ThumbDrive)`,
-  plus `thumbCopyReady()`. `goToStage3` seeds `refreshThumbCopyStatus()`.
-  No SSH target is resolved any more.
+- **`AppShellWindow::onUploadDataRequested`**: hard launch-active block
+  via `isScanLaunchActive()` (Stage 6 included, same composite as
+  close), `robots.json` lookup by `setup/robot_id`, `setSource(ThumbDrive)`,
+  plus `thumbCopyReady()`. `uploadOpenBlock` is that decision. A running
+  upload is the only exemption, and it only reopens the dialog. A held
+  notice does not skip the checks; the notice clears when the dialog
+  opens or the click is blocked. The open dialog's Upload button asks
+  the same rule with uploading forced false. `goToStage3` seeds
+  `refreshThumbCopyStatus()`. No SSH target is resolved any more.
 
 ### Decisions baked into the design
 
@@ -822,8 +827,11 @@ kept in sync by hand.
   Done/Partial/None from on-disk truth on every dialog open / stick
   insertion.
 - **Hard-blocked while a scan is alive.** `onUploadDataRequested`
-  reuses the `launch_active` composite the close-event guard uses.
-  Operator-locked: Complete Mission first.
+  uses `isScanLaunchActive()`, the same composite the close-event
+  guard uses, including a Stage 6 mission. Operator-locked: Complete
+  Mission first. A running upload may reopen the dialog; it must not
+  start another upload, and a held notice is not an exemption. The
+  Upload button inside the open dialog applies the same block.
 - **Hard-blocked until the robot→stick copy is done.** The Upload
   card stays disabled (and blinks) while `OffloadStatus` says the
   copy is incomplete. Two exceptions: `stick_full` (the copy did not
@@ -897,6 +905,9 @@ clearing, `FailedToStart` handling).
     — inactive, but the fallback the operator asked to keep.
   - `RobotRegistry::cloudApiBase()` and its three-tier resolution.
 - **Do NOT downgrade the launch-active gate** in `onUploadDataRequested`.
+  A running upload is the only exemption, and `uploadOpenBlock` is the
+  decision. A held notice must not skip it. The open dialog uses the
+  same rule.
 - **Do NOT wait on the thumb-drive copy inside Complete Mission.**
   That gate is the Dashboard Upload card (`thumbCopyReady()`).
 - **Do NOT require `thumbsync_manifest.json` on `Section_*`.** The

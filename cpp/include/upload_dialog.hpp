@@ -52,6 +52,8 @@
 #include <QHash>
 #include <QList>
 #include <QPoint>
+#include <functional>
+
 #include <QPointer>
 #include <QString>
 
@@ -108,11 +110,17 @@ public:
     /// Closing the dialog does not change this.
     bool isUploading() const;
 
-    /// The dialog is hidden and the card is holding a message the
-    /// operator still has to act on (drive removed, press Upload to
-    /// resume, or the upload failed). Opening the dialog must not be
-    /// blocked by the thumb-copy gate.
-    bool hasPendingNotice() const { return !background_hold_.isEmpty(); }
+    /// Empty when a new upload is allowed. AppShell supplies the scan,
+    /// copy, and profile gate with "uploading" forced false, so the
+    /// button inside an already-open dialog follows the same rule as
+    /// the Dashboard card. Consulted only while the runner is idle.
+    void setUploadBlockReason(std::function<QString()> reason);
+
+    /// Drops the Dashboard card notice (drive removed, resume, failed).
+    /// Stops the drive watcher when this dialog is hidden and nothing
+    /// is uploading, so a cleared notice does not keep polling. The
+    /// progress line inside the dialog is left as it is.
+    void clearPendingNotice();
 
     /// Quit path. Asks the script to pause and waits up to 10 s for the
     /// files already in progress to finish, then SIGTERMs whatever is
@@ -302,6 +310,8 @@ private:
     /// or the operator cancels.
     QString background_hold_;
     QString published_background_status_;
+    /// See `setUploadBlockReason`. Empty function means no extra gate.
+    std::function<QString()> upload_block_reason_;
 
     QPoint drag_offset_;
     bool dragging_ = false;

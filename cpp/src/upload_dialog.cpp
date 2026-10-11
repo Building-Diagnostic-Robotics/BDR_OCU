@@ -7,6 +7,8 @@
 
 #include <algorithm>
 
+#include <utility>
+
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QCheckBox>
@@ -673,6 +675,12 @@ void UploadDialog::applyStyle() {
 
 void UploadDialog::showEvent(QShowEvent* event) {
     QDialog::showEvent(event);
+    // The operator is looking at the dialog now. The card notice has
+    // done its job. A running upload has no notice to clear, and
+    // clearing one would wipe the progress subtitle.
+    if (!(runner_ && runner_->isBusy())) {
+        clearPendingNotice();
+    }
     refreshHeaderSubtitle();
     refreshButtonStates();
     armConnectivityProbes();
@@ -1019,6 +1027,31 @@ void UploadDialog::refreshSelectionSummary() {
     }
 }
 
+namespace {
+
+/// The scan/copy/profile gate applies only once the runner is idle.
+/// While an upload is running the button is hidden and asking the
+/// gate would read "a scan is active" over a dialog we opened on purpose.
+QString idleUploadGate(bool busy, const std::function<QString()>& gate) {
+    if (busy || !gate) return {};
+    return gate();
+}
+
+}  // namespace
+
+void UploadDialog::setUploadBlockReason(std::function<QString()> reason) {
+    upload_block_reason_ = std::move(reason);
+}
+
+void UploadDialog::clearPendingNotice() {
+    if (background_hold_.isEmpty()) return;
+    background_hold_.clear();
+    publishBackgroundActivity();
+    if (!isVisible() && !(runner_ && runner_->isBusy()) && drive_watcher_) {
+        drive_watcher_->stop();
+    }
+}
+
 void UploadDialog::refreshButtonStates() {
     const bool busy = runner_ && runner_->isBusy();
     const bool any_selected = currentSelection().buildings > 0;
@@ -1028,12 +1061,15 @@ void UploadDialog::refreshButtonStates() {
     const bool has_creds = !cloud_client_id_.isEmpty() &&
                            !cloud_device_token_.isEmpty();
     const bool online = isFullyOnline();
+    const QString blocked = idleUploadGate(busy, upload_block_reason_);
 
     if (btn_upload_) {
-        btn_upload_->setEnabled(!busy && any_selected && has_source &&
-                                has_creds && online);
+        btn_upload_->setEnabled(blocked.isEmpty() && !busy && any_selected &&
+                                has_source && has_creds && online);
         btn_upload_->setVisible(!busy);
-        if (!online && any_selected && has_source && has_creds) {
+        if (!blocked.isEmpty()) {
+            btn_upload_->setToolTip(blocked);
+        } else if (!online && any_selected && has_source && has_creds) {
             btn_upload_->setToolTip(
                 QStringLiteral("Upload disabled — see banner for connectivity status."));
         } else {
@@ -1139,6 +1175,13 @@ QString UploadDialog::formatBytes(qint64 bytes) const {
 // ---------------------------------------------------------------------------
 
 void UploadDialog::onUploadClicked() {
+    const QString blocked = idleUploadGate(runner_ && runner_->isBusy(),
+                                           upload_block_reason_);
+    if (!blocked.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Upload unavailable"), blocked);
+        refreshButtonStates();
+        return;
+    }
     const Selection sel = currentSelection();
     if (sel.folders.isEmpty()) return;
     // Stop the check before launch. Rows already marked missing keep

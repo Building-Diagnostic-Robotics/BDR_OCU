@@ -63,6 +63,7 @@
 #include "satellite_job_model.hpp"
 #include "components/scan_setup_dialog.hpp"
 #include "robot_registry.hpp"
+#include "upload_open_policy.hpp"
 #include "setup_screen.hpp"
 #include "settings_constants.hpp"
 #include "startup_screen.hpp"
@@ -1980,97 +1981,104 @@ void AppShellWindow::onStartNewScan() {
     goToStage6();
 }
 
-void AppShellWindow::onUploadDataRequested() {
-    // Hard-block uploads while any part of the launch tree is alive.
-    // Same composite check that closeEvent uses to gate the "Are you
-    // sure?" prompt — sharing the rule keeps the contract single-source.
-    // The stick itself cannot race the robot's writes, but the operator
-    // has to be at the laptop for an upload and the mission must be
-    // finalized before its data is worth uploading: Complete Mission
-    // first (operator-locked; do not relax to a warning).
-    //
-    // An upload that is already running is exempt: closing the dialog
-    // leaves it going, and the card click has to reopen that dialog
-    // even if a scan was started afterwards. It does not start a new
-    // upload.
-    const bool upload_in_progress =
-        upload_dialog_ && upload_dialog_->isUploading();
-    // A hidden failure or a stick-pull pause is no longer "uploading",
-    // but the card click still has to open the dialog. The thumb-copy
-    // gate must not trap that notice.
-    const bool reopen_dialog =
-        upload_in_progress ||
-        (upload_dialog_ && upload_dialog_->hasPendingNotice());
-    const bool launch_active =
-        exploration_launch_in_progress_ ||
-        exploration_launch_ready_ ||
-        laptop_launch_started_ ||
-        robot_launch_started_;
-    if (launch_active && !reopen_dialog) {
-        BdrMessageBox::warning(
-            this,
-            tr("Upload unavailable"),
-            tr("A scan is currently active. Complete Mission first, then "
-               "upload from the dashboard."));
-        return;
+namespace {
+
+struct UploadRobotAuth {
+    bool valid = false;
+    QString reason;
+    std::optional<RobotProfile> profile;
+    QString api_base;
+};
+
+UploadRobotAuth resolveUploadRobotAuth() {
+    UploadRobotAuth out;
+    RobotRegistry registry;
+    QString load_err;
+    if (!registry.load(&load_err)) {
+        out.reason = load_err.isEmpty()
+                         ? QStringLiteral("Robot registry could not be loaded.")
+                         : load_err;
+        return out;
     }
-    if (stage3_ && !stage3_->thumbCopyReady() && !reopen_dialog) {
-        BdrMessageBox::warning(
-            this,
-            tr("Upload unavailable"),
-            stage3_->thumbCopyBlockReason());
+    // The stick carries no robot identity: one stick per robot is the
+    // fleet rule, and everything on it uploads under the robot selected
+    // on Get started.
+    const QSettings settings(kSettingsOrgName, kSettingsAppName);
+    const QString robot_id =
+        settings.value(kSettingsRobotIdKey, QString()).toString().trimmed();
+    out.profile = registry.findById(robot_id);
+    if (!out.profile.has_value()) {
+        out.reason = robot_id.isEmpty()
+                         ? QStringLiteral(
+                               "No robot selected. Choose the robot this drive "
+                               "came from on the Get started screen first.")
+                         : QStringLiteral("No registry entry for the active robot.");
+        return out;
+    }
+    if (out.profile->cloud_client_id.isEmpty() ||
+        out.profile->cloud_device_token.isEmpty()) {
+        out.reason = QStringLiteral(
+            "Cloud credentials are missing for this robot. Update "
+            "robots.json with cloud_client_id and cloud_device_token.");
+        return out;
+    }
+    out.valid = true;
+    out.api_base = registry.cloudApiBase();
+    return out;
+}
+
+}  // namespace
+
+QString AppShellWindow::uploadUnavailableReason(bool uploading) const {
+    const bool copy_ready = !stage3_ || stage3_->thumbCopyReady();
+    UploadRobotAuth auth;
+    if (!uploading) {
+        auth = resolveUploadRobotAuth();
+    }
+    const UploadOpenInputs in{uploading, isScanLaunchActive(), copy_ready,
+                              uploading || auth.valid};
+    switch (uploadOpenBlock(in)) {
+        case UploadOpenBlock::None:
+            return {};
+        case UploadOpenBlock::ScanActive:
+            return tr("A scan is currently active. Complete Mission first, then "
+                      "upload from the dashboard.");
+        case UploadOpenBlock::CopyNotReady:
+            return stage3_ ? stage3_->thumbCopyBlockReason()
+                           : QStringLiteral(
+                                 "Wait for the robot to finish copying to RDATA_EXT.");
+        case UploadOpenBlock::ProfileInvalid:
+            return auth.reason.isEmpty()
+                       ? QStringLiteral(
+                             "Cloud credentials are missing for this robot.")
+                       : auth.reason;
+    }
+    return {};
+}
+
+void AppShellWindow::onUploadDataRequested() {
+    // Hard-block a new upload while a scan is alive or the stick copy
+    // is unfinished. `uploadOpenBlock` is the rule, shared with the
+    // Upload button inside the open dialog. A running upload is the
+    // only exemption, and it only reopens this dialog.
+    //
+    // A held notice is not an exemption. When the click is refused the
+    // notice is cleared, so the card stops saying "open Upload Data"
+    // for an action that will not open it.
+    const bool uploading =
+        upload_dialog_ && upload_dialog_->isUploading();
+    const QString blocked = uploadUnavailableReason(uploading);
+    if (!blocked.isEmpty()) {
+        if (upload_dialog_) upload_dialog_->clearPendingNotice();
+        BdrMessageBox::warning(this, tr("Upload unavailable"), blocked);
         return;
     }
 
-    // Pull the per-robot cloud credentials from the registry. Missing
-    // values are not auto-fixable from the OCU side — the deploy script
-    // ships robots.json and operators don't edit it in the field — so
-    // we surface the gap immediately rather than silently opening a
-    // dialog with disabled buttons. A running upload already has its
-    // credentials; a registry miss must not stop the operator reopening
-    // the dialog to watch it.
-    RobotRegistry registry;
-    QString load_err;
-    const bool registry_ok = registry.load(&load_err);
-    std::optional<RobotProfile> profile;
-    if (registry_ok) {
-        // The stick carries no robot identity: one stick per robot is the
-        // fleet rule, and everything on it uploads under the robot selected
-        // on Get started. The dialog header names that robot next to the
-        // drive so a mismatch is visible before Upload.
-        const QSettings settings(kSettingsOrgName, kSettingsAppName);
-        const QString robot_id =
-            settings.value(kSettingsRobotIdKey, QString()).toString().trimmed();
-        profile = registry.findById(robot_id);
-        if (!reopen_dialog && !profile.has_value()) {
-            BdrMessageBox::warning(
-                this,
-                tr("Upload unavailable"),
-                robot_id.isEmpty()
-                    ? tr("No robot selected. Choose the robot this drive came "
-                         "from on the Get started screen first.")
-                    : tr("No registry entry for the active robot."));
-            return;
-        }
-        if (!reopen_dialog &&
-            profile.has_value() &&
-            (profile->cloud_client_id.isEmpty() ||
-             profile->cloud_device_token.isEmpty())) {
-            BdrMessageBox::warning(
-                this,
-                tr("Upload unavailable"),
-                tr("Cloud credentials are missing for this robot. Update "
-                   "robots.json with cloud_client_id and cloud_device_token."));
-            return;
-        }
-    } else if (!reopen_dialog) {
-        BdrMessageBox::warning(
-            this,
-            tr("Upload unavailable"),
-            load_err.isEmpty() ? tr("Robot registry could not be loaded.")
-                               : load_err);
-        return;
-    }
+    // Credentials for a queue that is not already running. A running
+    // upload keeps the robot it started with; re-reading the registry
+    // here must not retarget it.
+    const UploadRobotAuth auth = uploading ? UploadRobotAuth{}
+                                           : resolveUploadRobotAuth();
 
     if (!upload_dialog_) {
         upload_dialog_ = new UploadDialog(this);
@@ -2084,21 +2092,22 @@ void AppShellWindow::onUploadDataRequested() {
                 });
     }
     upload_dialog_->setDarkMode(dark_mode_);
+    // Same gate as the card click, with uploading forced false, so the
+    // button disables if the upload finishes while a scan is still up.
+    upload_dialog_->setUploadBlockReason(
+        [this]() { return uploadUnavailableReason(false); });
     // Don't retarget a queue that is already uploading. setRobotId
     // would put the remaining folders under a different robot if the
     // operator had switched, and setSource is ignored while busy.
-    if (!upload_dialog_->isUploading() &&
-        profile.has_value() &&
-        !profile->cloud_client_id.isEmpty() &&
-        !profile->cloud_device_token.isEmpty()) {
+    if (!uploading && auth.valid && auth.profile.has_value()) {
         // Production source is the RDATA_EXT stick in the laptop. The
         // robot-SSH source (`UploadSource::RobotSsh` + `setRemote`) is kept
         // compiled as a fallback but is deliberately not wired here.
         upload_dialog_->setSource(UploadSource::ThumbDrive);
-        upload_dialog_->setRobotId(profile->robot_id);
-        upload_dialog_->setCloudAuth(registry.cloudApiBase(),
-                                     profile->cloud_client_id,
-                                     profile->cloud_device_token);
+        upload_dialog_->setRobotId(auth.profile->robot_id);
+        upload_dialog_->setCloudAuth(auth.api_base,
+                                     auth.profile->cloud_client_id,
+                                     auth.profile->cloud_device_token);
     }
 
     // Same backdrop-blur pattern as the New Scan modal so the
