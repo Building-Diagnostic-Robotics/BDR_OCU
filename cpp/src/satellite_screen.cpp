@@ -549,6 +549,17 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             });
     connect(map_capture_, &MapCaptureRunner::finished, this,
             &SatelliteScreen::onMapCaptured);
+    connect(map_capture_, &MapCaptureRunner::identityBlocked, this,
+            [this](const QString& message) {
+                BdrMessageBox::warning(this, QStringLiteral("Wrong robot"),
+                                       message);
+            });
+    connect(map_capture_, &MapCaptureRunner::identityUnchecked, this,
+            [this](const QString& message) {
+                appendLog(QStringLiteral("[align] %1").arg(message));
+                BdrMessageBox::warning(
+                    this, QStringLiteral("Robot ID not confirmed"), message);
+            });
 
     // ---- Map <-> rail sync ----
     connect(map_, &SatelliteMapWidget::roiChanged, this, [this] {
@@ -740,6 +751,10 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &SatelliteScreen::handleLaunchDeath);
     connect(mission_, &MissionController::robotSweepFailed, this,
             &SatelliteScreen::onRobotSweepFailed);
+    connect(mission_, &MissionController::robotIdentityBlocked, this,
+            &SatelliteScreen::onRobotIdentityBlocked);
+    connect(mission_, &MissionController::robotIdentityUnchecked, this,
+            &SatelliteScreen::onRobotIdentityUnchecked);
     connect(mission_, &MissionController::launchPhase, this,
             [this](const QString& phase) {
                 launch_phase_ = phase;
@@ -5483,7 +5498,8 @@ void SatelliteScreen::onCollectMap() {
     const QString local_dir = job_store_.assetsDir(current_job_id_) +
                               QStringLiteral("/robot_map");
     QString error;
-    if (!map_capture_->start(target.host, target.ssh_user, local_dir, &error)) {
+    if (!map_capture_->start(target.host, target.ssh_user, target.robot_id,
+                             local_dir, &error)) {
         setAlignStatus(error);
         appendLog(QStringLiteral("[align] %1").arg(error));
         return;
@@ -6455,6 +6471,31 @@ void SatelliteScreen::onDirectorWatchTick() {
     setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
     teardownThen([this] { setSelectedStep(Step::ScanParameters); });
+}
+
+void SatelliteScreen::onRobotIdentityBlocked(const QString& message) {
+    // The launch-wait prompt is a nested modal. Stop it before this dialog
+    // or a long read stacks "Still waiting" on top of "Wrong robot".
+    if (manager_watch_timer_) {
+        manager_watch_timer_->stop();
+    }
+    BdrMessageBox::warning(this, QStringLiteral("Wrong robot"), message);
+    if (!mission_->missionActive()) {
+        return;
+    }
+    mission_->cancelUnlaunchedMission();
+    if (!mission_->missionActive()) {
+        setSelectedStep(Step::ScanParameters);
+    }
+}
+
+void SatelliteScreen::onRobotIdentityUnchecked(const QString& message) {
+    BdrMessageBox::warning(this, QStringLiteral("Robot ID not confirmed"),
+                           message);
+    if (!mission_->missionActive()) {
+        return;
+    }
+    mission_->continueAfterIdentityWarning();
 }
 
 void SatelliteScreen::onRobotSweepFailed(int exit_code) {

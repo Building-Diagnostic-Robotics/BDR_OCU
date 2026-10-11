@@ -57,4 +57,31 @@ enum class StickSync {
 /// land on the stick. Section_* siblings are not checked.
 StickSync classifyStickSync(const QString& data_root);
 
+/**
+ * What the Upload card knows when it decides whether a copy is still
+ * owed. `robot_copy_incomplete` is the live probe when the robot
+ * answered, and the saved report when it did not.
+ */
+struct ThumbCopyInputs {
+    bool robot_reachable = false;
+    bool robot_copy_incomplete = false;
+    bool stick_full = false;
+    StickSync stick = StickSync::Absent;
+};
+
+/**
+ * Upload is allowed when the stick is under its free-space floor (that
+ * is how the operator frees it), and when the robot cannot be reached
+ * but the plugged-in stick is complete. A reachable robot that is still
+ * copying, and a stick that is incomplete or not plugged in, block.
+ */
+bool thumbCopyIsReady(const ThumbCopyInputs& in);
+
+/**
+ * Tooltip for the one case upload is allowed despite a saved unfinished
+ * report: the robot is unreachable and this stick is complete. Empty
+ * otherwise.
+ */
+QString thumbCopyStaleReportNote(const ThumbCopyInputs& in);
+
 }  // namespace f2c_cpp

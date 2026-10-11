@@ -45,9 +45,15 @@ QStringList sshBaseArgs(const RobotTarget& target) {
  * survivors get -9. Exits quickly when nothing is running: every pgrep
  * loop breaks on its first iteration.
  *
- * `set +e` and `|| true` mean this script exits 0 whenever ssh lands;
+ * `set +e` and `|| true` mean the pkill body exits 0 whenever ssh lands;
  * a non-zero from runRobotSweep is reachability (255) or the hang
  * deadline (-1), not "a process survived".
+ *
+ * Pre-launch prepends robotIdentityProbePrefix. A file that names a
+ * different robot `exit 0`s before any pkill, so exit 0 is not "the sweep
+ * succeeded" — decidePreLaunchIdentity reads the BDR_ROBOT_ID line.
+ * Teardown must not prepend that prefix: the robot being stopped is the
+ * one this mission already launched.
  */
 const char* kRobotSweep =
     "set +e; "
@@ -230,8 +236,8 @@ QStringList MissionController::recentRobotOutput(int max_lines) const {
 }
 
 RobotTarget MissionController::resolveRobotTarget(QString* error) {
-    // Same resolution the rest of the OCU uses: QSettings dev override
-    // (`robot_ip`) first, then the logged-in robot's registry entry.
+    // Same resolution the rest of the OCU uses. A dev build honours
+    // `robot_ip` ahead of the robot selected on Get started.
     RobotTarget target;
     ResolvedRobotSshTarget ssh_target;
     QString resolve_error;
@@ -243,7 +249,7 @@ RobotTarget MissionController::resolveRobotTarget(QString* error) {
     }
     target.host = ssh_target.host;
     target.ssh_user = ssh_target.ssh_user;
-    target.robot_id = ssh_target.host;  // display fallback; id not required
+    target.robot_id = ssh_target.robot_id;
     target.valid = !target.host.isEmpty();
     return target;
 }
@@ -364,21 +370,45 @@ bool MissionController::startMission(const RoiPolygon& poly,
     // as the legacy path; the robot sweep is what stops a lingering step-2
     // map-collection tree from fighting the director for the LiDAR /
     // FAST-LIO / ODrive nodes.
-    emit launchPhase(QStringLiteral("Clearing old processes…"));
+    emit launchPhase(QStringLiteral("Checking the robot…"));
     runLaptopSweep([this, seq] {
         if (mission_seq_ != seq) {
             return;
         }
-        runRobotSweep([this, seq](int rc, int) {
+        runRobotSweep([this, seq](int rc, int, const QString& output) {
             if (mission_seq_ != seq) {
                 return;
             }
-            if (rc != 0) {
-                parked_launch_seq_ = seq;
-                emit launchPhase(QStringLiteral("Cleanup did not finish"));
-                emit robotSweepFailed(rc);
-                return;
+            const RobotIdentityReport id =
+                classifyRobotIdentity(target_.robot_id, output);
+            switch (decidePreLaunchIdentity(id.verdict, rc)) {
+                case PreLaunchIdentityDecision::Block: {
+                    const QString message =
+                        robotIdentityMismatchText(target_.robot_id, id.reported) +
+                        QStringLiteral("\n\nLaunch was not started.");
+                    emit logLine(QStringLiteral("[send] %1").arg(message));
+                    emit launchPhase(QString());
+                    emit robotIdentityBlocked(message);
+                    return;
+                }
+                case PreLaunchIdentityDecision::SweepFailed:
+                    parked_launch_seq_ = seq;
+                    emit launchPhase(QStringLiteral("Cleanup did not finish"));
+                    emit robotSweepFailed(rc);
+                    return;
+                case PreLaunchIdentityDecision::WarnThenSpawn: {
+                    const QString message =
+                        robotIdentityUnreadableText(target_.robot_id) +
+                        QStringLiteral("\n\nLaunch will continue.");
+                    emit logLine(QStringLiteral("[send] %1").arg(message));
+                    parked_launch_seq_ = seq;
+                    emit robotIdentityUnchecked(message);
+                    return;
+                }
+                case PreLaunchIdentityDecision::Spawn:
+                    break;
             }
+            emit logLine(QStringLiteral("[send] robot id %1").arg(id.reported));
             spawnLaunches();
         }, /*kill_daemon=*/true);
     });
@@ -395,8 +425,10 @@ void MissionController::spawnLaunches() {
     pending_laptop_cmd_.clear();
     pending_robot_args_.clear();
     emit launchPhase(QString());
+    const QString who =
+        target_.robot_id.isEmpty() ? target_.host : target_.robot_id;
     emit logLine(QStringLiteral("[send] mission launched on %1 (%2)")
-                     .arg(target_.robot_id, target_.host));
+                     .arg(who, target_.host));
 }
 
 void MissionController::remoteServiceCall(const QString& service,
@@ -501,17 +533,23 @@ void MissionController::remoteDisarm(RemoteCallback on_done) {
 }
 
 void MissionController::runRobotSweep(
-    std::function<void(int rc, int elapsed_ms)> on_done, bool kill_daemon) {
+    std::function<void(int rc, int elapsed_ms, const QString& output)> on_done,
+    bool kill_daemon) {
     if (!target_.valid) {
         emit logLine(QStringLiteral("[sweep] robot skipped (no target)"));
         if (on_done) {
-            on_done(0, 0);
+            on_done(0, 0, QString());
         }
         return;
     }
     QStringList args = sshBaseArgs(target_);
     args.removeAll(QStringLiteral("-tt"));
-    QString remote = QString::fromLatin1(kRobotSweep);
+    QString remote;
+    if (kill_daemon) {
+        // Before any pkill. A mismatch exits 0 and leaves that robot alone.
+        remote = robotIdentityProbePrefix(target_.robot_id);
+    }
+    remote += QString::fromLatin1(kRobotSweep);
     if (kill_daemon) {
         remote += QString::fromLatin1(kPreLaunchDaemonKill);
     }
@@ -534,9 +572,40 @@ void MissionController::runRobotSweep(
                 }
             }
             if (on_done) {
-                on_done(rc, elapsed_ms);
+                on_done(rc, elapsed_ms, out);
             }
         });
+}
+
+void MissionController::continueAfterIdentityWarning() {
+    if (!mission_active_ || tearing_down_ || mission_seq_ != parked_launch_seq_) {
+        return;
+    }
+    if (pending_robot_args_.isEmpty()) {
+        emit logLine(QStringLiteral("[send] identity warning with nothing to launch"));
+        parked_launch_seq_ = -1;
+        return;
+    }
+    parked_launch_seq_ = -1;
+    spawnLaunches();
+}
+
+void MissionController::cancelUnlaunchedMission() {
+    if (robotLaunchRunning() ||
+        (laptop_proc_ && laptop_proc_->state() != QProcess::NotRunning)) {
+        emit logLine(QStringLiteral(
+            "[send] identity rejected after the launch started — tearing down"));
+        teardownMission();
+        return;
+    }
+    ++mission_seq_;
+    parked_launch_seq_ = -1;
+    mission_active_ = false;
+    tearing_down_ = false;
+    emit logLine(QStringLiteral(
+        "[send] launch abandoned before the robot was started"));
+    emit missionStateChanged(false);
+    closeMissionLog();
 }
 
 void MissionController::resumeAfterSweep(bool proceed) {
@@ -583,6 +652,9 @@ void MissionController::teardownMission() {
     // Abandons an in-flight launch chain: a Cancel during the sweeps must
     // not be followed by spawnLaunches().
     ++mission_seq_;
+    // Before the sweep. The link monitor has to stop while the topics
+    // are still the mission's, not after forty seconds of silence.
+    emit teardownBegan();
     emit launchPhase(QString());
     teardownStep(RobotSweep);
 }
@@ -622,7 +694,9 @@ void MissionController::teardownStep(TeardownStep step) {
             // hang up the pty and SIGHUP the launch — an instant death that
             // orphans every node.
             emit teardownPhase(QStringLiteral("Stopping the robot software…"));
-            runRobotSweep([this](int, int) { teardownStep(ReapRobot); });
+            runRobotSweep([this](int, int, const QString&) {
+                teardownStep(ReapRobot);
+            });
             return;
         case ReapRobot:
             emit teardownPhase(QStringLiteral("Closing the robot session…"));
