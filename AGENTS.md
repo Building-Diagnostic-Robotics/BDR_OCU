@@ -690,8 +690,10 @@ kept in sync by hand.
   poll, pure file I/O — `/dev/disk/by-label/RDATA_EXT` → device →
   `/proc/self/mounts` mount point; device present but unmounted →
   one `udisksctl mount -b` per insertion; fallbacks
-  `/media/$USER/RDATA_EXT`, `/run/media/$USER/RDATA_EXT`; an operator
-  **Browse…** path wins while it exists. States Absent /
+  `/media/$USER/RDATA_EXT`, `/run/media/$USER/RDATA_EXT`, `/media/RDATA_EXT`,
+  `/mnt/RDATA_EXT` — and only when `/proc/self/mounts` lists that path.
+  A directory with the label as its name is not a source, and there is
+  no folder picker. States Absent /
   PresentUnmounted / Mounted; `freeBytes()` via `QStorageInfo`.
 - **`UploadStateProbe`** (`cpp/include/upload_runner.hpp`): ThumbDrive
   mode is a `QDirIterator` walk of `<mount>/<date>/<building>/<section>`
@@ -854,7 +856,16 @@ kept in sync by hand.
   via `rm -f` inside the SSH command) — the script never removes it, and
   before this fix a resume re-paused at its first file.
 - **Cancel** SIGTERMs the process. State on disk is preserved.
-- **Closing the dialog while busy** routes through `requestPause()`.
+- **Closing the dialog while busy hides it.** The upload keeps running.
+  The drive watcher stays armed so pulling the stick still pauses, and
+  the Dashboard Upload card shows progress. A stick pull while hidden
+  stays "Upload paused — drive removed"; the SIGTERM that follows a
+  failed pause-flag write is not reported as a failure. Quitting the
+  OCU asks first, then `pauseForShutdown()` (pause flag, 10 s, then
+  SIGTERM). A retry wait has no process, so that path cancels
+  immediately instead of sitting out the 10 s. An update is refused
+  while an upload is running; the handoff still pauses before
+  `qApp->quit()` if one starts during the lockfile poll.
 
 ### Tests
 
@@ -874,7 +885,13 @@ clearing, `FailedToStart` handling).
     progress.
   - The depth-3 walk (`<date>/<building>/<section>`) in both probes.
   - `ThumbDriveWatcher`'s by-label → `/proc/self/mounts` resolution and
-    the one-attempt-per-device `udisksctl` mount.
+    the one-attempt-per-device `udisksctl` mount. Fallback paths count
+    only when `isMountPoint` says they are real mounts. Do not add a
+    folder picker.
+  - Hiding `UploadDialog` must not call `requestPause()`. Quit is the
+    only close path that pauses, and it goes through `pauseForShutdown()`.
+    A retry wait cancels immediately. The update handoff refuses while
+    an upload is running and pauses before `qApp->quit()`.
   - The pause-flag clear before launch.
   - `UploadSource::RobotSsh` and `setRemote()`/`setRemoteScriptPath()`
     — inactive, but the fallback the operator asked to keep.

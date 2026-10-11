@@ -1454,7 +1454,9 @@ void AppShellWindow::showUpdateModal(const update::VersionInfo& info) {
     gate.has_active_mission = (stack_ && stage5_ &&
                                stack_->currentWidget() == stage5_);
     gate.has_active_transfer = TransferManager::instance().hasActiveTransfer();
-    gate.has_active_upload = CloudUploadManager::instance().hasActiveUpload();
+    gate.has_active_upload =
+        CloudUploadManager::instance().hasActiveUpload() ||
+        (upload_dialog_ && upload_dialog_->isUploading());
     gate.battery_pct = UpdateModal::readBatteryPercent();
 
     auto* modal = new UpdateModal(info, gate, dark_mode_, this);
@@ -1643,6 +1645,21 @@ void AppShellWindow::showRobotSyncDialog() {
 
 void AppShellWindow::handoffToUpdateRunner(const update::VersionInfo& info,
                                            QWidget* modal_window) {
+    // qApp->quit() below skips closeEvent, so the quit-during-upload
+    // confirm never runs on this path. Refuse instead of killing the
+    // upload. The pause just before quit is the backstop if one starts
+    // during the lockfile poll.
+    if (upload_dialog_ && upload_dialog_->isUploading()) {
+        BdrMessageBox::warning(
+            modal_window ? modal_window : this,
+            QStringLiteral("Update unavailable"),
+            QStringLiteral(
+                "A cloud upload is still running. It keeps going while "
+                "Upload Data is hidden. Quit the app when you want it "
+                "paused, then update."));
+        return;
+    }
+
     // Resolve runner binary path. In a deployed install the runner lives
     // next to the OCU at /usr/bin/bdr-update-runner (.deb staging in Phase
     // 7 places it there). For dev builds we accept it sitting in the same
@@ -1734,6 +1751,9 @@ void AppShellWindow::handoffToUpdateRunner(const update::VersionInfo& info,
                         "runner lockfile held by pid=%1 — quitting OCU")
                         .arg(runner_pid));
                 cleanup();
+                if (upload_dialog_ && upload_dialog_->isUploading()) {
+                    upload_dialog_->pauseForShutdown();
+                }
                 qApp->quit();
             });
     connect(deadline, &QTimer::timeout, this,
@@ -1968,12 +1988,25 @@ void AppShellWindow::onUploadDataRequested() {
     // has to be at the laptop for an upload and the mission must be
     // finalized before its data is worth uploading: Complete Mission
     // first (operator-locked; do not relax to a warning).
+    //
+    // An upload that is already running is exempt: closing the dialog
+    // leaves it going, and the card click has to reopen that dialog
+    // even if a scan was started afterwards. It does not start a new
+    // upload.
+    const bool upload_in_progress =
+        upload_dialog_ && upload_dialog_->isUploading();
+    // A hidden failure or a stick-pull pause is no longer "uploading",
+    // but the card click still has to open the dialog. The thumb-copy
+    // gate must not trap that notice.
+    const bool reopen_dialog =
+        upload_in_progress ||
+        (upload_dialog_ && upload_dialog_->hasPendingNotice());
     const bool launch_active =
         exploration_launch_in_progress_ ||
         exploration_launch_ready_ ||
         laptop_launch_started_ ||
         robot_launch_started_;
-    if (launch_active) {
+    if (launch_active && !reopen_dialog) {
         BdrMessageBox::warning(
             this,
             tr("Upload unavailable"),
@@ -1981,7 +2014,7 @@ void AppShellWindow::onUploadDataRequested() {
                "upload from the dashboard."));
         return;
     }
-    if (stage3_ && !stage3_->thumbCopyReady()) {
+    if (stage3_ && !stage3_->thumbCopyReady() && !reopen_dialog) {
         BdrMessageBox::warning(
             this,
             tr("Upload unavailable"),
@@ -1993,10 +2026,44 @@ void AppShellWindow::onUploadDataRequested() {
     // values are not auto-fixable from the OCU side — the deploy script
     // ships robots.json and operators don't edit it in the field — so
     // we surface the gap immediately rather than silently opening a
-    // dialog with disabled buttons.
+    // dialog with disabled buttons. A running upload already has its
+    // credentials; a registry miss must not stop the operator reopening
+    // the dialog to watch it.
     RobotRegistry registry;
     QString load_err;
-    if (!registry.load(&load_err)) {
+    const bool registry_ok = registry.load(&load_err);
+    std::optional<RobotProfile> profile;
+    if (registry_ok) {
+        // The stick carries no robot identity: one stick per robot is the
+        // fleet rule, and everything on it uploads under the robot selected
+        // on Get started. The dialog header names that robot next to the
+        // drive so a mismatch is visible before Upload.
+        const QSettings settings(kSettingsOrgName, kSettingsAppName);
+        const QString robot_id =
+            settings.value(kSettingsRobotIdKey, QString()).toString().trimmed();
+        profile = registry.findById(robot_id);
+        if (!reopen_dialog && !profile.has_value()) {
+            BdrMessageBox::warning(
+                this,
+                tr("Upload unavailable"),
+                robot_id.isEmpty()
+                    ? tr("No robot selected. Choose the robot this drive came "
+                         "from on the Get started screen first.")
+                    : tr("No registry entry for the active robot."));
+            return;
+        }
+        if (!reopen_dialog &&
+            profile.has_value() &&
+            (profile->cloud_client_id.isEmpty() ||
+             profile->cloud_device_token.isEmpty())) {
+            BdrMessageBox::warning(
+                this,
+                tr("Upload unavailable"),
+                tr("Cloud credentials are missing for this robot. Update "
+                   "robots.json with cloud_client_id and cloud_device_token."));
+            return;
+        }
+    } else if (!reopen_dialog) {
         BdrMessageBox::warning(
             this,
             tr("Upload unavailable"),
@@ -2005,46 +2072,34 @@ void AppShellWindow::onUploadDataRequested() {
         return;
     }
 
-    // The stick carries no robot identity: one stick per robot is the
-    // fleet rule, and everything on it uploads under the robot selected
-    // on Get started. The dialog header names that robot next to the
-    // drive so a mismatch is visible before Upload.
-    const QSettings settings(kSettingsOrgName, kSettingsAppName);
-    const QString robot_id =
-        settings.value(kSettingsRobotIdKey, QString()).toString().trimmed();
-    const auto profile = registry.findById(robot_id);
-    if (!profile.has_value()) {
-        BdrMessageBox::warning(
-            this,
-            tr("Upload unavailable"),
-            robot_id.isEmpty()
-                ? tr("No robot selected. Choose the robot this drive came "
-                     "from on the Get started screen first.")
-                : tr("No registry entry for the active robot."));
-        return;
-    }
-    if (profile->cloud_client_id.isEmpty() ||
-        profile->cloud_device_token.isEmpty()) {
-        BdrMessageBox::warning(
-            this,
-            tr("Upload unavailable"),
-            tr("Cloud credentials are missing for this robot. Update "
-               "robots.json with cloud_client_id and cloud_device_token."));
-        return;
-    }
-
     if (!upload_dialog_) {
         upload_dialog_ = new UploadDialog(this);
+        connect(upload_dialog_, &UploadDialog::backgroundStatusChanged,
+                this, [this](const QString& status) {
+                    if (stage3_) stage3_->setBackgroundUploadStatus(status);
+                });
+        connect(upload_dialog_, &UploadDialog::uploadAttentionRequested,
+                this, [this](const QString& message) {
+                    showCommandDroppedToast(message);
+                });
     }
     upload_dialog_->setDarkMode(dark_mode_);
-    // Production source is the RDATA_EXT stick in the laptop. The
-    // robot-SSH source (`UploadSource::RobotSsh` + `setRemote`) is kept
-    // compiled as a fallback but is deliberately not wired here.
-    upload_dialog_->setSource(UploadSource::ThumbDrive);
-    upload_dialog_->setRobotId(profile->robot_id);
-    upload_dialog_->setCloudAuth(registry.cloudApiBase(),
-                                 profile->cloud_client_id,
-                                 profile->cloud_device_token);
+    // Don't retarget a queue that is already uploading. setRobotId
+    // would put the remaining folders under a different robot if the
+    // operator had switched, and setSource is ignored while busy.
+    if (!upload_dialog_->isUploading() &&
+        profile.has_value() &&
+        !profile->cloud_client_id.isEmpty() &&
+        !profile->cloud_device_token.isEmpty()) {
+        // Production source is the RDATA_EXT stick in the laptop. The
+        // robot-SSH source (`UploadSource::RobotSsh` + `setRemote`) is kept
+        // compiled as a fallback but is deliberately not wired here.
+        upload_dialog_->setSource(UploadSource::ThumbDrive);
+        upload_dialog_->setRobotId(profile->robot_id);
+        upload_dialog_->setCloudAuth(registry.cloudApiBase(),
+                                     profile->cloud_client_id,
+                                     profile->cloud_device_token);
+    }
 
     // Same backdrop-blur pattern as the New Scan modal so the
     // dashboard underneath reads as inactive while the dialog is up.
@@ -2093,6 +2148,10 @@ void AppShellWindow::closeEvent(QCloseEvent* event) {
     // active scan).  Stage 1-3 close paths skip the dialog: there is
     // nothing on the robot to tear down.  Per operator: "after Start
     // Mapping the close must be gated".
+    //
+    // A cloud upload is the other gate. Hiding the Upload dialog leaves
+    // it running; quitting is what pauses it, and only after the
+    // operator confirms.
     const bool satellite_mission_active = stage6_ && stage6_->missionActive();
     const bool launch_active =
         exploration_launch_in_progress_ ||
@@ -2100,7 +2159,34 @@ void AppShellWindow::closeEvent(QCloseEvent* event) {
         laptop_launch_started_ ||
         robot_launch_started_ ||
         satellite_mission_active;
+    const bool upload_active =
+        upload_dialog_ && upload_dialog_->isUploading();
+    if (!launch_active && !upload_active) {
+        QMainWindow::closeEvent(event);
+        return;
+    }
+
+    if (upload_active) {
+        const int choice = BdrMessageBox::custom(
+            this,
+            QStringLiteral("Quit during upload?"),
+            QStringLiteral("An upload is still running."),
+            {QStringLiteral("Quit"), QStringLiteral("Keep uploading")},
+            /*defaultIndex=*/1,
+            QStringLiteral(
+                "Quitting pauses it after the files already in progress "
+                "finish. Already-uploaded files stay in the cloud. Reopen "
+                "Upload Data and press Upload to resume."));
+        // 0 is Quit. The window X and Keep uploading both leave the
+        // upload running.
+        if (choice != 0) {
+            event->ignore();
+            return;
+        }
+    }
+
     if (!launch_active) {
+        upload_dialog_->pauseForShutdown();
         QMainWindow::closeEvent(event);
         return;
     }
@@ -2121,6 +2207,13 @@ void AppShellWindow::closeEvent(QCloseEvent* event) {
     if (box.clickedButton() != close_btn) {
         event->ignore();
         return;
+    }
+
+    // Pause before the launch teardown so a cancel on the launch
+    // prompt above never stops an upload the operator chose to keep.
+    // Reaching here means they confirmed Quit.
+    if (upload_active) {
+        upload_dialog_->pauseForShutdown();
     }
 
     // SYNCHRONOUS teardown — same path as Complete Mission.  The new

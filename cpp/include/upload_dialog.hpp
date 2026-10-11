@@ -23,8 +23,8 @@
  *     `UploadStateProbe` walks it and the dialog lists one row per
  *     building (operator, newest scan, summed size, rolled-up status).
  *     Every Mission_* and Section_* folder of that building, on any
- *     date, sits on the same row. Browse… lets the operator point at
- *     an unlabelled stick or a local copy.
+ *     date, sits on the same row. The only source is the mounted
+ *     RDATA_EXT stick — there is no folder picker.
  *  3. Operator selects buildings, presses **Upload Data**. The dialog
  *     expands each ticked row into the folders that are not already
  *     uploaded (oldest visit first) and feeds that queue to
@@ -36,8 +36,10 @@
  *     next file boundary. Resume = re-press Upload.
  *  6. **Cancel** SIGTERMs the subprocess. State on disk is preserved
  *     so the next run picks up where the kill landed.
- *  7. Closing the dialog while busy implicitly pauses (graceful) — see
- *     `closeEvent`. Pulling the stick mid-upload does the same.
+ *  7. Closing the dialog hides it. An upload that is already running
+ *     keeps running; the drive watcher stays armed so pulling the stick
+ *     still pauses. Quitting the OCU is the path that pauses — see
+ *     `pauseForShutdown()`. Pulling the stick mid-upload pauses too.
  *
  * Visual style follows the existing frameless dialog family
  * (`OfflineFinalizeDialog`, `MissionMetadataDialog`,
@@ -102,10 +104,36 @@ public:
     /// ThumbDrive: filesystem label to wait for. Defaults to RDATA_EXT.
     void setDriveLabel(const QString& label);
 
+    /// True while `uploader.py` is running or a retry is waiting.
+    /// Closing the dialog does not change this.
+    bool isUploading() const;
+
+    /// The dialog is hidden and the card is holding a message the
+    /// operator still has to act on (drive removed, press Upload to
+    /// resume, or the upload failed). Opening the dialog must not be
+    /// blocked by the thumb-copy gate.
+    bool hasPendingNotice() const { return !background_hold_.isEmpty(); }
+
+    /// Quit path. Asks the script to pause and waits up to 10 s for the
+    /// files already in progress to finish, then SIGTERMs whatever is
+    /// still running. A retry wait has no process, so that case cancels
+    /// immediately. Already-uploaded files stay in `upload_state.json`.
+    void pauseForShutdown();
+
+signals:
+    /// Empty when nothing is running and nothing is waiting on the
+    /// operator. Otherwise the Dashboard Upload card subtitle
+    /// ("Uploading · 271 / 11640 files", "Upload paused — drive removed").
+    void backgroundStatusChanged(const QString& status);
+
+    /// One-shot operator notice while the dialog is hidden (stick pulled,
+    /// upload failed). The shell shows it as a toast.
+    void uploadAttentionRequested(const QString& message);
+
 public slots:
-    /// Esc hides the dialog through `close()`, so the upload pauses and
-    /// the cloud check stops. `QDialog::closeEvent` calls `reject()`
-    /// again; `in_close_` makes that second call the plain hide.
+    /// Esc hides the dialog through `close()`. A running upload keeps
+    /// going. `QDialog::closeEvent` calls `reject()` again; `in_close_`
+    /// makes that second call the plain hide.
     void reject() override;
 
 protected:
@@ -119,7 +147,6 @@ private slots:
     void onProbeReady(bool ok, const QList<UploadTarget>& targets,
                       const QString& error);
     void onRefreshClicked();
-    void onBrowseClicked();
     void onSelectAllClicked();
     void onTreeItemChanged(QTreeWidgetItem* item, int column);
     void onUploadClicked();
@@ -190,6 +217,12 @@ private:
     // Connectivity helpers.
     void armConnectivityProbes();
     void disarmConnectivityProbes();
+    /// Stops the cloud `curl` probe without clearing `cloud_reachable_`.
+    /// Hiding a running upload uses this so the next drive event does
+    /// not look like "cloud went down" and pause the runner.
+    void stopCloudProbe();
+    void publishBackgroundActivity();
+    void noteDriveRemoved();
     void refreshConnectivityBanner();
     void handleConnectivityTransition();
     /// The data source is usable: stick mounted (ThumbDrive) or robot
@@ -264,6 +297,11 @@ private:
     bool cloud_probe_seen_response_ = false;
     bool offline_pause_active_ = false;
     QString last_offline_reason_;
+    /// Card text that outlives the runner: drive pulled, or a failure
+    /// while the dialog was hidden. Cleared when Upload is pressed again
+    /// or the operator cancels.
+    QString background_hold_;
+    QString published_background_status_;
 
     QPoint drag_offset_;
     bool dragging_ = false;
@@ -282,7 +320,6 @@ private:
 
     // Filter row.
     QPushButton* btn_refresh_ = nullptr;
-    QPushButton* btn_browse_ = nullptr;   // ThumbDrive only
     QLabel* lbl_probe_status_ = nullptr;
 
     // Tree + summary.

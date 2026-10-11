@@ -89,7 +89,9 @@ protected:
     // closeEvent: gated shutdown for the OCU's main window.
     // If the exploration launch tree is alive on the robot (operator
     // already pressed Start Mapping / past Stage 4), the close is
-    // intercepted and a confirmation dialog is shown.  Acceptance runs
+    // intercepted and a confirmation dialog is shown. A cloud upload
+    // that is still running gets its own confirm first: quitting pauses
+    // it (files in progress get up to 10 s to finish). Acceptance runs
     // the same SYNCHRONOUS teardown as Complete Mission so the robot's
     // unified_data_collector gets a chance to call
     // seekcamera_manager_destroy() before the OCU process exits.

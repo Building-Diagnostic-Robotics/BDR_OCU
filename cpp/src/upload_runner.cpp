@@ -701,7 +701,7 @@ void UploadStateProbe::startLocal() {
                 const QList<UploadTarget> result = watcher->result();
                 watcher->deleteLater();
                 if (generation != local_generation_) {
-                    // Root changed underneath us (stick swapped, Browse…);
+                    // Root changed underneath us (stick swapped);
                     // the newer walk owns the signal.
                     return;
                 }
@@ -1384,7 +1384,9 @@ void UploadRunner::onProcessFinished(int exit_code,
                     });
             emit targetRetryScheduled(snapshot, next_attempt, wait_ms,
                                       pause_reason_);
-            retry_timer_->start();
+            // A slot may cancel during the signal (quit during a retry
+            // wait). cancelPendingRetry() has already dropped the timer.
+            if (retry_pending_ && retry_timer_) retry_timer_->start();
             // Stay busy_ — we are still owning the active target.
             return;
         }

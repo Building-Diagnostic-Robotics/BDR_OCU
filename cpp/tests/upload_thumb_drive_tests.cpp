@@ -14,6 +14,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDate>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -195,6 +196,18 @@ TEST(UploadThumbDrive, ScriptResolverHonoursOverrideAndRejectsMissing) {
         f2c_cpp::UploadRunner::resolveLocalScriptPath(tmp.path() + "/nope.py");
     EXPECT_TRUE(fallback.isEmpty() || QFileInfo(fallback).isFile());
     EXPECT_NE(fallback, tmp.path() + "/nope.py");
+}
+
+TEST(UploadThumbDrive, MountPointRequiresARealMount) {
+    const QString mounts =
+        "/dev/sdb1 /media/ops/RDATA_EXT exfat rw 0 0\n"
+        "/dev/sdc1 /media/ops/New\\040Volume vfat rw 0 0\n";
+    EXPECT_TRUE(ThumbDriveWatcher::isMountPoint("/media/ops/RDATA_EXT", mounts));
+    EXPECT_TRUE(ThumbDriveWatcher::isMountPoint("/media/ops/New Volume", mounts));
+    EXPECT_TRUE(ThumbDriveWatcher::isMountPoint("/media/ops/RDATA_EXT/", mounts));
+    EXPECT_FALSE(ThumbDriveWatcher::isMountPoint("/media/ops/RDATA_EXT/extra", mounts));
+    EXPECT_FALSE(ThumbDriveWatcher::isMountPoint("/tmp/RDATA_EXT", mounts));
+    EXPECT_FALSE(ThumbDriveWatcher::isMountPoint("", mounts));
 }
 
 TEST(UploadThumbDrive, MountsLookupDecodesKernelEscapes) {
@@ -412,6 +425,72 @@ else:
     EXPECT_TRUE(joined.contains("force=yes")) << joined.toStdString();
     EXPECT_TRUE(joined.contains("force=no")) << joined.toStdString();
     EXPECT_LT(joined.indexOf("force=yes"), joined.indexOf("force=no"));
+}
+
+// Quit during a retry wait must not sit out the 5 s backoff. requestPause
+// is a no-op with no process, and cancelling from the retry signal used
+// to free the timer and then start it.
+TEST(UploadThumbDrive, CancelDuringRetryWaitFinishesImmediately) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+
+    QTemporaryDir tmp;
+    ASSERT_TRUE(tmp.isValid());
+    layOutStick(tmp.path());
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    const UploadTarget* s1 = find(all, "Section_1_101500");
+    ASSERT_NE(s1, nullptr);
+
+    const QString stub = tmp.path() + "/stub_cancel_retry.py";
+    writeFile(stub, R"PY(
+import sys
+print("Connection error: blip", flush=True)
+print("Auto-pausing. You can resume later.", flush=True)
+)PY");
+
+    UploadRunner runner;
+    runner.setLocalScriptPath(stub);
+    runner.setCloudAuth("https://api.example", "c", "t");
+    runner.setRobotId("Roofus#0001");
+    runner.setQueue({*s1});
+
+    bool saw_retry = false;
+    bool finished = false;
+    bool cancelled = false;
+    qint64 cancel_ms = -1;
+    QObject::connect(
+        &runner, &UploadRunner::targetRetryScheduled,
+        [&](const UploadTarget&, int, int, const QString&) {
+            EXPECT_TRUE(runner.isBusy());
+            EXPECT_TRUE(runner.isRetryScheduled());
+            runner.requestPause();
+            EXPECT_TRUE(runner.isBusy());
+            EXPECT_TRUE(runner.isRetryScheduled());
+            QElapsedTimer timer;
+            timer.start();
+            runner.requestCancel();
+            cancel_ms = timer.elapsed();
+            saw_retry = true;
+        });
+    QEventLoop loop;
+    QObject::connect(&runner, &UploadRunner::queueFinished, [&](bool c) {
+        finished = true;
+        cancelled = c;
+        loop.quit();
+    });
+    // First retry waits 5 s. If cancel does not land, this fires first.
+    QTimer::singleShot(1500, &loop, &QEventLoop::quit);
+    runner.start();
+    loop.exec();
+
+    EXPECT_TRUE(saw_retry);
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(cancelled);
+    EXPECT_GE(cancel_ms, 0);
+    EXPECT_LT(cancel_ms, 1500);
+    EXPECT_FALSE(runner.isBusy());
 }
 
 TEST(UploadThumbDrive, LocalRunnerReportsMissingInterpreterAsFailure) {

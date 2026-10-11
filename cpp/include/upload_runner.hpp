@@ -336,8 +336,9 @@ private:
  *  - `requestCancel()` SIGTERMs the process. Files in-flight may or may
  *    not finish; whichever finished are recorded in `upload_state.json`
  *    so the next run picks up cleanly.
- *  - Closing the dialog routes through `requestPause()` (graceful) by
- *    convention — see `UploadDialog::closeEvent`.
+ *  - Hiding the dialog does not pause. Quitting the OCU calls
+ *    `UploadDialog::pauseForShutdown()`, which is this method plus a
+ *    10 s wait and then `requestCancel()`.
  */
 class UploadRunner : public QObject {
     Q_OBJECT
