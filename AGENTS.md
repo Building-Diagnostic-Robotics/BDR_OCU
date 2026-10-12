@@ -1812,7 +1812,10 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  `maybeHandleTopple()` runs first in the `statusUpdated` handler: on a new
  count (`topple_notice_policy::onTripSeq`, a counter so a trip between two
  1 Hz lines is not missed) it calls `onEstop()` and shows a modeless
- "Topple detected — E-Stop engaged" notice. There is no topple-specific
+ "Topple detected — E-Stop engaged" notice. The "motors may not have
+ disarmed" line is shown only while `tip` is still true, and it points at
+ the MOTORS chip and Space — that button already reads Clear E-Stop, so
+ the line must not say "press Emergency Stop". There is no topple-specific
  recovery: Clear E-Stop, then Resume or Motors: Arm. A shadow-mode trip
  (`estop_engaged` false) is not counted in `tip_seq`, so it does not
  latch here. Do not add a second clear path. Do not gate on the guard's

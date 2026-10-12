@@ -8864,10 +8864,15 @@ void SatelliteScreen::maybeHandleTopple(const CoverageStatus& status) {
         "\n\nTo recover: press Clear E-Stop, then either Resume, or use "
         "Motors: Arm and take manual control to drive the robot away from "
         "this spot.");
-    if (!status.tip_disarmed) {
+    // tip_disarmed is reset when the guard releases, so a later status line
+    // for the same trip can carry tip_disarmed=false after the motors did
+    // disarm. Only say so while the trip is still latched. Do not tell the
+    // operator to press Emergency Stop: that button now reads Clear E-Stop.
+    if (status.tip && !status.tip_disarmed) {
         body += QStringLiteral(
-            "\n\nThe robot reported the motors may NOT have disarmed — press "
-            "Emergency Stop.");
+            "\n\nThe robot could not confirm the motors disarmed. The OCU has "
+            "sent the stop again — check the MOTORS chip. Space re-sends the "
+            "stop.");
     }
     // Modeless, like the stop prompt: exec() would nest a loop under a live
     // launch. It only informs — the E-Stop button is the control.
