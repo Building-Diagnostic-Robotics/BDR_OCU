@@ -56,6 +56,27 @@ TEST(EstopLatchPolicy, ReleaseNeverResumesAutonomy) {
     }
 }
 
+TEST(EstopLatchPolicy, ArmWaitCompletesOnlyWhenNothingChanged) {
+    EXPECT_TRUE(policy::armWaitMayComplete(RunState::Idle, RunState::Idle,
+                                           true, false));
+    EXPECT_TRUE(policy::armWaitMayComplete(RunState::Paused, RunState::Paused,
+                                           true, false));
+}
+
+TEST(EstopLatchPolicy, ArmWaitRefusesAfterAnEmergencyStop) {
+    EXPECT_FALSE(policy::armWaitMayComplete(
+        RunState::Paused, RunState::EmergencyStopped, true, false));
+    EXPECT_FALSE(policy::armWaitMayComplete(
+        RunState::Idle, RunState::EmergencyStopped, true, false));
+}
+
+TEST(EstopLatchPolicy, ArmWaitRefusesWhenTheMissionIsGone) {
+    EXPECT_FALSE(policy::armWaitMayComplete(RunState::Idle, RunState::Idle,
+                                            false, false));
+    EXPECT_FALSE(policy::armWaitMayComplete(RunState::Paused, RunState::Paused,
+                                            true, true));
+}
+
 TEST(EstopLatchPolicy, LatchOwnsTheStatusPill) {
     EXPECT_TRUE(policy::holdsStatusPill(RunState::EmergencyStopped));
     for (const RunState state : {RunState::Idle, RunState::Running,

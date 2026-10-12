@@ -760,6 +760,10 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     connect(mission_, &MissionController::logLine, this,
             &SatelliteScreen::appendLog);
     connect(mission_, &MissionController::teardownBegan, this, [this] {
+        // Cancel can land during the CLOSED_LOOP wait. Stop it here, before
+        // the sweeps, so the timer cannot publish autonomy_enable=true while
+        // the stack is coming down.
+        cancelArmWait(QStringLiteral("teardown"));
         forgetMissionTelemetry();
         emit missionTeardownBegan();
     });
@@ -803,6 +807,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     topple_seq_seen_ = topple_notice_policy::kUnseen;
                     last_autonomy_enable_ms_ = 0;
                     guard_watch_ = {};
+                    cancelArmWait(QStringLiteral("mission ended"));
                     scan_run_state_ = ScanRunState::Idle;
                     scan_autonomy_ran_ = false;
                     manual_override_ = false;
@@ -7119,6 +7124,11 @@ void SatelliteScreen::beginStartScan() {
         return;
     }
     if (ros_->motorsArmed()) {
+        // This path is the completion. A wait left over from an earlier
+        // press must not also fire and enable a second time.
+        if (arm_wait_timer_ && arm_wait_timer_->isActive()) {
+            arm_wait_timer_->stop();
+        }
         setAutonomyEnabled(true);
         if (scan_started_wall_ms_ == 0) {
             scan_started_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
@@ -7136,8 +7146,20 @@ void SatelliteScreen::beginStartScan() {
         arm_wait_timer_->setInterval(100);
     }
     arm_wait_ticks_ = 0;
+    arm_wait_from_ = scan_run_state_;
     disconnect(arm_wait_timer_, &QTimer::timeout, nullptr, nullptr);
     connect(arm_wait_timer_, &QTimer::timeout, this, [this] {
+        // Backstop for a caller that did not cancel the wait. Enabling
+        // after an E-Stop or a teardown republishes autonomy_enable=true
+        // over the stop.
+        if (!estop_latch_policy::armWaitMayComplete(
+                arm_wait_from_, scan_run_state_, mission_->missionActive(),
+                mission_->tearingDown())) {
+            arm_wait_timer_->stop();
+            appendLog(QStringLiteral(
+                "[scan] arming wait cancelled — not enabling autonomy"));
+            return;
+        }
         ++arm_wait_ticks_;
         if (ros_->motorsArmed()) {
             arm_wait_timer_->stop();
@@ -7174,6 +7196,14 @@ void SatelliteScreen::beginStartScan() {
         }
     });
     arm_wait_timer_->start();
+}
+
+void SatelliteScreen::cancelArmWait(const QString& why) {
+    if (!arm_wait_timer_ || !arm_wait_timer_->isActive()) {
+        return;
+    }
+    arm_wait_timer_->stop();
+    appendLog(QStringLiteral("[scan] arming wait cancelled — %1").arg(why));
 }
 
 void SatelliteScreen::onScanCancelClicked() {
@@ -8120,9 +8150,13 @@ void SatelliteScreen::onEstop() {
     // every later tick. There is deliberately no /coverage/abort here — abort
     // ends the run and closes the section as partial, so it would make the
     // stop unrecoverable instead of resumable.
+    // State first, then the wait. A CLOSED_LOOP wait started by Start or
+    // Resume enables autonomy up to 6 s later; if its tick lands while this
+    // function is still running, armWaitMayComplete already sees the latch.
+    scan_run_state_ = estop_latch_policy::onEmergencyStop(scan_run_state_);
+    cancelArmWait(QStringLiteral("E-Stop"));
     setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
-    scan_run_state_ = estop_latch_policy::onEmergencyStop(scan_run_state_);
     appendLog(QStringLiteral(
         "[E-STOP] autonomy disabled + axis IDLE requested — latched"));
     // Both pills: on the scan page the rail is hidden and the corner pill is the

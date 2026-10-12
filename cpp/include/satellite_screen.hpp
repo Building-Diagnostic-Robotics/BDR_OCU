@@ -450,6 +450,9 @@ private:
     void onScanStartPauseClicked();
     void onScanCancelClicked();
     void beginStartScan();
+    /** Stops the CLOSED_LOOP wait if one is running. Silent otherwise, so
+        the mission-end reset can call it unconditionally. */
+    void cancelArmWait(const QString& why);
     /** A launch exited unasked (`side` = "robot" | "laptop"): tear down,
         tell the operator, back to Scan Parameters. Plan stays PLANNED. */
     void handleLaunchDeath(const QString& side, int exit_code);
@@ -952,6 +955,9 @@ private:
     qint64 scan_elapsed_ms_ = 0;
     QTimer* arm_wait_timer_ = nullptr;
     int arm_wait_ticks_ = 0;
+    /** Run state when the CLOSED_LOOP wait started. The timer may enable
+        autonomy only while the state is still this one. */
+    ScanRunState arm_wait_from_ = ScanRunState::Idle;
     QTimer* conclude_wait_timer_ = nullptr;
     int conclude_wait_ticks_ = 0;
     /** Abort-and-save CTA. A click never re-enables. */
