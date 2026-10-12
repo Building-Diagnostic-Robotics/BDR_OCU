@@ -58,23 +58,32 @@ TEST(EstopLatchPolicy, ReleaseNeverResumesAutonomy) {
 
 TEST(EstopLatchPolicy, ArmWaitCompletesOnlyWhenNothingChanged) {
     EXPECT_TRUE(policy::armWaitMayComplete(RunState::Idle, RunState::Idle,
-                                           true, false));
+                                           true, false, false));
     EXPECT_TRUE(policy::armWaitMayComplete(RunState::Paused, RunState::Paused,
-                                           true, false));
+                                           true, false, false));
 }
 
 TEST(EstopLatchPolicy, ArmWaitRefusesAfterAnEmergencyStop) {
     EXPECT_FALSE(policy::armWaitMayComplete(
-        RunState::Paused, RunState::EmergencyStopped, true, false));
+        RunState::Paused, RunState::EmergencyStopped, true, false, false));
     EXPECT_FALSE(policy::armWaitMayComplete(
-        RunState::Idle, RunState::EmergencyStopped, true, false));
+        RunState::Idle, RunState::EmergencyStopped, true, false, false));
 }
 
 TEST(EstopLatchPolicy, ArmWaitRefusesWhenTheMissionIsGone) {
     EXPECT_FALSE(policy::armWaitMayComplete(RunState::Idle, RunState::Idle,
-                                            false, false));
+                                            false, false, false));
     EXPECT_FALSE(policy::armWaitMayComplete(RunState::Paused, RunState::Paused,
-                                            true, true));
+                                            true, true, false));
+}
+
+// Taking manual control does not change Idle or Paused, so the state check
+// alone would let the wait enable autonomy under the operator's hands.
+TEST(EstopLatchPolicy, ArmWaitRefusesDuringManualOverride) {
+    EXPECT_FALSE(policy::armWaitMayComplete(RunState::Idle, RunState::Idle,
+                                            true, false, true));
+    EXPECT_FALSE(policy::armWaitMayComplete(RunState::Paused, RunState::Paused,
+                                            true, false, true));
 }
 
 TEST(EstopLatchPolicy, LatchOwnsTheStatusPill) {

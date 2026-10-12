@@ -7154,7 +7154,7 @@ void SatelliteScreen::beginStartScan() {
         // over the stop.
         if (!estop_latch_policy::armWaitMayComplete(
                 arm_wait_from_, scan_run_state_, mission_->missionActive(),
-                mission_->tearingDown())) {
+                mission_->tearingDown(), manual_override_)) {
             arm_wait_timer_->stop();
             appendLog(QStringLiteral(
                 "[scan] arming wait cancelled — not enabling autonomy"));
@@ -7329,6 +7329,9 @@ void SatelliteScreen::setManualOverride(bool active) {
     manual_override_ = active;
     if (active) {
         scan_run_state_ = estop_latch_policy::pauseIfRunning(scan_run_state_);
+        // A Start or Resume still waiting for CLOSED_LOOP leaves the state
+        // Idle or Paused, so it would enable autonomy under the operator.
+        cancelArmWait(QStringLiteral("manual override"));
         setAutonomyEnabled(false);
         if (teleop_check_) {
             teleop_check_->setChecked(true);

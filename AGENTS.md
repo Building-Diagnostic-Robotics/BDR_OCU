@@ -1782,14 +1782,16 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  - `beginStartScan()` refuses outright on `!armingAllowed()`. It is the
  single choke point for arming-with-autonomy, so the guard belongs there
  even though the button is already disabled.
- - **The CLOSED_LOOP wait in `beginStartScan` is cancelled by E-Stop and
- teardown.** When the motors are not yet armed, a 6 s timer enables
- autonomy once they reach CLOSED_LOOP, or on timeout. `cancelArmWait`
- stops it from `onEstop()`, `teardownBegan`, and the
- `missionActiveChanged(false)` reset. The callback also re-checks
- `armWaitMayComplete` — state unchanged since the wait began, mission
- still active, not tearing down — before it enables. Do not let that
- timer publish `autonomy_enable=true` after a stop.
+ - **The CLOSED_LOOP wait in `beginStartScan` is cancelled by E-Stop,
+ manual override, and teardown.** When the motors are not yet armed, a
+ 6 s timer enables autonomy once they reach CLOSED_LOOP, or on timeout.
+ `cancelArmWait` stops it from `onEstop()`, `setManualOverride(true)`,
+ `teardownBegan`, and the `missionActiveChanged(false)` reset. The
+ callback also re-checks `armWaitMayComplete` — state unchanged since the
+ wait began, mission still active, not tearing down, no manual override —
+ before it enables. Do not let that timer publish `autonomy_enable=true`
+ after a stop or while the operator is driving. Taking control is never
+ blocked during the wait; it cancels the start instead.
  - **Clearing costs its own press and does not arm.** The E-Stop button
  relabels to `Clear E-Stop` (matching the shipped Stage 5 control bar,
  `PlannerScreen::scan_estop_latched_`); clearing lands on `Paused`, and

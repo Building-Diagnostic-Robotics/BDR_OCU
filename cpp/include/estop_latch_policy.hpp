@@ -58,11 +58,13 @@ constexpr bool armingAllowed(RunState state) noexcept {
 /** The CLOSED_LOOP wait in beginStartScan() may enable autonomy only while
     the run is still the one that started the wait. An E-Stop, a teardown,
     or the mission ending during those 6 s must not be overwritten by the
-    timer publishing autonomy_enable=true. */
+    timer publishing autonomy_enable=true. Taking manual control cancels the
+    wait too: the operator is driving, and autonomy must not take over. */
 constexpr bool armWaitMayComplete(RunState started_from, RunState now,
-                                  bool mission_active,
-                                  bool tearing_down) noexcept {
-    return mission_active && !tearing_down && started_from == now;
+                                  bool mission_active, bool tearing_down,
+                                  bool manual_override) noexcept {
+    return mission_active && !tearing_down && !manual_override &&
+           started_from == now;
 }
 
 /** While latched, the director's own state must not overwrite the E-STOP
