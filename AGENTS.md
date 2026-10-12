@@ -1145,6 +1145,21 @@ Classic Stage 4/5 remain in-tree, unrouted.
  it into Standard would double the width. Schema ≤ 5 (no `scan` block)
  loads as Standard. Do not add a second copy of the ranges. `TrackSlider`
  stays for the screens that still use it; this card does not.
+ Each card is one 76 px row, no second line and no radio dot: a fixed
+ 64 px lane value (number 30 px bold, unit 20 px **regular** — Arimo
+ Bold "ft" reads as π — painted by `LaneValue`), the name 17 px bold
+ caps centred, and a fixed 44 px icon slot. The speed icon is the
+ selection mark: outline `scan_speed_*_outline.svg` in `muted` off,
+ filled in `accent_green` on. The selected card also keeps the green
+ wash and a 2 px `accent_green` border, because outline vs filled alone
+ is too weak in glare. Custom uses the same row with `—` (`muted`) until
+ it is selected and a 24 px chevron in the icon slot. Padding is 12 px
+ and gaps 10 px, not the mockup's 16 / 14: the card is 256 px wide in
+ the 288 px rail and STANDARD needs ~100 px. Metric shows one decimal
+ (`0.9 m`) so it fits the 64 px slot. The accessible name still carries
+ the speed (`Detailed, 2 ft, slow`). Custom speed buttons follow the
+ same icon rule at 36 px, 76 px tall, 14 px labels; slider labels are
+ 14 px.
  The cards and the speed buttons have no hover style: a touchscreen
  leaves hover on the last widget touched, which read as a second
  selection. While a mission is running the cards drop to 0.55 opacity

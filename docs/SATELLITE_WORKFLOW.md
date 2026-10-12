@@ -281,7 +281,9 @@ scan parameters, and, when any edge is marked, `roi_edge_flags`.
 
 **Scan Parameters** is the step after Edge Review. Four exclusive cards:
 Detailed (2 ft lanes, Slow), Standard (3 ft, Medium — the default),
-Quick (5 ft, Fast), and Custom. Custom opens a Slow / Medium / Fast row
+Quick (5 ft, Fast), and Custom. Each card is one row: the lane width,
+the name, and the speed animal, which is filled green on the selected
+card and an outline on the others. Custom opens a Slow / Medium / Fast row
 and a vertical lane-width slider, 1–7 ft in half-foot steps. The map
 shows a labelled preview of the lanes at that width. Next opens the
 launch confirmation, which names the preset, the lane width, and the

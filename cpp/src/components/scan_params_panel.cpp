@@ -22,10 +22,17 @@
 namespace f2c_cpp {
 namespace {
 
-constexpr int kCardMinHeight = 60;
-constexpr int kSpeedButtonHeight = 68;
-constexpr int kCardIconPx = 18;
-constexpr int kSpeedIconPx = 30;
+constexpr int kCardMinHeight = 76;
+constexpr int kCardPadV = 12;
+// A card is 256 px wide in the 288 px rail. With 16 px padding and 14 px
+// gaps the name gets 86 px, and STANDARD needs 100 px in Arimo Bold 17.
+constexpr int kCardPadH = 12;
+constexpr int kCardGap = 10;
+constexpr int kLaneSlotW = 64;
+constexpr int kCardIconPx = 44;
+constexpr int kChevronPx = 24;
+constexpr int kSpeedButtonHeight = 76;
+constexpr int kSpeedIconPx = 36;
 
 constexpr int kSliderW = 208;
 constexpr int kSliderH = 272;
@@ -46,7 +53,13 @@ const char* kSpeedIcon[3] = {
     ":/assets/scansetup/speed_fast.svg",
 };
 
-const char* kPresetName[3] = {"DETAILED", "STANDARD", "QUICK"};
+const char* kSpeedOutlineIcon[3] = {
+    ":/assets/scansetup/speed_slow_outline.svg",
+    ":/assets/scansetup/speed_medium_outline.svg",
+    ":/assets/scansetup/speed_fast_outline.svg",
+};
+
+const char* kPresetName[3] = {"Detailed", "Standard", "Quick"};
 
 double speedForIndex(int index) {
     if (index <= 0) {
@@ -79,6 +92,24 @@ QString laneNumber(int half_feet) {
         return QString::number(half_feet / 2);
     }
     return QString::number(half_feet * 0.5, 'f', 1);
+}
+
+struct LaneParts {
+    QString number;
+    QString unit;
+};
+
+LaneParts cardLaneParts(double meters) {
+    const double snapped = ScanParams::snapWidth(meters);
+    if (UnitsProvider::instance()->isMetric()) {
+        // One decimal so "0.9 m" fits the 64 px slot. The 0.15 m grid
+        // still gives every slider step its own value.
+        const QString full = units::formatLength(snapped, 1);
+        return {full.section(QLatin1Char(' '), 0, 0),
+                units::lengthUnitSuffix().trimmed()};
+    }
+    return {laneNumber(ScanParams::halfFeetFromMeters(snapped)),
+            units::lengthUnitSuffix().trimmed()};
 }
 
 QColor minorTickColor(bool dark) {
@@ -125,44 +156,62 @@ int halfForY(double y) {
     return snapped;
 }
 
-class RadioMark : public QWidget {
+// The card's lane width: a bold number and a regular unit on one baseline.
+// The unit stays regular because Arimo Bold "ft" reads as a pi sign.
+class LaneValue : public QWidget {
 public:
-    explicit RadioMark(QWidget* parent) : QWidget(parent) {
-        setFixedSize(20, 20);
+    explicit LaneValue(QWidget* parent) : QWidget(parent) {
+        setFixedWidth(kLaneSlotW);
+        setMinimumHeight(36);
         ignoreMouse(this);
     }
 
-    void setOn(bool on, const QColor& ring, const QColor& dot) {
-        on_ = on;
-        ring_ = ring;
-        dot_ = dot;
+    void setValue(const QString& number, const QString& unit,
+                  const QColor& color) {
+        if (number == number_ && unit == unit_ && color == color_) {
+            return;
+        }
+        number_ = number;
+        unit_ = unit;
+        color_ = color;
         update();
     }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setPen(QPen(ring_, 2));
-        painter.setBrush(Qt::NoBrush);
-        painter.drawEllipse(QRectF(1, 1, 18, 18));
-        if (on_) {
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(dot_);
-            painter.drawEllipse(QRectF(5, 5, 10, 10));
+        painter.setRenderHint(QPainter::TextAntialiasing, true);
+        QFont number_font(QStringLiteral("Arimo"));
+        number_font.setPixelSize(30);
+        number_font.setWeight(QFont::Bold);
+        QFont unit_font(QStringLiteral("Arimo"));
+        unit_font.setPixelSize(20);
+        unit_font.setWeight(QFont::Normal);
+        unit_font.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
+        const QFontMetricsF metrics(number_font);
+        const qreal baseline =
+            (height() + metrics.capHeight()) / 2.0;
+        painter.setPen(color_);
+        painter.setFont(number_font);
+        painter.drawText(QPointF(0, baseline), number_);
+        if (!unit_.isEmpty()) {
+            painter.setFont(unit_font);
+            painter.drawText(
+                QPointF(metrics.horizontalAdvance(number_) + 3.0, baseline),
+                unit_);
         }
     }
 
 private:
-    bool on_ = false;
-    QColor ring_ = Qt::gray;
-    QColor dot_ = Qt::transparent;
+    QString number_;
+    QString unit_;
+    QColor color_ = Qt::gray;
 };
 
 class ChevronMark : public QWidget {
 public:
     explicit ChevronMark(QWidget* parent) : QWidget(parent) {
-        setFixedSize(14, 14);
+        setFixedSize(kChevronPx, kChevronPx);
         ignoreMouse(this);
     }
 
@@ -176,14 +225,14 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setPen(QPen(color_, 1.6, Qt::SolidLine, Qt::RoundCap,
+        painter.setPen(QPen(color_, 2.4, Qt::SolidLine, Qt::RoundCap,
                             Qt::RoundJoin));
         if (open_) {
-            painter.drawLine(QPointF(2, 4.5), QPointF(7, 9.5));
-            painter.drawLine(QPointF(7, 9.5), QPointF(12, 4.5));
+            painter.drawLine(QPointF(6, 9), QPointF(12, 15));
+            painter.drawLine(QPointF(12, 15), QPointF(18, 9));
         } else {
-            painter.drawLine(QPointF(4.5, 2), QPointF(9.5, 7));
-            painter.drawLine(QPointF(9.5, 7), QPointF(4.5, 12));
+            painter.drawLine(QPointF(9, 6), QPointF(15, 12));
+            painter.drawLine(QPointF(15, 12), QPointF(9, 18));
         }
     }
 
@@ -232,7 +281,7 @@ protected:
         const double thumb_y = yForHalf(half_);
 
         QFont label_font(QStringLiteral("Arimo"));
-        label_font.setPixelSize(12);
+        label_font.setPixelSize(14);
         painter.setFont(label_font);
         painter.setPen(muted_);
         for (int half = ScanParams::kWidthHalfFeetMin;
@@ -246,7 +295,7 @@ protected:
                              major ? muted_ : minor_);
             if (major) {
                 painter.drawText(
-                    QRectF(0, y - 8, 56, 16),
+                    QRectF(0, y - 10, 56, 20),
                     Qt::AlignRight | Qt::AlignVCenter,
                     laneNumber(half) + units::lengthUnitSuffix());
             }
@@ -353,13 +402,15 @@ QString cardStyle(const UiThemeTokens& tokens, bool dark) {
     const QString selected = wash.name(QColor::HexArgb);
     // No :hover. A touchscreen leaves hover on the last widget touched,
     // and that grey fill read as a second selected card.
+    // The selected card keeps the wash and a 2 px border. In glare the
+    // filled-versus-outline icon alone does not mark the selection.
     return QStringLiteral(
                "QPushButton { background: %1; border: 1px solid %2; "
-               "border-radius: 10px; text-align: left; }"
-               "QPushButton:checked { background: %3; border: 1px solid %4; }"
+               "border-radius: 12px; text-align: left; }"
+               "QPushButton:checked { background: %3; border: 2px solid %4; }"
                "QPushButton:disabled { background: %1; border: 1px solid %2; }"
                "QPushButton:checked:disabled { background: %3; "
-               "border: 1px solid %4; }")
+               "border: 2px solid %4; }")
         .arg(tokens.raised, tokens.raised_border, selected, tokens.accent_green);
 }
 
@@ -379,12 +430,32 @@ QString speedStyle(const UiThemeTokens& tokens, bool dark) {
 
 struct PresetCard {
     QPushButton* button = nullptr;
+    LaneValue* value = nullptr;
     QLabel* name = nullptr;
-    QLabel* lanes = nullptr;
     QLabel* icon = nullptr;
-    QLabel* speed = nullptr;
-    RadioMark* radio = nullptr;
 };
+
+// [lane value 64] [name, centred] [44 px slot]. All four cards share it so
+// the columns line up.
+QHBoxLayout* cardRow(QWidget* card, LaneValue* value, QLabel* name,
+                     QWidget* slot_content) {
+    auto* row = new QHBoxLayout(card);
+    row->setContentsMargins(kCardPadH, kCardPadV, kCardPadH, kCardPadV);
+    row->setSpacing(kCardGap);
+    row->addWidget(value, 0, Qt::AlignVCenter);
+    name->setAlignment(Qt::AlignCenter);
+    name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    ignoreMouse(name);
+    row->addWidget(name, 1);
+    auto* slot = new QWidget(card);
+    slot->setFixedSize(kCardIconPx, kCardIconPx);
+    ignoreMouse(slot);
+    auto* slot_layout = new QHBoxLayout(slot);
+    slot_layout->setContentsMargins(0, 0, 0, 0);
+    slot_layout->addWidget(slot_content, 0, Qt::AlignCenter);
+    row->addWidget(slot, 0, Qt::AlignVCenter);
+    return row;
+}
 
 }  // namespace
 
@@ -393,8 +464,8 @@ public:
     PresetCard cards[3];
     QWidget* custom_frame = nullptr;
     QPushButton* custom_button = nullptr;
+    LaneValue* custom_value = nullptr;
     QLabel* custom_name = nullptr;
-    QLabel* custom_summary = nullptr;
     ChevronMark* chevron = nullptr;
     QWidget* custom_body = nullptr;
     QPushButton* speed_buttons[3] = {};
@@ -408,9 +479,6 @@ public:
     QButtonGroup* speeds = nullptr;
     QPixmap card_icon[3][2];
     QPixmap speed_icon[3][2];
-    QString text;
-    QString muted;
-    QString accent_text;
 };
 
 ScanParamsPanel::ScanParamsPanel(QWidget* parent) : QWidget(parent) {
@@ -451,37 +519,16 @@ ScanParamsPanel::ScanParamsPanel(QWidget* parent) : QWidget(parent) {
         button->setMinimumHeight(kCardMinHeight);
         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
         button->setFocusPolicy(Qt::NoFocus);
-        auto* row = new QHBoxLayout(button);
-        row->setContentsMargins(14, 10, 14, 10);
-        row->setSpacing(12);
-
-        auto* text_col = new QVBoxLayout;
-        text_col->setContentsMargins(0, 0, 0, 0);
-        text_col->setSpacing(4);
-        auto* name = new QLabel(QString::fromLatin1(kPresetName[i]), button);
-        ignoreMouse(name);
-        text_col->addWidget(name);
-        auto* line = new QHBoxLayout;
-        line->setContentsMargins(0, 0, 0, 0);
-        line->setSpacing(6);
-        auto* lanes = new QLabel(button);
+        auto* value = new LaneValue(button);
+        auto* name = new QLabel(
+            QString::fromLatin1(kPresetName[i]).toUpper(), button);
         auto* icon = new QLabel(button);
         icon->setFixedSize(kCardIconPx, kCardIconPx);
-        auto* speed = new QLabel(button);
-        ignoreMouse(lanes);
+        icon->setAlignment(Qt::AlignCenter);
         ignoreMouse(icon);
-        ignoreMouse(speed);
-        line->addWidget(lanes);
-        line->addWidget(icon);
-        line->addWidget(speed);
-        line->addStretch(1);
-        text_col->addLayout(line);
-        row->addLayout(text_col, 1);
+        cardRow(button, value, name, icon);
 
-        auto* radio = new RadioMark(button);
-        row->addWidget(radio, 0, Qt::AlignVCenter);
-
-        ui_->cards[i] = {button, name, lanes, icon, speed, radio};
+        ui_->cards[i] = {button, value, name, icon};
         ui_->presets->addButton(button, static_cast<int>(named[i]));
         card_layout->addWidget(button);
     }
@@ -499,21 +546,11 @@ ScanParamsPanel::ScanParamsPanel(QWidget* parent) : QWidget(parent) {
     ui_->custom_button->setCursor(Qt::PointingHandCursor);
     ui_->custom_button->setMinimumHeight(kCardMinHeight);
     ui_->custom_button->setFocusPolicy(Qt::NoFocus);
-    auto* custom_row = new QHBoxLayout(ui_->custom_button);
-    custom_row->setContentsMargins(14, 10, 14, 10);
-    custom_row->setSpacing(12);
-    auto* custom_text = new QVBoxLayout;
-    custom_text->setSpacing(4);
+    ui_->custom_value = new LaneValue(ui_->custom_button);
     ui_->custom_name = new QLabel(QStringLiteral("CUSTOM"), ui_->custom_button);
-    ui_->custom_summary = new QLabel(ui_->custom_button);
-    ui_->custom_summary->setWordWrap(true);
-    ignoreMouse(ui_->custom_name);
-    ignoreMouse(ui_->custom_summary);
-    custom_text->addWidget(ui_->custom_name);
-    custom_text->addWidget(ui_->custom_summary);
-    custom_row->addLayout(custom_text, 1);
     ui_->chevron = new ChevronMark(ui_->custom_button);
-    custom_row->addWidget(ui_->chevron, 0, Qt::AlignVCenter);
+    cardRow(ui_->custom_button, ui_->custom_value, ui_->custom_name,
+            ui_->chevron);
     ui_->presets->addButton(ui_->custom_button,
                             static_cast<int>(ScanPreset::Custom));
     custom_layout->addWidget(ui_->custom_button);
@@ -730,10 +767,6 @@ void ScanParamsPanel::setCustomHalfFeet(int half_feet) {
 
 void ScanParamsPanel::restyle() {
     const UiThemeTokens tokens = uiThemeTokens(dark_mode_);
-    ui_->text = tokens.text;
-    ui_->muted = tokens.muted;
-    ui_->accent_text = tokens.accent_text;
-
     const QString cards = cardStyle(tokens, dark_mode_);
     for (const PresetCard& card : ui_->cards) {
         card.button->setStyleSheet(cards);
@@ -749,19 +782,18 @@ void ScanParamsPanel::restyle() {
         label->setStyleSheet(labelStyle(tokens.muted, 11, 700, 0.5));
     }
 
+    // The icon is the selection mark: outline when off, filled when on.
     for (int i = 0; i < 3; ++i) {
+        const QString outline = QString::fromLatin1(kSpeedOutlineIcon[i]);
+        const QString filled = QString::fromLatin1(kSpeedIcon[i]);
         ui_->card_icon[i][0] =
-            loadTintedSvg(QString::fromLatin1(kSpeedIcon[i]), kCardIconPx,
-                          kCardIconPx, tokens.muted);
-        ui_->card_icon[i][1] =
-            loadTintedSvg(QString::fromLatin1(kSpeedIcon[i]), kCardIconPx,
-                          kCardIconPx, tokens.accent_text);
+            loadTintedSvg(outline, kCardIconPx, kCardIconPx, tokens.muted);
+        ui_->card_icon[i][1] = loadTintedSvg(filled, kCardIconPx, kCardIconPx,
+                                             tokens.accent_green);
         ui_->speed_icon[i][0] =
-            loadTintedSvg(QString::fromLatin1(kSpeedIcon[i]), kSpeedIconPx,
-                          kSpeedIconPx, tokens.muted);
-        ui_->speed_icon[i][1] =
-            loadTintedSvg(QString::fromLatin1(kSpeedIcon[i]), kSpeedIconPx,
-                          kSpeedIconPx, tokens.accent_text);
+            loadTintedSvg(outline, kSpeedIconPx, kSpeedIconPx, tokens.muted);
+        ui_->speed_icon[i][1] = loadTintedSvg(
+            filled, kSpeedIconPx, kSpeedIconPx, tokens.accent_green);
     }
     ui_->slider->setColors(QColor(tokens.muted), minorTickColor(dark_mode_),
                            QColor(tokens.accent_green),
@@ -774,56 +806,54 @@ void ScanParamsPanel::refresh() {
     const QSignalBlocker block_presets(ui_->presets);
     const QSignalBlocker block_speeds(ui_->speeds);
 
+    const UiThemeTokens tokens = uiThemeTokens(dark_mode_);
     const bool custom = params_.preset == ScanPreset::Custom;
     const ScanPreset named[3] = {ScanPreset::Detailed, ScanPreset::Standard,
                                  ScanPreset::Quick};
     for (int i = 0; i < 3; ++i) {
         const ScanParams spec = ScanParams::fromPreset(named[i]);
         const bool on = params_.preset == named[i];
+        const QString ink = on ? tokens.accent_text : tokens.text;
         PresetCard& card = ui_->cards[i];
         card.button->setChecked(on);
-        card.name->setStyleSheet(
-            labelStyle(on ? ui_->accent_text : ui_->text, 14, 700, 1.0));
-        card.lanes->setText(laneWidthText(spec.coverage_width_m) +
-                            QStringLiteral(" lanes ·"));
-        card.lanes->setStyleSheet(labelStyle(ui_->muted, 12, 400, 0.0));
-        card.speed->setText(ScanParams::speedTitle(spec.scan_speed_mps));
-        card.speed->setStyleSheet(labelStyle(ui_->muted, 12, 400, 0.0));
+        const LaneParts lane = cardLaneParts(spec.coverage_width_m);
+        card.value->setValue(lane.number, lane.unit, QColor(ink));
+        card.name->setStyleSheet(labelStyle(ink, 17, 700, 0.8));
         card.icon->setPixmap(ui_->card_icon[i][on ? 1 : 0]);
-        const UiThemeTokens tokens = uiThemeTokens(dark_mode_);
-        card.radio->setOn(
-            on, QColor(on ? tokens.accent_green : tokens.raised_border),
-            QColor(tokens.accent_green));
+        // The speed is no longer printed on the card; keep it in the name.
         card.button->setAccessibleName(
-            QStringLiteral("%1, %2 lanes, %3")
-                .arg(card.name->text(), laneWidthText(spec.coverage_width_m),
-                     card.speed->text()));
+            QStringLiteral("%1, %2, %3")
+                .arg(QLatin1String(kPresetName[i]),
+                     laneWidthText(spec.coverage_width_m),
+                     ScanParams::speedTitle(spec.scan_speed_mps).toLower()));
     }
 
     ui_->custom_button->setChecked(custom);
-    ui_->custom_name->setStyleSheet(
-        labelStyle(custom ? ui_->accent_text : ui_->text, 14, 700, 1.0));
-    ui_->custom_summary->setStyleSheet(labelStyle(ui_->muted, 12, 400, 0.0));
+    const QString custom_ink = custom ? tokens.accent_text : tokens.text;
+    ui_->custom_name->setStyleSheet(labelStyle(custom_ink, 17, 700, 0.8));
     if (custom) {
-        ui_->custom_summary->setText(
-            laneWidthText(params_.coverage_width_m) +
-            QStringLiteral(" lanes · ") +
-            ScanParams::speedTitle(params_.scan_speed_mps));
+        const LaneParts lane = cardLaneParts(params_.coverage_width_m);
+        ui_->custom_value->setValue(lane.number, lane.unit, QColor(custom_ink));
+        ui_->custom_button->setAccessibleName(
+            QStringLiteral("Custom, %1, %2")
+                .arg(laneWidthText(params_.coverage_width_m),
+                     ScanParams::speedTitle(params_.scan_speed_mps).toLower()));
     } else {
-        ui_->custom_summary->setText(
-            QStringLiteral("Set your own width and speed"));
+        ui_->custom_value->setValue(QStringLiteral("\u2014"), QString(),
+                                    QColor(tokens.muted));
+        ui_->custom_button->setAccessibleName(QStringLiteral("Custom"));
     }
-    const UiThemeTokens tokens = uiThemeTokens(dark_mode_);
     ui_->chevron->setOpen(custom, QColor(tokens.muted));
     ui_->custom_body->setVisible(custom);
 
     QColor frame_wash(tokens.accent_green);
     frame_wash.setAlphaF(dark_mode_ ? 0.14 : 0.12);
     ui_->custom_frame->setStyleSheet(
-        QStringLiteral("#SatScanCustom { background: %1; border: 1px solid %2; "
-                       "border-radius: 10px; }")
-            .arg(custom ? frame_wash.name(QColor::HexArgb) : tokens.raised,
-                 custom ? tokens.accent_green : tokens.raised_border));
+        QStringLiteral("#SatScanCustom { background: %1; border: %2px solid %3; "
+                       "border-radius: 12px; }")
+            .arg(custom ? frame_wash.name(QColor::HexArgb) : tokens.raised)
+            .arg(custom ? 2 : 1)
+            .arg(custom ? tokens.accent_green : tokens.raised_border));
 
     const int speed_index = indexForSpeed(
         custom ? params_.scan_speed_mps : custom_speed_mps_);
@@ -832,7 +862,7 @@ void ScanParamsPanel::refresh() {
         ui_->speed_buttons[i]->setChecked(on);
         ui_->speed_icons[i]->setPixmap(ui_->speed_icon[i][on ? 1 : 0]);
         ui_->speed_labels[i]->setStyleSheet(
-            labelStyle(on ? ui_->text : ui_->muted, 12, 600, 0.0));
+            labelStyle(on ? tokens.text : tokens.muted, 14, 600, 0.0));
     }
     const double shown_width =
         custom ? params_.coverage_width_m : custom_width_m_;

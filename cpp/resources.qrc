@@ -24,6 +24,9 @@
     <file alias="scansetup/speed_slow.svg">../App resource/icons/scan_speed_slow.svg</file>
     <file alias="scansetup/speed_medium.svg">../App resource/icons/scan_speed_medium.svg</file>
     <file alias="scansetup/speed_fast.svg">../App resource/icons/scan_speed_fast.svg</file>
+    <file alias="scansetup/speed_slow_outline.svg">../App resource/icons/scan_speed_slow_outline.svg</file>
+    <file alias="scansetup/speed_medium_outline.svg">../App resource/icons/scan_speed_medium_outline.svg</file>
+    <file alias="scansetup/speed_fast_outline.svg">../App resource/icons/scan_speed_fast_outline.svg</file>
     <!-- Stage 6 step 2 picker — exported from Figma I9tRcFEniAqnXD0yiMlo6W (235:2246 family). -->
     <file alias="satellite/scan_frame.svg">../App resource/icons/satellite_scan_frame.svg</file>
     <file alias="setup/chevron_down.svg">../App resource/icons/setup_chevron_down.svg</file>
