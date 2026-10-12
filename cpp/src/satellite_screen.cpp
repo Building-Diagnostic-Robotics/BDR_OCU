@@ -145,10 +145,6 @@ constexpr FitHandedness kPcdToSatHandedness = FitHandedness::Reversing;
 constexpr double kSeedOriginWarnSigma = 3.0;
 constexpr double kSeedHeadingWarnRtkDeg = 15.0;
 constexpr double kSeedHeadingWarnDeg = 45.0;
-// A fitted scale this far from the imagery's own is not pick noise — across a
-// site of this size Mercator scale varies by ~5e-5 — so the fit is wrong and
-// must not be allowed to re-project the view. See plausibleForProjection.
-constexpr double kScaleRejectFrac = 0.10;
 // Removing one pair has to cut the weighted RMSE by more than this for that
 // pair to be called an outlier rather than the set simply being loose.
 constexpr double kOutlierImprovementFrac = 0.5;
@@ -659,6 +655,49 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     });
     connect(ros_, &RosLink::statusUpdated, this, [this] {
         const CoverageStatus status = ros_->coverageStatus();
+        // Before anything else reads the run state: a topple trip latches
+        // the E-Stop, and everything below paints from that state.
+        maybeHandleTopple(status);
+        // A new trip has already left Running, so this cannot also fire on
+        // the sample that engaged the E-Stop. It covers the enable that
+        // landed while the guard was still latched: the robot answered with
+        // false, and a change-only publisher would never send true again.
+        if (topple_notice_policy::refusedWhileRunning(
+                scan_run_state_ == ScanRunState::Running, status.tip,
+                status.wall_ms, last_autonomy_enable_ms_)) {
+            setAutonomyEnabled(false);
+            scan_run_state_ = ScanRunState::Paused;
+            refreshScanRunUi();
+            appendLog(QStringLiteral(
+                "[TOPPLE] robot refused autonomy — guard still latched"));
+            showToppleNotice(
+                QStringLiteral("Robot did not start"),
+                QStringLiteral(
+                    "The topple guard is still holding after a trip. Use "
+                    "Motors: Arm and drive the robot clear by hand — it "
+                    "releases on its own about 2 seconds after the robot is "
+                    "level and still."));
+        }
+        if (mission_->missionActive() && status.fresh(kDirectorFreshMs)) {
+            const auto step = topple_notice_policy::onTipReady(
+                guard_watch_, status.tip_ready,
+                QDateTime::currentMSecsSinceEpoch());
+            guard_watch_ = step.next;
+            if (step.warn_now) {
+                appendLog(QStringLiteral(
+                    "[TOPPLE] guard not reporting — no topple protection"));
+                showToppleNotice(
+                    QStringLiteral("Topple guard offline"),
+                    QStringLiteral(
+                        "The robot's topple guard is not reporting, so the "
+                        "robot has no tilt protection right now. You can keep "
+                        "scanning; it restarts automatically. If this persists, "
+                        "Complete Mission and check the robot."));
+            }
+            if (step.recovered_now) {
+                appendLog(QStringLiteral("[TOPPLE] guard reporting again"));
+            }
+        }
         if (linkSampleIsCurrent(status.wall_ms)) {
             if (link_monitor_) {
                 link_monitor_->stamp(LinkHealthMonitor::Source::ScanStatus);
@@ -721,6 +760,10 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     connect(mission_, &MissionController::logLine, this,
             &SatelliteScreen::appendLog);
     connect(mission_, &MissionController::teardownBegan, this, [this] {
+        // Cancel can land during the CLOSED_LOOP wait. Stop it here, before
+        // the sweeps, so the timer cannot publish autonomy_enable=true while
+        // the stack is coming down.
+        cancelArmWait(QStringLiteral("teardown"));
         forgetMissionTelemetry();
         emit missionTeardownBegan();
     });
@@ -761,6 +804,10 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                     metadata_pushed_ = false;
                     stop_prompt_key_.clear();
                     stop_dwell_samples_ = 0;
+                    topple_seq_seen_ = topple_notice_policy::kUnseen;
+                    last_autonomy_enable_ms_ = 0;
+                    guard_watch_ = {};
+                    cancelArmWait(QStringLiteral("mission ended"));
                     scan_run_state_ = ScanRunState::Idle;
                     scan_autonomy_ran_ = false;
                     manual_override_ = false;
@@ -1176,7 +1223,7 @@ namespace {
 
 // Where the demo site sits. The fixture's stitch bounds, GPS fix and picks are
 // all derived from this one anchor so they agree with each other — a fixture
-// whose georeference contradicts its own picks would trip the scale guard and
+// whose georeference contradicts its own picks would trip
 // the seed cross-check, and every shot would be of the failure path.
 constexpr double kDevSiteLat = 43.600664;
 constexpr double kDevSiteLon = -116.249774;
@@ -5473,13 +5520,12 @@ bool SatelliteScreen::plausibleForProjection(const Similarity2D& fit) const {
     if (!(px_per_m > 1e-9) || !std::isfinite(px_per_m)) {
         return false;
     }
-    // When the imagery's own ground scale is known, a fit that disagrees with
-    // it is provably wrong — no operator judgement needed — and must not be
-    // allowed to move the view the next pick is made in.
-    const double expected = stitchPxPerM();
-    if (expected > 0.0) {
-        return std::abs(px_per_m - expected) / expected <= kScaleRejectFrac;
-    }
+    // Deliberately no check against the imagery's own ground scale. There used
+    // to be one (10%), and on real roofs it parked the view on ordinary picks:
+    // the imagery then stopped following the pairs, which is the one thing that
+    // makes the next pair easy to place. A fit from picks always re-projects;
+    // a bad pair shows up as a swung view and a long residual spur, and Undo
+    // puts it back.
     return true;
 }
 
@@ -5611,13 +5657,10 @@ void SatelliteScreen::updateSatelliteAlignmentView() {
             }
         }
     } else {
-        // An implausible fit holds the last good projection rather than swinging
-        // the imagery somewhere useless. Nothing derived from it may be drawn
-        // either — a stable pane with a robot glyph flung off it looks like a
-        // rendering fault — and the operator has to be told the view is parked,
-        // or the imagery simply stops responding to picks with no explanation.
-        // That includes the residual diagnostics: a ring naming the worst pair
-        // of a fit we have just called wrong is worse than no ring.
+        // Only a degenerate fit (no finite scale) lands here now. It holds the
+        // last good projection, and nothing derived from it may be drawn — a
+        // stable pane with a robot glyph flung off it looks like a rendering
+        // fault — and the operator has to be told the view is parked.
         preview_held_ = true;
         invalidateAlignmentResiduals();
     }
@@ -6175,8 +6218,8 @@ void SatelliteScreen::updateCorrespondenceUi() {
         // Otherwise the imagery just stops turning and the operator has no way
         // to tell a parked view from a working one.
         advisory = QStringLiteral(
-                       " <span style='color:%1'>· Map held — the latest pair "
-                       "disagrees with the imagery's own scale; re-pick it</span>")
+                       " <span style='color:%1'>· Map held — the pairs do not "
+                       "give a usable fit; re-pick the latest one</span>")
                        .arg(uiThemeTokens(dark_mode_).warning);
     } else if (corr_outlier_index_ >= 0 &&
                corr_outlier_index_ < corr_studentized_.size()) {
@@ -6600,12 +6643,16 @@ QDialog* makeSatPrompt(QWidget* parent, const QString& title,
 
     auto* buttons = new QHBoxLayout;
     buttons->addStretch(1);
-    auto* reject = new QPushButton(reject_label, dialog);
+    // An empty reject label is a one-button notice. Callers that decide
+    // something always pass both labels.
+    if (!reject_label.isEmpty()) {
+        auto* reject = new QPushButton(reject_label, dialog);
+        QObject::connect(reject, &QPushButton::clicked, dialog, &QDialog::reject);
+        buttons->addWidget(reject);
+    }
     auto* accept = new QPushButton(accept_label, dialog);
     accept->setObjectName("Accept");
-    QObject::connect(reject, &QPushButton::clicked, dialog, &QDialog::reject);
     QObject::connect(accept, &QPushButton::clicked, dialog, &QDialog::accept);
-    buttons->addWidget(reject);
     buttons->addWidget(accept);
     layout->addLayout(buttons);
     return dialog;
@@ -7050,6 +7097,17 @@ void SatelliteScreen::beginStartScan() {
         refreshScanRunUi();
         return;
     }
+    // The button is already disabled while the guard is latched. This is
+    // the same choke point, so a caller that gets here anyway still cannot
+    // enable autonomy the robot will refuse.
+    const CoverageStatus tip_status = ros_->coverageStatus();
+    if (topple_notice_policy::blocksArming(tip_status.fresh(kDirectorFreshMs),
+                                           tip_status.tip)) {
+        appendLog(QStringLiteral(
+            "[scan] refused — topple guard is still latched"));
+        refreshScanRunUi();
+        return;
+    }
     if (!directorReady()) {
         appendLog(QStringLiteral(
             "[scan] director not reporting — Start Scan stays locked"));
@@ -7066,6 +7124,11 @@ void SatelliteScreen::beginStartScan() {
         return;
     }
     if (ros_->motorsArmed()) {
+        // This path is the completion. A wait left over from an earlier
+        // press must not also fire and enable a second time.
+        if (arm_wait_timer_ && arm_wait_timer_->isActive()) {
+            arm_wait_timer_->stop();
+        }
         setAutonomyEnabled(true);
         if (scan_started_wall_ms_ == 0) {
             scan_started_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
@@ -7083,8 +7146,20 @@ void SatelliteScreen::beginStartScan() {
         arm_wait_timer_->setInterval(100);
     }
     arm_wait_ticks_ = 0;
+    arm_wait_from_ = scan_run_state_;
     disconnect(arm_wait_timer_, &QTimer::timeout, nullptr, nullptr);
     connect(arm_wait_timer_, &QTimer::timeout, this, [this] {
+        // Backstop for a caller that did not cancel the wait. Enabling
+        // after an E-Stop or a teardown republishes autonomy_enable=true
+        // over the stop.
+        if (!estop_latch_policy::armWaitMayComplete(
+                arm_wait_from_, scan_run_state_, mission_->missionActive(),
+                mission_->tearingDown(), manual_override_)) {
+            arm_wait_timer_->stop();
+            appendLog(QStringLiteral(
+                "[scan] arming wait cancelled — not enabling autonomy"));
+            return;
+        }
         ++arm_wait_ticks_;
         if (ros_->motorsArmed()) {
             arm_wait_timer_->stop();
@@ -7121,6 +7196,14 @@ void SatelliteScreen::beginStartScan() {
         }
     });
     arm_wait_timer_->start();
+}
+
+void SatelliteScreen::cancelArmWait(const QString& why) {
+    if (!arm_wait_timer_ || !arm_wait_timer_->isActive()) {
+        return;
+    }
+    arm_wait_timer_->stop();
+    appendLog(QStringLiteral("[scan] arming wait cancelled — %1").arg(why));
 }
 
 void SatelliteScreen::onScanCancelClicked() {
@@ -7246,6 +7329,9 @@ void SatelliteScreen::setManualOverride(bool active) {
     manual_override_ = active;
     if (active) {
         scan_run_state_ = estop_latch_policy::pauseIfRunning(scan_run_state_);
+        // A Start or Resume still waiting for CLOSED_LOOP leaves the state
+        // Idle or Paused, so it would enable autonomy under the operator.
+        cancelArmWait(QStringLiteral("manual override"));
         setAutonomyEnabled(false);
         if (teleop_check_) {
             teleop_check_->setChecked(true);
@@ -7285,6 +7371,8 @@ void SatelliteScreen::refreshScanRunUi() {
     // already killing its target. Telemetry is left alone — it resets a
     // moment later when the mission goes inactive.
     const bool commandable = active && !mission_->tearingDown();
+    const bool tip_blocks = topple_notice_policy::blocksArming(
+        status.fresh(kDirectorFreshMs), status.tip);
 
     if (arm_button_) {
         // Stays live while the E-Stop is latched — that is the whole point of
@@ -7320,7 +7408,7 @@ void SatelliteScreen::refreshScanRunUi() {
         QString icon = QStringLiteral(":/assets/missionplanner/scan_play.svg");
         bool enable = ready && !mission_->tearingDown() &&
                       scan_run_state_ == ScanRunState::Idle &&
-                      !manual_override_ && !start_scan_pending_;
+                      !manual_override_ && !start_scan_pending_ && !tip_blocks;
         if (start_scan_pending_) {
             label = QStringLiteral("Starting…");
         }
@@ -7336,7 +7424,7 @@ void SatelliteScreen::refreshScanRunUi() {
             enable = false;
         } else if (scan_run_state_ == ScanRunState::Paused) {
             label = QStringLiteral("Resume");
-            enable = ready && !manual_override_;
+            enable = ready && !manual_override_ && !tip_blocks;
         } else if (scan_run_state_ == ScanRunState::Completed) {
             label = QStringLiteral("Scan Complete");
             enable = false;
@@ -8065,9 +8153,13 @@ void SatelliteScreen::onEstop() {
     // every later tick. There is deliberately no /coverage/abort here — abort
     // ends the run and closes the section as partial, so it would make the
     // stop unrecoverable instead of resumable.
+    // State first, then the wait. A CLOSED_LOOP wait started by Start or
+    // Resume enables autonomy up to 6 s later; if its tick lands while this
+    // function is still running, armWaitMayComplete already sees the latch.
+    scan_run_state_ = estop_latch_policy::onEmergencyStop(scan_run_state_);
+    cancelArmWait(QStringLiteral("E-Stop"));
     setAutonomyEnabled(false);
     ros_->requestAxisState(RosLink::kAxisIdle);
-    scan_run_state_ = estop_latch_policy::onEmergencyStop(scan_run_state_);
     appendLog(QStringLiteral(
         "[E-STOP] autonomy disabled + axis IDLE requested — latched"));
     // Both pills: on the scan page the rail is hidden and the corner pill is the
@@ -8170,6 +8262,12 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
 
 void SatelliteScreen::setAutonomyEnabled(bool enabled) {
     autonomy_on_ = enabled;
+    if (enabled) {
+        // The refusal check compares a later status against this. Stamped
+        // on the send, not on the ack: the robot's answer arrives as the
+        // next /coverage/status.
+        last_autonomy_enable_ms_ = QDateTime::currentMSecsSinceEpoch();
+    }
     if (autonomy_on_ && teleop_check_) {
         teleop_check_->setChecked(false);
     }
@@ -8379,6 +8477,20 @@ void SatelliteScreen::updateStatePill() {
     if (estop_latch_policy::holdsStatusPill(scan_run_state_)) {
         return;
     }
+    // Same problem as the latch, one step later: after Clear E-Stop the
+    // director's 1 Hz state would paint SWEEP over a guard that is still
+    // holding. Both pills, or the corner one goes stale within a second.
+    if (mission_->missionActive() &&
+        topple_notice_policy::blocksArming(status.fresh(kDirectorFreshMs),
+                                           status.tip)) {
+        const ScanBlock block = scanBlockReason();
+        setStatePill(block.label, block.color);
+        setScanStatusPill(block.label, block.color);
+        if (scan_status_pill_) {
+            scan_status_pill_->setToolTip(block.detail);
+        }
+        return;
+    }
     const QString state = status.state.toUpper();
     QColor color(mutedColor(dark_mode_));
     if (state == QLatin1String("TRANSIT") || state == QLatin1String("SWEEP") ||
@@ -8518,6 +8630,19 @@ SatelliteScreen::ScanBlock SatelliteScreen::scanBlockReason() const {
             "Emergency stop is holding. Press Arm Motors to drive by hand, or "
             "Clear E-Stop and then Resume to continue the scan.");
         out.color = QColor(kEstopRed);
+        return out;
+    }
+    // Ahead of manual override and of the director's own state: Resume
+    // would be refused, and the pill is the only place that can say why.
+    const CoverageStatus held = ros_->coverageStatus();
+    if (topple_notice_policy::blocksArming(held.fresh(kDirectorFreshMs),
+                                           held.tip)) {
+        out.label = QStringLiteral("Guard latched");
+        out.detail = QStringLiteral(
+            "The topple guard is still holding after a trip. Use Motors: "
+            "Arm and drive the robot clear by hand — it releases on its own "
+            "about 2 seconds after the robot is level and still.");
+        out.color = QColor(kAmber);
         return out;
     }
     if (manual_override_) {
@@ -8699,6 +8824,77 @@ void SatelliteScreen::maybePromptStop(const CoverageStatus& status) {
             setManualOverride(true);
         }
     });
+    centerSatPrompt(box, this);
+    box->show();
+}
+
+void SatelliteScreen::maybeHandleTopple(const CoverageStatus& status) {
+    if (!status.valid) {
+        return;
+    }
+    const auto decision =
+        topple_notice_policy::onTripSeq(topple_seq_seen_, status.tip_seq);
+    topple_seq_seen_ = decision.seen;
+    if (!decision.engage || !mission_->missionActive()) {
+        return;
+    }
+    // The robot has already done its half: tip_guard idles both drive axes
+    // and publishes autonomy_enable=false itself, so the stop never waited on
+    // this screen or the radio. onEstop() re-asserts both (idempotent) and
+    // adds the part only the OCU owns — the latch. Recovery is therefore the
+    // ordinary one: Clear E-Stop, then Resume, or Motors: Arm to drive away.
+    appendLog(QStringLiteral("[TOPPLE] trip %1 reported by the robot — %2")
+                  .arg(status.tip_seq)
+                  .arg(status.tip_detail.isEmpty()
+                           ? QStringLiteral("no detail")
+                           : status.tip_detail));
+    onEstop();
+    if (topple_prompt_open_) {
+        return;
+    }
+    topple_prompt_open_ = true;
+    QString body = QStringLiteral(
+        "The robot's topple guard tripped and stopped the robot: both drive "
+        "motors are disarmed and autonomy is off. The E-Stop is latched.");
+    if (!status.tip_detail.isEmpty()) {
+        body += QStringLiteral("\n\n%1.").arg(status.tip_detail);
+    }
+    if (status.tip_cells > 0) {
+        body += QStringLiteral(
+            "\n\nThis spot is now a no-go area for the planner.");
+    }
+    body += QStringLiteral(
+        "\n\nTo recover: press Clear E-Stop, then either Resume, or use "
+        "Motors: Arm and take manual control to drive the robot away from "
+        "this spot.");
+    // tip_disarmed is reset when the guard releases, so a later status line
+    // for the same trip can carry tip_disarmed=false after the motors did
+    // disarm. Only say so while the trip is still latched. Do not tell the
+    // operator to press Emergency Stop: that button now reads Clear E-Stop.
+    if (status.tip && !status.tip_disarmed) {
+        body += QStringLiteral(
+            "\n\nThe robot could not confirm the motors disarmed. The OCU has "
+            "sent the stop again — check the MOTORS chip. Space re-sends the "
+            "stop.");
+    }
+    // Modeless, like the stop prompt: exec() would nest a loop under a live
+    // launch. It only informs — the E-Stop button is the control.
+    auto* box = makeSatPrompt(
+        this, QStringLiteral("Topple detected — E-Stop engaged"), body,
+        QStringLiteral("OK"), QString());
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setModal(false);
+    connect(box, &QDialog::finished, this,
+            [this](int) { topple_prompt_open_ = false; });
+    centerSatPrompt(box, this);
+    box->show();
+}
+
+void SatelliteScreen::showToppleNotice(const QString& title,
+                                      const QString& body) {
+    auto* box = makeSatPrompt(this, title, body, QStringLiteral("OK"), QString());
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setModal(false);
     centerSatPrompt(box, this);
     box->show();
 }

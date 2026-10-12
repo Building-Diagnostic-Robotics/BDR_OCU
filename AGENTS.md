@@ -1409,15 +1409,13 @@ stitch as much as the fix and those arrive in either order.
  as good as its fix type usually is, never perfect.
 - **`stitchPxPerM()` is the imagery's ground scale; `site_manifest_.res_m`
  is not.** `res_m` is Esri's `SRC_RES`, the SOURCE's native GSD (0.3 m is
- typical), while a z19 stitch pixel covers ~0.22 m at 43°N. The scale guard
- (`plausibleForProjection`) used to compare against `1 / res_m`, which put
- every correct fit ~30% outside a 10% tolerance: the live re-projection sat
- on "Map held" on real sites, and the dev fixtures never showed it because
- they carried no `res_m`. Do not read `res_m` in the alignment path again.
+ typical), while a z19 stitch pixel covers ~0.22 m at 43°N. The pick sigmas,
+ the seed fit and the seed circle all read `stitchPxPerM()`. Do not read
+ `res_m` in the alignment path again.
 - **The dev fixtures are self-consistent on purpose.** `devStitchBounds`
  derives the stitch extent, the GPS fix and the picks from one anchor. A
- fixture whose georeference contradicts its own picks trips the scale guard
- and the seed cross-check, and every shot becomes the failure path.
+ fixture whose georeference contradicts its own picks trips the seed
+ cross-check, and every shot becomes the failure path.
 - **The seed marker stays up while picking.** The dashed circle
  (`PanZoomImageWidget::setSeedMarker`, 2-sigma) is the fix; the green glyph
  is the current fit. Seeing them drift apart is the cross-check made
@@ -1430,6 +1428,8 @@ stitch as much as the fix and those arrive in either order.
  capture, through `PanZoomImageWidget::frameImageRect` — not `setView`,
  which silently no-ops before layout has sized the pane and would leave the
  imagery as a thumbnail in the corner.
+- `two_pairs` (no GPS fix) and `two_pairs_seed` shot modes render the
+ first pick-driven turn: two pairs on the skewed site.
 - `seed`, `seed_pair`, `seed_position`, `seed_none`, `seed_outside` shot
  modes render each case.
 
@@ -1472,21 +1472,17 @@ instruction bar then read.
  `sqrt(|determinant|)` of `sat_view_xform_` as well. They differ only
  when the canvas hit `kAlignedSatMaxDim`, but conflating them
  mis-weights exactly the picks that are least trustworthy.
-- **`plausibleForProjection` is a guard, not a nicety.** Two pairs fit a
- similarity exactly, so an early mismatched pick yields a *confident*
- nonsense transform; swinging the imagery by it would wreck the view the
- next pick is made in. A fit whose scale is more than
- `kScaleRejectFrac` from the manifest's own `res_m` holds the last good
- projection instead. With no `res_m` there is nothing to check against
- and the fit is allowed through. A hold sets `preview_held_`, and
- **everything derived from the rejected fit then goes off screen** —
- residual spurs, robot glyph, and the diagnostics behind the outlier
- ring (`invalidateAlignmentResiduals`) — because a pane that sits still
- while a robot marker is flung off it reads as a rendering fault, and a
- ring naming the worst pair of a fit we just called wrong is worse than
- no ring. The hold is **announced** in `#SatCorrBar`: silently freezing
- the imagery is the same silent-refusal class as a disabled button with
- no reason.
+- **A fit from picks always re-projects — there is no scale guard.**
+ `plausibleForProjection` only rejects a degenerate fit (invalid, or no
+ finite positive scale). It used to hold the view when the fitted scale
+ was more than 10% (`kScaleRejectFrac`) from the imagery's own, and on
+ real roofs that parked the pane on ordinary picks; the operator asked
+ for it gone (2026-10-11) because the imagery following the picks is
+ what makes the next pair easy to place. Do not re-add a scale check. A
+ bad pair now shows as a swung view and a long residual spur, and Undo
+ last puts it back. `preview_held_` and the "Map held" clause in
+ `#SatCorrBar` remain for the degenerate case only; while held, nothing
+ derived from the rejected fit is drawn (`invalidateAlignmentResiduals`).
 - **The re-projected canvas carries no palette.** Rotation leaves the
  canvas corners empty and they are filled `Qt::transparent`, so the
  pane's own matte shows through and a theme toggle needs no repaint
@@ -1591,8 +1587,9 @@ residual, with `← OUTLIER` / `← can't be checked (isolated)` suffixes and a
 Delete-selected button; the Figma correspondence frames here have no list,
 so the same information became the pane ring plus one instruction-bar
 clause. The *policy* is upstream's (`worstOutlierIndex`, the leave-one-out
-call, `plausibleForProjection`, `kScaleRejectFrac`,
-`kOutlierImprovementFrac`, `kAlignedSatMaxDim`) and should stay identical;
+call, `plausibleForProjection` — with the scale guard removed in both
+trees — `kOutlierImprovementFrac`, `kAlignedSatMaxDim`) and should stay
+identical;
 only the presentation diverges. Upstream's `preview_rmse_m_` has no
 counterpart because there is no status label to put it in.
 
@@ -1799,6 +1796,16 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  - `beginStartScan()` refuses outright on `!armingAllowed()`. It is the
  single choke point for arming-with-autonomy, so the guard belongs there
  even though the button is already disabled.
+ - **The CLOSED_LOOP wait in `beginStartScan` is cancelled by E-Stop,
+ manual override, and teardown.** When the motors are not yet armed, a
+ 6 s timer enables autonomy once they reach CLOSED_LOOP, or on timeout.
+ `cancelArmWait` stops it from `onEstop()`, `setManualOverride(true)`,
+ `teardownBegan`, and the `missionActiveChanged(false)` reset. The
+ callback also re-checks `armWaitMayComplete` — state unchanged since the
+ wait began, mission still active, not tearing down, no manual override —
+ before it enables. Do not let that timer publish `autonomy_enable=true`
+ after a stop or while the operator is driving. Taking control is never
+ blocked during the wait; it cancels the start instead.
  - **Clearing costs its own press and does not arm.** The E-Stop button
  relabels to `Clear E-Stop` (matching the shipped Stage 5 control bar,
  `PlannerScreen::scan_estop_latched_`); clearing lands on `Paused`, and
@@ -1815,6 +1822,22 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  `onEstop()` directly, never `onEstopButtonClicked()`: if the key toggled,
  an operator mashing a panic key an even number of times would release the
  stop they were applying. Clearing stays mouse-only.
+ - **A topple trip engages this same E-Stop.** The robot's `tip_guard`
+ E-Stops itself on a trip (drive axes IDLE + `autonomy_enable=false`) and
+ the director counts it as `tip_seq` in `/coverage/status`.
+ `maybeHandleTopple()` runs first in the `statusUpdated` handler: on a new
+ count (`topple_notice_policy::onTripSeq`, a counter so a trip between two
+ 1 Hz lines is not missed) it calls `onEstop()` and shows a modeless
+ "Topple detected — E-Stop engaged" notice. The "motors may not have
+ disarmed" line is shown only while `tip` is still true, and it points at
+ the MOTORS chip and Space — that button already reads Clear E-Stop, so
+ the line must not say "press Emergency Stop". There is no topple-specific
+ recovery: Clear E-Stop, then Resume or Motors: Arm. A shadow-mode trip
+ (`estop_engaged` false) is not counted in `tip_seq`, so it does not
+ latch here. Do not add a second clear path. Do not gate on the guard's
+ readiness (`tip_ready` only warns). A latched guard (`tip`) blocks
+ Start/Resume only, and the robot refuses autonomy while latched; the
+ OCU drops Running to Paused if that happens.
  (`estop_latch_policy_tests` makes that hazard executable.) Three details
  are load-bearing:
  - `Qt::ApplicationShortcut`, not a `keyPressEvent`. Qt matches shortcuts
@@ -1954,7 +1977,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
 - `BDR_DEV_STAGE6_SHOT=<png>` renders the stage headlessly and exits
  (`_DARK`, `_MODE=measured|measured_map|scan|align_empty|correspond|review|
  correspond_outlier|review_outlier|seed|seed_pair|seed_position|seed_none|
- seed_outside|roi|edges|params|run|plan|plan_confirm|revisit_align|
+ seed_outside|two_pairs|two_pairs_seed|roi|edges|params|run|plan|plan_confirm|revisit_align|
  revisit_search`,
  `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog

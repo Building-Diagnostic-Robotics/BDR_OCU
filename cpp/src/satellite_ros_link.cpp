@@ -211,6 +211,17 @@ bool RosLink::start(QString* error) {
                     s.dc_paused =
                         obj.value(QLatin1String("dc_paused")).toBool();
                     s.revisit = int(jsonNumber(obj, "revisit", 0.0));
+                    s.tip_seq = int(jsonNumber(obj, "tip_seq", 0.0));
+                    s.tip_cells = int(jsonNumber(obj, "tip_cells", 0.0));
+                    s.tip_detail = jsonString(obj, "tip_detail");
+                    s.tip = obj.value(QLatin1String("tip")).toBool();
+                    s.tip_ready = obj.contains(QLatin1String("tip_ready"))
+                                      ? obj.value(QLatin1String("tip_ready")).toBool()
+                                      : true;
+                    s.tip_disarmed =
+                        obj.contains(QLatin1String("tip_disarmed"))
+                            ? obj.value(QLatin1String("tip_disarmed")).toBool()
+                            : true;
                     s.remaining = jsonNumber(obj, "remaining", -1.0);
                     s.swept = jsonNumber(obj, "swept", -1.0);
                     s.deferred = jsonNumber(obj, "deferred", -1.0);

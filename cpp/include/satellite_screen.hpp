@@ -29,6 +29,7 @@
 #pragma once
 
 #include "estop_latch_policy.hpp"
+#include "topple_notice_policy.hpp"
 #include "radio_link_pill.hpp"
 #include "satellite_job_model.hpp"
 #include "satellite_map_capture.hpp"
@@ -393,10 +394,10 @@ private:
     /** Swaps the pane's image while holding the operator's viewpoint. */
     void applySatelliteView(const QImage& image, const QTransform& xform);
     /**
-     * Whether a fit may move the view. Two pairs fit a similarity exactly, so
-     * an early mismatched pick produces a confident nonsense transform;
-     * checking its scale against the imagery's own catches that without
-     * needing operator judgement.
+     * Whether a fit may move the view: valid, with a finite positive scale.
+     * There is no scale check against the imagery — a fit from picks always
+     * re-projects, because following the picks is what makes the next one
+     * easy to place.
      */
     bool plausibleForProjection(const Similarity2D& fit) const;
     /** Georeference of the loaded stitch; invalid until a site image is in. */
@@ -449,6 +450,9 @@ private:
     void onScanStartPauseClicked();
     void onScanCancelClicked();
     void beginStartScan();
+    /** Stops the CLOSED_LOOP wait if one is running. Silent otherwise, so
+        the mission-end reset can call it unconditionally. */
+    void cancelArmWait(const QString& why);
     /** A launch exited unasked (`side` = "robot" | "laptop"): tear down,
         tell the operator, back to Scan Parameters. Plan stays PLANNED. */
     void handleLaunchDeath(const QString& side, int exit_code);
@@ -457,6 +461,12 @@ private:
         modal per distinct (state, reason) once kStopDwellSamples consecutive
         samples are stopped. The corner pill updates on the first sample. */
     void maybePromptStop(const CoverageStatus& status);
+    /** A new topple trip in /coverage/status latches the E-Stop and says
+     *  why. The robot has already stopped itself; this is the OCU half. */
+    void maybeHandleTopple(const CoverageStatus& status);
+    /** One-button modeless notice. Informs only; it does not change the
+     *  run state. */
+    void showToppleNotice(const QString& title, const QString& body);
     static bool isStopState(const QString& state);
     static QString stopHeadline(const CoverageStatus& status);
     static QString stopGuidance(const CoverageStatus& status);
@@ -820,8 +830,8 @@ private:
     /** Fit the pane's current canvas was warped by, to skip a needless re-warp. */
     Similarity2D sat_view_fit_;
     /**
-     * The latest fit was rejected as implausible, so the pane is showing the
-     * previous projection. Nothing derived from the rejected fit may be drawn
+     * The latest fit was degenerate, so the pane is showing the previous
+     * projection. Nothing derived from the rejected fit may be drawn
      * while this holds, and the instruction bar says why the view is parked.
      */
     bool preview_held_ = false;
@@ -913,6 +923,13 @@ private:
     bool stop_prompt_open_ = false;
     QString stop_prompt_key_;   // last (state|stop|stale) explained
     int stop_dwell_samples_ = 0;  // consecutive stopped status samples
+    // Last /coverage/status tip_seq acted on (topple_notice_policy).
+    int topple_seq_seen_ = topple_notice_policy::kUnseen;
+    bool topple_prompt_open_ = false;
+    // Wall time of the last autonomy_enable=true, for the refusal check.
+    // 0 means none this mission.
+    qint64 last_autonomy_enable_ms_ = 0;
+    topple_notice_policy::GuardWatch guard_watch_{};
     bool revisit_hold_ = false;  // WAITING_REVISIT latched (prompt edge)
     bool director_failed_ = false;
     // Director-boot bookkeeping. The only hard "death" signal is a launch
@@ -938,6 +955,9 @@ private:
     qint64 scan_elapsed_ms_ = 0;
     QTimer* arm_wait_timer_ = nullptr;
     int arm_wait_ticks_ = 0;
+    /** Run state when the CLOSED_LOOP wait started. The timer may enable
+        autonomy only while the state is still this one. */
+    ScanRunState arm_wait_from_ = ScanRunState::Idle;
     QTimer* conclude_wait_timer_ = nullptr;
     int conclude_wait_ticks_ = 0;
     /** Abort-and-save CTA. A click never re-enables. */
