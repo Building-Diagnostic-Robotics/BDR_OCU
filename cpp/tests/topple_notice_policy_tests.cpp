@@ -59,3 +59,70 @@ TEST(ToppleNoticePolicy, GarbageIsIgnored) {
     EXPECT_FALSE(d.engage);
     EXPECT_EQ(d.seen, 1);
 }
+
+TEST(ToppleNoticePolicy, BlocksArmingOnlyOnAFreshLatch) {
+    EXPECT_TRUE(policy::blocksArming(true, true));
+    EXPECT_FALSE(policy::blocksArming(false, true));
+    EXPECT_FALSE(policy::blocksArming(true, false));
+    EXPECT_FALSE(policy::blocksArming(false, false));
+}
+
+TEST(ToppleNoticePolicy, RefusalNeedsASampleAfterTheEnable) {
+    EXPECT_TRUE(policy::refusedWhileRunning(true, true, 2000, 1000));
+    // No enable was sent this mission.
+    EXPECT_FALSE(policy::refusedWhileRunning(true, true, 2000, 0));
+    // This sample was already in flight when the enable went out.
+    EXPECT_FALSE(policy::refusedWhileRunning(true, true, 1000, 1000));
+    EXPECT_FALSE(policy::refusedWhileRunning(true, true, 999, 1000));
+    EXPECT_FALSE(policy::refusedWhileRunning(false, true, 2000, 1000));
+    EXPECT_FALSE(policy::refusedWhileRunning(true, false, 2000, 1000));
+}
+
+TEST(ToppleNoticePolicy, ANewTripIsNotAlsoARefusal) {
+    // maybeHandleTopple() engages the E-Stop before the refusal check, and
+    // that leaves Running. A sample that both counts a new trip and shows
+    // the latch must not also take the refusal path.
+    const auto trip = policy::onTripSeq(0, 1);
+    ASSERT_TRUE(trip.engage);
+    EXPECT_FALSE(policy::refusedWhileRunning(
+        /*running=*/false, /*tip_latched=*/true, 2000, 1000));
+}
+
+TEST(ToppleNoticePolicy, GuardOfflineWarnsOnceAfterTheThreshold) {
+    policy::GuardWatch watch;
+    auto step = policy::onTipReady(watch, false, 0);
+    EXPECT_FALSE(step.warn_now);
+    EXPECT_EQ(step.next.not_ready_since_ms, 0);
+
+    step = policy::onTipReady(step.next, false, 9999);
+    EXPECT_FALSE(step.warn_now);
+
+    step = policy::onTipReady(step.next, false, policy::kGuardOfflineWarnMs);
+    EXPECT_TRUE(step.warn_now);
+    EXPECT_FALSE(step.recovered_now);
+
+    step = policy::onTipReady(step.next, false, 20000);
+    EXPECT_FALSE(step.warn_now);
+
+    step = policy::onTipReady(step.next, true, 21000);
+    EXPECT_TRUE(step.recovered_now);
+    EXPECT_FALSE(step.warn_now);
+    EXPECT_EQ(step.next.not_ready_since_ms, -1);
+    EXPECT_FALSE(step.next.warned);
+
+    step = policy::onTipReady(step.next, true, 22000);
+    EXPECT_FALSE(step.recovered_now);
+}
+
+TEST(ToppleNoticePolicy, AShortGuardBlipResetsSilently) {
+    auto step = policy::onTipReady({}, false, 0);
+    step = policy::onTipReady(step.next, true, 5000);
+    EXPECT_FALSE(step.warn_now);
+    EXPECT_FALSE(step.recovered_now);
+    EXPECT_EQ(step.next.not_ready_since_ms, -1);
+
+    step = policy::onTipReady(step.next, false, 5000);
+    step = policy::onTipReady(step.next, false, 14999);
+    EXPECT_FALSE(step.warn_now);
+    EXPECT_FALSE(step.recovered_now);
+}

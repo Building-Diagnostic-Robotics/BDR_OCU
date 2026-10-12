@@ -1805,8 +1805,12 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  count (`topple_notice_policy::onTripSeq`, a counter so a trip between two
  1 Hz lines is not missed) it calls `onEstop()` and shows a modeless
  "Topple detected — E-Stop engaged" notice. There is no topple-specific
- recovery: Clear E-Stop, then Resume or Motors: Arm. Do not add a second
- clear path or gate anything on the guard's readiness.
+ recovery: Clear E-Stop, then Resume or Motors: Arm. A shadow-mode trip
+ (`estop_engaged` false) is not counted in `tip_seq`, so it does not
+ latch here. Do not add a second clear path. Do not gate on the guard's
+ readiness (`tip_ready` only warns). A latched guard (`tip`) blocks
+ Start/Resume only, and the robot refuses autonomy while latched; the
+ OCU drops Running to Paused if that happens.
  (`estop_latch_policy_tests` makes that hazard executable.) Three details
  are load-bearing:
  - `Qt::ApplicationShortcut`, not a `keyPressEvent`. Qt matches shortcuts
