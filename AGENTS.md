@@ -1782,6 +1782,16 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  - `beginStartScan()` refuses outright on `!armingAllowed()`. It is the
  single choke point for arming-with-autonomy, so the guard belongs there
  even though the button is already disabled.
+ - **The CLOSED_LOOP wait in `beginStartScan` is cancelled by E-Stop,
+ manual override, and teardown.** When the motors are not yet armed, a
+ 6 s timer enables autonomy once they reach CLOSED_LOOP, or on timeout.
+ `cancelArmWait` stops it from `onEstop()`, `setManualOverride(true)`,
+ `teardownBegan`, and the `missionActiveChanged(false)` reset. The
+ callback also re-checks `armWaitMayComplete` — state unchanged since the
+ wait began, mission still active, not tearing down, no manual override —
+ before it enables. Do not let that timer publish `autonomy_enable=true`
+ after a stop or while the operator is driving. Taking control is never
+ blocked during the wait; it cancels the start instead.
  - **Clearing costs its own press and does not arm.** The E-Stop button
  relabels to `Clear E-Stop` (matching the shipped Stage 5 control bar,
  `PlannerScreen::scan_estop_latched_`); clearing lands on `Paused`, and
@@ -1804,9 +1814,16 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  `maybeHandleTopple()` runs first in the `statusUpdated` handler: on a new
  count (`topple_notice_policy::onTripSeq`, a counter so a trip between two
  1 Hz lines is not missed) it calls `onEstop()` and shows a modeless
- "Topple detected — E-Stop engaged" notice. There is no topple-specific
- recovery: Clear E-Stop, then Resume or Motors: Arm. Do not add a second
- clear path or gate anything on the guard's readiness.
+ "Topple detected — E-Stop engaged" notice. The "motors may not have
+ disarmed" line is shown only while `tip` is still true, and it points at
+ the MOTORS chip and Space — that button already reads Clear E-Stop, so
+ the line must not say "press Emergency Stop". There is no topple-specific
+ recovery: Clear E-Stop, then Resume or Motors: Arm. A shadow-mode trip
+ (`estop_engaged` false) is not counted in `tip_seq`, so it does not
+ latch here. Do not add a second clear path. Do not gate on the guard's
+ readiness (`tip_ready` only warns). A latched guard (`tip`) blocks
+ Start/Resume only, and the robot refuses autonomy while latched; the
+ OCU drops Running to Paused if that happens.
  (`estop_latch_policy_tests` makes that hazard executable.) Three details
  are load-bearing:
  - `Qt::ApplicationShortcut`, not a `keyPressEvent`. Qt matches shortcuts

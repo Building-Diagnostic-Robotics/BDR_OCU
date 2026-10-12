@@ -105,6 +105,15 @@ struct CoverageStatus {
     int tip_seq = 0;
     int tip_cells = 0;       // map cells marked no-go by topple trips
     QString tip_detail;      // "tilt 21.3 deg, turning 90 deg/s, …"
+    // Latch, not a trip count: true while the guard has not re-armed.
+    // Absent reads false, so an older robot never blocks Start/Resume.
+    bool tip = false;
+    // Liveness. Absent reads true: a robot that does not speak the field
+    // must not raise the "guard offline" warning.
+    bool tip_ready = true;
+    // True when the guard issued the axis-idle request. Absent reads true
+    // so an older robot does not claim the motors failed to disarm.
+    bool tip_disarmed = true;
     // Ledger totals (same unit as each other; only their ratio is used).
     double remaining = -1.0;
     double swept = -1.0;

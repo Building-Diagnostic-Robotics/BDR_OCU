@@ -450,6 +450,9 @@ private:
     void onScanStartPauseClicked();
     void onScanCancelClicked();
     void beginStartScan();
+    /** Stops the CLOSED_LOOP wait if one is running. Silent otherwise, so
+        the mission-end reset can call it unconditionally. */
+    void cancelArmWait(const QString& why);
     /** A launch exited unasked (`side` = "robot" | "laptop"): tear down,
         tell the operator, back to Scan Parameters. Plan stays PLANNED. */
     void handleLaunchDeath(const QString& side, int exit_code);
@@ -461,6 +464,9 @@ private:
     /** A new topple trip in /coverage/status latches the E-Stop and says
      *  why. The robot has already stopped itself; this is the OCU half. */
     void maybeHandleTopple(const CoverageStatus& status);
+    /** One-button modeless notice. Informs only; it does not change the
+     *  run state. */
+    void showToppleNotice(const QString& title, const QString& body);
     static bool isStopState(const QString& state);
     static QString stopHeadline(const CoverageStatus& status);
     static QString stopGuidance(const CoverageStatus& status);
@@ -920,6 +926,10 @@ private:
     // Last /coverage/status tip_seq acted on (topple_notice_policy).
     int topple_seq_seen_ = topple_notice_policy::kUnseen;
     bool topple_prompt_open_ = false;
+    // Wall time of the last autonomy_enable=true, for the refusal check.
+    // 0 means none this mission.
+    qint64 last_autonomy_enable_ms_ = 0;
+    topple_notice_policy::GuardWatch guard_watch_{};
     bool revisit_hold_ = false;  // WAITING_REVISIT latched (prompt edge)
     bool director_failed_ = false;
     // Director-boot bookkeeping. The only hard "death" signal is a launch
@@ -945,6 +955,9 @@ private:
     qint64 scan_elapsed_ms_ = 0;
     QTimer* arm_wait_timer_ = nullptr;
     int arm_wait_ticks_ = 0;
+    /** Run state when the CLOSED_LOOP wait started. The timer may enable
+        autonomy only while the state is still this one. */
+    ScanRunState arm_wait_from_ = ScanRunState::Idle;
     QTimer* conclude_wait_timer_ = nullptr;
     int conclude_wait_ticks_ = 0;
     /** Abort-and-save CTA. A click never re-enables. */
