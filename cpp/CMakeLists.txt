@@ -157,6 +157,7 @@ set(HEADERS
     include/pan_zoom_image.hpp
     include/satellite_map_capture.hpp
     include/components/scan_setup_dialog.hpp
+    include/components/scan_params_panel.hpp
     include/imagery_reachability_probe.hpp
     include/plot_widget.hpp
     include/obstacle_detector.hpp
@@ -277,6 +278,8 @@ set(GUI_SOURCES
     src/components/auto_hide_scroll_bar.cpp
     src/components/svg_icon_button.cpp
     src/components/track_slider.cpp
+    src/components/scan_params_panel.cpp
+    src/svg_tint.cpp
     src/components/camera_switch_pill.cpp
     src/components/rollback_banner.cpp
     src/components/update_banner.cpp

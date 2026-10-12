@@ -53,8 +53,8 @@ double distanceToSegment(const QPointF& point, const QPointF& a,
 TEST(SwathPreview, ClearancesMatchTheDirectorDefaults) {
     EXPECT_NEAR(previewEdgeClearanceM(false), 0.55, 1e-12);
     EXPECT_NEAR(previewEdgeClearanceM(true), 1.25, 1e-12);
-    EXPECT_NEAR(previewMinFragmentM(1.0), 0.70, 1e-12);
-    EXPECT_NEAR(previewMinFragmentM(0.4), 0.45, 1e-12);
+    EXPECT_NEAR(previewMinFragmentM(1.0), 0.60, 1e-12);
+    EXPECT_NEAR(previewMinFragmentM(0.4), 0.60, 1e-12);
 }
 
 TEST(SwathPreview, LanesFollowTheLongerBodyAxisAndStayClearOfEdges) {
@@ -111,7 +111,7 @@ TEST(SwathPreview, MarkedEdgeTrimsFurtherThanAnUnmarkedEdge) {
 
 TEST(SwathPreview, ShortLeftoverPieceIsDropped) {
     // Left prong is 1.2 m wide. Both walls take 0.55 m, leaving 0.1 m,
-    // under the 0.7 m minimum. The right prong survives.
+    // under the 0.60 m minimum. The right prong survives.
     SwathPreviewRequest request;
     request.marker_valid = true;
     request.heading_deg = 0.0;

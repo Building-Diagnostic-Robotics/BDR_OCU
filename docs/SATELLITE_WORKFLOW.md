@@ -86,13 +86,14 @@ Some specifics that are easy to get wrong:
 - **Scan Parameters is complete while a mission is active.** That is the
   launch itself, not a stored flag: before launch the step is still to do,
   and after teardown it is to do again. Width and speed are written at
-  launch, not on every slider move.
+  launch, not on every card change. While a mission is running the card
+  is dimmed and cannot be changed.
 - **The swath preview is a picture, not the route.** Lanes follow the
   director: along the longer side of the ROI in the robot's frame, the
   first half a width in from that box and the rest one width apart. They
   are cut back 1.25 m from a marked roof edge and 0.55 m from any other
-  edge, and a piece shorter than the director's minimum is dropped. The
-  robot plans the real path; the preview is never sent. Without a placed
+  edge, and a piece shorter than 0.60 m is dropped. The robot plans
+  the real path; the preview is never sent. Without a placed
   marker there is nothing to draw.
 - **Imagery is advisory in the field, not a gate.** The office save already
   cached it; if the operator chose "Save without imagery" the plan loads with
@@ -278,17 +279,22 @@ scan parameters, and, when any edge is marked, `roi_edge_flags`.
 
 ### Scan parameters
 
-**Scan Parameters** is the step after Edge Review. The rail is **Swath
-Width** 0.30-2.00 m in 0.05 m steps and **Robot Speed** 0.4-0.6 m/s in
-0.1 steps. The map shows a labelled preview of the lanes at that width.
-Next opens the launch confirmation. Drag the slider
-or click the value and type; typed input is converted from the display
-unit, clamped, and snapped. Both are saved on the plan and travel at Send as
-`coverage_width:=W swath_overlap:=0.0 desired_linear_speed:=V`. Overlap is
-pinned to 0 so the width you set is the lane pitch the planner uses. Speed
-also feeds the MPC cruise/cap through `mpc_desired_linear_speed`. Plans
-saved before this block existed load with the director defaults
-(0.50 m / 0.40 m/s).
+**Scan Parameters** is the step after Edge Review. Four exclusive cards:
+Detailed (2 ft lanes, Slow), Standard (3 ft, Medium — the default),
+Quick (5 ft, Fast), and Custom. Custom opens a Slow / Medium / Fast row
+and a vertical lane-width slider, 1–7 ft in half-foot steps. The map
+shows a labelled preview of the lanes at that width. Next opens the
+launch confirmation, which names the preset, the lane width, and the
+speed. The choice is saved on the plan (`scan.preset`, schema 7) and
+travels at launch as
+`coverage_width:=W swath_overlap:=0.0 desired_linear_speed:=V`, both
+numbers with four decimal places. Overlap is pinned to 0 so the width
+you set is the lane pitch the planner uses. Speed also feeds the MPC
+cruise/cap through `mpc_desired_linear_speed`. A plan saved before
+presets, whose width and speed match a card, loads as that card;
+anything else loads as Custom — the old 0.50 m / 0.40 m/s default is
+Custom, 1.5 ft, Slow. A plan with no scan block loads as Standard.
+While a mission is running the card is dimmed and cannot be changed.
 
 ### While it launches and while it stops
 
