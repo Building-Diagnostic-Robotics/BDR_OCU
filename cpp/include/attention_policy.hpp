@@ -65,6 +65,10 @@ struct Tracker {
     bool shown = false;
     bool dismissed = false;
     long long dismissed_ms = 0;
+    // Robot episode the operator dismissed. Stays quiet across a radio gap
+    // while the robot still reports that seq; cleared when the robot says
+    // nothing is wrong.
+    int quiet_seq = -1;
 };
 
 struct Output {
@@ -150,6 +154,9 @@ inline Output step(Tracker t, const Inputs& in) {
         (in.robot_speaks
              ? want == Kind::None || in.robot_seq != t.robot_seq
              : out.progressed);
+    if (active && in.robot_speaks && want == Kind::None) {
+        t.quiet_seq = -1;
+    }
     if (t.kind != Kind::None && over) {
         out.ended = true;
         t.kind = Kind::None;
@@ -157,6 +164,12 @@ inline Output step(Tracker t, const Inputs& in) {
         t.dismissed = false;
     }
     if (want != Kind::None) {
+        if (t.kind == Kind::None && in.robot_speaks && t.quiet_seq >= 0 &&
+            in.robot_seq == t.quiet_seq) {
+            // Same robot episode back after a gap: keep the Dismiss.
+            t.shown = true;
+            t.dismissed = true;
+        }
         // Kind can change inside one episode (takeover clears, still stuck).
         t.kind = want;
         t.robot_seq = in.robot_seq;
@@ -179,6 +192,7 @@ inline Tracker onDismissed(Tracker t, long long now_ms) {
     if (t.kind != Kind::None) {
         t.dismissed = true;
         t.dismissed_ms = now_ms;
+        t.quiet_seq = t.robot_seq;
     }
     return t;
 }

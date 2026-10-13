@@ -1910,7 +1910,8 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  active, not tearing down, `Running`, no manual override, status
  fresh (3 s), odometry fresh (2 s), and not an on-purpose hold
  (`DC_STARTING`, `DC_PAUSED`, `GPR_ROLLOVER`, `WAITING_REVISIT`,
- `COMPLETE`, `complete`, `tip`). Leaving any of these resets it.
+ `COMPLETE`, `complete`, `tip`, and `WAITING_READY` before the
+ first `initialized`). Leaving any of these resets it.
  - `takeover` / `MANUAL_TAKEOVER`, `POSE_HOLD` and `ERROR` prompt after
  being held 2 s (`kHoldConfirmMs`). ERROR offers Cancel Scan /
  Dismiss, never manual control.
@@ -1922,7 +1923,9 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  Accept after the episode ended is dropped.
  - A robot that publishes `attention` / `attention_seq` is followed
  instead: its kind wins, a new seq is a new episode, and OCU-side
- progress does not override it.
+ progress does not override it. A dismissed robot seq stays quiet
+ across a radio gap (`quiet_seq`) until the 60 s reminder; the robot
+ reporting no attention, or a new seq, ends that quiet.
  - Routine handover stops (`isRoutineStop`) show **Planning** in the
  corner pill; the raw stop reason goes in the tooltip and once per
  change into the mission log.

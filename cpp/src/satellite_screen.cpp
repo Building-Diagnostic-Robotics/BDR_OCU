@@ -8784,7 +8784,11 @@ void SatelliteScreen::maybePromptAttention(const CoverageStatus& status) {
     in.gates_open = mission_->missionActive() && !mission_->tearingDown() &&
                     scan_run_state_ == ScanRunState::Running &&
                     !manual_override_ && status.fresh(kDirectorFreshMs);
+    // WAITING_READY before the first initialize is the director decomposing
+    // the ROI, not a stall.
     in.robot_hold = status.tip || status.complete ||
+                    (state == QLatin1String("WAITING_READY") &&
+                     !status.initialized) ||
                     state == QLatin1String("DC_STARTING") ||
                     state == QLatin1String("DC_PAUSED") ||
                     state == QLatin1String("GPR_ROLLOVER") ||

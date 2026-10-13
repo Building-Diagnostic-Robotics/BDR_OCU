@@ -300,6 +300,67 @@ TEST(AttentionPolicy, RobotNewSeqIsANewEpisode) {
     EXPECT_EQ(s.ends, 1);
 }
 
+// A Microhard fade closes the gates for a few seconds. The robot is still
+// reporting the episode the operator dismissed: no re-prompt until reminder.
+TEST(AttentionPolicy, RadioGapKeepsTheDismissOfTheSameRobotEpisode) {
+    Sim s;
+    s.in.robot_speaks = true;
+    s.in.robot_kind = ap::Kind::Stalled;
+    s.in.robot_seq = 3;
+    s.tick();
+    ASSERT_EQ(s.shows, 1);
+    s.dismiss();
+    s.in.gates_open = false;
+    s.run(5);
+    s.in.gates_open = true;
+    s.run(50);
+    EXPECT_EQ(s.shows, 1);
+    s.run(10);  // 60 s after the dismiss
+    EXPECT_EQ(s.shows, 2);
+}
+
+TEST(AttentionPolicy, RobotClearingEndsTheQuiet) {
+    Sim s;
+    s.in.robot_speaks = true;
+    s.in.robot_kind = ap::Kind::Stalled;
+    s.in.robot_seq = 3;
+    s.tick();
+    s.dismiss();
+    s.in.robot_kind = ap::Kind::None;  // robot moving again
+    s.tick();
+    EXPECT_EQ(s.t.quiet_seq, -1);
+    s.in.robot_kind = ap::Kind::Stalled;
+    s.in.robot_seq = 4;
+    s.tick();
+    EXPECT_EQ(s.shows, 2);
+}
+
+TEST(AttentionPolicy, NewRobotSeqAfterAGapPrompts) {
+    Sim s;
+    s.in.robot_speaks = true;
+    s.in.robot_kind = ap::Kind::Stalled;
+    s.in.robot_seq = 3;
+    s.tick();
+    s.dismiss();
+    s.in.gates_open = false;
+    s.run(5);
+    s.in.gates_open = true;
+    s.in.robot_seq = 4;
+    s.tick();
+    EXPECT_EQ(s.shows, 2);
+}
+
+TEST(AttentionPolicy, OcuModeGapDoesNotInheritAQuiet) {
+    Sim s;
+    s.run(16);
+    s.dismiss();
+    s.in.gates_open = false;
+    s.tick();
+    s.in.gates_open = true;
+    s.run(16);
+    EXPECT_EQ(s.shows, 2);
+}
+
 TEST(AttentionPolicy, RobotVerdictStillRespectsGates) {
     Sim s;
     s.in.robot_speaks = true;
