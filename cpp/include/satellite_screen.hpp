@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "attention_policy.hpp"
 #include "estop_latch_policy.hpp"
 #include "topple_notice_policy.hpp"
 #include "radio_link_pill.hpp"
@@ -42,12 +43,14 @@
 #include <QDate>
 #include <QFutureWatcher>
 #include <QImage>
+#include <QPointer>
 #include <QRectF>
 #include <QSet>
 #include <QTransform>
 #include <QWidget>
 
 class QCheckBox;
+class QDialog;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -107,6 +110,9 @@ public:
         chrome behind Confirm ROI / Collect Map / Complete Mission) to a PNG.
         It has no other render path, so this is how its theme gets verified. */
     void devRenderPrompt(const QString& png_path);
+    /** Dev screenshot hook: the stall and fault attention prompts. */
+    void devRenderAttentionPrompts(const QString& stall_png,
+                                   const QString& fault_png);
     /** Dev screenshot hook: fakes a collected map + site image and opens the
         correspondence picker (or, with `review`, a solved alignment).
         `skewed` swaps in a seed the clean one cannot exercise: a real
@@ -457,10 +463,14 @@ private:
         tell the operator, back to Scan Parameters. Plan stays PLANNED. */
     void handleLaunchDeath(const QString& side, int exit_code);
     void maybePromptRevisit();
-    /** Director entered a stop state while autonomy was on: one modeless
-        modal per distinct (state, reason) once kStopDwellSamples consecutive
-        samples are stopped. The corner pill updates on the first sample. */
-    void maybePromptStop(const CoverageStatus& status);
+    /** Raise / remind / auto-close the "robot needs help" prompt
+        (attention_policy). Runs on every status sample. */
+    void maybePromptAttention(const CoverageStatus& status);
+    QDialog* buildAttentionPrompt(attention_policy::Kind kind,
+                                  const CoverageStatus& status,
+                                  long long stalled_ms);
+    /** Closes the attention / revisit prompts and forgets the episode. */
+    void clearAttention();
     /** A new topple trip in /coverage/status latches the E-Stop and says
      *  why. The robot has already stopped itself; this is the OCU half. */
     void maybeHandleTopple(const CoverageStatus& status);
@@ -912,10 +922,13 @@ private:
     ScanRunState scan_run_state_ = ScanRunState::Idle;
     bool scan_autonomy_ran_ = false;
     bool manual_override_ = false;
-    bool revisit_prompt_open_ = false;
-    bool stop_prompt_open_ = false;
-    QString stop_prompt_key_;   // last (state|stop|stale) explained
-    int stop_dwell_samples_ = 0;  // consecutive stopped status samples
+    QPointer<QDialog> revisit_box_;
+    attention_policy::Tracker attention_{};
+    QPointer<QDialog> attention_box_;
+    // Last stop/stale reason seen since progress, for the prompt text.
+    QString attention_last_stop_;
+    // Last stop reason written to the mission log (one line per change).
+    QString logged_stop_;
     // Last /coverage/status tip_seq acted on (topple_notice_policy).
     int topple_seq_seen_ = topple_notice_policy::kUnseen;
     bool topple_prompt_open_ = false;
@@ -923,7 +936,7 @@ private:
     // 0 means none this mission.
     qint64 last_autonomy_enable_ms_ = 0;
     topple_notice_policy::GuardWatch guard_watch_{};
-    bool revisit_hold_ = false;  // WAITING_REVISIT latched (prompt edge)
+    bool revisit_hold_ = false;  // prompt already shown for this WAITING_REVISIT
     bool director_failed_ = false;
     // Director-boot bookkeeping. The only hard "death" signal is a launch
     // process exiting (MissionController::launchDied); the status watchdog

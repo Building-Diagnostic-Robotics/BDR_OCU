@@ -114,6 +114,12 @@ struct CoverageStatus {
     // True when the guard issued the axis-idle request. Absent reads true
     // so an older robot does not claim the motors failed to disarm.
     bool tip_disarmed = true;
+    // Director's own "needs the operator" verdict. has_attention is false on
+    // robots that do not publish it; the OCU then decides from progress.
+    bool has_attention = false;
+    QString attention;          // "" | takeover | pose_hold | stalled | error
+    QString attention_reason;
+    int attention_seq = -1;
     // Ledger totals (same unit as each other; only their ratio is used).
     double remaining = -1.0;
     double swept = -1.0;

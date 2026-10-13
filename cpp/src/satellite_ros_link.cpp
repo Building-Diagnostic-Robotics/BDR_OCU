@@ -222,6 +222,12 @@ bool RosLink::start(QString* error) {
                         obj.contains(QLatin1String("tip_disarmed"))
                             ? obj.value(QLatin1String("tip_disarmed")).toBool()
                             : true;
+                    s.has_attention =
+                        obj.contains(QLatin1String("attention"));
+                    s.attention = jsonString(obj, "attention").toLower();
+                    s.attention_reason = jsonString(obj, "attention_reason");
+                    s.attention_seq =
+                        int(jsonNumber(obj, "attention_seq", -1.0));
                     s.remaining = jsonNumber(obj, "remaining", -1.0);
                     s.swept = jsonNumber(obj, "swept", -1.0);
                     s.deferred = jsonNumber(obj, "deferred", -1.0);

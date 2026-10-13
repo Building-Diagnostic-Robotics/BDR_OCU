@@ -868,6 +868,9 @@ AppShellWindow::AppShellWindow(QWidget* parent)
                 // every prompt on that stage, and the only dialog here with
                 // no other render path.
                 stage6_->devRenderPrompt(shot_sibling(QStringLiteral("prompt")));
+                stage6_->devRenderAttentionPrompts(
+                    shot_sibling(QStringLiteral("attention")),
+                    shot_sibling(QStringLiteral("fault")));
 
                 QApplication::quit();
                 return;
