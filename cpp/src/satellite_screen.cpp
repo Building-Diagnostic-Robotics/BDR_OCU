@@ -6519,12 +6519,12 @@ void applySatPromptStyle(QDialog* dialog) {
             "border: 1px solid %2; border-radius: 10px; }"
             "QLabel { color: %3; font-family: 'Arimo'; "
             "background: transparent; }"
-            "QLabel#SatPromptTitle { font-weight: 700; font-size: 20px; }"
-            "QLabel#SatPromptBody { font-size: 14px; color: %4; }"
+            "QLabel#SatPromptTitle { font-weight: 700; font-size: 24px; }"
+            "QLabel#SatPromptBody { font-size: 18px; color: %4; }"
             "QPushButton { background-color: %5; border: none; "
-            "border-radius: 18px; padding: 8px 18px; color: %3; "
-            "font-family: 'Arimo'; font-weight: 600; font-size: 14px; "
-            "min-height: 36px; }"
+            "border-radius: 24px; padding: 10px 22px; color: %3; "
+            "font-family: 'Arimo'; font-weight: 600; font-size: 17px; "
+            "min-height: 48px; }"
             "QPushButton:hover { background-color: %6; }"
             // Brand fill, swapped label — white on #00BC7D is 2.5:1 in light.
             "QPushButton#Accept { background-color: %7; color: %8; "
@@ -6543,8 +6543,9 @@ QDialog* makeSatPrompt(QWidget* parent, const QString& title,
                        const QString& reject_label) {
     auto* dialog = new QDialog(parent);
     dialog->setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-    dialog->setMinimumWidth(430);
-    dialog->setMaximumWidth(560);
+    // Fixed width: a free width lets the wrapped body under-report its height
+    // and the last line clips.
+    dialog->setFixedWidth(620);
     dialog->setObjectName("SatConfirmDialog");
     dialog->setAttribute(Qt::WA_StyledBackground, true);
     applySatPromptStyle(dialog);
