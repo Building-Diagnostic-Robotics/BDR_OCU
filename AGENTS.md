@@ -1084,8 +1084,10 @@ Classic Stage 4/5 remain in-tree, unrouted.
  `setCacheRoot` (per-job tile tree), `setMaxZoomCap`, Clarity and Wayback
  layer URLs, `listWaybackReleases`.
 - `satellite_job_model.{hpp,cpp}` — plans as JSON under
- AppData/satellite_jobs; **schema 6** adds the `scan` block
- (`coverage_width_m`, `scan_speed_mps`; absent => director defaults);
+ AppData/satellite_jobs; **schema 7** adds `scan.preset`
+ (`detailed|standard|quick|custom`); **schema 6** added the `scan` block
+ (`coverage_width_m`, `scan_speed_mps`; no preset => snap onto a named
+ card when the pair matches one, otherwise Custom; absent => Standard);
  5 added `polygon_edge_locks_m`; **schema 4** carries `mode`
  (satellite|measured), the `polygon` + `polygon_roof_edges` arrays,
  `gps` (the map-collection seed fix), `imagery_cache` (what the office
@@ -1124,17 +1126,46 @@ Classic Stage 4/5 remain in-tree, unrouted.
  node in the launch keeps running and logging, and Start Scan never
  unlocks. Cost a field session on 2026-09-15; guarded by
  `ScanParams.LaunchArgsAlwaysCarryADecimalPoint`.
-- **Scan Parameters** is its own step, after Edge Review (`buildScanParamsCard`,
- both trims). `stepComplete` is whether a mission is active: true from a
- successful launch until teardown, so the step is not skipped mid-run and
- is asked again afterwards. Do not store a second flag for that.
- `TrackSlider` (the legacy Stage 5 slider lifted to
- `components/track_slider.*`) + a typed `QLineEdit` per knob. Slider is SI
- and the model; the edit is a units-layer view. Ranges / step / defaults
- live ONLY in `ScanParams` (`satellite_job_model.hpp`): width 0.30-2.00 m
- step 0.05, speed 0.4-0.6 m/s step 0.1, defaults 0.50 / 0.40 = director
- defaults. `snapWidth/snapSpeed` clamp + snap everything (typed input,
- hand-edited JSON, launch args). Do not add a second copy of the ranges.
+- **Scan Parameters** is its own step, after Edge Review (`buildScanParamsCard`
+ hosts `ScanParamsPanel`, both trims). `stepComplete` is whether a mission
+ is active: true from a successful launch until teardown, so the step is
+ not skipped mid-run and is asked again afterwards. Do not store a second
+ flag for that. Four exclusive cards: Detailed 2 ft / Slow (0.4 m/s),
+ Standard 3 ft / Medium (0.5 m/s), Quick 5 ft / Fast (0.6 m/s), Custom.
+ Custom expands to three speed buttons and a vertical lane-width slider
+ (1–7 ft, 0.5 ft steps). Ranges / step / defaults live ONLY in `ScanParams`
+ (`satellite_job_model.hpp`): width 0.3048–2.1336 m step 0.1524 m, speed
+ 0.4–0.6 m/s step 0.1, default Standard 0.9144 m / 0.5 m/s. `snapWidth` /
+ `snapSpeed` clamp + snap everything (hand-edited JSON, launch args).
+ A named preset's table wins over stored width and speed, including in
+ `launchArgs()`, which writes both numbers with 4 decimal places
+ (`coverage_width:=0.9144`). Schema 6 plans with no `preset` become that
+ card when the snapped pair matches one, otherwise Custom — the old
+ 0.50 m / 0.40 m/s default loads as Custom 1.5 ft · Slow, because turning
+ it into Standard would double the width. Schema ≤ 5 (no `scan` block)
+ loads as Standard. Do not add a second copy of the ranges. `TrackSlider`
+ stays for the screens that still use it; this card does not.
+ Each card is one 76 px row, no second line and no radio dot: a fixed
+ 64 px lane value (number 30 px bold, unit 20 px **regular** — Arimo
+ Bold "ft" reads as π — painted by `LaneValue`), the name 17 px bold
+ caps centred, and a fixed 44 px icon slot. The speed icon is the
+ selection mark: outline `scan_speed_*_outline.svg` in `muted` off,
+ filled in `accent_green` on. The selected card also keeps the green
+ wash and a 2 px `accent_green` border, because outline vs filled alone
+ is too weak in glare. Custom uses the same row with `—` (`muted`) until
+ it is selected and a 24 px chevron in the icon slot. Padding is 12 px
+ and gaps 10 px, not the mockup's 16 / 14: the card is 256 px wide in
+ the 288 px rail and STANDARD needs ~100 px. Metric shows one decimal
+ (`0.9 m`) so it fits the 64 px slot. The accessible name still carries
+ the speed (`Detailed, 2 ft, slow`). Custom speed buttons follow the
+ same icon rule at 36 px, 76 px tall, 14 px labels; slider labels are
+ 14 px.
+ The cards and the speed buttons have no hover style: a touchscreen
+ leaves hover on the last widget touched, which read as a second
+ selection. While a mission is running the cards drop to 0.55 opacity
+ and the blurb says it is locked. The title and blurb are not faded: the
+ blurb is the only explanation a touch operator can read. Half-foot slider ticks are 6×2 px in
+ `#52525B` / `#A1A1AA`; the labeled ticks stay `muted`.
 - `satellite_ros_link.{hpp,cpp}` — the stage's own rclcpp node:
  cmd_vel/autonomy_enable pubs, coverage/odom/status subs, axis-state
  clients, `pushSessionMetadata` (coordinator SetParameters).
@@ -1222,14 +1253,18 @@ warning, stays on step 1. Plans already cached skip straight through.
  (synced with a map tap) plus Mark all / Clear all, and Next pops
  **Edges Reviewed** ("N of M edges marked. Confirm?"). Confirming saves
  the plan (`persistJob`, no reload) so the flags survive leaving before
- launch, then advances. Step 5 is **Scan Parameters** (width and speed
- only). Its map stays locked and draws an approximate swath preview —
+ launch, then advances. Step 5 is **Scan Parameters**: four exclusive
+ cards (Detailed 2 ft / Slow, Standard 3 ft / Medium, Quick 5 ft / Fast,
+ Custom). Custom expands to the speed buttons and the lane-width slider.
+ While a mission is running the card is dimmed and locked. Its map stays
+ locked and draws an approximate swath preview —
  lanes in the robot's frame (marker heading), the first half a width in
  from the box, then one width apart, cut back 1.25 m from a marked roof
  edge and 0.55 m from any other edge, labelled "Preview — robot plans the
  final route". The preview is never sent to the robot. No marker, no
  preview. Next pops **Launch coverage stack** (edge
- summary, width and speed, marker checklist) and confirming launches —
+ summary, the preset with its lane width and speed, marker checklist)
+ and confirming launches —
  there is no Send button. Ack checkboxes are gone. Measured
  field trim hides Satellite Map (Robot Map is step 1); chips renumber
  1–5. **The scan page (step 6, step 5 when measured) is the shipped Stage 5 Scan page reproduced 1:1**
@@ -1979,7 +2014,10 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  correspond_outlier|review_outlier|seed|seed_pair|seed_position|seed_none|
  seed_outside|two_pairs|two_pairs_seed|roi|edges|params|run|plan|plan_confirm|revisit_align|
  revisit_search`,
- `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers) — the agent-side
+ `_STAGE=1|2|3|4|5`, `_TOGGLE` modifiers). `_PRESET=detailed|standard|quick|custom[:feet]`
+ with `_MODE=params` selects the Scan Parameters card (`custom:1`,
+ `custom:3.5`, `custom:7` open the slider). `_LOCKED=1` dims that card.
+ This is the agent-side
  visual verification loop. `plan_confirm` also writes the Save Plan dialog
  to `<png>_dialog.png`. See docs/DEV_BYPASSES.md.
  **`_STAGE` selects the app-shell stage, not the Stage 6 step**, and

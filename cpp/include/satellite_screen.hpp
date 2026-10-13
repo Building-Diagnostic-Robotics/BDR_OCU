@@ -70,7 +70,7 @@ class MissionFinalizeDialog;
 class PanZoomImageWidget;
 class RosLink;
 class SatelliteMapWidget;
-class TrackSlider;
+class ScanParamsPanel;
 
 class SatelliteScreen : public QWidget {
     Q_OBJECT
@@ -673,18 +673,11 @@ private:
     QWidget* buildEdgeCard(QWidget* parent);
     void refreshEdgeCard();
 
-    // Scan Parameters: swath width + robot speed. Slider plus a typed value
-    // per knob; SI in the sliders, display units in the edits. Its own step,
-    // after Edge Review. Saved on the Job at launch.
-    QWidget* scan_params_card_ = nullptr;
-    TrackSlider* swath_slider_ = nullptr;
-    TrackSlider* speed_slider_ = nullptr;
-    QLineEdit* swath_edit_ = nullptr;
-    QLineEdit* speed_edit_ = nullptr;
-    QLabel* swath_unit_ = nullptr;
-    QLabel* speed_unit_ = nullptr;
+    // Scan Parameters: preset cards (Detailed / Standard / Quick / Custom).
+    // Its own step, after Edge Review. Saved on the Job at launch.
+    ScanParamsPanel* scan_params_panel_ = nullptr;
     QWidget* buildScanParamsCard(QWidget* parent);
-    /** Re-renders the edits from the sliders and applies visibility. */
+    /** Shows the card on its step and locks it while a mission is running. */
     void refreshScanParamsCard();
     /** Draws or clears the approximate swath picture for Scan Parameters. */
     void updateSwathPreview();

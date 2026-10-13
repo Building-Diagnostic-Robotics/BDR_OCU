@@ -16,38 +16,167 @@ namespace f2c_cpp {
 
 namespace {
 
-double snapToGrid(double value, double lo, double hi, double step,
-                  double fallback) {
-    if (!std::isfinite(value)) {
-        return fallback;
+struct NamedPreset {
+    ScanPreset preset;
+    int half_feet;
+    double speed_mps;
+    const char* id;
+    const char* title;
+};
+
+// Widths are half-foot indexes, not stored metres, so the table cannot
+// drift from the snap grid. Speeds are the three operator buttons.
+constexpr NamedPreset kNamedPresets[] = {
+    {ScanPreset::Detailed, 4, 0.40, "detailed", "Detailed"},
+    {ScanPreset::Standard, 6, 0.50, "standard", "Standard"},
+    {ScanPreset::Quick, 10, 0.60, "quick", "Quick"},
+};
+
+const NamedPreset* findNamed(ScanPreset preset) {
+    for (const NamedPreset& row : kNamedPresets) {
+        if (row.preset == preset) {
+            return &row;
+        }
     }
-    const double clamped = std::min(hi, std::max(lo, value));
+    return nullptr;
+}
+
+double snapSpeedToGrid(double mps) {
+    if (!std::isfinite(mps)) {
+        return ScanParams::kSpeedDefaultMps;
+    }
+    const double lo = ScanParams::kSpeedMinMps;
+    const double hi = ScanParams::kSpeedMaxMps;
+    const double step = ScanParams::kSpeedStepMps;
+    const double clamped = std::min(hi, std::max(lo, mps));
     const double snapped = lo + std::round((clamped - lo) / step) * step;
-    // Two decimals is the finest grid either knob uses; kills 0.30000000004.
+    // One decimal is the whole speed grid; the extra digit kills 0.50000000004.
     return std::round(std::min(hi, snapped) * 100.0) / 100.0;
+}
+
+QString formatLaunchNumber(double value) {
+    return QString::number(value, 'f', 4);
 }
 
 }  // namespace
 
+int ScanParams::halfFeetFromMeters(double meters) {
+    if (!std::isfinite(meters)) {
+        return 6;  // Standard, 3 ft
+    }
+    const double feet = meters / kMetersPerFoot;
+    int half = static_cast<int>(std::lround(feet * 2.0));
+    if (half < kWidthHalfFeetMin) {
+        half = kWidthHalfFeetMin;
+    }
+    if (half > kWidthHalfFeetMax) {
+        half = kWidthHalfFeetMax;
+    }
+    return half;
+}
+
+double ScanParams::metersFromHalfFeet(int half_feet) {
+    if (half_feet < kWidthHalfFeetMin) {
+        half_feet = kWidthHalfFeetMin;
+    }
+    if (half_feet > kWidthHalfFeetMax) {
+        half_feet = kWidthHalfFeetMax;
+    }
+    return half_feet * 0.5 * kMetersPerFoot;
+}
+
 double ScanParams::snapWidth(double meters) {
-    return snapToGrid(meters, kWidthMinM, kWidthMaxM, kWidthStepM,
-                      kWidthDefaultM);
+    return metersFromHalfFeet(halfFeetFromMeters(meters));
 }
 
-double ScanParams::snapSpeed(double mps) {
-    return snapToGrid(mps, kSpeedMinMps, kSpeedMaxMps, kSpeedStepMps,
-                      kSpeedDefaultMps);
+double ScanParams::snapSpeed(double mps) { return snapSpeedToGrid(mps); }
+
+ScanParams ScanParams::fromPreset(ScanPreset preset) {
+    if (const NamedPreset* row = findNamed(preset)) {
+        ScanParams out;
+        out.preset = row->preset;
+        out.coverage_width_m = metersFromHalfFeet(row->half_feet);
+        out.scan_speed_mps = row->speed_mps;
+        return out;
+    }
+    return ScanParams{};
 }
 
-ScanParams ScanParams::snapped() const {
+bool ScanParams::presetFromId(const QString& id, ScanPreset* out) {
+    const QString key = id.trimmed().toLower();
+    if (key == QLatin1String("custom")) {
+        if (out) {
+            *out = ScanPreset::Custom;
+        }
+        return true;
+    }
+    for (const NamedPreset& row : kNamedPresets) {
+        if (key == QLatin1String(row.id)) {
+            if (out) {
+                *out = row.preset;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+QString ScanParams::presetId(ScanPreset preset) {
+    if (const NamedPreset* row = findNamed(preset)) {
+        return QString::fromLatin1(row->id);
+    }
+    return QStringLiteral("custom");
+}
+
+QString ScanParams::presetTitle(ScanPreset preset) {
+    if (const NamedPreset* row = findNamed(preset)) {
+        return QString::fromLatin1(row->title);
+    }
+    return QStringLiteral("Custom");
+}
+
+QString ScanParams::speedTitle(double mps) {
+    const double snapped = snapSpeed(mps);
+    if (snapped < 0.45) {
+        return QStringLiteral("Slow");
+    }
+    if (snapped < 0.55) {
+        return QStringLiteral("Medium");
+    }
+    return QStringLiteral("Fast");
+}
+
+bool ScanParams::matchesNamedPreset(double width_m, double speed_mps,
+                                    ScanPreset* out) {
+    const int half = halfFeetFromMeters(snapWidth(width_m));
+    const double speed = snapSpeed(speed_mps);
+    for (const NamedPreset& row : kNamedPresets) {
+        if (row.half_feet == half && std::abs(row.speed_mps - speed) < 1e-9) {
+            if (out) {
+                *out = row.preset;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+ScanParams ScanParams::resolved() const {
+    if (const NamedPreset* row = findNamed(preset)) {
+        return fromPreset(row->preset);
+    }
+    if (!std::isfinite(coverage_width_m) || !std::isfinite(scan_speed_mps)) {
+        return fromPreset(ScanPreset::Standard);
+    }
     ScanParams out;
+    out.preset = ScanPreset::Custom;
     out.coverage_width_m = snapWidth(coverage_width_m);
     out.scan_speed_mps = snapSpeed(scan_speed_mps);
     return out;
 }
 
 QString ScanParams::launchArgs() const {
-    const ScanParams s = snapped();
+    const ScanParams s = resolved();
     // `swath_overlap:=0.0`, never `:=0`. The director's launch file passes
     // this straight into the node's `parameters` dict as a bare
     // LaunchConfiguration, so launch_ros type-infers it with YAML: "0" is an
@@ -57,10 +186,12 @@ QString ScanParams::launchArgs() const {
     // director's __init__ — before it creates the /coverage/status publisher —
     // so the director dies while every other node in the launch keeps running
     // and Start Scan never unlocks. Same trap for any float arg added here.
+    // Four decimals: a half-foot width is 0.1524 m, and two decimals would
+    // send 0.91 for the 3 ft Standard lane.
     return QStringLiteral(" coverage_width:=%1 swath_overlap:=0.0 "
                           "desired_linear_speed:=%2")
-        .arg(QString::number(s.coverage_width_m, 'f', 2),
-             QString::number(s.scan_speed_mps, 'f', 2));
+        .arg(formatLaunchNumber(s.coverage_width_m),
+             formatLaunchNumber(s.scan_speed_mps));
 }
 
 QVector<geo::GeoPoint> RoiRect::corners() const {
@@ -132,11 +263,11 @@ QJsonObject Job::toJson() const {
     robot_obj["heading_deg"] = robot.heading_deg;
 
     QJsonObject obj;
-    // Schema 6 adds the scan knobs (coverage width / speed); 5 added
-    // per-edge pinned lengths; 4 added the polygon, alignment and
-    // imagery-cache blocks; 3 added imagery provenance. Readers tolerate
-    // every one of those being absent, so older plans load unchanged.
-    obj["schema"] = 6;
+    // Schema 7 adds scan.preset. 6 added the scan knobs (coverage width /
+    // speed); 5 added per-edge pinned lengths; 4 added the polygon,
+    // alignment and imagery-cache blocks; 3 added imagery provenance.
+    // Readers tolerate every one of those being absent.
+    obj["schema"] = 7;
     obj["id"] = id;
     obj["name"] = name;
     obj["address"] = address;
@@ -217,8 +348,9 @@ QJsonObject Job::toJson() const {
         obj["alignment"] = a;
     }
     {
-        const ScanParams s = scan.snapped();
+        const ScanParams s = scan.resolved();
         QJsonObject sp;
+        sp["preset"] = ScanParams::presetId(s.preset);
         sp["coverage_width_m"] = s.coverage_width_m;
         sp["scan_speed_mps"] = s.scan_speed_mps;
         obj["scan"] = sp;
@@ -333,14 +465,42 @@ Job Job::fromJson(const QJsonObject& obj) {
         job.alignment.valid = true;
         job.align_rmse_m = a.value("rmse_m").toDouble();
     }
-    // Absent on schema <= 5 plans: they ran the director defaults, which is
-    // exactly what ScanParams{} is. Snap so a hand-edited file cannot push
-    // a value outside the operator range onto the robot.
+    // No scan block (schema <= 5): Standard. Those plans predate the knobs.
+    // A scan block with no preset (schema 6) snaps onto a named card when
+    // the width and speed land on one, and otherwise becomes Custom — the
+    // old 0.50 m / 0.40 m/s default is Custom 1.5 ft · Slow, not Standard,
+    // because Standard is a wider, faster scan.
+    // Schema 7 names the card. A named preset's table wins over the stored
+    // numbers, so a hand edit cannot desync the card from what we launch.
     const QJsonObject sp = obj.value("scan").toObject();
-    job.scan.coverage_width_m = ScanParams::snapWidth(
-        sp.value("coverage_width_m").toDouble(ScanParams::kWidthDefaultM));
-    job.scan.scan_speed_mps = ScanParams::snapSpeed(
-        sp.value("scan_speed_mps").toDouble(ScanParams::kSpeedDefaultMps));
+    if (!obj.contains(QStringLiteral("scan"))) {
+        job.scan = ScanParams::fromPreset(ScanPreset::Standard);
+        return job;
+    }
+    ScanPreset named = ScanPreset::Standard;
+    const bool has_preset =
+        sp.contains(QStringLiteral("preset")) &&
+        ScanParams::presetFromId(sp.value(QStringLiteral("preset")).toString(),
+                                 &named);
+    if (has_preset && named != ScanPreset::Custom) {
+        job.scan = ScanParams::fromPreset(named);
+        return job;
+    }
+    const double width = ScanParams::snapWidth(
+        sp.value(QStringLiteral("coverage_width_m"))
+            .toDouble(ScanParams::kWidthDefaultM));
+    const double speed = ScanParams::snapSpeed(
+        sp.value(QStringLiteral("scan_speed_mps"))
+            .toDouble(ScanParams::kSpeedDefaultMps));
+    ScanPreset matched = ScanPreset::Standard;
+    if (!has_preset &&
+        ScanParams::matchesNamedPreset(width, speed, &matched)) {
+        job.scan = ScanParams::fromPreset(matched);
+        return job;
+    }
+    job.scan.preset = ScanPreset::Custom;
+    job.scan.coverage_width_m = width;
+    job.scan.scan_speed_mps = speed;
     return job;
 }
 

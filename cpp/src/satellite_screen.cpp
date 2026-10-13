@@ -26,7 +26,8 @@
 #include "components/mission_finalize_dialog.hpp"
 #include "components/offline_finalize_dialog.hpp"
 #include "components/satellite_plan_confirm_dialog.hpp"
-#include "components/track_slider.hpp"
+#include "components/scan_params_panel.hpp"
+#include "svg_tint.hpp"
 #include "video_stream_widget.hpp"
 #include "pan_zoom_image.hpp"
 #include "satellite_map_capture.hpp"
@@ -46,9 +47,7 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDir>
-#include <QDoubleValidator>
 #include <QEventLoop>
-#include <QFile>
 #include <QtConcurrent/QtConcurrent>
 #include <QGraphicsBlurEffect>
 #include <QGraphicsDropShadowEffect>
@@ -72,7 +71,6 @@
 #include <QSlider>
 #include <QStackedWidget>
 #include <QStyle>
-#include <QSvgRenderer>
 #include <QTimer>
 #include <QUuid>
 #include <QVBoxLayout>
@@ -294,47 +292,6 @@ QString statusTextStyle(const QString& color) {
                "font-family: 'Arimo'; font-size: 14px; font-weight: 400; "
                "color: %1;")
         .arg(color);
-}
-
-/** SVG loader with stroke AND fill retint (superset of the screens'
-    loadSvgPixmap — the status dot is fill-based, the icons stroke-based). */
-QPixmap loadTintedSvg(const QString& resource_path, int w, int h,
-                      const QString& color = QString()) {
-    QFile file(resource_path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return QPixmap();
-    }
-    QByteArray data = file.readAll();
-    file.close();
-    if (!color.isEmpty()) {
-        for (const QByteArray needle : {QByteArrayLiteral("stroke=\""),
-                                        QByteArrayLiteral("fill=\"")}) {
-            int index = data.indexOf(needle);
-            while (index >= 0) {
-                const int value_start = index + needle.size();
-                const int value_end = data.indexOf('"', value_start);
-                if (value_end <= value_start) {
-                    break;
-                }
-                const QByteArray value =
-                    data.mid(value_start, value_end - value_start);
-                if (value != "none") {
-                    data = data.left(value_start) + color.toUtf8() +
-                           data.mid(value_end);
-                }
-                index = data.indexOf(needle, value_start);
-            }
-        }
-    }
-    QSvgRenderer renderer(data);
-    if (!renderer.isValid()) {
-        return QPixmap();
-    }
-    QPixmap pixmap(w, h);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    renderer.render(&painter);
-    return pixmap;
 }
 
 QLabel* makeStatusIconLabel(QWidget* parent, const QString& resource_path,
@@ -1383,8 +1340,51 @@ void SatelliteScreen::devSeedDemoParamsStep() {
     devSeedDemoAlignment(true);
     confirmed_vertices_ = map_->polygon().vertices;
     edges_reviewed_ = true;
+    // BDR_DEV_STAGE6_SHOT_PRESET=detailed|standard|quick|custom[:feet]
+    // picks the card. custom:1, custom:3.5 and custom:7 are the slider shots.
+    const QString spec = qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_PRESET")
+                             .trimmed()
+                             .toLower();
+    if (!spec.isEmpty()) {
+        ScanParams params = ScanParams::fromPreset(ScanPreset::Standard);
+        if (spec == QLatin1String("detailed")) {
+            params = ScanParams::fromPreset(ScanPreset::Detailed);
+        } else if (spec == QLatin1String("quick")) {
+            params = ScanParams::fromPreset(ScanPreset::Quick);
+        } else if (spec == QLatin1String("standard")) {
+            params = ScanParams::fromPreset(ScanPreset::Standard);
+        } else if (spec == QLatin1String("custom") ||
+                   spec.startsWith(QLatin1String("custom:"))) {
+            double feet = 3.5;
+            if (spec.startsWith(QLatin1String("custom:"))) {
+                bool ok = false;
+                const double parsed = spec.mid(7).toDouble(&ok);
+                if (ok) {
+                    feet = parsed;
+                }
+            }
+            params.preset = ScanPreset::Custom;
+            params.coverage_width_m = feet * ScanParams::kMetersPerFoot;
+            params.scan_speed_mps = ScanParams::kSpeedDefaultMps;
+            params = params.resolved();
+        }
+        setScanParams(params);
+    }
     setSelectedStep(Step::ScanParameters);
-    QTimer::singleShot(400, this, [this] { map_->fitToRoi(); });
+    // BDR_DEV_STAGE6_SHOT_LOCKED=1 dims the card the way a running mission
+    // does. Applied after the step refresh, which would otherwise unlock it.
+    const bool shot_locked =
+        qEnvironmentVariable("BDR_DEV_STAGE6_SHOT_LOCKED").trimmed() ==
+        QLatin1String("1");
+    if (shot_locked && scan_params_panel_) {
+        scan_params_panel_->setEditable(false);
+    }
+    QTimer::singleShot(400, this, [this, shot_locked] {
+        map_->fitToRoi();
+        if (shot_locked && scan_params_panel_) {
+            scan_params_panel_->setEditable(false);
+        }
+    });
 }
 
 void SatelliteScreen::devSeedDemoScanStep() {
@@ -3245,8 +3245,7 @@ QWidget* SatelliteScreen::buildLeftRail() {
     layout->addWidget(roi_card_);
     edge_card_ = buildEdgeCard(rail_content);
     layout->addWidget(edge_card_);
-    scan_params_card_ = buildScanParamsCard(rail_content);
-    layout->addWidget(scan_params_card_);
+    layout->addWidget(buildScanParamsCard(rail_content));
     align_card_ = buildAlignCard(rail_content);
     layout->addWidget(align_card_);
     teleop_card_ = buildTeleopCard(rail_content);
@@ -4045,119 +4044,28 @@ void SatelliteScreen::refreshEdgeCard() {
 }
 
 QWidget* SatelliteScreen::buildScanParamsCard(QWidget* parent) {
-    // Same shape as the legacy Stage 5 slider blocks: name on the left, a
-    // typed value + unit on the right, the track underneath. The slider is
-    // the model (SI); the edit is a view of it in the operator's units.
-    auto* card = new QWidget(parent);
-    card->setObjectName("SatScanParamsCard");
-    auto* layout = new QVBoxLayout(card);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(10);
-
-    auto* title = new QLabel(QStringLiteral("Scan Parameters"), card);
-    title->setObjectName("SatRoiTitle");
-    layout->addWidget(title);
-    auto* blurb = new QLabel(
-        QStringLiteral("Set the pass width and the robot's speed."), card);
-    blurb->setObjectName("SatRoiBlurb");
-    blurb->setWordWrap(true);
-    layout->addWidget(blurb);
-
-    const auto makeRow = [&](const QString& name, double lo, double hi,
-                             double step, int decimals, TrackSlider** slider,
-                             QLineEdit** edit, QLabel** unit) {
-        auto* row = new QWidget(card);
-        auto* rl = new QVBoxLayout(row);
-        rl->setContentsMargins(0, 0, 0, 0);
-        rl->setSpacing(2);
-        auto* head = new QHBoxLayout();
-        head->setContentsMargins(0, 0, 0, 0);
-        head->setSpacing(6);
-        auto* label = new QLabel(name, row);
-        label->setObjectName("SatScanParamName");
-        head->addWidget(label);
-        head->addStretch(1);
-        *edit = new QLineEdit(row);
-        (*edit)->setObjectName("SatScanParamEdit");
-        (*edit)->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        (*edit)->setFixedSize(64, 24);
-        // Digits only; range is enforced on commit by ScanParams::snap*.
-        auto* validator = new QDoubleValidator(0.0, 1.0e6, 2, *edit);
-        validator->setNotation(QDoubleValidator::StandardNotation);
-        (*edit)->setValidator(validator);
-        head->addWidget(*edit);
-        *unit = new QLabel(row);
-        (*unit)->setObjectName("SatScanParamUnit");
-        head->addWidget(*unit);
-        rl->addLayout(head);
-        *slider = new TrackSlider(row);
-        (*slider)->setRange(lo, hi);
-        (*slider)->setStep(step);
-        (*slider)->setDecimals(decimals);
-        (*slider)->setDarkMode(dark_mode_);
-        rl->addWidget(*slider);
-        layout->addWidget(row);
-    };
-    makeRow(QStringLiteral("Swath Width"), ScanParams::kWidthMinM,
-            ScanParams::kWidthMaxM, ScanParams::kWidthStepM, 2,
-            &swath_slider_, &swath_edit_, &swath_unit_);
-    makeRow(QStringLiteral("Robot Speed"), ScanParams::kSpeedMinMps,
-            ScanParams::kSpeedMaxMps, ScanParams::kSpeedStepMps, 1,
-            &speed_slider_, &speed_edit_, &speed_unit_);
-    setScanParams(ScanParams{});
-
-    swath_slider_->on_value_changed = [this](double) { refreshScanParamsCard(); };
-    speed_slider_->on_value_changed = [this](double) { refreshScanParamsCard(); };
-
-    // Typed value: parse in display units, back to SI, snap to the grid,
-    // and let the slider re-render the edit. Bad input just redraws.
-    const auto commit = [this](QLineEdit* edit, TrackSlider* slider,
-                               double (*snap)(double)) {
-        bool ok = false;
-        const double shown = edit->text().trimmed().toDouble(&ok);
-        if (ok) {
-            const bool metric = UnitsProvider::instance()->isMetric();
-            slider->setValue(snap(metric ? shown : units::feetToMeters(shown)));
-        }
-        refreshScanParamsCard();
-    };
-    connect(swath_edit_, &QLineEdit::editingFinished, this, [this, commit] {
-        commit(swath_edit_, swath_slider_, &ScanParams::snapWidth);
-    });
-    connect(speed_edit_, &QLineEdit::editingFinished, this, [this, commit] {
-        commit(speed_edit_, speed_slider_, &ScanParams::snapSpeed);
-    });
-
+    scan_params_panel_ = new ScanParamsPanel(parent);
+    scan_params_panel_->setObjectName(QStringLiteral("SatScanParamsCard"));
+    scan_params_panel_->setDarkMode(dark_mode_);
+    connect(scan_params_panel_, &ScanParamsPanel::paramsChanged, this,
+            [this] { refreshScanParamsCard(); });
     connect(map_, &SatelliteMapWidget::roiChanged, this,
             &SatelliteScreen::refreshScanParamsCard);
     connect(map_, &SatelliteMapWidget::interactionChanged, this,
             &SatelliteScreen::refreshScanParamsCard);
     connect(UnitsProvider::instance(), &UnitsProvider::unitsChanged, this,
             [this] { refreshScanParamsCard(); });
-    return card;
+    setScanParams(ScanParams{});
+    return scan_params_panel_;
 }
 
 void SatelliteScreen::refreshScanParamsCard() {
-    if (!scan_params_card_) {
+    if (!scan_params_panel_) {
         return;
     }
-    const bool metric = UnitsProvider::instance()->isMetric();
-    const double width_m = swath_slider_->value();
-    const double speed_mps = speed_slider_->value();
-    swath_edit_->setText(QString::number(
-        metric ? width_m : units::metersToFeet(width_m), 'f', 2));
-    speed_edit_->setText(QString::number(
-        metric ? speed_mps : units::metersToFeet(speed_mps), 'f', metric ? 1 : 2));
-    swath_unit_->setText(units::lengthUnitSuffix().trimmed());
-    speed_unit_->setText(units::speedUnitSuffix().trimmed());
-
     // Its own step. Reaching it already required a closed polygon.
-    scan_params_card_->setVisible(selected_step_ == Step::ScanParameters);
-    const bool editable = !mission_->missionActive();
-    swath_slider_->setEnabled(editable);
-    speed_slider_->setEnabled(editable);
-    swath_edit_->setEnabled(editable);
-    speed_edit_->setEnabled(editable);
+    scan_params_panel_->setVisible(selected_step_ == Step::ScanParameters);
+    scan_params_panel_->setEditable(!mission_->missionActive());
     updateSwathPreview();
 }
 
@@ -4198,21 +4106,20 @@ void SatelliteScreen::updateSwathPreview() {
 }
 
 ScanParams SatelliteScreen::scanParams() const {
-    ScanParams p;
-    if (swath_slider_ && speed_slider_) {
-        p.coverage_width_m = swath_slider_->value();
-        p.scan_speed_mps = speed_slider_->value();
+    if (!scan_params_panel_) {
+        return ScanParams{};
     }
-    return p.snapped();
+    return scan_params_panel_->params();
 }
 
 void SatelliteScreen::setScanParams(const ScanParams& params) {
-    if (!swath_slider_ || !speed_slider_) {
+    if (!scan_params_panel_) {
         return;
     }
-    const ScanParams s = params.snapped();
-    swath_slider_->setValue(s.coverage_width_m);
-    speed_slider_->setValue(s.scan_speed_mps);
+    // A loaded or new plan must not inherit the previous plan's Custom
+    // width and speed. setParams puts a Custom plan's own values back.
+    scan_params_panel_->resetCustomMemory();
+    scan_params_panel_->setParams(params);
     refreshScanParamsCard();
 }
 
@@ -4689,17 +4596,6 @@ QPushButton#SatRoiClearButton:disabled:hover {
 }
 #SatRoiNote { background: @RAISED@; border-radius: 10px; }
 
-/* ---- Scan Parameters (swath width / robot speed, both trims) ---- */
-QLabel#SatScanParamName { background: transparent; font-size: 12px; color: @MUTED@; }
-QLineEdit#SatScanParamEdit {
-    background: @INPUT_BG@; border: 1px solid @INPUT_BORDER@; border-radius: 4px; padding: 0 6px;
-    font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px; font-weight: 500;
-    color: @TEXT@; selection-background-color: #009966; selection-color: #ffffff;
-}
-QLineEdit#SatScanParamEdit:focus { border: 1px solid #00d492; color: #00d492; }
-QLineEdit#SatScanParamEdit:disabled { color: @DISABLED_GHOST@; }
-QLabel#SatScanParamUnit { background: transparent; font-size: 12px; color: @FAINT@; min-width: 28px; }
-
 /* ---- Step 1 floating search (Figma 238:4509) + layer chip (238:4531) ---- */
 #SatSearchBar { background: @OVERLAY_BG@; border: 1px solid @OVERLAY_BORDER@; border-radius: 24px; }
 QLineEdit#SatSearchEdit {
@@ -4846,11 +4742,8 @@ void SatelliteScreen::setDarkMode(bool dark_mode) {
     if (scan_camera_view_) {
         scan_camera_view_->setDarkMode(dark_mode_);
     }
-    if (swath_slider_) {
-        swath_slider_->setDarkMode(dark_mode_);
-    }
-    if (speed_slider_) {
-        speed_slider_->setDarkMode(dark_mode_);
+    if (scan_params_panel_) {
+        scan_params_panel_->setDarkMode(dark_mode_);
     }
     // Step chips carry per-element colours for the same reason the pills do,
     // so they need re-rendering here too — applyTheme()'s sheet does not
@@ -6722,18 +6615,21 @@ void SatelliteScreen::launchMissionFromScanParams() {
         return;
     }
     const ScanParams params = scanParams();
+    const QString preset_line =
+        QStringLiteral("%1 — %2 lanes, %3")
+            .arg(ScanParams::presetTitle(params.preset),
+                 ScanParamsPanel::laneWidthText(params.coverage_width_m),
+                 ScanParams::speedTitle(params.scan_speed_mps));
     if (!confirmDialog(
             QStringLiteral("Launch coverage stack"),
             QStringLiteral(
                 "%1\n\n"
-                "Swath width %2 · speed %3\n\n"
+                "%2\n\n"
                 "Confirm before launch:\n"
                 "• The robot is physically at the marker position.\n"
-                "• The robot is facing the marker's arrow direction (%4°).\n"
+                "• The robot is facing the marker's arrow direction (%3°).\n"
                 "• The ROI will be anchored to the robot exactly as drawn.")
-                .arg(edgeReviewSummary(),
-                     units::formatLength(params.coverage_width_m, 2),
-                     units::formatSpeed(params.scan_speed_mps, 2))
+                .arg(edgeReviewSummary(), preset_line)
                 .arg(marker.heading_deg, 0, 'f', 1),
             QStringLiteral("Launch"))) {
         return;

@@ -93,32 +93,71 @@ struct ImageryCache {
 };
 
 /**
- * Operator-tunable coverage knobs (schema 6). SI on the wire; the ROI card
- * renders them through the units layer. Ranges are the operator's spec and
- * the single source of truth for slider, typed entry, and launch args.
+ * Which Scan Parameters card is selected (schema 7). Named presets carry
+ * fixed width and speed; Custom is the operator's own pair on the same grids.
+ */
+enum class ScanPreset { Detailed, Standard, Quick, Custom };
+
+/**
+ * Operator-tunable coverage knobs (schema 7). SI on the wire; the card
+ * renders width through the units layer and speed as Slow / Medium / Fast.
+ * Ranges live only here — the panel, the JSON loader, and launch args all
+ * read them. Width is a half-foot grid (international foot, 0.3048 m)
+ * because the operator picks lanes in feet. Speed stays the 0.1 m/s grid.
  */
 struct ScanParams {
-    static constexpr double kWidthMinM = 0.30;
-    static constexpr double kWidthMaxM = 2.00;
-    static constexpr double kWidthStepM = 0.05;
-    static constexpr double kWidthDefaultM = 0.50;
+    static constexpr double kMetersPerFoot = 0.3048;
+    static constexpr int kWidthHalfFeetMin = 2;   // 1 ft
+    static constexpr int kWidthHalfFeetMax = 14;  // 7 ft
+    static constexpr double kWidthMinM = kWidthHalfFeetMin * 0.5 * kMetersPerFoot;
+    static constexpr double kWidthMaxM = kWidthHalfFeetMax * 0.5 * kMetersPerFoot;
+    static constexpr double kWidthStepM = 0.5 * kMetersPerFoot;
+    static constexpr double kWidthDefaultM = 6 * 0.5 * kMetersPerFoot;  // 3 ft
     static constexpr double kSpeedMinMps = 0.40;
     static constexpr double kSpeedMaxMps = 0.60;
     static constexpr double kSpeedStepMps = 0.10;
-    static constexpr double kSpeedDefaultMps = 0.40;
+    static constexpr double kSpeedDefaultMps = 0.50;
 
+    ScanPreset preset = ScanPreset::Standard;
     double coverage_width_m = kWidthDefaultM;
     double scan_speed_mps = kSpeedDefaultMps;
 
-    /** Clamp + snap to the slider grid. Non-finite -> default. */
+    /** Half-foot index on the width grid. Non-finite -> the Standard index. */
+    static int halfFeetFromMeters(double meters);
+    static double metersFromHalfFeet(int half_feet);
+
+    /** Clamp + snap. Non-finite width -> Standard width; non-finite speed -> Standard speed. */
     static double snapWidth(double meters);
     static double snapSpeed(double mps);
-    ScanParams snapped() const;
 
     /**
-     * Director launch args, leading space included:
-     * " coverage_width:=0.50 swath_overlap:=0 desired_linear_speed:=0.40".
-     * Overlap is pinned to 0 so the slider IS the lane pitch.
+     * Named preset -> the table's width and speed, ignoring whatever was
+     * stored. Custom snaps both knobs and stays Custom, except a non-finite
+     * knob, which is not a choice and resolves to Standard.
+     */
+    ScanParams resolved() const;
+    ScanParams snapped() const { return resolved(); }
+
+    static ScanParams fromPreset(ScanPreset preset);
+    /** False when `id` is not one of the four schema strings. */
+    static bool presetFromId(const QString& id, ScanPreset* out);
+    static QString presetId(ScanPreset preset);
+    /** Sentence case, for the launch confirm ("Standard", "Slow"). */
+    static QString presetTitle(ScanPreset preset);
+    static QString speedTitle(double mps);
+
+    /**
+     * True when the snapped width and speed are exactly one named preset.
+     * Schema 6 plans have no preset field, so this is how they pick a card.
+     */
+    static bool matchesNamedPreset(double width_m, double speed_mps,
+                                   ScanPreset* out);
+
+    /**
+     * Director launch args, leading space included. Both numbers are written
+     * with 4 decimal places so a half-foot width (0.9144) is not rounded to
+     * 0.91, and so no token can look like an integer to launch_ros.
+     * Overlap is pinned to 0 so the chosen width IS the lane pitch.
      */
     QString launchArgs() const;
 };

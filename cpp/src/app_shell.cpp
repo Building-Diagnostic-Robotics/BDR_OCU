@@ -781,7 +781,11 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     // measured|measured_map|scan|correspond|review|correspond_outlier|
     // review_outlier|seed|seed_pair|seed_position|seed_none|seed_outside|
     // roi|plan|plan_confirm|revisit_align|revisit_search
-    // (default: planning-only satellite trim). See docs/DEV_BYPASSES.md.
+    // (default: planning-only satellite trim).
+    // BDR_DEV_STAGE6_SHOT_PRESET=detailed|standard|quick|custom[:feet]
+    // selects the Scan Parameters card when MODE=params.
+    // BDR_DEV_STAGE6_SHOT_LOCKED=1 dims that card.
+    // See docs/DEV_BYPASSES.md.
     if (!qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
         const QString shot_path =
             qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed();

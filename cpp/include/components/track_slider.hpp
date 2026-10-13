@@ -3,8 +3,9 @@
  * @brief Painted range slider: 8 px track, filled accent to the thumb,
  *        step-snapped values with fixed decimals.
  *
- * Lifted verbatim from the legacy Stage 5 planner (`PlannerTrackSlider`)
- * so the Stage 6 ROI card can reuse the same control. Value changes from
+ * Lifted verbatim from the legacy Stage 5 planner (`PlannerTrackSlider`).
+ * Stage 5 still uses it. Stage 6 Scan Parameters uses ScanParamsPanel.
+ * Value changes from
  * the operator fire `on_value_changed`; programmatic `setValue` does not.
  */
 

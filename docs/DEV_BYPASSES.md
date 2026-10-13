@@ -307,6 +307,9 @@ enumerates all sites.
       Modifiers: `BDR_DEV_STAGE6_SHOT_DARK=1`,
       `BDR_DEV_STAGE6_SHOT_MODE=measured|measured_map|scan|align_empty|correspond|review|correspond_outlier|review_outlier|seed|seed_pair|seed_position|seed_none|seed_outside|two_pairs|two_pairs_seed|roi|edges|params|run|plan|plan_confirm|scan_setup|dialogs|revisit_align|revisit_search`,
       `BDR_DEV_STAGE6_SHOT_STAGE=1|2|3|4|5`, `BDR_DEV_STAGE6_SHOT_TOGGLE=1`,
+      `BDR_DEV_STAGE6_SHOT_PRESET=detailed|standard|quick|custom[:feet]`
+      (`params` only: `custom:1`, `custom:3.5`, `custom:7` open the slider;
+      `BDR_DEV_STAGE6_SHOT_LOCKED=1` dims the card),
       `BDR_DEV_STAGE6_SHOT_FIT=1` (`plan` only: `fitToRoi()` after seeding,
       lands past the fetch ceiling to exercise scaled-tile overzoom).
       `_STAGE=1` is Setup (where the shell already starts) and `=2` is the
