@@ -731,18 +731,18 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME mission_finalize_policy_tests COMMAND mission_finalize_policy_tests)
 
-        # Stage 6 stop-modal dwell. Header-only, no Qt/ROS.
-        add_executable(stop_prompt_policy_tests
-            tests/stop_prompt_policy_tests.cpp
+        # Stage 6 "robot needs help" prompt. Header-only, no Qt/ROS.
+        add_executable(attention_policy_tests
+            tests/attention_policy_tests.cpp
         )
-        target_include_directories(stop_prompt_policy_tests PRIVATE
+        target_include_directories(attention_policy_tests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
         )
-        target_link_libraries(stop_prompt_policy_tests PRIVATE
+        target_link_libraries(attention_policy_tests PRIVATE
             GTest::gtest
             GTest::gtest_main
         )
-        add_test(NAME stop_prompt_policy_tests COMMAND stop_prompt_policy_tests)
+        add_test(NAME attention_policy_tests COMMAND attention_policy_tests)
 
         # Stage 6 E-Stop latch transitions. Header-only, no Qt/ROS.
         add_executable(estop_latch_policy_tests
@@ -813,7 +813,7 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME link_health_monitor_tests COMMAND link_health_monitor_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests gps_prealign_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests robot_registry_tests repo_sync_tests async_process_tests mission_finalize_policy_tests stop_prompt_policy_tests estop_latch_policy_tests topple_notice_policy_tests touch_gesture_state_tests swath_preview_tests radio_link_pill_tests link_health_monitor_tests)")
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests gps_prealign_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests robot_registry_tests repo_sync_tests async_process_tests mission_finalize_policy_tests attention_policy_tests estop_latch_policy_tests topple_notice_policy_tests touch_gesture_state_tests swath_preview_tests radio_link_pill_tests link_health_monitor_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

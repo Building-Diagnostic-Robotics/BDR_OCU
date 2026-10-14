@@ -1896,23 +1896,45 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  publishes a stop, drops the installed route, and `tick()` returns at the
  top of every later cycle. `abort` ends the run and closes the section as
  partial, which would make a recoverable stop unrecoverable.
-- **The stop modal dwells three `/coverage/status` samples
- (`stop_prompt_policy::kStopDwellSamples`).** The executor latches a
- stop reason for as little as one 20 Hz tick (`degenerate_path` at the
- end of a sweep that has not settled yet); the status topic is 1 Hz, so
- a healthy robot can look stopped on a single sample. The corner pill
- still updates on the first sample — that is the operator's view of a
- blip. Do not drop the dwell, do not exempt ERROR / STALE_INPUT, and do
- not move the pill behind the same counter. A stop that persists is
- operator-actionable; a one-tick latch is not.
- The counter counts **consecutive stopped samples, not repeats of one
- reason** — a robot failing to replan cycles `blocked_*` →
- `route_invalid` → `replan_*` across samples, so keying the dwell to a
- matching `state|stop|stale` let a genuinely stuck robot reset the count
- forever and never prompt. `stop_prompt_key_` is for the
- already-explained dedupe only. `stop_dwell_samples_` resets in the
- `missionActiveChanged(false)` handler with the rest of the run state;
- leaving it set let the next mission's first stop skip the dwell.
+- **"Robot needs help" keys off lack of progress, not the director's
+ state** (`attention_policy.hpp`, `maybePromptAttention`). The director's
+ `state` says what is happening, not whether help is needed: a route
+ handover or an in-tick replan reads `STOPPED_*` / `REPLAN_FAILED` /
+ `STALE_INPUT` for seconds while the robot is fine, and the stop reason
+ is sticky until the next tracking publication. Prompting on the state
+ (the old three-sample stop dwell) misfired on every handover. The rules:
+ - The prompt shows after **15 s with no progress** (`kStallMs`):
+ moved ≥ 0.25 m, turned ≥ 15°, or `swept` rose. A replan is not
+ progress — replanning in place is exactly the stuck case.
+ - The clock only runs while the robot should be driving: mission
+ active, not tearing down, `Running`, no manual override, status
+ fresh (3 s), odometry fresh (2 s), and not an on-purpose hold
+ (`DC_STARTING`, `DC_PAUSED`, `GPR_ROLLOVER`, `WAITING_REVISIT`,
+ `COMPLETE`, `complete`, `tip`, and `WAITING_READY` before the
+ first `initialized`). Leaving any of these resets it.
+ - `takeover` / `MANUAL_TAKEOVER`, `POSE_HOLD` and `ERROR` prompt after
+ being held 2 s (`kHoldConfirmMs`). ERROR offers Cancel Scan /
+ Dismiss, never manual control.
+ - An episode ends only on progress or when the robot should not be
+ driving — a held flag clearing does not end it, so a flapping flag
+ cannot re-prompt. Dismiss quiets the episode; a reminder comes every
+ 60 s (`kRemindMs`). An ended episode auto-closes the dialog with
+ `kPromptAutoClosed`, which the `finished` handler ignores, and an
+ Accept after the episode ended is dropped.
+ - A robot that publishes `attention` / `attention_seq` is followed
+ instead: its kind wins, a new seq is a new episode, and OCU-side
+ progress does not override it. A dismissed robot seq stays quiet
+ across a radio gap (`quiet_seq`) until the 60 s reminder; the robot
+ reporting no attention, or a new seq, ends that quiet.
+ - Routine handover stops (`isRoutineStop`) show **Planning** in the
+ corner pill; the raw stop reason goes in the tooltip and once per
+ change into the mission log.
+ - Guidance never says the map click resumes. It ends teleop; Resume is
+ a separate press (E-Stop latch rules above).
+ - The revisit prompt shows once per `WAITING_REVISIT` hold, only when
+ it can (Running, no override); a blocked sample leaves it pending.
+ It auto-closes when the hold ends. `clearAttention()` resets both
+ prompts at teardown start and on mission end.
 - **Operator dialogs carry no raw launch output.** The robot launch is
  10-20 Hz of cliff / tfmini INFO lines, so a tail tells the operator
  nothing and the traceback worth reading has already scrolled out of it.
@@ -2292,7 +2314,9 @@ that is how frameless dialogs get the right theme without being handed it.
 
 `BDR_DEV_STAGE6_SHOT` with `_STAGE=1|2|3|4|5` and `_MODE=…|dialogs` renders
 every screen and the shared dialogs headlessly in both themes — `dialogs`
-also writes the Stage 6 confirm prompt to `<png>_prompt.png`. The shot pins
+also writes the Stage 6 confirm prompt to `<png>_prompt.png` and the
+"Robot needs help" / fault prompts to `<png>_attention.png` /
+`<png>_fault.png`. The shot pins
 the window to **1920x1080**, the Figma frame size and the field laptop's
 panel; do not shrink it. The staged constants are frame px unscaled, so a
 shorter shot gives the layout less vertical budget than it will ever have
