@@ -581,18 +581,9 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &SatelliteScreen::refreshStepUi);
     connect(map_, &SatelliteMapWidget::interactionChanged, this,
             &SatelliteScreen::maybeRearmRoiDraw);
-    // Touch carve-out for one non-precision action. A finger tap on a canvas
-    // places nothing anywhere in the app, but handing control back from
-    // manual override is the one canvas "click" that does not need aiming —
-    // a mouse gets it from the press filter below, and without this a finger
-    // could enter teleop (a press on the FPV view, a separate widget that
-    // still sees synthesized mouse events) with no way back out, while
-    // Start Scan and Resume sit disabled behind manual_override_.
-    connect(map_, &SatelliteMapWidget::canvasTapped, this, [this] {
-        if (selected_step_ == Step::AutonomousScan && manual_override_) {
-            setManualOverride(false);
-        }
-    });
+    // Manual override is no longer ended from the map (tap or press): on the
+    // touchscreen a pan or zoom ended it by accident. The Stop Manual Driving
+    // button in the Manual Override card is the way out, for mouse and finger.
     // World Imagery is a mosaic: the same roof can be served from different
     // flights at different zooms. Re-check provenance whenever the view moves,
     // but only mark it dirty here — viewChanged fires on every wheel notch and
@@ -668,13 +659,6 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             if (step.warn_now) {
                 appendLog(QStringLiteral(
                     "[TOPPLE] guard not reporting — no topple protection"));
-                showToppleNotice(
-                    QStringLiteral("Topple guard offline"),
-                    QStringLiteral(
-                        "The robot's topple guard is not reporting, so the "
-                        "robot has no tilt protection right now. You can keep "
-                        "scanning; it restarts automatically. If this persists, "
-                        "Complete Mission and check the robot."));
             }
             if (step.recovered_now) {
                 appendLog(QStringLiteral("[TOPPLE] guard reporting again"));
@@ -2374,7 +2358,7 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     // Manual Override (320 px). Header 24 + FPV 196 + state + hint; every
     // element above the video has a fixed height.
     auto* override = scanCardShell(rail);
-    override->setFixedHeight(320);
+    override->setFixedHeight(362);
     auto* override_layout = new QVBoxLayout(override);
     override_layout->setContentsMargins(16, 16, 16, 16);
     override_layout->setSpacing(12);
@@ -2405,8 +2389,8 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     override_content_layout->addWidget(scan_override_label_);
     auto* hint = scanText(
         override_content,
-        QStringLiteral("Click camera for manual teleop (W/A/S/D). "
-                       "Click map to return to autonomy."),
+        QStringLiteral("Tap the camera to drive by hand (W/A/S/D). "
+                       "Tap Stop Manual Driving when done, then Resume."),
         QStringLiteral("hint"));
     hint->setWordWrap(true);
     // scanText pins every label to Fixed vertically, which stops the layout
@@ -2414,6 +2398,27 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     // this hint runs to two lines and the second was clipped by the card.
     hint->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
     override_content_layout->addWidget(hint);
+    // The only way out of manual override. A press or tap on the map used to
+    // end it too, but on the touchscreen every pan or zoom started with one,
+    // so the operator lost the wheels mid-drive without meaning to (1200
+    // O'Brien, 2026-10-13). Ending manual driving does not resume autonomy:
+    // the run stays Paused and the operator presses Resume.
+    scan_stop_manual_button_ = new QPushButton(
+        QStringLiteral("Stop Manual Driving"), override_content);
+    scan_stop_manual_button_->setCursor(Qt::PointingHandCursor);
+    scan_stop_manual_button_->setFixedHeight(32);
+    scan_stop_manual_button_->setProperty(kScanRoleProp,
+                                          QStringLiteral("surface"));
+    scan_stop_manual_button_->setProperty(kScanRoleArgProp,
+                                          QStringLiteral("disarm"));
+    scan_stop_manual_button_->setStyleSheet(
+        scanSurfaceStyle(QStringLiteral("disarm"), appThemeTokens()));
+    scan_stop_manual_button_->setEnabled(false);
+    connect(scan_stop_manual_button_, &QPushButton::clicked, this, [this] {
+        appendLog(QStringLiteral("[teleop] manual driving stopped by operator"));
+        setManualOverride(false);
+    });
+    override_content_layout->addWidget(scan_stop_manual_button_);
     override_layout->addWidget(override_content);
     layout->addWidget(override);
 
@@ -7491,6 +7496,9 @@ void SatelliteScreen::refreshScanRunUi() {
         scan_copy_label_->setText(text);
         scan_copy_label_->setToolTip(status_live ? status.copy_error : QString());
     }
+    if (scan_stop_manual_button_) {
+        scan_stop_manual_button_->setEnabled(manual_override_);
+    }
     if (scan_override_label_) {
         scan_override_label_->setText(
             manual_override_
@@ -7652,12 +7660,37 @@ void SatelliteScreen::onCompleteMission() {
     if (complete_mission_in_flight_) {
         return;
     }
-    if (!confirmDialog(
+    // /coverage/conclude refuses while the director still has reachable work,
+    // so finishing early used to fail and then sit ~10 s before offering
+    // abort-and-save. The operator decides when the scan is over: with work
+    // left, end it as partial straight away. Unknown or stale status keeps the
+    // normal path, which still falls back to abort-and-save.
+    const CoverageStatus status = ros_->coverageStatus();
+    const bool work_left = status.valid && status.fresh(kDirectorFreshMs) &&
+                           !status.complete && status.remaining > 0.0;
+    bool confirmed = false;
+    if (work_left) {
+        const double done = status.coverageFraction();
+        const QString progress =
+            done >= 0.0 ? QStringLiteral(" (about %1% done)")
+                              .arg(qRound(done * 100.0))
+                        : QString();
+        confirmed = confirmDialog(
+            QStringLiteral("Finish Scan Early"),
+            QStringLiteral("Part of the roof is not scanned yet%1. The scan "
+                           "will be saved as unfinished, and you can scan the "
+                           "rest later.")
+                .arg(progress),
+            QStringLiteral("Finish and Save"));
+    } else {
+        confirmed = confirmDialog(
             QStringLiteral("Complete Mission"),
             QStringLiteral(
                 "Autonomy will be disabled, the motors disarmed, the mission "
                 "finalized on the robot, and both launch trees stopped."),
-            QStringLiteral("Complete Mission"))) {
+            QStringLiteral("Complete Mission"));
+    }
+    if (!confirmed) {
         return;
     }
     complete_mission_in_flight_ = true;
@@ -7686,7 +7719,11 @@ void SatelliteScreen::onCompleteMission() {
             case OfflineFinalizeDialog::Choice::WaitReconnected:
                 appendLog(QStringLiteral(
                     "[mission] link recovered while waiting — normal path"));
-                executeCompleteMissionNormalPath();
+                if (work_left) {
+                    executeCompleteMissionPartialPath();
+                } else {
+                    executeCompleteMissionNormalPath();
+                }
                 return;
             case OfflineFinalizeDialog::Choice::FinalizeOverSsh:
                 executeCompleteMissionSshFallback();
@@ -7695,7 +7732,51 @@ void SatelliteScreen::onCompleteMission() {
         complete_mission_in_flight_ = false;
         return;
     }
+    if (work_left) {
+        executeCompleteMissionPartialPath();
+        return;
+    }
     executeCompleteMissionNormalPath();
+}
+
+void SatelliteScreen::executeCompleteMissionPartialPath() {
+    appendLog(QStringLiteral(
+        "[mission] work left on the robot — finishing early, saving as "
+        "partial"));
+    showFinalizeProgress(QStringLiteral("Saving the scan…"));
+    // Settle first: it resets the abort flags, which requestAbortAndSave then
+    // sets so the plan stays PLANNED and the offer is not shown again.
+    startCompleteMissionSettle();
+    requestAbortAndSave();
+}
+
+void SatelliteScreen::requestAbortAndSave() {
+    abort_consumed_ = true;
+    abort_save_used_ = true;
+    conclude_wait_ticks_ = 0;
+    appendLog(QStringLiteral("[mission] operator abort-and-save"));
+    ros_->abortCoverage(true, [this](bool ok, const QString& detail) {
+        if (ok) {
+            appendLog(QStringLiteral("[mission] abort-and-save accepted: %1")
+                          .arg(detail));
+            return;
+        }
+        appendLog(QStringLiteral("[mission] abort-and-save via bridge failed "
+                                 "(%1) — retrying over SSH")
+                      .arg(detail));
+        mission_->remoteServiceCall(
+            QStringLiteral("/coverage/abort"),
+            QStringLiteral("std_srvs/srv/SetBool"),
+            QStringLiteral("{data: true}"),
+            [this](bool ssh_ok, const QString& ssh_detail) {
+                appendLog(ssh_ok ? QStringLiteral("[mission] abort-and-save "
+                                                  "accepted: %1")
+                                       .arg(ssh_detail)
+                                 : QStringLiteral("[mission] abort-and-save "
+                                                  "failed (%1)")
+                                       .arg(ssh_detail));
+            });
+    });
 }
 
 void SatelliteScreen::beginMotorsIdleWait(
@@ -7774,44 +7855,7 @@ void SatelliteScreen::showFinalizeProgress(const QString& phase) {
                     });
                 });
         connect(finalize_dialog_, &MissionFinalizeDialog::abortAndSaveRequested,
-                this, [this] {
-                    abort_consumed_ = true;
-                    abort_save_used_ = true;
-                    conclude_wait_ticks_ = 0;
-                    appendLog(QStringLiteral(
-                        "[mission] operator abort-and-save"));
-                    ros_->abortCoverage(
-                        true, [this](bool ok, const QString& detail) {
-                            if (ok) {
-                                appendLog(QStringLiteral(
-                                              "[mission] abort-and-save "
-                                              "accepted: %1")
-                                              .arg(detail));
-                                return;
-                            }
-                            appendLog(QStringLiteral(
-                                          "[mission] abort-and-save via "
-                                          "bridge failed (%1) — retrying "
-                                          "over SSH")
-                                          .arg(detail));
-                            mission_->remoteServiceCall(
-                                QStringLiteral("/coverage/abort"),
-                                QStringLiteral("std_srvs/srv/SetBool"),
-                                QStringLiteral("{data: true}"),
-                                [this](bool ssh_ok,
-                                       const QString& ssh_detail) {
-                                    appendLog(
-                                        ssh_ok ? QStringLiteral(
-                                                     "[mission] abort-and-save "
-                                                     "accepted: %1")
-                                                     .arg(ssh_detail)
-                                               : QStringLiteral(
-                                                     "[mission] abort-and-save "
-                                                     "failed (%1)")
-                                                     .arg(ssh_detail));
-                                });
-                        });
-                });
+                this, &SatelliteScreen::requestAbortAndSave);
     }
     finalize_dialog_->setTitle(complete_mission_in_flight_
                                    ? QStringLiteral("Completing Mission")
@@ -8133,10 +8177,6 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
             };
             if (scan_camera_view_ && is_under(watched, scan_camera_view_)) {
                 setManualOverride(true);
-                return false;
-            }
-            if (map_ && is_under(watched, map_) && manual_override_) {
-                setManualOverride(false);
                 return false;
             }
         }
