@@ -1870,7 +1870,7 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  recovery: Clear E-Stop, then Resume or Motors: Arm. A shadow-mode trip
  (`estop_engaged` false) is not counted in `tip_seq`, so it does not
  latch here. Do not add a second clear path. Do not gate on the guard's
- readiness (`tip_ready` only warns). A latched guard (`tip`) blocks
+ readiness (`tip_ready` only writes a mission-log line, no modal). A latched guard (`tip`) blocks
  Start/Resume only, and the robot refuses autonomy while latched; the
  OCU drops Running to Paused if that happens.
  (`estop_latch_policy_tests` makes that hazard executable.) Three details
