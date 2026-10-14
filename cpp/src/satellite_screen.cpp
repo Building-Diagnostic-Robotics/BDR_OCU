@@ -8645,8 +8645,8 @@ SatelliteScreen::ScanBlock SatelliteScreen::scanBlockReason() const {
     if (manual_override_) {
         out.label = QStringLiteral("Manual");
         out.detail = QStringLiteral(
-            "You are driving manually. Click the map to hand control back to "
-            "the robot, then press Resume.");
+            "You are driving manually. Tap Stop Manual Driving to hand control "
+            "back to the robot, then press Resume.");
         return out;
     }
     if (start_scan_pending_) {
@@ -8748,20 +8748,21 @@ QString SatelliteScreen::stopGuidance(const CoverageStatus& status) {
         return QStringLiteral(
             "An obstacle is in the path right now.\n\nIf it can move, wait — "
             "the robot resumes on its own once the path clears. If it is "
-            "fixed, take manual control, drive around it, then click the map "
-            "and press Resume.");
+            "fixed, take manual control, drive around it, then tap Stop "
+            "Manual Driving and press Resume.");
     }
     if (state == QLatin1String("STOPPED_PERSISTENT")) {
         return QStringLiteral(
             "The path ahead is persistently blocked.\n\nTake manual control, "
-            "drive past the obstruction, then click the map and press "
-            "Resume; the director replans from the new position.");
+            "drive past the obstruction, then tap Stop Manual Driving and "
+            "press Resume; the director replans from the new position.");
     }
     if (state == QLatin1String("REPLAN_FAILED")) {
         return QStringLiteral(
             "The director could not plan a route to the remaining area from "
             "here (%1).\n\nTake manual control and drive closer to the "
-            "uncovered region, then click the map and press Resume. If that "
+            "uncovered region, then tap Stop Manual Driving and press Resume. "
+            "If that "
             "area is genuinely unreachable, Complete Mission saves what was "
             "covered.")
             .arg(stop);
@@ -8769,8 +8770,8 @@ QString SatelliteScreen::stopGuidance(const CoverageStatus& status) {
     if (stop == QLatin1String("obligation_terminal")) {
         return QStringLiteral(
             "The current swath reached its end and no follow-on route exists "
-            "from here.\n\nDrive toward the uncovered area, click the map and "
-            "press Resume, or Complete Mission.");
+            "from here.\n\nDrive toward the uncovered area, tap Stop Manual "
+            "Driving and press Resume, or Complete Mission.");
     }
     // degenerate_path, route_invalid, transit_endpoint_lost, topology_replan,
     // handoff_entry_replan — the route stopped making sense.
@@ -8778,7 +8779,7 @@ QString SatelliteScreen::stopGuidance(const CoverageStatus& status) {
         "The current route became invalid (%1).\n\nThis usually means the "
         "robot is outside or on the edge of the ROI, or the map changed under "
         "the route. Take manual control, drive back inside the ROI facing the "
-        "uncovered area, then click the map and press Resume.")
+        "uncovered area, then tap Stop Manual Driving and press Resume.")
         .arg(stop);
 }
 
@@ -8921,8 +8922,8 @@ QDialog* SatelliteScreen::buildAttentionPrompt(attention_policy::Kind kind,
             QStringLiteral("Cancel Scan"), QStringLiteral("Dismiss"));
     }
     const QString drive_out = QStringLiteral(
-        "Take manual control, drive the robot clear, then click the map and "
-        "press Resume.");
+        "Take manual control, drive the robot clear, then tap Stop Manual "
+        "Driving and press Resume.");
     QString body;
     if (kind == Kind::Takeover) {
         body = QStringLiteral("The robot asked for manual control: it cannot "
