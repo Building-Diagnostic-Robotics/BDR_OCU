@@ -497,6 +497,13 @@ private:
     void onCompleteMission();
     /** Disarm wait -> /dc/finalize_mission -> teardown. */
     void executeCompleteMissionNormalPath();
+    /** Work still left on the robot: /coverage/abort(save) instead of
+        /coverage/conclude, which refuses while lanes remain. Same settle,
+        disarm and teardown as the normal path; the plan stays PLANNED. */
+    void executeCompleteMissionPartialPath();
+    /** /coverage/abort {data: true} over the bridge, SSH on failure. Marks the
+        settle as an abort-and-save so the plan is not stamped COMPLETED. */
+    void requestAbortAndSave();
     /** finalize_mission_local.py over SSH, then teardown. No RPCs. */
     void executeCompleteMissionSshFallback();
     /** Teardown + leave, after the offline finalize resolves either way. */
@@ -889,6 +896,8 @@ private:
     QLabel* scan_eta_label_ = nullptr;
     QLabel* scan_copy_label_ = nullptr;
     QLabel* scan_override_label_ = nullptr;
+    /** The only way out of manual override (map taps no longer do it). */
+    QPushButton* scan_stop_manual_button_ = nullptr;
     FPVCameraView* scan_camera_view_ = nullptr;
     QWidget* scan_left_rail_ = nullptr;
     QWidget* scan_right_rail_ = nullptr;
