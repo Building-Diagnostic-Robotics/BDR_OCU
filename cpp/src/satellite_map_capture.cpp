@@ -31,10 +31,12 @@ namespace {
 constexpr int kProjectionMaxDim = 4096;
 constexpr int kProjectionMinDim = 64;
 
-// Everything a ground robot can see on a roof lives well inside this band;
-// clipping it keeps stray sky/ground returns out of the density stretch.
-constexpr double kTopDownZMin = -10.0;
-constexpr double kTopDownZMax = 10.0;
+// Z is relative to the robot's final pose (the cloud is re-origined before
+// rendering). +/-3 m keeps the roof deck and rooftop structures while
+// clipping stray sky/ground returns and taller adjacent walls out of the
+// density stretch.
+constexpr double kTopDownZMin = -3.0;
+constexpr double kTopDownZMax = 3.0;
 
 // The raster carries every point at one flat gray and puts all the density
 // information in the alpha channel, so these two ends are the faintest and
