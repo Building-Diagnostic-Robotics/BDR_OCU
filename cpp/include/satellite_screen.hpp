@@ -504,6 +504,10 @@ private:
     /** /coverage/abort {data: true} over the bridge, SSH on failure. Marks the
         settle as an abort-and-save so the plan is not stamped COMPLETED. */
     void requestAbortAndSave();
+    /** True when a conclude reply says lanes are still active. */
+    static bool concludeRefusedWorkActive(const QString& detail);
+    /** Conclude refused with work left: switch to abort-and-save once. */
+    void fallBackToAbortAndSave();
     /** finalize_mission_local.py over SSH, then teardown. No RPCs. */
     void executeCompleteMissionSshFallback();
     /** Teardown + leave, after the offline finalize resolves either way. */

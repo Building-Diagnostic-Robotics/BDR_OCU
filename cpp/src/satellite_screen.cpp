@@ -7998,6 +7998,14 @@ void SatelliteScreen::executeCompleteMissionNormalPath() {
         if (ok) {
             return;
         }
+        // The robot refuses conclude while lanes remain. work_left was false
+        // because the OCU's coverage status was stale (688 Gibraltar
+        // Section 3, 2026-10-14: no director updates for 11 min, conclude
+        // refused, nothing saved). Save as partial instead of tearing down.
+        if (concludeRefusedWorkActive(detail)) {
+            fallBackToAbortAndSave();
+            return;
+        }
         mission_->remoteServiceCall(
             QStringLiteral("/coverage/conclude"),
             QStringLiteral("std_srvs/srv/Trigger"),
@@ -8006,11 +8014,31 @@ void SatelliteScreen::executeCompleteMissionNormalPath() {
                 if (!complete_mission_in_flight_ || !finalize_dialog_) {
                     return;
                 }
+                // ssh_ok is the transport; the Trigger can still say no.
+                if (concludeRefusedWorkActive(ssh_detail)) {
+                    fallBackToAbortAndSave();
+                    return;
+                }
                 if (!ssh_ok && !ssh_detail.isEmpty()) {
                     finalize_dialog_->setDetail(ssh_detail, true);
                 }
             });
     });
+}
+
+bool SatelliteScreen::concludeRefusedWorkActive(const QString& detail) {
+    return detail.contains(QStringLiteral("still active"), Qt::CaseInsensitive);
+}
+
+void SatelliteScreen::fallBackToAbortAndSave() {
+    if (abort_save_used_) {
+        return;  // bridge and SSH replies can both land here
+    }
+    appendLog(QStringLiteral(
+        "[mission] conclude refused — work still on the robot, saving as "
+        "partial"));
+    showFinalizeProgress(QStringLiteral("Saving the scan…"));
+    requestAbortAndSave();
 }
 
 void SatelliteScreen::executeCompleteMissionSshFallback() {
