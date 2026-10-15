@@ -65,6 +65,7 @@ public:
     rclcpp::Node::SharedPtr node;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr autonomy_pub;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr manual_drive_pub;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_sub;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub;
     rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr swaths_sub;
@@ -112,6 +113,17 @@ bool RosLink::start(QString* error) {
         impl_->autonomy_pub =
             impl_->node->create_publisher<std_msgs::msg::Bool>(
                 "/mpc_autonomy_enable", enable_qos);
+        // TEMP (record_during_manual): tells the director whether autonomy-off
+        // is manual driving (keep collecting) or Pause (pause collection).
+        // Same latched QoS; starts false so a stale "true" never survives.
+        impl_->manual_drive_pub =
+            impl_->node->create_publisher<std_msgs::msg::Bool>(
+                "/ocu/manual_drive", enable_qos);
+        {
+            std_msgs::msg::Bool off;
+            off.data = false;
+            impl_->manual_drive_pub->publish(off);
+        }
 
         // Deliberately NOT subscribed: /coverage/global_occupancy and
         // /coverage/planned_path. Both are RELIABLE + TRANSIENT_LOCAL at 5 Hz
@@ -369,6 +381,15 @@ void RosLink::publishAutonomyEnable(bool enabled) {
     impl_->autonomy_pub->publish(msg);
     autonomy_published_ = true;
     last_autonomy_enabled_ = enabled;
+}
+
+void RosLink::publishManualDrive(bool active) {
+    if (!running_ || !impl_->manual_drive_pub) {
+        return;
+    }
+    std_msgs::msg::Bool msg;
+    msg.data = active;
+    impl_->manual_drive_pub->publish(msg);
 }
 
 void RosLink::requestAxisState(int state) {
