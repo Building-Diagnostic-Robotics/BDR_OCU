@@ -7272,6 +7272,8 @@ void SatelliteScreen::setManualOverride(bool active) {
         // A Start or Resume still waiting for CLOSED_LOOP leaves the state
         // Idle or Paused, so it would enable autonomy under the operator.
         cancelArmWait(QStringLiteral("manual override"));
+        // Flag first, so the robot reads autonomy-off as manual driving.
+        ros_->publishManualDrive(true);
         setAutonomyEnabled(false);
         if (teleop_check_) {
             teleop_check_->setChecked(true);
@@ -7289,6 +7291,7 @@ void SatelliteScreen::setManualOverride(bool active) {
             teleop_timer_->stop();
         }
         ros_->publishTwist(0.0, 0.0);
+        ros_->publishManualDrive(false);  // robot pauses collection until Resume
         // Handing control back ends teleop and nothing else. This used to
         // call beginStartScan() when the run had been Running, which re-armed
         // CLOSED_LOOP and republished autonomy_enable=true — from a map

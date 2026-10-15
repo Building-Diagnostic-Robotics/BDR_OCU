@@ -149,6 +149,7 @@ public:
     /** Edge-triggered: publishes only when the value changes (TRANSIENT_LOCAL
         keeps the latest for late joiners). */
     void publishAutonomyEnable(bool enabled);
+    void publishManualDrive(bool active);
     /** ODrive axis state: 1 = IDLE (disarm), 8 = CLOSED_LOOP_CONTROL (arm). */
     void requestAxisState(int state);
 
