@@ -39,6 +39,7 @@
 #include "similarity_2d.hpp"
 
 #include "satellite_ros_link.hpp"
+#include "teleop_ramp.hpp"
 
 #include <QDate>
 #include <QFutureWatcher>
@@ -1006,6 +1007,7 @@ private:
     LinkHealthMonitor* link_monitor_ = nullptr;
     QSet<int> pressed_keys_;
     bool teleop_last_nonzero_ = false;
+    teleop_ramp::Ramp teleop_ramp_;  ///< WASD target -> published twist
     bool autonomy_on_ = false;
     bool dark_mode_ = false;
     bool view_initialized_ = false;
