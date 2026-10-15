@@ -4,6 +4,8 @@
 #include <QString>
 #include <QWidget>
 
+#include "teleop_ramp.hpp"
+
 class QEvent;
 class QFocusEvent;
 class QHideEvent;
@@ -294,11 +296,12 @@ private:
     bool key_a_down_ = false;
     bool key_s_down_ = false;
     bool key_d_down_ = false;
-    double teleop_linear_speed_mps_ = 0.4;
-    double teleop_angular_speed_rps_ = 1.0;
+    double teleop_linear_speed_mps_ = teleop_ramp::kLinearSpeedMps;
+    double teleop_angular_speed_rps_ = teleop_ramp::kAngularSpeedRps;
     double teleop_angular_speed_step_rps_ = 0.1;
     double teleop_angular_speed_min_rps_ = 0.0;
     double teleop_angular_speed_max_rps_ = 4.5;
+    teleop_ramp::Ramp teleop_ramp_;  ///< WASD target -> published twist
 };
 
 }  // namespace f2c_cpp
