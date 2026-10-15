@@ -196,6 +196,11 @@ void RobotSyncDialog::refreshButtons() {
     btn_sync_->setToolTip(why);
     btn_prepare_->setEnabled(ok);
     btn_prepare_->setToolTip(why);
+    // Touchscreens never show tooltips: say why the buttons are disabled.
+    if (!busy_) {
+        lbl_stage_->setText(why);
+        lbl_stage_->setVisible(!why.isEmpty());
+    }
 }
 
 }  // namespace f2c_cpp
