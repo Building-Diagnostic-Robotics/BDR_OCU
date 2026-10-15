@@ -1548,7 +1548,8 @@ void SatelliteMapWidget::paintTelemetry(QPainter& painter) {
         }
     };
     drawLines(swaths_, 1.6, 0.85);
-    drawLines(path_, 2.4, 0.95);
+    // Swaths only, like the legacy planner: the planned path (turns and
+    // connectors) cluttered big roofs and added draw cost on the UI thread.
 
     // Odometry breadcrumb trail + live robot pose.
     if (trail_.size() >= 2) {
