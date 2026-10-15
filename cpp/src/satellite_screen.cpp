@@ -581,9 +581,18 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &SatelliteScreen::refreshStepUi);
     connect(map_, &SatelliteMapWidget::interactionChanged, this,
             &SatelliteScreen::maybeRearmRoiDraw);
-    // Manual override is no longer ended from the map (tap or press): on the
-    // touchscreen a pan or zoom ended it by accident. The Stop Manual Driving
-    // button in the Manual Override card is the way out, for mouse and finger.
+    // Touch carve-out for one non-precision action. A finger tap on a canvas
+    // places nothing anywhere in the app, but handing control back from
+    // manual override is the one canvas "click" that does not need aiming —
+    // a mouse gets it from the press filter below, and without this a finger
+    // could enter teleop (a press on the FPV view, a separate widget that
+    // still sees synthesized mouse events) with no way back out, while
+    // Start Scan and Resume sit disabled behind manual_override_.
+    connect(map_, &SatelliteMapWidget::canvasTapped, this, [this] {
+        if (selected_step_ == Step::AutonomousScan && manual_override_) {
+            setManualOverride(false);
+        }
+    });
     // World Imagery is a mosaic: the same roof can be served from different
     // flights at different zooms. Re-check provenance whenever the view moves,
     // but only mark it dirty here — viewChanged fires on every wheel notch and
@@ -2358,7 +2367,7 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     // Manual Override (320 px). Header 24 + FPV 196 + state + hint; every
     // element above the video has a fixed height.
     auto* override = scanCardShell(rail);
-    override->setFixedHeight(362);
+    override->setFixedHeight(320);
     auto* override_layout = new QVBoxLayout(override);
     override_layout->setContentsMargins(16, 16, 16, 16);
     override_layout->setSpacing(12);
@@ -2389,8 +2398,8 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     override_content_layout->addWidget(scan_override_label_);
     auto* hint = scanText(
         override_content,
-        QStringLiteral("Tap the camera to drive by hand (W/A/S/D). "
-                       "Tap Stop Manual Driving when done, then Resume."),
+        QStringLiteral("Click camera for manual teleop (W/A/S/D). "
+                       "Click map to return to autonomy."),
         QStringLiteral("hint"));
     hint->setWordWrap(true);
     // scanText pins every label to Fixed vertically, which stops the layout
@@ -2398,27 +2407,6 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     // this hint runs to two lines and the second was clipped by the card.
     hint->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
     override_content_layout->addWidget(hint);
-    // The only way out of manual override. A press or tap on the map used to
-    // end it too, but on the touchscreen every pan or zoom started with one,
-    // so the operator lost the wheels mid-drive without meaning to (1200
-    // O'Brien, 2026-10-13). Ending manual driving does not resume autonomy:
-    // the run stays Paused and the operator presses Resume.
-    scan_stop_manual_button_ = new QPushButton(
-        QStringLiteral("Stop Manual Driving"), override_content);
-    scan_stop_manual_button_->setCursor(Qt::PointingHandCursor);
-    scan_stop_manual_button_->setFixedHeight(32);
-    scan_stop_manual_button_->setProperty(kScanRoleProp,
-                                          QStringLiteral("surface"));
-    scan_stop_manual_button_->setProperty(kScanRoleArgProp,
-                                          QStringLiteral("disarm"));
-    scan_stop_manual_button_->setStyleSheet(
-        scanSurfaceStyle(QStringLiteral("disarm"), appThemeTokens()));
-    scan_stop_manual_button_->setEnabled(false);
-    connect(scan_stop_manual_button_, &QPushButton::clicked, this, [this] {
-        appendLog(QStringLiteral("[teleop] manual driving stopped by operator"));
-        setManualOverride(false);
-    });
-    override_content_layout->addWidget(scan_stop_manual_button_);
     override_layout->addWidget(override_content);
     layout->addWidget(override);
 
@@ -7496,9 +7484,6 @@ void SatelliteScreen::refreshScanRunUi() {
         scan_copy_label_->setText(text);
         scan_copy_label_->setToolTip(status_live ? status.copy_error : QString());
     }
-    if (scan_stop_manual_button_) {
-        scan_stop_manual_button_->setEnabled(manual_override_);
-    }
     if (scan_override_label_) {
         scan_override_label_->setText(
             manual_override_
@@ -8179,6 +8164,10 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
                 setManualOverride(true);
                 return false;
             }
+            if (map_ && is_under(watched, map_) && manual_override_) {
+                setManualOverride(false);
+                return false;
+            }
         }
     }
     // Step-1 search: arrow keys walk the suggestions, Esc closes them, and
@@ -8645,8 +8634,8 @@ SatelliteScreen::ScanBlock SatelliteScreen::scanBlockReason() const {
     if (manual_override_) {
         out.label = QStringLiteral("Manual");
         out.detail = QStringLiteral(
-            "You are driving manually. Tap Stop Manual Driving to hand control "
-            "back to the robot, then press Resume.");
+            "You are driving manually. Click the map to hand control back to "
+            "the robot, then press Resume.");
         return out;
     }
     if (start_scan_pending_) {
@@ -8748,21 +8737,20 @@ QString SatelliteScreen::stopGuidance(const CoverageStatus& status) {
         return QStringLiteral(
             "An obstacle is in the path right now.\n\nIf it can move, wait — "
             "the robot resumes on its own once the path clears. If it is "
-            "fixed, take manual control, drive around it, then tap Stop "
-            "Manual Driving and press Resume.");
+            "fixed, take manual control, drive around it, then click the map "
+            "and press Resume.");
     }
     if (state == QLatin1String("STOPPED_PERSISTENT")) {
         return QStringLiteral(
             "The path ahead is persistently blocked.\n\nTake manual control, "
-            "drive past the obstruction, then tap Stop Manual Driving and "
-            "press Resume; the director replans from the new position.");
+            "drive past the obstruction, then click the map and press "
+            "Resume; the director replans from the new position.");
     }
     if (state == QLatin1String("REPLAN_FAILED")) {
         return QStringLiteral(
             "The director could not plan a route to the remaining area from "
             "here (%1).\n\nTake manual control and drive closer to the "
-            "uncovered region, then tap Stop Manual Driving and press Resume. "
-            "If that "
+            "uncovered region, then click the map and press Resume. If that "
             "area is genuinely unreachable, Complete Mission saves what was "
             "covered.")
             .arg(stop);
@@ -8770,8 +8758,8 @@ QString SatelliteScreen::stopGuidance(const CoverageStatus& status) {
     if (stop == QLatin1String("obligation_terminal")) {
         return QStringLiteral(
             "The current swath reached its end and no follow-on route exists "
-            "from here.\n\nDrive toward the uncovered area, tap Stop Manual "
-            "Driving and press Resume, or Complete Mission.");
+            "from here.\n\nDrive toward the uncovered area, click the map and "
+            "press Resume, or Complete Mission.");
     }
     // degenerate_path, route_invalid, transit_endpoint_lost, topology_replan,
     // handoff_entry_replan — the route stopped making sense.
@@ -8779,7 +8767,7 @@ QString SatelliteScreen::stopGuidance(const CoverageStatus& status) {
         "The current route became invalid (%1).\n\nThis usually means the "
         "robot is outside or on the edge of the ROI, or the map changed under "
         "the route. Take manual control, drive back inside the ROI facing the "
-        "uncovered area, then tap Stop Manual Driving and press Resume.")
+        "uncovered area, then click the map and press Resume.")
         .arg(stop);
 }
 
@@ -8922,8 +8910,8 @@ QDialog* SatelliteScreen::buildAttentionPrompt(attention_policy::Kind kind,
             QStringLiteral("Cancel Scan"), QStringLiteral("Dismiss"));
     }
     const QString drive_out = QStringLiteral(
-        "Take manual control, drive the robot clear, then tap Stop Manual "
-        "Driving and press Resume.");
+        "Take manual control, drive the robot clear, then click the map and "
+        "press Resume.");
     QString body;
     if (kind == Kind::Takeover) {
         body = QStringLiteral("The robot asked for manual control: it cannot "
