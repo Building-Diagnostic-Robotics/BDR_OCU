@@ -770,6 +770,19 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME topple_notice_policy_tests COMMAND topple_notice_policy_tests)
 
+        # Post-launch WASD teleop rate limiter. Header-only, no Qt/ROS.
+        add_executable(teleop_ramp_tests
+            tests/teleop_ramp_tests.cpp
+        )
+        target_include_directories(teleop_ramp_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(teleop_ramp_tests PRIVATE
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME teleop_ramp_tests COMMAND teleop_ramp_tests)
+
         # Touchscreen pan / pinch bookkeeping. Header-only, no Qt/ROS.
         add_executable(touch_gesture_state_tests
             tests/touch_gesture_state_tests.cpp
