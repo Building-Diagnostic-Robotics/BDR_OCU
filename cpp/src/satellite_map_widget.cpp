@@ -1,3 +1,4 @@
+#include <QTimer>
 #include "satellite_map_widget.hpp"
 
 #include "satellite_map_capture.hpp"
@@ -957,7 +958,20 @@ void SatelliteMapWidget::setOdom(const OdomSnapshot& odom) {
             }
         }
     }
-    update();
+    // Odometry arrives at ~10 Hz; a full map repaint per message is what kept
+    // the UI thread busy. Coalesce odometry-driven repaints to <= 5 Hz.
+    auto* throttle = findChild<QTimer*>(QStringLiteral("odomRepaintThrottle"),
+                                        Qt::FindDirectChildrenOnly);
+    if (!throttle) {
+        throttle = new QTimer(this);
+        throttle->setObjectName(QStringLiteral("odomRepaintThrottle"));
+        throttle->setSingleShot(true);
+        throttle->setInterval(200);
+        connect(throttle, &QTimer::timeout, this, [this] { update(); });
+    }
+    if (!throttle->isActive()) {
+        throttle->start();
+    }
 }
 
 void SatelliteMapWidget::clearTelemetry() {
@@ -1518,7 +1532,13 @@ void SatelliteMapWidget::paintTelemetry(QPainter& painter) {
             QColor color = i < set.colors.size() ? set.colors[i]
                                                  : satpal::info();
             color.setAlphaF(alpha);
-            painter.setPen(QPen(color, width_px));
+            // Swaths: 1 px cosmetic pen = Qt's fast line path. A wider or
+            // non-cosmetic translucent pen is stroked into an outline and
+            // filled on every repaint, which on a big roof pinned the UI
+            // thread (and the teleop timer on it) for seconds.
+            QPen line_pen(color, width_px <= 1.6 ? 1.0 : width_px);
+            line_pen.setCosmetic(true);
+            painter.setPen(line_pen);
             QPolygonF poly;
             poly.reserve(line.size());
             for (const QPointF& body : line) {
@@ -1534,7 +1554,9 @@ void SatelliteMapWidget::paintTelemetry(QPainter& painter) {
     if (trail_.size() >= 2) {
         QColor trail_color = satpal::accent();
         trail_color.setAlphaF(0.65);
-        painter.setPen(QPen(trail_color, 2.0));
+        QPen trail_pen(trail_color, 1.0);  // cosmetic 1 px: fast path
+        trail_pen.setCosmetic(true);
+        painter.setPen(trail_pen);
         QPolygonF poly;
         poly.reserve(trail_.size());
         for (const QPointF& body : trail_) {
