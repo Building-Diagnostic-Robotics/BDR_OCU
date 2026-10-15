@@ -896,8 +896,6 @@ private:
     QLabel* scan_eta_label_ = nullptr;
     QLabel* scan_copy_label_ = nullptr;
     QLabel* scan_override_label_ = nullptr;
-    /** The only way out of manual override (map taps no longer do it). */
-    QPushButton* scan_stop_manual_button_ = nullptr;
     FPVCameraView* scan_camera_view_ = nullptr;
     QWidget* scan_left_rail_ = nullptr;
     QWidget* scan_right_rail_ = nullptr;
