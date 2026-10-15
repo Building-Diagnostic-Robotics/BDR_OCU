@@ -1091,7 +1091,7 @@ ExplorationScreen::ExplorationScreen(QWidget* parent)
     mapping_lock_timer_->setInterval(1000);
     connect(mapping_lock_timer_, &QTimer::timeout, this, &ExplorationScreen::onMappingLockTick);
     teleop_publish_timer_ = new QTimer(this);
-    teleop_publish_timer_->setInterval(100);
+    teleop_publish_timer_->setInterval(teleop_ramp::kTickMs);
     connect(teleop_publish_timer_, &QTimer::timeout, this, &ExplorationScreen::onTeleopPublishTick);
     teleop_publish_timer_->start();
 
@@ -1843,6 +1843,7 @@ void ExplorationScreen::onMappingLockTick() {
 
 void ExplorationScreen::onTeleopPublishTick() {
     if (!fpv_control_active_ || !teleopMovementAllowed()) {
+        teleop_ramp_.reset();
         return;
     }
     emitTeleopTwistCommand();
@@ -1892,6 +1893,8 @@ void ExplorationScreen::updateFpvControlIndicator() {
 
 void ExplorationScreen::emitTeleopTwistCommand() {
     if (!teleopMovementAllowed()) {
+        // Nothing is published while blocked; driving again starts from rest.
+        teleop_ramp_.reset();
         return;
     }
 
@@ -1908,10 +1911,13 @@ void ExplorationScreen::emitTeleopTwistCommand() {
         angular_z = -teleop_angular_speed_rps_;
     }
 
-    emit teleopTwistRequested(linear_x, angular_z);
+    // Keys set the target; the published twist ramps toward it.
+    teleop_ramp_.advance(linear_x, angular_z, teleop_ramp::Ramp::Clock::now());
+    emit teleopTwistRequested(teleop_ramp_.linear(), teleop_ramp_.angular());
 }
 
 void ExplorationScreen::emitZeroTeleopTwist() {
+    teleop_ramp_.reset();
     emit teleopTwistRequested(0.0, 0.0);
 }
 
@@ -1971,6 +1977,7 @@ void ExplorationScreen::keyPressEvent(QKeyEvent* event) {
     }
 
     if (event->key() == Qt::Key_Q) {
+        teleop_ramp_.reset();
         emit teleopDisarmRequested();
         event->accept();
         return;
