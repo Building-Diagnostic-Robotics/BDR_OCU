@@ -161,6 +161,24 @@ bool RosLink::start(QString* error) {
                         }
                         {
                             std::lock_guard<std::mutex> lock(mutex_);
+                            // Swath markers are LINE_LIST: points come in (start, end) pairs, one
+                            // lane each. Joining them into one polyline drew lane-end -> next-lane-start
+                            // diagonals across the roof. Split into pairs, like the legacy planner.
+                            {
+                                QVector<QVector<QPointF>> seg_lines;
+                                QVector<QColor> seg_colors;
+                                for (int i = 0; i < lines.size(); ++i) {
+                                    const QVector<QPointF>& l = lines[i];
+                                    const QColor c = i < colors.size() ? colors[i]
+                                                     : (colors.isEmpty() ? QColor(Qt::cyan) : colors.last());
+                                    for (int k = 0; k + 1 < l.size(); k += 2) {
+                                        seg_lines.append(QVector<QPointF>{l[k], l[k + 1]});
+                                        seg_colors.append(c);
+                                    }
+                                }
+                                lines = seg_lines;
+                                colors = seg_colors;
+                            }
                             swaths_.lines = lines;
                             swaths_.colors = colors;
                             swaths_.revision++;
