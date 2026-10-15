@@ -289,7 +289,8 @@ constexpr double kUsSouthLat = 24.4;
 constexpr double kUsNorthLat = 49.4;
 constexpr double kUsWestLon = -125.0;
 constexpr double kUsEastLon = -66.9;
-constexpr double kTeleopAngularSpeed = 1.0;  // rad/s
+// Same setpoints and ramp as the map-capture teleop (teleop_ramp.hpp).
+constexpr double kTeleopAngularSpeed = teleop_ramp::kAngularSpeedRps;  // rad/s
 
 // Measured plans live in a fictional geo frame anchored at the reference
 // origin — the operator only ever sees meters.
@@ -876,7 +877,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             &SatelliteScreen::offerForceStop);
 
     teleop_timer_ = new QTimer(this);
-    teleop_timer_->setInterval(100);
+    teleop_timer_->setInterval(teleop_ramp::kTickMs);
     connect(teleop_timer_, &QTimer::timeout, this,
             &SatelliteScreen::publishTeleopTick);
     qApp->installEventFilter(this);
@@ -4294,6 +4295,7 @@ QWidget* SatelliteScreen::buildTeleopCard(QWidget* parent) {
     teleop_check_->setObjectName("SatCheck");
     connect(teleop_check_, &QCheckBox::toggled, this, [this](bool enabled) {
         pressed_keys_.clear();
+        teleop_ramp_.reset();
         if (enabled) {
             teleop_timer_->start();
             appendLog(QStringLiteral(
@@ -4315,8 +4317,11 @@ QWidget* SatelliteScreen::buildTeleopCard(QWidget* parent) {
     teleop_speed_ = new QSlider(Qt::Horizontal, row);
     teleop_speed_->setObjectName("SatSlider");
     teleop_speed_->setRange(10, 80);
-    teleop_speed_->setValue(35);
-    teleop_speed_label_ = new QLabel(QStringLiteral("0.35 m/s"), row);
+    const int default_speed_cm =
+        static_cast<int>(std::lround(teleop_ramp::kLinearSpeedMps * 100.0));
+    teleop_speed_->setValue(default_speed_cm);
+    teleop_speed_label_ = new QLabel(
+        QStringLiteral("%1 m/s").arg(default_speed_cm / 100.0, 0, 'f', 2), row);
     teleop_speed_label_->setObjectName("SatFieldLabel");
     connect(teleop_speed_, &QSlider::valueChanged, this, [this](int value) {
         teleop_speed_label_->setText(
@@ -7284,6 +7289,7 @@ void SatelliteScreen::setManualOverride(bool active) {
         setFocus(Qt::OtherFocusReason);
     } else {
         pressed_keys_.clear();
+        teleop_ramp_.reset();
         if (teleop_check_) {
             teleop_check_->setChecked(false);
         }
@@ -8312,6 +8318,7 @@ void SatelliteScreen::setAutonomyEnabled(bool enabled) {
 
 void SatelliteScreen::publishTeleopTick() {
     if (!teleop_check_->isChecked() || !ros_->isRunning()) {
+        teleop_ramp_.reset();
         return;
     }
     double linear = 0.0;
@@ -8333,13 +8340,17 @@ void SatelliteScreen::publishTeleopTick() {
         pressed_keys_.contains(Qt::Key_Right)) {
         angular -= kTeleopAngularSpeed;
     }
-    // Only put a twist on the radio while a key is down, plus one zero to
-    // stop — a 10 Hz stream of zeros competes with the heartbeat.
-    const bool moving = linear != 0.0 || angular != 0.0;
+    // Keys set the target; the published twist ramps toward it, so a press
+    // accelerates and a release brakes (VEL_RAMP) instead of a zero-torque
+    // coast on the robot.
+    teleop_ramp_.advance(linear, angular, teleop_ramp::Ramp::Clock::now());
+    // Only put a twist on the radio while moving or ramping down, plus the
+    // final zero — a 10 Hz stream of zeros competes with the heartbeat.
+    const bool moving = !teleop_ramp_.atRest();
     if (!moving && !teleop_last_nonzero_) {
         return;
     }
-    ros_->publishTwist(linear, angular);
+    ros_->publishTwist(teleop_ramp_.linear(), teleop_ramp_.angular());
     teleop_last_nonzero_ = moving;
 }
 

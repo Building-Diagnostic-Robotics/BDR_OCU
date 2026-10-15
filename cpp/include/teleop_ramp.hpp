@@ -3,7 +3,7 @@
  * @brief Pure WASD teleop rate limiter — no Qt, no ROS.
  *
  * Exploration's post-launch FPV teleop turns held keys into a target twist
- * (the Satellite and Planner teleops are deliberately unchanged). Publishing that target
+ * (the Satellite scan-stage teleop uses the same ramp; the legacy Planner is unchanged). Publishing that target
  * directly steps /cmd_vel from 0 to full speed on a key press, and back to 0
  * on release, where the robot's diff_drive_controller drops to zero torque
  * and the robot coasts. This ramps the published twist toward the target
