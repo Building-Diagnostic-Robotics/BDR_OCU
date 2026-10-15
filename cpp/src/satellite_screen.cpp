@@ -590,6 +590,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     // Start Scan and Resume sit disabled behind manual_override_.
     connect(map_, &SatelliteMapWidget::canvasTapped, this, [this] {
         if (selected_step_ == Step::AutonomousScan && manual_override_) {
+            appendLog(QStringLiteral("[teleop] manual driving ended (map tap)"));
             setManualOverride(false);
         }
     });
@@ -2398,8 +2399,8 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     override_content_layout->addWidget(scan_override_label_);
     auto* hint = scanText(
         override_content,
-        QStringLiteral("Click camera for manual teleop (W/A/S/D). "
-                       "Click map to return to autonomy."),
+        QStringLiteral("Tap the camera to drive by hand (W/A/S/D). "
+                       "Tap the map when done, then Resume."),
         QStringLiteral("hint"));
     hint->setWordWrap(true);
     // scanText pins every label to Fixed vertically, which stops the layout
@@ -8164,10 +8165,34 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
                 setManualOverride(true);
                 return false;
             }
-            if (map_ && is_under(watched, map_) && manual_override_) {
-                setManualOverride(false);
-                return false;
+            // A press on the map only arms a hand-back. It counts on release,
+            // and only if the pointer did not travel: every pan or drag starts
+            // with a press, and ending manual driving on the press made pans
+            // and zooms drop the operator out of manual control (1200 O'Brien,
+            // 2026-10-13). Touch-synthesized presses are skipped; real touch
+            // taps arrive through canvasTapped, which rejects pans, pinches
+            // and twists.
+            map_click_armed_ = map_ && manual_override_ &&
+                               mouse->source() == Qt::MouseEventNotSynthesized &&
+                               is_under(watched, map_);
+            if (map_click_armed_) {
+                map_click_press_pos_ = mouse->globalPos();
             }
+        }
+    }
+    if (event->type() == QEvent::MouseButtonRelease && map_click_armed_) {
+        auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() == Qt::LeftButton) {
+            map_click_armed_ = false;
+            const int moved = (mouse->globalPos() -
+                               map_click_press_pos_).manhattanLength();
+            if (selected_step_ == Step::AutonomousScan && manual_override_ &&
+                moved < QApplication::startDragDistance()) {
+                appendLog(QStringLiteral(
+                    "[teleop] manual driving ended (map click)"));
+                setManualOverride(false);
+            }
+            return false;
         }
     }
     // Step-1 search: arrow keys walk the suggestions, Esc closes them, and
