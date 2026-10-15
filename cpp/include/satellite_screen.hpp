@@ -504,6 +504,10 @@ private:
     /** /coverage/abort {data: true} over the bridge, SSH on failure. Marks the
         settle as an abort-and-save so the plan is not stamped COMPLETED. */
     void requestAbortAndSave();
+    /** True when a conclude reply says lanes are still active. */
+    static bool concludeRefusedWorkActive(const QString& detail);
+    /** Conclude refused with work left: switch to abort-and-save once. */
+    void fallBackToAbortAndSave();
     /** finalize_mission_local.py over SSH, then teardown. No RPCs. */
     void executeCompleteMissionSshFallback();
     /** Teardown + leave, after the offline finalize resolves either way. */
@@ -896,6 +900,10 @@ private:
     QLabel* scan_eta_label_ = nullptr;
     QLabel* scan_copy_label_ = nullptr;
     QLabel* scan_override_label_ = nullptr;
+    /** A left press on the map during manual override; a release within the
+        drag distance ends manual driving (a drag is a pan, not a hand-back). */
+    bool map_click_armed_ = false;
+    QPoint map_click_press_pos_;
     FPVCameraView* scan_camera_view_ = nullptr;
     QWidget* scan_left_rail_ = nullptr;
     QWidget* scan_right_rail_ = nullptr;
