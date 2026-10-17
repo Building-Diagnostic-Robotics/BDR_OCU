@@ -717,6 +717,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
             noteRobotTopic();
         }
         updateMotorsChip();
+        updateArmBlink();
     });
     connect(ros_, &RosLink::segmentStatusUpdated, this, [this] {
         if (linkSampleIsCurrent(ros_->segmentWallMs()) && link_monitor_) {
@@ -2002,14 +2003,43 @@ QString scanSurfaceStyle(const QString& role, const UiThemeTokens& t) {
                    "QPushButton:hover { background: %1; }")
             .arg(t.hover_wash);
     }
-    if (role == QLatin1String("disarm")) {
+    // Motors card: fixed colours, Arm green / Disarm red, in both themes.
+    // Disabled (teardown only) drops to the neutral fill so it never reads
+    // as pressable. "motorArmDim" is the off-beat of the Arm blink.
+    if (role == QLatin1String("motorArm") ||
+        role == QLatin1String("motorArmDim") ||
+        role == QLatin1String("motorDisarm")) {
+        QString fill;
+        QString hover;
+        QString label;
+        if (role == QLatin1String("motorArm")) {
+            fill = t.accent_green;
+            hover = t.accent_green_hover;
+            label = t.on_accent;
+        } else if (role == QLatin1String("motorArmDim")) {
+            QColor dim(t.accent_green);
+            dim.setAlphaF(0.30);
+            fill = QStringLiteral("rgba(%1, %2, %3, %4)")
+                       .arg(dim.red())
+                       .arg(dim.green())
+                       .arg(dim.blue())
+                       .arg(dim.alphaF(), 0, 'f', 2);
+            hover = t.accent_green_hover;
+            label = t.text;
+        } else {
+            fill = t.danger_fill;
+            hover = t.danger_fill_hover;
+            // A danger fill carries a white label (ui_theme_constants.hpp),
+            // the same as the other danger buttons.
+            label = QStringLiteral("#FFFFFF");
+        }
         return QStringLiteral(
                    "QPushButton { background: %1; border: none; "
                    "border-radius: 8px; font-family: 'Arimo'; "
-                   "font-size: 14px; font-weight: 500; color: %2; }"
+                   "font-size: 14px; font-weight: 600; color: %2; }"
                    "QPushButton:hover { background: %3; }"
-                   "QPushButton:disabled { background: %1; color: %4; }")
-            .arg(t.raised_border, t.text, t.neutral_hover, t.muted);
+                   "QPushButton:disabled { background: %4; color: %5; }")
+            .arg(fill, label, hover, t.raised_border, t.disabled_text);
     }
     if (role == QLatin1String("endButton")) {
         return QStringLiteral(
@@ -2462,29 +2492,29 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     // pushed into on 2026-09-16. Arm requests CLOSED_LOOP only, so teleop
     // works with the latch still held. One row, same card height.
     auto* motors = scanCardShell(rail);
-    motors->setFixedHeight(96);
+    // 16 + header 24 + 12 + buttons 32 + 16.
+    motors->setFixedHeight(100);
     auto* motors_layout = new QVBoxLayout(motors);
     motors_layout->setContentsMargins(16, 16, 16, 16);
     motors_layout->setSpacing(12);
     motors_layout->addWidget(scanCardHeader(
-        motors, QStringLiteral(":/assets/exploration/telemetry.svg"),
+        motors, QStringLiteral(":/assets/missionplanner/scan_card_motors.svg"),
         QStringLiteral("Motors")));
     auto* motors_row = new QWidget(motors);
     auto* motors_row_layout = new QHBoxLayout(motors_row);
     motors_row_layout->setContentsMargins(0, 0, 0, 0);
     motors_row_layout->setSpacing(8);
-    auto motors_style = [](QPushButton* button) {
+    auto motors_style = [](QPushButton* button, const QString& role) {
         button->setCursor(Qt::PointingHandCursor);
         button->setFixedHeight(32);
         button->setProperty(kScanRoleProp, QStringLiteral("surface"));
-        button->setProperty(kScanRoleArgProp, QStringLiteral("disarm"));
-        button->setStyleSheet(
-            scanSurfaceStyle(QStringLiteral("disarm"), appThemeTokens()));
+        button->setProperty(kScanRoleArgProp, role);
+        button->setStyleSheet(scanSurfaceStyle(role, appThemeTokens()));
     };
-    arm_button_ = new QPushButton(QStringLiteral("Arm Motors"), motors_row);
-    motors_style(arm_button_);
-    arm_button_->setToolTip(QStringLiteral(
-        "Power the wheels for manual driving. Does not start the scan."));
+    arm_button_ = new QPushButton(QStringLiteral("Arm"), motors_row);
+    motors_style(arm_button_, QStringLiteral("motorArm"));
+    arm_button_->setToolTip(
+        QStringLiteral("Power the wheels. Does not start the scan."));
     connect(arm_button_, &QPushButton::clicked, this, [this] {
         // Deliberately does not touch autonomy, and deliberately does not
         // consult armingAllowed(): arming for teleop is the operator's way
@@ -2494,7 +2524,9 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
         refreshScanRunUi();
     });
     disarm_button_ = new QPushButton(QStringLiteral("Disarm"), motors_row);
-    motors_style(disarm_button_);
+    motors_style(disarm_button_, QStringLiteral("motorDisarm"));
+    disarm_button_->setToolTip(
+        QStringLiteral("Cut wheel power and pause the scan."));
     connect(disarm_button_, &QPushButton::clicked, this, [this] {
         setAutonomyEnabled(false);
         ros_->requestAxisState(RosLink::kAxisIdle);
@@ -2504,6 +2536,21 @@ QWidget* SatelliteScreen::buildScanRightRail(QWidget* parent) {
     });
     motors_row_layout->addWidget(arm_button_, 1);
     motors_row_layout->addWidget(disarm_button_, 1);
+    // Twice a second. Each tick re-checks the rule first, so a stale link
+    // or an arm that lands between status lines stops it on the next beat.
+    arm_blink_timer_ = new QTimer(this);
+    arm_blink_timer_->setInterval(500);
+    connect(arm_blink_timer_, &QTimer::timeout, this, [this] {
+        updateArmBlink();
+        if (!arm_blink_timer_->isActive() || !arm_button_) {
+            return;
+        }
+        arm_blink_dim_ = !arm_blink_dim_;
+        const QString role = arm_blink_dim_ ? QStringLiteral("motorArmDim")
+                                            : QStringLiteral("motorArm");
+        arm_button_->setProperty(kScanRoleArgProp, role);
+        arm_button_->setStyleSheet(scanSurfaceStyle(role, appThemeTokens()));
+    });
     motors_layout->addWidget(motors_row);
     layout->addWidget(motors);
     layout->addStretch(1);
@@ -7352,6 +7399,8 @@ void SatelliteScreen::refreshScanRunUi() {
     if (disarm_button_) {
         disarm_button_->setEnabled(commandable);
     }
+    // refreshScanRunUi runs on every override, E-Stop and mission change.
+    updateArmBlink();
     if (estop_button_) {
         // Clearing stays available even when the director is unhappy or the
         // link is degraded: the latch is an OCU-side interlock, so refusing to
@@ -8461,7 +8510,11 @@ void SatelliteScreen::setStatePill(const QString& text, const QColor& color) {
                                    QStringLiteral(" background: transparent;"));
 }
 
-void SatelliteScreen::updateMotorsChip() {
+motors_state_policy::MotorsState SatelliteScreen::currentMotorsState() const {
+    static_assert(motors_state_policy::kAxisIdle == RosLink::kAxisIdle &&
+                      motors_state_policy::kAxisClosedLoop ==
+                          RosLink::kAxisClosedLoop,
+                  "motors_state_policy axis values must match RosLink");
     // Real controller_status wins over the axis-state RPC's optimistic ack:
     // the request being accepted is not the same as the axes having moved.
     const MotorStatus motors = ros_->motorStatus();
@@ -8470,16 +8523,44 @@ void SatelliteScreen::updateMotorsChip() {
         motors.left_wall_ms > 0 && motors.right_wall_ms > 0 &&
         now - motors.left_wall_ms <= RosLink::kControllerStatusStaleMs &&
         now - motors.right_wall_ms <= RosLink::kControllerStatusStaleMs;
-    if (!fresh) {
+    return motors_state_policy::classify(motors.left_axis_state,
+                                         motors.right_axis_state, fresh);
+}
+
+void SatelliteScreen::updateArmBlink() {
+    if (!arm_button_ || !arm_blink_timer_) {
+        return;
+    }
+    const bool commandable =
+        mission_->missionActive() && !mission_->tearingDown();
+    const bool blink = motors_state_policy::shouldBlinkArm(
+        manual_override_, commandable, currentMotorsState());
+    if (blink == arm_blink_timer_->isActive()) {
+        return;
+    }
+    arm_blink_dim_ = false;
+    if (blink) {
+        arm_blink_timer_->start();
+        return;
+    }
+    arm_blink_timer_->stop();
+    arm_button_->setProperty(kScanRoleArgProp, QStringLiteral("motorArm"));
+    arm_button_->setStyleSheet(
+        scanSurfaceStyle(QStringLiteral("motorArm"), appThemeTokens()));
+}
+
+void SatelliteScreen::updateMotorsChip() {
+    using motors_state_policy::MotorsState;
+    const MotorsState state = currentMotorsState();
+    const MotorStatus motors = ros_->motorStatus();
+    if (state == MotorsState::Unknown) {
         setMotorsChip(QStringLiteral("MOTORS —"),
                       QColor(mutedColor(dark_mode_)));
         return;
     }
-    if (motors.left_axis_state == RosLink::kAxisClosedLoop &&
-        motors.right_axis_state == RosLink::kAxisClosedLoop) {
+    if (state == MotorsState::Armed) {
         setMotorsChip(QStringLiteral("MOTORS ARMED"), QColor(kAccent));
-    } else if (motors.left_axis_state == RosLink::kAxisIdle &&
-               motors.right_axis_state == RosLink::kAxisIdle) {
+    } else if (state == MotorsState::Disarmed) {
         setMotorsChip(QStringLiteral("MOTORS DISARMED"),
                       QColor(mutedColor(dark_mode_)));
     } else {

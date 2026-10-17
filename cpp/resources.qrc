@@ -123,6 +123,7 @@
     <file alias="missionplanner/scan_card_telemetry.svg">../App resource/icons/mission_planner_scan_card_telemetry.svg</file>
     <file alias="missionplanner/scan_card_segments.svg">../App resource/icons/mission_planner_scan_card_segments.svg</file>
     <file alias="missionplanner/scan_card_stats.svg">../App resource/icons/mission_planner_scan_card_stats.svg</file>
+    <file alias="missionplanner/scan_card_motors.svg">../App resource/icons/mission_planner_scan_card_motors.svg</file>
     <file alias="missionplanner/scan_play.svg">../App resource/icons/mission_planner_scan_play.svg</file>
     <file alias="missionplanner/scan_pause.svg">../App resource/icons/mission_planner_scan_pause.svg</file>
     <file alias="missionplanner/scan_emergency_stop.svg">../App resource/icons/mission_planner_scan_emergency_stop.svg</file>
