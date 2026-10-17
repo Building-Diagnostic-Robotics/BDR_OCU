@@ -701,6 +701,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         }
         maybePromptAttention(status);
         maybePromptRevisit();
+        maybePromptMissionDone(ros_->coverageStatus());
         refreshScanRunUi();
     });
     connect(ros_, &RosLink::motorStatusUpdated, this, [this] {
@@ -7393,6 +7394,45 @@ void SatelliteScreen::maybePromptRevisit() {
     box->show();
 }
 
+void SatelliteScreen::maybePromptMissionDone(const CoverageStatus& status) {
+    mission_done_notice_policy::Inputs in;
+    in.robot_complete = status.state == QLatin1String("COMPLETE");
+    in.status_fresh = status.fresh(kDirectorFreshMs);
+    in.mission_active = mission_->missionActive();
+    in.tearing_down = mission_->tearingDown();
+    in.autonomy_ran = scan_autonomy_ran_;
+    in.operator_finishing = complete_mission_in_flight_;
+    in.already_shown = done_notice_shown_;
+    if (!mission_done_notice_policy::shouldShow(in)) {
+        return;
+    }
+    done_notice_shown_ = true;
+    appendLog(QStringLiteral("[scan] coverage complete — notified operator"));
+    // The revisit question is moot once the robot has finished.
+    closePrompt(revisit_box_);
+    // Modeless, like the other prompts: exec() would spin a nested loop in
+    // which the launch can die underneath the operator.
+    auto* box = makeSatPrompt(
+        this, QStringLiteral("Scan complete"),
+        QStringLiteral("The robot finished scanning the roof."),
+        QStringLiteral("Complete Mission"), QStringLiteral("Later"));
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setModal(false);
+    done_box_ = box;
+    connect(box, &QDialog::finished, this, [this](int result) {
+        if (result == kPromptAutoClosed) {
+            return;
+        }
+        done_box_ = nullptr;
+        if (result == QDialog::Accepted && mission_->missionActive()) {
+            // This prompt was the confirmation.
+            completeMission(/*ask_confirm=*/false);
+        }
+    });
+    centerSatPrompt(box, this);
+    box->show();
+}
+
 void SatelliteScreen::setManualOverride(bool active) {
     if (manual_override_ == active) {
         return;
@@ -7780,6 +7820,10 @@ qint64 SatelliteScreen::lastScanFpvFrameWallMs() const {
 }
 
 void SatelliteScreen::onCompleteMission() {
+    completeMission(/*ask_confirm=*/true);
+}
+
+void SatelliteScreen::completeMission(bool ask_confirm) {
     if (complete_mission_in_flight_) {
         return;
     }
@@ -7806,7 +7850,7 @@ void SatelliteScreen::onCompleteMission() {
                 .arg(progress),
             QStringLiteral("Finish and Save"));
     } else {
-        confirmed = confirmDialog(
+        confirmed = !ask_confirm || confirmDialog(
             QStringLiteral("Complete Mission"),
             QStringLiteral(
                 "Autonomy will be disabled, the motors disarmed, the mission "
@@ -9247,8 +9291,10 @@ void SatelliteScreen::clearAttention() {
     attention_ = {};
     attention_last_stop_.clear();
     revisit_hold_ = false;
+    done_notice_shown_ = false;
     closePrompt(attention_box_);
     closePrompt(revisit_box_);
+    closePrompt(done_box_);
 }
 
 void SatelliteScreen::devRenderAttentionPrompts(const QString& stall_png,

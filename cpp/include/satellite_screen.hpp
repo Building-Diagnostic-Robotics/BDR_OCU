@@ -31,6 +31,7 @@
 #include "attention_policy.hpp"
 #include "estop_latch_policy.hpp"
 #include "topple_notice_policy.hpp"
+#include "mission_done_notice_policy.hpp"
 #include "motors_state_policy.hpp"
 #include "radio_link_pill.hpp"
 #include "satellite_job_model.hpp"
@@ -470,6 +471,9 @@ private:
         tell the operator, back to Scan Parameters. Plan stays PLANNED. */
     void handleLaunchDeath(const QString& side, int exit_code);
     void maybePromptRevisit();
+    /** Once per mission, when the robot finishes coverage on its own
+        (mission_done_notice_policy). Offers Complete Mission. */
+    void maybePromptMissionDone(const CoverageStatus& status);
     /** Raise / remind / auto-close the "robot needs help" prompt
         (attention_policy). Runs on every status sample. */
     void maybePromptAttention(const CoverageStatus& status);
@@ -508,6 +512,9 @@ private:
      * genuinely cannot. Mirrors the Stage 5 contract.
      */
     void onCompleteMission();
+    /** `ask_confirm` false skips the normal-path confirm, for callers whose
+        own prompt already asked. The finish-early confirm always shows. */
+    void completeMission(bool ask_confirm);
     /** Disarm wait -> /dc/finalize_mission -> teardown. */
     void executeCompleteMissionNormalPath();
     /** Work still left on the robot: /coverage/abort(save) instead of
@@ -963,6 +970,8 @@ private:
     bool scan_autonomy_ran_ = false;
     bool manual_override_ = false;
     QPointer<QDialog> revisit_box_;
+    QPointer<QDialog> done_box_;
+    bool done_notice_shown_ = false;  // "Scan complete" shown this mission
     attention_policy::Tracker attention_{};
     QPointer<QDialog> attention_box_;
     // Last stop/stale reason seen since progress, for the prompt text.
