@@ -343,6 +343,8 @@ private:
     // ---- Alignment (robot map <-> satellite imagery) ----
     void onCollectMap();
     void onMapCaptured(const MapCapture& capture);
+    static QString captureErrorForOperator(const QString& raw);
+    void showCaptureError(const QString& raw);
     void showCorrespondPage();
     /** Site image (or why it cannot load) plus a pane repaint. Does not
         switch the canvas page. */
@@ -799,8 +801,6 @@ private:
     QStackedWidget* pcd_pane_stack_ = nullptr;
     QWidget* pcd_empty_ = nullptr;
     QWidget* pcd_pick_host_ = nullptr;
-    QLabel* pcd_empty_title_ = nullptr;
-    QLabel* pcd_empty_hint_ = nullptr;
     QPushButton* capture_button_ = nullptr;
     QWidget* align_success_card_ = nullptr;
     QLabel* align_success_rmse_ = nullptr;

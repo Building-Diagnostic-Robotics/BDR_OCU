@@ -104,7 +104,10 @@ public:
      * `local_dir` receives the downloaded pcd/pose and the re-origined pcd.
      * `expected_robot_id` is checked against `/etc/pilot_robot_id` before
      * the robot is armed. A mismatch finishes with an error and never
-     * launches. A missing file warns (`identityUnchecked`) and then collects.
+     * launches. A missing or empty file is logged and collection continues.
+     * If SSH never reaches the robot, the gated attempt is retried
+     * (kMaxConnectAttempts) before failing; nothing has run on the robot
+     * at that point, so a retry is safe.
      */
     bool start(const QString& host, const QString& ssh_user,
                const QString& expected_robot_id, const QString& local_dir,
@@ -118,9 +121,10 @@ signals:
     void finished(const MapCapture& capture);
     /** The ID file names a different robot. Collection did not start. */
     void identityBlocked(const QString& message);
-    /** The ID file is missing or empty. The slot runs before the motors
-        arm, so a modal warning here is seen first. */
-    void identityUnchecked(const QString& message);
+    /** Diagnostic detail (ssh rc, raw robot output, retries). For the log
+        only, never for the operator. Also appended to
+        `<local_dir>/capture.log`. */
+    void logLine(const QString& line);
 
 private:
     void runCommand(const QString& program, const QStringList& args,
@@ -135,6 +139,7 @@ private:
     void startRendering();
     void onRenderFinished();
     void fail(const QString& message);
+    void log(const QString& line);
     void killProcess();
     void startRobotStop(const QString& reason);
     /** Before the identity gate passes nothing has been launched, and the
@@ -153,9 +158,14 @@ private:
     static constexpr int kScpPoseTimeoutMs = 30000;
     // SSH connect (10 s) + the stop script's own 10 s SIGINT grace.
     static constexpr int kStopTimeoutMs = 30000;
+    // Gated SSH attempts before "could not reach the robot". Each can wait
+    // ConnectTimeout (10 s), so the worst case is ~36 s with the delays.
+    static constexpr int kMaxConnectAttempts = 3;
+    static constexpr int kConnectRetryDelayMs = 3000;
 
     QProcess* proc_ = nullptr;
     QTimer* timeout_ = nullptr;
+    QTimer* retry_timer_ = nullptr;
     /** Re-origin + raster run here: a roof cloud is millions of points and
         PCL would otherwise hold the GUI thread for seconds. */
     QFutureWatcher<MapCapture>* render_watcher_ = nullptr;
@@ -170,8 +180,10 @@ private:
     /** Stdout accumulated for the command in flight. `readyRead` consumes
         the buffer, so `onProcessFinished` must not call `readAll` itself. */
     QString remote_output_;
-    /** The missing-file warning already happened; the next SSH collects. */
+    /** The ID file was missing (logged); the next SSH collects ungated. */
     bool identity_gate_cleared_ = false;
+    /** Gated SSH attempts made for this start(). */
+    int connect_attempts_ = 0;
     /** The "collecting" progress line has been shown for this SSH, i.e. the
         identity gate passed (or was skipped) and the launch may be up. */
     bool collecting_announced_ = false;

@@ -77,4 +77,54 @@ inline constexpr const char* kMapCollectionStop =
     "fi; "
     "pkill -9 -f '[r]os2 launch pilot_control robot_map_collection' >/dev/null 2>&1 || true; ";
 
+/**
+ * Robot-side sweep: leave the robot with no Stage 6 stack running. Used
+ * before a Send, before a map capture (MapCaptureRunner), and at teardown.
+ * Before a Send, a step-2 map-collection tree (whose Fast-LIO / Livox /
+ * ODrive nodes routinely ignore the shutdown request) must not coexist
+ * with the director; before a capture, a leftover mission must not.
+ *
+ * Order matters. SIGINT to `ros2 launch` is Ctrl-C: the launch shuts its
+ * ~25 children down in dependency order and exits — never SIGKILL it
+ * first, that orphans every node. Then the nodes known to ignore that
+ * shutdown are killed by name (legacy's list plus the director stack),
+ * the data collector is given time to release the Seek SDK, and only the
+ * survivors get -9. Exits quickly when nothing is running: every pgrep
+ * loop breaks on its first iteration.
+ *
+ * `set +e` and `|| true` mean the pkill body exits 0 whenever ssh lands;
+ * a non-zero from runRobotSweep is reachability (255) or the hang
+ * deadline (-1), not "a process survived".
+ *
+ * Pre-launch prepends robotIdentityProbePrefix. A file that names a
+ * different robot `exit 0`s before any pkill, so exit 0 is not "the sweep
+ * succeeded" — decidePreLaunchIdentity reads the BDR_ROBOT_ID line.
+ * Teardown must not prepend that prefix: the robot being stopped is the
+ * one this mission already launched.
+ */
+inline constexpr const char* kRobotSweep =
+    "set +e; "
+    "pkill -INT -f '[r]os2 launch pilot_control robot_' >/dev/null 2>&1 || true; "
+    "for i in $(seq 1 100); do "
+    "  pgrep -f '[r]os2 launch pilot_control robot_' >/dev/null 2>&1 || break; "
+    "  sleep 0.1; "
+    "done; "
+    "pkill -f '[c]overage_director_node' >/dev/null 2>&1 || true; "
+    "pkill -f '[m]pc_accel_autonomous_controller' >/dev/null 2>&1 || true; "
+    "pkill -f '[m]ap_collection_node' >/dev/null 2>&1 || true; "
+    "pkill -f '[f]astlio_mapping' >/dev/null 2>&1 || true; "
+    "pkill -f '[l]ivox_ros_driver2_node' >/dev/null 2>&1 || true; "
+    "pkill -f '[o]drive_can_node' >/dev/null 2>&1 || true; "
+    "pkill -f '[d]iff_drive_controller' >/dev/null 2>&1 || true; "
+    "pkill -f '[/]pilot_control/udc_supervisor' >/dev/null 2>&1 || true; "
+    "pkill -f '[/]pilot_control/unified_data_collector' >/dev/null 2>&1 || true; "
+    "pkill -f '[r]os2 bag record' >/dev/null 2>&1 || true; "
+    "pkill -f '[z]enohd -c .*zenohd_robot' >/dev/null 2>&1 || true; "
+    "for i in $(seq 1 50); do "
+    "  pgrep -f '[/]pilot_control/unified_data_collector' >/dev/null 2>&1 || break; "
+    "  sleep 0.1; "
+    "done; "
+    "pkill -9 -f '[/]pilot_control/unified_data_collector' >/dev/null 2>&1 || true; "
+    "pkill -9 -f '[r]os2 launch pilot_control robot_' >/dev/null 2>&1 || true";
+
 }  // namespace f2c_cpp
