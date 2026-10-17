@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <QGuiApplication>
+#include <QWindow>
 #include <QEvent>
 #include <QFile>
 #include <QFocusEvent>
@@ -1094,6 +1096,22 @@ ExplorationScreen::ExplorationScreen(QWidget* parent)
     teleop_publish_timer_->setInterval(teleop_ramp::kTickMs);
     connect(teleop_publish_timer_, &QTimer::timeout, this, &ExplorationScreen::onTeleopPublishTick);
     teleop_publish_timer_->start();
+    // A key release that lands in another window never reaches us, so a held
+    // key would keep ROOFUS driving. Any focus change away from this window
+    // ends FPV control (ramped stop).
+    connect(qApp, &QGuiApplication::focusWindowChanged, this, [this](QWindow* focus) {
+        QWindow* own = window() ? window()->windowHandle() : nullptr;
+        if (focus && focus == own) {
+            return;
+        }
+        stopFpvForFocusLoss();
+    });
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+            [this](Qt::ApplicationState state) {
+                if (state != Qt::ApplicationActive) {
+                    stopFpvForFocusLoss();
+                }
+            });
 
     setLaunchProgress(0, "Waiting for Start Scan");
     setLaunchDiagnostics("Press Start Scan to begin launch diagnostics.");
@@ -1842,11 +1860,37 @@ void ExplorationScreen::onMappingLockTick() {
 }
 
 void ExplorationScreen::onTeleopPublishTick() {
+    if (!fpv_control_active_ && teleop_ramping_down_ && teleopMovementAllowed()) {
+        // FPV control ended while moving: brake along the ramp, then the
+        // final zero (published as the ramp reaches rest).
+        teleop_ramp_.advance(0.0, 0.0, teleop_ramp::Ramp::Clock::now());
+        emit teleopTwistRequested(teleop_ramp_.linear(), teleop_ramp_.angular());
+        if (teleop_ramp_.atRest()) {
+            teleop_ramping_down_ = false;
+        }
+        return;
+    }
     if (!fpv_control_active_ || !teleopMovementAllowed()) {
-        teleop_ramp_.reset();
+        if (teleop_ramping_down_) {
+            emitZeroTeleopTwist();  // blocked mid-brake: stop now
+        } else {
+            teleop_ramp_.reset();
+        }
         return;
     }
     emitTeleopTwistCommand();
+}
+
+void ExplorationScreen::stopFpvForFocusLoss() {
+    const bool had_keys_down = key_w_down_ || key_a_down_ || key_s_down_ || key_d_down_;
+    if (!fpv_control_active_ && !had_keys_down) {
+        return;
+    }
+    setFpvControlActive(false);
+    if (had_keys_down) {
+        fpv_focus_stopped_ = true;
+        updateFpvControlIndicator();
+    }
 }
 
 void ExplorationScreen::setFpvControlActive(bool active) {
@@ -1862,8 +1906,16 @@ void ExplorationScreen::setFpvControlActive(bool active) {
         key_a_down_ = false;
         key_s_down_ = false;
         key_d_down_ = false;
-        emitZeroTeleopTwist();
+        if (teleopMovementAllowed() && !teleop_ramp_.atRest()) {
+            // Moving: let the publish tick brake along the ramp and send the
+            // final zero. A zero now would cut torque and ROOFUS would coast.
+            teleop_ramping_down_ = true;
+        } else {
+            emitZeroTeleopTwist();
+        }
     } else {
+        teleop_ramping_down_ = false;
+        fpv_focus_stopped_ = false;
         setFocus(Qt::OtherFocusReason);
     }
 
@@ -1882,6 +1934,11 @@ void ExplorationScreen::updateFpvControlIndicator() {
             "color: #10B981; font-size: 12px; line-height: 16px; font-weight: 700;");
     } else if (fpv_control_active_ && !teleopMovementAllowed()) {
         lbl_fpv_control_state_->setText("FPV Control: Waiting for launch...");
+        lbl_fpv_control_state_->setStyleSheet(
+            "color: #D97706; font-size: 12px; line-height: 16px; font-weight: 700;");
+    } else if (fpv_focus_stopped_) {
+        lbl_fpv_control_state_->setText(
+            "FPV Control: Stopped — another window opened. Tap the camera to drive.");
         lbl_fpv_control_state_->setStyleSheet(
             "color: #D97706; font-size: 12px; line-height: 16px; font-weight: 700;");
     } else {
@@ -1917,6 +1974,7 @@ void ExplorationScreen::emitTeleopTwistCommand() {
 }
 
 void ExplorationScreen::emitZeroTeleopTwist() {
+    teleop_ramping_down_ = false;
     teleop_ramp_.reset();
     emit teleopTwistRequested(0.0, 0.0);
 }
@@ -1977,6 +2035,7 @@ void ExplorationScreen::keyPressEvent(QKeyEvent* event) {
     }
 
     if (event->key() == Qt::Key_Q) {
+        teleop_ramping_down_ = false;
         teleop_ramp_.reset();
         emit teleopDisarmRequested();
         event->accept();
@@ -2070,7 +2129,7 @@ void ExplorationScreen::keyReleaseEvent(QKeyEvent* event) {
     if (handled) {
         if (fpv_control_active_ && teleopMovementAllowed()) {
             emitTeleopTwistCommand();
-        } else {
+        } else if (!teleop_ramping_down_) {
             emitZeroTeleopTwist();
         }
         event->accept();
@@ -2081,7 +2140,12 @@ void ExplorationScreen::keyReleaseEvent(QKeyEvent* event) {
 }
 
 void ExplorationScreen::focusOutEvent(QFocusEvent* event) {
-    setFpvControlActive(false);
+    if (event && (event->reason() == Qt::ActiveWindowFocusReason ||
+                  event->reason() == Qt::PopupFocusReason)) {
+        stopFpvForFocusLoss();  // another window took focus: tell the operator
+    } else {
+        setFpvControlActive(false);
+    }
     QWidget::focusOutEvent(event);
 }
 

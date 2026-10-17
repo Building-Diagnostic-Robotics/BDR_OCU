@@ -186,6 +186,8 @@ private:
     void updateFpvControlIndicator();
     void emitTeleopTwistCommand();
     void emitZeroTeleopTwist();
+    /** Focus left this window: end FPV control with a ramped stop. */
+    void stopFpvForFocusLoss();
     void applyToneToLabel(QLabel* label, ValueTone tone, bool emphasize);
     void applyTopStatusToneToLabel(QLabel* label, ValueTone tone, bool emphasize);
     void updateTopMotorsChipGeometry();
@@ -302,6 +304,10 @@ private:
     double teleop_angular_speed_min_rps_ = 0.0;
     double teleop_angular_speed_max_rps_ = 4.5;
     teleop_ramp::Ramp teleop_ramp_;  ///< WASD target -> published twist
+    /** FPV control ended while moving; the tick is braking to rest. */
+    bool teleop_ramping_down_ = false;
+    /** Driving was stopped by a focus loss (shown on the FPV indicator). */
+    bool fpv_focus_stopped_ = false;
 };
 
 }  // namespace f2c_cpp
