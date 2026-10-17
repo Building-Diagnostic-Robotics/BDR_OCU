@@ -377,6 +377,13 @@ public:
     /// dialog surfaces that before the operator selects anything.
     static QString resolveLocalScriptPath(const QString& override_path = QString());
 
+    /// ThumbDrive: where this laptop keeps its mission logs (tests only;
+    /// empty = ocu_logs::storeDir()). Before a Mission_* folder uploads,
+    /// the logs its mission_config.json lists are copied into
+    /// <Mission>/logs/ocu/ on the stick; after it uploads they are marked
+    /// uploaded. See ocu_log_store.hpp.
+    void setOcuLogStoreDir(const QString& dir) { ocu_log_store_dir_ = dir; }
+
     /// Set the queue. Replaces any prior queue. No-op if the runner is
     /// currently busy — call `requestCancel()` first.
     void setQueue(const QList<UploadTarget>& targets);
@@ -484,6 +491,9 @@ private slots:
 private:
     void launchNext();
     void launchActiveTarget();   // common path between fresh-start and retry
+    /// Second half of launchActiveTarget, after the OCU logs are attached.
+    void spawnUploader(const UploadTarget& target);
+    QString ocuLogStoreDir() const;
     void configureLocalProcess(QProcess* proc, const UploadTarget& target);
     void configureSshProcess(QProcess* proc, const UploadTarget& target);
     void processStdoutLine(const QString& raw_line);
@@ -521,6 +531,12 @@ private:
 
     QPointer<QProcess> proc_;
     QString stdout_carry_;  // partial line buffer between readyRead chunks.
+
+    // OCU logs being copied to the stick before the uploader starts (on a
+    // worker thread). The seq drops a result that outlived its queue.
+    QString ocu_log_store_dir_;
+    bool attach_pending_ = false;
+    int attach_seq_ = 0;
 
     // Per-target retry counter — bumped each time we re-launch the
     // current_index_ target after a transient connection error.

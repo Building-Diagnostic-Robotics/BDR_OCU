@@ -581,6 +581,12 @@ TEST(UploadThumbDrive, LocalRunnerReportsMissingInterpreterAsFailure) {
     // PATH with no python3, so QProcess fails to start.
     const QString stub = tmp.path() + "/stub.py";
     writeFile(stub, "print('never runs')\n");
+    // Restored on exit: later tests in this binary launch python3.
+    const QByteArray saved_path = qgetenv("PATH");
+    struct RestorePath {
+        QByteArray value;
+        ~RestorePath() { qputenv("PATH", value); }
+    } restore{saved_path};
     qputenv("PATH", tmp.path().toUtf8());
 
     UploadRunner runner;
@@ -1179,4 +1185,206 @@ TEST(OffloadStatus, UncopiedScansAtRiskOnlyUnderTwiceTheFloor) {
     const OffloadSnapshot bad = parseOffloadStatusJson(QByteArray("not json"));
     EXPECT_FALSE(bad.parse_ok);
     EXPECT_EQ(scansAtRiskOfDeletion(bad), 0);
+}
+
+// ------------------------------------------- OCU logs ride with the mission
+
+namespace {
+
+struct OcuLogRig {
+    QTemporaryDir tmp;
+    QString store;
+    UploadTarget mission;
+    QString stub;
+    QString ran_marker;
+
+    explicit OcuLogRig(const QByteArray& stub_body = QByteArray()) {
+        store = tmp.path() + "/store";
+        QDir().mkpath(store);
+        mission.date_folder = "September_13_2026";
+        mission.building_slug = "Acme_HQ";
+        mission.section_name = "Mission_120000";
+        mission.run_id = "September_13_2026/Acme_HQ/Mission_120000";
+        mission.data_path = tmp.path() + "/stick/" + mission.run_id;
+        writeFile(mission.data_path + "/mission_config.json",
+                  R"({"ocu_logs": ["mission_20260913_115900"]})");
+        writeFile(mission.data_path + "/thumbsync_manifest.json", "{}");
+        writeFile(store + "/mission_20260913_115900.log", "ocu log body");
+        writeFile(store + "/mission_20260913_115900.laptop_ros_logs.tar.gz",
+                  QByteArray(64, 'z'));
+        ran_marker = tmp.path() + "/script_ran";
+        stub = tmp.path() + "/stub_mission.py";
+        writeFile(stub, stub_body.isEmpty() ? QByteArray(R"PY(
+import os, sys
+root = sys.argv[1]
+ocu = os.path.join(root, "logs", "ocu")
+names = sorted(os.listdir(ocu)) if os.path.isdir(ocu) else []
+open(os.environ["RAN_MARKER"], "w").write(",".join(names))
+print("Upload complete: {}", flush=True)
+)PY") : stub_body);
+        qputenv("RAN_MARKER", ran_marker.toUtf8());
+    }
+
+    void configure(UploadRunner& runner) const {
+        runner.setSource(f2c_cpp::UploadSource::ThumbDrive);
+        runner.setLocalScriptPath(stub);
+        runner.setCloudAuth("https://api.example", "c", "t");
+        runner.setRobotId("Roofus#0003");
+        runner.setOcuLogStoreDir(store);
+        runner.setQueue({mission});
+    }
+};
+
+QByteArray readAll(const QString& path) {
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
+}  // namespace
+
+TEST(UploadOcuLogs, MissionUploadCarriesItsOcuLogsAndMarksThem) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+    OcuLogRig rig;
+    UploadRunner runner;
+    rig.configure(runner);
+    QStringList logs;
+    int completed = 0;
+    QObject::connect(&runner, &UploadRunner::logLine,
+                     [&](const QString& l) { logs << l; });
+    QObject::connect(&runner, &UploadRunner::targetCompleted,
+                     [&](const UploadTarget&) { ++completed; });
+    QEventLoop loop;
+    QObject::connect(&runner, &UploadRunner::queueFinished, [&](bool) { loop.quit(); });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    runner.start();
+    loop.exec();
+
+    EXPECT_EQ(completed, 1) << logs.join(" | ").toStdString();
+    // The script saw both files already in place when it started.
+    EXPECT_EQ(readAll(rig.ran_marker),
+              "mission_20260913_115900.laptop_ros_logs.tar.gz,"
+              "mission_20260913_115900.log");
+    EXPECT_EQ(readAll(rig.mission.data_path + "/logs/ocu/mission_20260913_115900.log"),
+              "ocu log body");
+    EXPECT_TRUE(QFile::exists(rig.store + "/mission_20260913_115900.uploaded"));
+    EXPECT_TRUE(logs.join(" | ").contains("OCU logs added")) << logs.join(" | ").toStdString();
+}
+
+TEST(UploadOcuLogs, AlreadyUploadedMissionGetsNothingAdded) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+    OcuLogRig rig;
+    writeFile(rig.mission.data_path + "/manifest.json", "{}");
+    UploadRunner runner;
+    rig.configure(runner);
+    QEventLoop loop;
+    QObject::connect(&runner, &UploadRunner::queueFinished, [&](bool) { loop.quit(); });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    runner.start();
+    loop.exec();
+    EXPECT_EQ(readAll(rig.ran_marker), "");
+    EXPECT_TRUE(QFile::exists(rig.ran_marker)) << "the upload itself still runs";
+    EXPECT_FALSE(QFile::exists(rig.mission.data_path + "/logs"));
+}
+
+TEST(UploadOcuLogs, CancelWhileAttachingNeverStartsTheUploader) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+    OcuLogRig rig;
+    UploadRunner runner;
+    rig.configure(runner);
+    bool finished = false, cancelled = false;
+    int paused = 0;
+    QObject::connect(&runner, &UploadRunner::targetPaused,
+                     [&](const UploadTarget&, const QString&) { ++paused; });
+    QObject::connect(&runner, &UploadRunner::queueFinished, [&](bool c) {
+        finished = true;
+        cancelled = c;
+    });
+    runner.start();           // attach is now on a worker thread
+    EXPECT_TRUE(runner.isBusy());
+    runner.requestCancel();   // before its result is delivered
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(cancelled);
+    EXPECT_EQ(paused, 1);
+    EXPECT_FALSE(runner.isBusy());
+    // Let the worker's result arrive: it must be dropped.
+    QEventLoop loop;
+    QTimer::singleShot(1500, &loop, &QEventLoop::quit);
+    loop.exec();
+    EXPECT_FALSE(QFile::exists(rig.ran_marker));
+    EXPECT_FALSE(runner.isBusy());
+}
+
+TEST(UploadOcuLogs, PauseWhileAttachingStopsBeforeTheUploaderAndResumes) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+    OcuLogRig rig;
+    UploadRunner runner;
+    rig.configure(runner);
+    int paused = 0, completed = 0, finishes = 0;
+    bool last_cancelled = true;
+    QObject::connect(&runner, &UploadRunner::targetPaused,
+                     [&](const UploadTarget&, const QString&) { ++paused; });
+    QObject::connect(&runner, &UploadRunner::targetCompleted,
+                     [&](const UploadTarget&) { ++completed; });
+    QEventLoop loop;
+    QObject::connect(&runner, &UploadRunner::queueFinished, [&](bool c) {
+        ++finishes;
+        last_cancelled = c;
+        loop.quit();
+    });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    runner.start();
+    runner.requestPause();
+    loop.exec();
+    EXPECT_EQ(paused, 1);
+    EXPECT_EQ(finishes, 1);
+    EXPECT_FALSE(last_cancelled);
+    EXPECT_FALSE(runner.isBusy());
+    EXPECT_FALSE(QFile::exists(rig.ran_marker));
+
+    // Upload again: same target, logs already there, script runs.
+    QEventLoop again;
+    QObject::connect(&runner, &UploadRunner::queueFinished, [&](bool) { again.quit(); });
+    QTimer::singleShot(10000, &again, &QEventLoop::quit);
+    runner.start();
+    again.exec();
+    EXPECT_EQ(completed, 1);
+    EXPECT_TRUE(QFile::exists(rig.ran_marker));
+}
+
+TEST(UploadOcuLogs, MissingLogIsReportedAndTheUploadStillRuns) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+    OcuLogRig rig;
+    QFile::remove(rig.store + "/mission_20260913_115900.log");
+    QFile::remove(rig.store + "/mission_20260913_115900.laptop_ros_logs.tar.gz");
+    UploadRunner runner;
+    rig.configure(runner);
+    QStringList logs;
+    int completed = 0;
+    QObject::connect(&runner, &UploadRunner::logLine,
+                     [&](const QString& l) { logs << l; });
+    QObject::connect(&runner, &UploadRunner::targetCompleted,
+                     [&](const UploadTarget&) { ++completed; });
+    QEventLoop loop;
+    QObject::connect(&runner, &UploadRunner::queueFinished, [&](bool) { loop.quit(); });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    runner.start();
+    loop.exec();
+    EXPECT_EQ(completed, 1);
+    EXPECT_TRUE(logs.join(" | ").contains("is not on this laptop")) << logs.join(" | ").toStdString();
+    EXPECT_FALSE(QFile::exists(rig.store + "/mission_20260913_115900.uploaded"));
 }

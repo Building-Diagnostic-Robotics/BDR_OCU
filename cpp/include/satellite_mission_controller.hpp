@@ -119,6 +119,15 @@ public:
     QString missionLogPath() const { return mission_log_path_; }
 
     /**
+     * Id of the current (or most recent) mission log: its file name
+     * without ".log", e.g. "mission_20261017_101500". Pushed to the
+     * robot's coordinator as `ocu_log_id`, which records it in the
+     * mission's mission_config.json so the upload attaches exactly this
+     * log (see ocu_log_store.hpp). Empty before the first launch.
+     */
+    QString missionLogId() const;
+
+    /**
      * Mirrors one already-formatted log line into the mission log.
      *
      * The screen routes every line it displays through here — including the
@@ -229,9 +238,13 @@ private:
     /** Second half of startMission, once both sweeps are clear. */
     void spawnLaunches();
     void teardownStep(TeardownStep step);
-    /** Opens a fresh mission log and prunes older ones. */
+    /** Opens a fresh mission log; frees disk space first if needed
+        (ocu_logs::prune — by space only, never by age or count). */
     void openMissionLog();
+    /** Closes the log and starts packing the laptop's ROS logs of the
+        mission into <id>.laptop_ros_logs.tar.gz beside it (detached). */
     void closeMissionLog();
+    void startLaptopRosLogBundle();
 
     RobotTarget target_;
     QProcess* laptop_proc_ = nullptr;
@@ -265,12 +278,12 @@ private:
     qint64 robot_spawn_ms_ = 0;
     QFile* mission_log_ = nullptr;
     QString mission_log_path_;
+    /** When the current log was opened: start of the laptop ROS log window. */
+    qint64 mission_log_opened_epoch_s_ = 0;
     // 40 was too short to be useful: cliff_horizon logs at 10 Hz and
     // tfmini_cliff_evidence at 20 Hz, so a startup traceback was overwritten
     // within a second and the launch-wait prompt only ever showed INFO spam.
     static constexpr int kRobotOutputTailMax = 200;
-    /** Mission logs kept on disk; oldest are pruned at the next launch. */
-    static constexpr int kMissionLogsKept = 10;
 };
 
 }  // namespace f2c_cpp

@@ -167,6 +167,7 @@ set(HEADERS
     include/cloud_upload_manager.hpp
     include/robot_registry.hpp
     include/upload_runner.hpp
+    include/ocu_log_store.hpp
     include/upload_dialog.hpp
     include/cloud_verifier.hpp
     include/thumb_drive_watcher.hpp
@@ -258,6 +259,7 @@ set(GUI_SOURCES
     src/preset_manager.cpp
     src/cloud_upload_manager.cpp
     src/upload_runner.cpp
+    src/ocu_log_store.cpp
     src/upload_dialog.cpp
     src/cloud_verifier.cpp
     src/thumb_drive_watcher.cpp
@@ -645,6 +647,7 @@ if(BDR_BUILD_TESTS)
         add_executable(upload_thumb_drive_tests
             tests/upload_thumb_drive_tests.cpp
             src/upload_runner.cpp
+            src/ocu_log_store.cpp
             src/thumb_drive_watcher.cpp
             src/offload_status.cpp
             include/upload_runner.hpp
@@ -677,6 +680,22 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME cloud_verifier_tests COMMAND cloud_verifier_tests)
+
+        # OCU mission logs: exact attach to the uploading mission, upload
+        # marks, space-only retention.
+        add_executable(ocu_log_store_tests
+            tests/ocu_log_store_tests.cpp
+            src/ocu_log_store.cpp
+        )
+        target_include_directories(ocu_log_store_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(ocu_log_store_tests PRIVATE
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME ocu_log_store_tests COMMAND ocu_log_store_tests)
 
         # uploader.py integrity checks (Content-MD5, ETag, resume). No Qt.
         add_test(

@@ -696,15 +696,32 @@ def iter_files(root_dir: str):
             yield full, rel
 
 
+# Added to a mission folder on the stick by the OCU laptop after the robot's
+# copy: the OCU mission log and the laptop's ROS logs for that mission. Not
+# in the robot's copy record by design, still uploaded and listed in the
+# cloud manifest. Plain files directly under this folder only; ".part" is an
+# interrupted laptop copy and is never uploaded.
+OCU_LOG_PREFIX = "logs/ocu/"
+
+
+def is_ocu_log(rel_norm: str) -> bool:
+    if not rel_norm.startswith(OCU_LOG_PREFIX):
+        return False
+    name = rel_norm[len(OCU_LOG_PREFIX):]
+    return bool(name) and "/" not in name and not name.startswith(".") \
+        and not name.endswith(".part")
+
+
 def _stick_extra(rel_norm: str) -> bool:
     """True when the robot's record does not include this file.
 
     thumbsync_manifest.json is the robot's own provenance and is still
-    uploaded. Each extra file is named once per run.
+    uploaded, and so are the OCU's logs (is_ocu_log). Each other extra file
+    is named once per run.
     """
     if _copy_record is None or rel_norm in _copy_record.by_rel:
         return False
-    if rel_norm == THUMB_MANIFEST:
+    if rel_norm == THUMB_MANIFEST or is_ocu_log(rel_norm):
         return False
     if rel_norm not in _stick_extra_warned:
         _stick_extra_warned.add(rel_norm)

@@ -454,25 +454,26 @@ void RosLink::requestAxisState(int state) {
 void RosLink::pushSessionMetadata(const QString& building_name,
                                   const QString& operator_name,
                                   const QString& units_preference,
-                                  std::function<void(bool ok)> on_complete) {
+                                  const QString& ocu_log_id,
+                                  std::function<void(bool ok, bool log_linked)> on_complete) {
     // Marshal every completion onto the GUI thread (this object's thread).
-    const auto complete = [this, on_complete](bool ok) {
+    const auto complete = [this, on_complete](bool ok, bool log_linked) {
         if (!on_complete) {
             return;
         }
         QMetaObject::invokeMethod(
-            this, [on_complete, ok]() { on_complete(ok); },
+            this, [on_complete, ok, log_linked]() { on_complete(ok, log_linked); },
             Qt::QueuedConnection);
     };
 
     if (!running_ || !impl_->coordinator_params) {
-        complete(false);
+        complete(false, false);
         return;
     }
     // Non-blocking readiness check — the caller retries while the robot
     // stack boots, so a not-yet-available service is a normal miss.
     if (!impl_->coordinator_params->service_is_ready()) {
-        complete(false);
+        complete(false, false);
         return;
     }
 
@@ -487,30 +488,40 @@ void RosLink::pushSessionMetadata(const QString& building_name,
     };
     auto request =
         std::make_shared<rcl_interfaces::srv::SetParameters::Request>();
-    request->parameters.reserve(3);
+    request->parameters.reserve(4);
     request->parameters.push_back(
         make_string_param("building_name", building_name));
     request->parameters.push_back(
         make_string_param("operator_name", operator_name));
     request->parameters.push_back(
         make_string_param("units_preference", units_preference));
+    const bool send_log_id = !ocu_log_id.trimmed().isEmpty();
+    if (send_log_id) {
+        // Last, so the gating three keep their result indices.
+        request->parameters.push_back(
+            make_string_param("ocu_log_id", ocu_log_id.trimmed()));
+    }
 
     impl_->coordinator_params->async_send_request(
         request,
-        [complete](rclcpp::Client<rcl_interfaces::srv::SetParameters>::
+        [complete, send_log_id](rclcpp::Client<rcl_interfaces::srv::SetParameters>::
                        SharedFuture future) {
             bool ok = false;
+            bool log_linked = false;
             try {
                 const auto response = future.get();
+                // SetParameters answers one result per parameter, in order.
+                // A robot without `ocu_log_id` rejects only that one.
                 ok = response &&
-                     response->results.size() == 3 &&
+                     response->results.size() == (send_log_id ? 4u : 3u) &&
                      std::all_of(response->results.begin(),
-                                 response->results.end(),
+                                 response->results.begin() + 3,
                                  [](const auto& r) { return r.successful; });
+                log_linked = ok && send_log_id && response->results[3].successful;
             } catch (const std::exception&) {
                 ok = false;
             }
-            complete(ok);
+            complete(ok, log_linked);
         });
 }
 
