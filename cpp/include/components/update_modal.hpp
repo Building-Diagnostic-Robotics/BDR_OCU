@@ -33,6 +33,7 @@
 #include <QString>
 
 #include "update/update_types.hpp"
+#include "update/power_status.hpp"
 
 class QLabel;
 class QPushButton;
@@ -54,9 +55,9 @@ public:
         bool has_active_transfer = false;
         bool has_active_upload = false;
         bool has_active_mission = false;  // stage 5 active proxy
-        // -1  → no /sys/class/power_supply/BAT* found → treat as AC, allow.
-        // 0..100 → battery present, gate at <20 %.
-        int  battery_pct = -1;
+        // Charger + combined battery level. Blocks only on battery power
+        // below 20 % (update::lowBatteryBlocks); no battery never blocks.
+        update::PowerStatus power;
     };
 
     UpdateModal(const update::VersionInfo& info,
@@ -68,13 +69,6 @@ public:
     /// Install Now enabled/disabled state and tooltip in place.
     void setGateState(const GateState& gate_state);
 
-    /// Read the local battery percentage from
-    /// /sys/class/power_supply/BAT*/capacity. Returns -1 if no battery
-    /// node is found (AC-only device → install allowed per Q2=C). Returns
-    /// -1 on read failure too (unknown is treated as AC, never blocks).
-    /// Static so AppShellWindow can call it when computing the initial
-    /// GateState before the modal exists.
-    static int readBatteryPercent();
 
 signals:
     /// Operator clicked "Remind Me Later". AppShell snoozes for 4 h and

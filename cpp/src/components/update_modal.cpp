@@ -35,8 +35,8 @@ namespace {
 // in to clear the low-battery gate.
 constexpr int kBatteryPollIntervalMs = 5000;
 
-// Locked spec phase 4 Q3: block Install Now under 20 % battery.
-constexpr int kBatteryGateThresholdPct = 20;
+// Locked spec phase 4 Q3: block Install Now under 20 % battery
+// (update::kLowBatteryThresholdPct), but only when not plugged in.
 
 // Cap on parsed release-note bullets. Anything longer than this and the
 // modal stops feeling minimal. Operators can read full notes on the
@@ -404,19 +404,8 @@ void UpdateModal::populateContent() {
 void UpdateModal::refreshInstallButton() {
     // Battery readout & gate decision. Locked spec Q2=C: -1 means "no
     // BAT* node present" → AC, allow install, render literal "AC".
-    QString battery_text;
-    bool low_batt = false;
-    if (gate_.battery_pct < 0) {
-        battery_text = QStringLiteral("AC");
-    } else {
-        battery_text = QStringLiteral("%1%").arg(gate_.battery_pct);
-        if (gate_.battery_pct < kBatteryGateThresholdPct) {
-            low_batt = true;
-            battery_text = QStringLiteral("%1%  (low)")
-                               .arg(gate_.battery_pct);
-        }
-    }
-    lbl_battery_value_->setText(battery_text);
+    const bool low_batt = update::lowBatteryBlocks(gate_.power);
+    lbl_battery_value_->setText(update::powerReadout(gate_.power));
     lbl_battery_value_->setObjectName(
         low_batt ? QStringLiteral("UpdateModal_StatValueWarn")
                  : QStringLiteral("UpdateModal_StatValue"));
@@ -439,7 +428,8 @@ void UpdateModal::refreshInstallButton() {
     }
     if (low_batt) {
         reasons << QStringLiteral(
-            "battery is below %1%").arg(kBatteryGateThresholdPct);
+            "battery is below %1% (plug in to install)")
+                       .arg(update::kLowBatteryThresholdPct);
     }
 
     const bool blocked = !reasons.isEmpty();
@@ -482,11 +472,12 @@ void UpdateModal::hideEvent(QHideEvent* event) {
 }
 
 void UpdateModal::onPollBattery() {
-    const int pct = readBatteryPercent();
-    if (pct == gate_.battery_pct) {
+    const update::PowerStatus power = update::readPowerStatus();
+    if (power == gate_.power) {
         return;
     }
-    gate_.battery_pct = pct;
+    update::log::info("modal", update::powerLogLine(power));
+    gate_.power = power;
     refreshInstallButton();
 }
 
@@ -567,31 +558,6 @@ QString UpdateModal::formatPublishedDate(const QString& iso8601) {
     dt = dt.toLocalTime();
     // QLocale::LongFormat → e.g. "May 8, 2026" on en_US.
     return QLocale().toString(dt.date(), QLocale::LongFormat);
-}
-
-int UpdateModal::readBatteryPercent() {
-    QDir psu(QStringLiteral("/sys/class/power_supply"));
-    if (!psu.exists()) return -1;
-    const QStringList entries = psu.entryList(
-        QStringList() << QStringLiteral("BAT*"),
-        QDir::Dirs | QDir::NoDotAndDotDot);
-    if (entries.isEmpty()) return -1;
-    // Prefer the first BAT* node. Multi-battery laptops are rare in this
-    // fleet; if one ever shows up, the OCU still behaves correctly because
-    // any BAT below threshold is enough to cancel install.
-    for (const QString& name : entries) {
-        QFile cap(psu.absoluteFilePath(name) +
-                  QStringLiteral("/capacity"));
-        if (!cap.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
-        QTextStream ts(&cap);
-        bool ok = false;
-        const int pct = ts.readLine().trimmed().toInt(&ok);
-        cap.close();
-        if (ok && pct >= 0 && pct <= 100) {
-            return pct;
-        }
-    }
-    return -1;
 }
 
 }  // namespace f2c_cpp

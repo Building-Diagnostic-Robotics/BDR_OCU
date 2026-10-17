@@ -211,10 +211,12 @@ add_library(bdr_update_core STATIC
     include/update/update_lockfile.hpp
     include/update/update_state.hpp
     include/update/update_downloader.hpp
+    include/update/power_status.hpp
     src/update/update_log.cpp
     src/update/update_lockfile.cpp
     src/update/update_state.cpp
     src/update/update_downloader.cpp
+    src/update/power_status.cpp
 )
 target_include_directories(bdr_update_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -479,6 +481,18 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME update_checker_tests COMMAND update_checker_tests)
+
+        # Install / robot-sync battery gate (sysfs power_supply reader).
+        add_executable(power_status_tests
+            tests/power_status_tests.cpp
+        )
+        target_link_libraries(power_status_tests PRIVATE
+            bdr_update_core
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME power_status_tests COMMAND power_status_tests)
         message(STATUS "Unit tests: enabled (update_checker_tests)")
 
         # Obstacle/free-space geometry core (boost-only; no GUI/ROS/PCL link).

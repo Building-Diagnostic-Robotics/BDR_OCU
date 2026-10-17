@@ -75,6 +75,7 @@
 #include "update/update_lockfile.hpp"
 #include "update/update_state.hpp"
 #include "update/update_log.hpp"
+#include "update/power_status.hpp"
 #include "update/update_types.hpp"
 #include "window_controls_metrics.hpp"
 
@@ -1500,7 +1501,8 @@ void AppShellWindow::showUpdateModal(const update::VersionInfo& info) {
     gate.has_active_upload =
         CloudUploadManager::instance().hasActiveUpload() ||
         (upload_dialog_ && upload_dialog_->isUploading());
-    gate.battery_pct = UpdateModal::readBatteryPercent();
+    gate.power = update::readPowerStatus();
+    update::log::info("appshell", update::powerLogLine(gate.power));
 
     auto* modal = new UpdateModal(info, gate, dark_mode_, this);
     modal->setAttribute(Qt::WA_DeleteOnClose);
@@ -1671,8 +1673,7 @@ void AppShellWindow::showRobotSyncDialog() {
             if (isScanLaunchActive() || !repo_sync_ || repo_sync_->isBusy()) {
                 return;
             }
-            const int battery = UpdateModal::readBatteryPercent();
-            if (battery >= 0 && battery < 20) {
+            if (update::lowBatteryBlocks(update::readPowerStatus())) {
                 return;
             }
             repo_sync_->syncNow();
@@ -1681,8 +1682,7 @@ void AppShellWindow::showRobotSyncDialog() {
             if (isScanLaunchActive() || !repo_sync_ || repo_sync_->isBusy()) {
                 return;
             }
-            const int battery = UpdateModal::readBatteryPercent();
-            if (battery >= 0 && battery < 20) {
+            if (update::lowBatteryBlocks(update::readPowerStatus())) {
                 return;
             }
             repo_sync_->prepareRobot();
@@ -1690,7 +1690,7 @@ void AppShellWindow::showRobotSyncDialog() {
     }
     RobotSyncDialog::GateState gate;
     gate.launch_active = isScanLaunchActive();
-    gate.battery_pct = UpdateModal::readBatteryPercent();
+    gate.power = update::readPowerStatus();
     robot_sync_dialog_->setBusy(false);
     robot_sync_dialog_->setGateState(gate);
     robot_sync_dialog_->setSnapshot(repo_sync_->lastSnapshot());

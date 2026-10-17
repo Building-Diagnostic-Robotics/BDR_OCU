@@ -3,10 +3,12 @@
 #include <QDialog>
 
 #include "repo_sync_manager.hpp"
+#include "update/power_status.hpp"
 
 class QLabel;
 class QProgressBar;
 class QPushButton;
+class QTimer;
 
 namespace f2c_cpp {
 
@@ -16,7 +18,7 @@ class RobotSyncDialog : public QDialog {
 public:
     struct GateState {
         bool launch_active = false;
-        int battery_pct = -1;
+        update::PowerStatus power;
     };
 
     explicit RobotSyncDialog(QWidget* parent = nullptr);
@@ -27,6 +29,10 @@ public:
     void setBusy(bool busy, const QString& stage = QString());
     void setFinished(int level, const QString& headline, const QString& detail);
 
+protected:
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+
 signals:
     void syncRequested();
     void prepareRequested();
@@ -36,11 +42,15 @@ private:
     void buildUi();
     void applyStyle();
     void refreshButtons();
+    /// Re-read the charger/battery while open, so plugging in re-enables
+    /// Sync without closing and reopening the dialog.
+    void pollPower();
 
     RepoSyncSnapshot snap_;
     GateState gate_;
     bool dark_mode_ = true;
     bool busy_ = false;
+    QTimer* power_poll_timer_ = nullptr;
 
     QWidget* container_ = nullptr;
     QLabel* lbl_title_ = nullptr;
