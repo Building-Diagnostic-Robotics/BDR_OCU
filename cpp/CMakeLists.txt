@@ -166,6 +166,7 @@ set(HEADERS
     include/ui_theme_constants.hpp
     include/cloud_upload_manager.hpp
     include/robot_registry.hpp
+    include/single_instance.hpp
     include/upload_runner.hpp
     include/ocu_log_store.hpp
     include/upload_dialog.hpp
@@ -248,6 +249,7 @@ set(PIPELINE_SOURCES
 #   include/network_monitor.hpp
 
 set(GUI_SOURCES
+    src/single_instance.cpp
     src/plot_widget.cpp
     src/setup_screen.cpp
     src/app_shell.cpp
@@ -496,6 +498,23 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME power_status_tests COMMAND power_status_tests)
+
+        # One OCU per user: lock semantics across processes. Core + Network.
+        add_executable(single_instance_tests
+            tests/single_instance_tests.cpp
+            src/single_instance.cpp
+            include/single_instance.hpp
+        )
+        target_include_directories(single_instance_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(single_instance_tests PRIVATE
+            bdr_update_core
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME single_instance_tests COMMAND single_instance_tests)
         message(STATUS "Unit tests: enabled (update_checker_tests)")
 
         # Obstacle/free-space geometry core (boost-only; no GUI/ROS/PCL link).
@@ -908,7 +927,7 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME link_health_monitor_tests COMMAND link_health_monitor_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests gps_prealign_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests robot_registry_tests repo_sync_tests async_process_tests mission_finalize_policy_tests attention_policy_tests estop_latch_policy_tests topple_notice_policy_tests mission_done_notice_policy_tests motors_state_policy_tests touch_gesture_state_tests swath_preview_tests radio_link_pill_tests link_health_monitor_tests)")
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests gps_prealign_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests robot_registry_tests repo_sync_tests async_process_tests mission_finalize_policy_tests attention_policy_tests estop_latch_policy_tests topple_notice_policy_tests mission_done_notice_policy_tests single_instance_tests motors_state_policy_tests touch_gesture_state_tests swath_preview_tests radio_link_pill_tests link_health_monitor_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

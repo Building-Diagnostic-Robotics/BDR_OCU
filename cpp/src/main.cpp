@@ -28,6 +28,8 @@
 #include "dev_flags.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
+#include "single_instance.hpp"
+#include "components/bdr_message_box.hpp"
 #include "ui_theme_constants.hpp"
 #include "update/update_lockfile.hpp"
 #include "update/update_log.hpp"
@@ -265,6 +267,32 @@ int main(int argc, char* argv[])
     app.setApplicationVersion(QString::fromLatin1(f2c_cpp::version::kAppSemver));
     app.setOrganizationName("PilotControl");
 
+    // One OCU per user (single_instance.hpp). First thing after the app is
+    // named: a second copy must not write settings, touch update state,
+    // build the window or join the ROS graph. It raises the first copy and
+    // exits; the first copy is never touched. The dev screenshot hook is
+    // exempt: it renders offscreen beside a running OCU.
+    f2c_cpp::SingleInstance instance;
+    if (qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()) {
+        if (!instance.acquire(0)) {
+            // A running copy answers at once: bring it forward and leave.
+            if (f2c_cpp::SingleInstance::askRunningToRaise(1500)) {
+                rclcpp::shutdown();
+                return 0;
+            }
+            // No answer: it is closing (teardown runs inside closeEvent and
+            // can take up to the 20 s robot sweep) or hung. Wait for it.
+            if (!instance.acquire(15000)) {
+                f2c_cpp::BdrMessageBox::information(
+                    nullptr, QStringLiteral("BDR Coverage Planner"),
+                    QStringLiteral("BDR Coverage Planner is already open."));
+                rclcpp::shutdown();
+                return 0;
+            }
+        }
+        instance.listen();
+    }
+
     // OTA log: tag this process so the merged update.log is debuggable.
     // Cross-process safety relies on each binary calling setProcessTag()
     // before any info/warn/error (concern #1, locked Phase 7).
@@ -493,6 +521,24 @@ int main(int argc, char* argv[])
     } else {
         shell.show();
     }
+
+    // A second launch brings this window back instead of opening another.
+    QObject::connect(&instance, &f2c_cpp::SingleInstance::raiseRequested,
+                     &shell, [&shell] {
+                         shell.setWindowState(
+                             (shell.windowState() & ~Qt::WindowMinimized) |
+                             Qt::WindowActive);
+                         shell.show();
+                         shell.raise();
+                         shell.activateWindow();
+                         QApplication::alert(&shell);
+                     });
+
+    // Once the window has accepted close (teardown included), stop answering
+    // raise requests: a new launch then waits for this copy to exit and
+    // opens normally, instead of "raising" a window that is going away.
+    QObject::connect(&app, &QApplication::lastWindowClosed, &instance,
+                     &f2c_cpp::SingleInstance::stopListening);
 
     int exit_code = app.exec();
 
