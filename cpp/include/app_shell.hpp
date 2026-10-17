@@ -175,10 +175,11 @@ private:
     void refreshBannerHostVisibility();
     void refreshUpdateBanner();
     void refreshRobotSyncBanner();
-    /// Get started or Dashboard, and no scan pipeline running.
+    /// Update banners (OTA + robot sync): Dashboard only, and no scan
+    /// launching or running.
     bool bannersAllowedNow() const;
-    /// OTA banner gate: Dashboard only, no scan launch active.
-    bool updateBannerAllowedNow() const;
+    /// Robot-sync banner wanted (update offered, not snoozed, allowed now).
+    bool robotSyncBannerWanted() const;
     bool isScanLaunchActive() const;
     /// Empty when Upload Data may open or a new upload may start.
     /// `uploading` is the only exemption. The dialog asks again with
@@ -465,6 +466,9 @@ private:
     RobotSyncBanner* robot_sync_banner_ = nullptr;
     RobotSyncDialog* robot_sync_dialog_ = nullptr;
     QTimer* robot_sync_poll_ = nullptr;
+    /// Robot was offline at the last sync check: retry soon (30 s) instead
+    /// of waiting for the 5-min poll, so the result is ready on the Dashboard.
+    QTimer* robot_sync_retry_ = nullptr;
     /// Floor between robot-sync checks, so repeated Dashboard entries coalesce.
     static constexpr qint64 kRobotSyncMinRecheckMs = 60 * 1000;
     /// Epoch-ms of the last check we started (poll or Dashboard entry). 0 = none.

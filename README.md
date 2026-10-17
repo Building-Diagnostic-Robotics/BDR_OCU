@@ -115,7 +115,7 @@ and ship the resulting data to the cloud.
   new `.deb` via a NOPASSWD `bdr-apply-update` wrapper.
 - 60 s `bootHealthy` watchdog in `main()` automatically **rolls back** to
   the previous `.deb` if the new build fails to come up cleanly.
-- Pre-install gating on battery state and active mission; snooze backs off 30 min, 1 h, then 2 h; banner on the Dashboard only, never during a scan.
+- Pre-install gating on battery state and active mission; snooze backs off 30 min, 1 h, then 2 h; checked at app open and on Dashboard entry; banner on the Dashboard only, never during a scan (robot-sync banner too, shown after the OCU one; its snooze is 30 min).
   Persistent rollback denylist prevents repeat-offering a known-bad SHA.
 
 See [`docs/OTA.md`](docs/OTA.md) for the full state machine and

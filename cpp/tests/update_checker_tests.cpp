@@ -263,3 +263,21 @@ TEST(SnoozeBackoff, NewReleaseRestartsAtThirtyMinutes) {
 TEST(SnoozeBackoff, UnknownShaNeverEscalates) {
     EXPECT_EQ(UpdateChecker::nextSnoozeCount("", 4, ""), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard-entry re-check gate
+// ---------------------------------------------------------------------------
+
+TEST(DashboardRecheck, FirstEntryAlwaysChecks) {
+    EXPECT_TRUE(UpdateChecker::dashboardRecheckAllowed(1'000'000, 0, 0));
+}
+
+TEST(DashboardRecheck, ThrottledWithinAMinute) {
+    EXPECT_FALSE(UpdateChecker::dashboardRecheckAllowed(1'059'999, 1'000'000, 0));
+    EXPECT_TRUE(UpdateChecker::dashboardRecheckAllowed(1'060'000, 1'000'000, 0));
+}
+
+TEST(DashboardRecheck, RespectsRateLimitCooldown) {
+    EXPECT_FALSE(UpdateChecker::dashboardRecheckAllowed(2'000'000, 0, 2'500'000));
+    EXPECT_TRUE(UpdateChecker::dashboardRecheckAllowed(2'500'000, 0, 2'500'000));
+}

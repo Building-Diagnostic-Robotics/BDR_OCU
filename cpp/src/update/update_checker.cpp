@@ -130,6 +130,26 @@ void UpdateChecker::clearSnooze() {
     setSnoozedUntil(0);
 }
 
+bool UpdateChecker::dashboardRecheckAllowed(qint64 nowMs, qint64 lastStartMs,
+                                            qint64 rateLimitedUntilMs) {
+    if (nowMs < rateLimitedUntilMs) {
+        return false;
+    }
+    return lastStartMs <= 0 || nowMs - lastStartMs >= kDashboardRecheckMinMs;
+}
+
+void UpdateChecker::checkOnDashboardEntry() {
+    if (!started_ || in_flight_ || !autoCheckEnabled()) {
+        return;
+    }
+    if (!dashboardRecheckAllowed(QDateTime::currentMSecsSinceEpoch(),
+                                 last_check_start_ms_, rate_limited_until_ms_)) {
+        return;
+    }
+    log::info("checker", QStringLiteral("dashboard entry: checking now"));
+    performCheck();
+}
+
 int UpdateChecker::nextSnoozeCount(const QString& storedSha, int storedCount,
                                    const QString& releaseSha) {
     const bool same = !releaseSha.isEmpty() && storedSha == releaseSha;
@@ -321,6 +341,7 @@ void UpdateChecker::performCheck() {
     if (in_flight_) {
         return;
     }
+    last_check_start_ms_ = QDateTime::currentMSecsSinceEpoch();
 
     const QUrl url(version::releasesApiUrl());
     QNetworkRequest req(url);
@@ -397,6 +418,8 @@ void UpdateChecker::onReplyFinished() {
                       .arg(kRateLimitCooldownMs / 60000));
         consecutive_failures_ = 0;  // not a real failure, don't escalate backoff
         current_backoff_ms_ = kBackoffStartMs;
+        rate_limited_until_ms_ =
+            QDateTime::currentMSecsSinceEpoch() + kRateLimitCooldownMs;
         scheduleNextPoll(kRateLimitCooldownMs);
         emit checkFailed(QStringLiteral("rate limited"));
         return;

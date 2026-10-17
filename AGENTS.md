@@ -540,7 +540,7 @@ on that timer stay silent, but every outcome is logged — one
 `kRobotDeployBranch`, origin ahead, robot SHA/branch mismatch, or
 helpers / `updateInstead` missing) raises a banner **below** the OTA
 banner. Laptop current + robot merely offline is `robot_pending` —
-no banner. Later snoozes 1 h (`kRobotSyncSnoozeMs`, its own constant —
+no banner. Later snoozes 30 min every time (`kRobotSyncSnoozeMs`, its own constant —
 the OTA snooze backs off 30 min, 1 h, then 2 h).
 
 Sync targets compiled-in `kRobotDeployBranch` (`cliff-on-autonomy`).

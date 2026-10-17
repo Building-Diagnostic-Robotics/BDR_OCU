@@ -71,6 +71,15 @@ public:
     /// Reset any active snooze.
     void clearSnooze();
 
+    /// Dashboard entry: check now unless a check is in flight, one started
+    /// in the last minute, or GitHub rate-limited us. The banner only shows
+    /// on the Dashboard, so it must be fresh the moment the operator lands.
+    void checkOnDashboardEntry();
+
+    /// Pure gate for checkOnDashboardEntry (unit-tested).
+    static bool dashboardRecheckAllowed(qint64 nowMs, qint64 lastStartMs,
+                                        qint64 rateLimitedUntilMs);
+
     /// "Remind Me Later" for `releaseSha`: snooze for the next back-off
     /// step (30 min, 1 h, then 2 h) and persist the count.
     /// @return The snooze length applied, in ms.
@@ -182,6 +191,8 @@ private:
 
     bool started_ = false;
     int consecutive_failures_ = 0;
+    qint64 last_check_start_ms_ = 0;
+    qint64 rate_limited_until_ms_ = 0;
     int current_backoff_ms_ = kBackoffStartMs;
 };
 
