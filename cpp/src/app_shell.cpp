@@ -1509,16 +1509,15 @@ void AppShellWindow::showUpdateModal(const update::VersionInfo& info) {
 
     connect(modal, &UpdateModal::remindMeLaterRequested, this,
             [this](const update::VersionInfo& vi) {
-                Q_UNUSED(vi);
                 if (!update_checker_) return;
-                const qint64 until_ms =
-                    QDateTime::currentMSecsSinceEpoch() +
-                    update::kSnoozeDurationMs;
-                update_checker_->setSnoozedUntil(until_ms);
+                const qint64 duration_ms =
+                    update_checker_->snoozeRelease(vi.commitSha);
                 update::log::info(
                     "appshell",
-                    QStringLiteral("snooze 4h: until_ms=%1")
-                        .arg(until_ms));
+                    QStringLiteral("snooze %1 min: sha=%2 until_ms=%3")
+                        .arg(duration_ms / 60000)
+                        .arg(vi.commitSha.left(7))
+                        .arg(update_checker_->snoozedUntil()));
                 has_pending_update_ = false;
                 refreshUpdateBanner();
             });
@@ -1558,9 +1557,17 @@ bool AppShellWindow::bannersAllowedNow() const {
     return on_home && !isScanLaunchActive();
 }
 
+bool AppShellWindow::updateBannerAllowedNow() const {
+    // OTA banner: Dashboard only, and never while a scan is launching or
+    // running — an operator mid-mission must not be offered an install.
+    const QWidget* page = stack_ ? stack_->currentWidget() : nullptr;
+    return stage3_ && page == stage3_ && !isScanLaunchActive();
+}
+
 void AppShellWindow::refreshUpdateBanner() {
     if (update_banner_) {
-        update_banner_->setVisible(has_pending_update_ && bannersAllowedNow());
+        update_banner_->setVisible(has_pending_update_ &&
+                                   updateBannerAllowedNow());
     }
     refreshBannerHostVisibility();
 }

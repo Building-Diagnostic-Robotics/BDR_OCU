@@ -71,6 +71,16 @@ public:
     /// Reset any active snooze.
     void clearSnooze();
 
+    /// "Remind Me Later" for `releaseSha`: snooze for the next back-off
+    /// step (30 min, 1 h, then 2 h) and persist the count.
+    /// @return The snooze length applied, in ms.
+    qint64 snoozeRelease(const QString& releaseSha);
+
+    /// Pure back-off step: the count after snoozing `releaseSha`, given the
+    /// stored sha/count. A different release restarts the count.
+    static int nextSnoozeCount(const QString& storedSha, int storedCount,
+                               const QString& releaseSha);
+
     /**
      * @brief Pure-function compare of the embedded SHA against a remote one.
      *        Exposed for unit testing the prefix-match logic in isolation.

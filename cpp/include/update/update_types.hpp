@@ -102,8 +102,18 @@ constexpr int kBackoffStartMs = 5 * 60 * 1000;  // 5 minutes
 /// Maximum backoff between retries when the network is flapping.
 constexpr int kBackoffMaxMs = 30 * 60 * 1000;  // 30 minutes
 
-/// Snooze duration when the operator clicks "Remind Me Later" in the modal.
-constexpr qint64 kSnoozeDurationMs = 4LL * 60LL * 60LL * 1000LL;  // 4 hours
+/// "Remind Me Later" backs off per release: 30 min, then 1 h, then 2 h for
+/// every snooze after that. A different release starts again at 30 min.
+constexpr qint64 kSnoozeFirstMs = 30LL * 60LL * 1000LL;       // 30 minutes
+constexpr qint64 kSnoozeSecondMs = 60LL * 60LL * 1000LL;      // 1 hour
+constexpr qint64 kSnoozeMaxMs = 2LL * 60LL * 60LL * 1000LL;   // 2 hours
+
+/// Snooze length given how many times this release was already snoozed.
+constexpr qint64 snoozeDurationMs(int prior_snoozes) {
+    return prior_snoozes <= 0   ? kSnoozeFirstMs
+           : prior_snoozes == 1 ? kSnoozeSecondMs
+                                : kSnoozeMaxMs;
+}
 
 /// Asset filename suffix used to identify the OTA Debian package.
 inline constexpr const char* kDebAssetSuffix = "_amd64.deb";

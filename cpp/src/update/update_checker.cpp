@@ -130,6 +130,24 @@ void UpdateChecker::clearSnooze() {
     setSnoozedUntil(0);
 }
 
+int UpdateChecker::nextSnoozeCount(const QString& storedSha, int storedCount,
+                                   const QString& releaseSha) {
+    const bool same = !releaseSha.isEmpty() && storedSha == releaseSha;
+    return (same ? std::max(0, storedCount) : 0) + 1;
+}
+
+qint64 UpdateChecker::snoozeRelease(const QString& releaseSha) {
+    QSettings s = settings();
+    const int count = nextSnoozeCount(
+        s.value(QString::fromLatin1(kKeySnoozeSha)).toString(),
+        s.value(QString::fromLatin1(kKeySnoozeCount), 0).toInt(), releaseSha);
+    const qint64 duration = snoozeDurationMs(count - 1);
+    s.setValue(QString::fromLatin1(kKeySnoozeSha), releaseSha);
+    s.setValue(QString::fromLatin1(kKeySnoozeCount), count);
+    setSnoozedUntil(QDateTime::currentMSecsSinceEpoch() + duration);
+    return duration;
+}
+
 QString UpdateChecker::extractRemoteSha(const QString& releaseName,
                                         const QString& tag,
                                         const QString& targetCommitish) {

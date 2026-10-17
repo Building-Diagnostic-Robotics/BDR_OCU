@@ -12,7 +12,7 @@
  *     wires the actual installer takeover).
  *
  * Other locked details:
- *   - "Remind Me Later" snoozes for 4 h via UpdateChecker::setSnoozedUntil()
+ *   - "Remind Me Later" snoozes 30 min, then 1 h, then 2 h via UpdateChecker::setSnoozedUntil()
  *     (wired in AppShellWindow, not here).
  *   - 20 % battery threshold blocks Install Now when a battery is present.
  *   - Active mission / active transfer / active upload also block Install Now
@@ -71,7 +71,7 @@ public:
 
 
 signals:
-    /// Operator clicked "Remind Me Later". AppShell snoozes for 4 h and
+    /// Operator clicked "Remind Me Later". AppShell snoozes (30 min, 1 h, then 2 h) and
     /// closes the modal.
     void remindMeLaterRequested(const f2c_cpp::update::VersionInfo& info);
 

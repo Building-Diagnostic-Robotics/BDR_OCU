@@ -237,3 +237,29 @@ TEST(OtaTargetsAllow, IdIsTrimmedButCaseSensitive) {
     EXPECT_TRUE(UpdateChecker::targetsAllow(t, "  Roofus#0002  "));
     EXPECT_FALSE(UpdateChecker::targetsAllow(t, "roofus#0002"));
 }
+
+// ---------------------------------------------------------------------------
+// Remind Me Later back-off: 30 min, 1 h, then 2 h per release
+// ---------------------------------------------------------------------------
+
+TEST(SnoozeBackoff, DurationSteps) {
+    using f2c_cpp::update::snoozeDurationMs;
+    EXPECT_EQ(snoozeDurationMs(0), 30LL * 60 * 1000);
+    EXPECT_EQ(snoozeDurationMs(1), 60LL * 60 * 1000);
+    EXPECT_EQ(snoozeDurationMs(2), 2LL * 60 * 60 * 1000);
+    EXPECT_EQ(snoozeDurationMs(7), 2LL * 60 * 60 * 1000);  // capped
+}
+
+TEST(SnoozeBackoff, SameReleaseCountsUp) {
+    EXPECT_EQ(UpdateChecker::nextSnoozeCount("", 0, "abc1234"), 1);
+    EXPECT_EQ(UpdateChecker::nextSnoozeCount("abc1234", 1, "abc1234"), 2);
+    EXPECT_EQ(UpdateChecker::nextSnoozeCount("abc1234", 2, "abc1234"), 3);
+}
+
+TEST(SnoozeBackoff, NewReleaseRestartsAtThirtyMinutes) {
+    EXPECT_EQ(UpdateChecker::nextSnoozeCount("abc1234", 3, "def5678"), 1);
+}
+
+TEST(SnoozeBackoff, UnknownShaNeverEscalates) {
+    EXPECT_EQ(UpdateChecker::nextSnoozeCount("", 4, ""), 1);
+}

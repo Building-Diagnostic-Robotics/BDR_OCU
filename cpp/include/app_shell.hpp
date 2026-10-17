@@ -177,6 +177,8 @@ private:
     void refreshRobotSyncBanner();
     /// Get started or Dashboard, and no scan pipeline running.
     bool bannersAllowedNow() const;
+    /// OTA banner gate: Dashboard only, no scan launch active.
+    bool updateBannerAllowedNow() const;
     bool isScanLaunchActive() const;
     /// Empty when Upload Data may open or a new upload may start.
     /// `uploading` is the only exemption. The dialog asks again with

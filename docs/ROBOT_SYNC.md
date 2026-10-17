@@ -37,7 +37,7 @@ in sync" from "the SSH probe failed, so the snapshot fell back to
 An actionable mismatch raises **Robot software** below the OTA banner
 (OTA stays first). View Details opens a frameless modal (`show()`, not
 `exec()`): **Sync now** / **Later** (1 h snooze, `kRobotSyncSnoozeMs` —
-the OTA snooze is a separate 4 h). **Prepare robot**
+the OTA snooze is separate: 30 min, then 1 h, then 2 h). **Prepare robot**
 appears only when Check says helpers or `updateInstead` are missing.
 A helper without `--no-build` is treated as missing (same Prepare CTA).
 
