@@ -428,6 +428,15 @@ AppShellWindow::AppShellWindow(QWidget* parent)
 
     repo_sync_ = new RepoSyncManager(this);
     robot_sync_poll_ = new QTimer(this);
+    robot_sync_retry_ = new QTimer(this);
+    robot_sync_retry_->setSingleShot(true);
+    robot_sync_retry_->setInterval(30 * 1000);
+    connect(robot_sync_retry_, &QTimer::timeout,
+            this, &AppShellWindow::onRobotSyncCheckTick);
+    // Check the robot's software at app open, not first Dashboard entry, so
+    // the banner is ready when the operator lands there. Queued so the rest
+    // of the constructor (reachability probe, banners) exists first.
+    QTimer::singleShot(0, this, [this]() { requestRobotSyncCheckNow(); });
     robot_sync_poll_->setInterval(5 * 60 * 1000);
     connect(robot_sync_poll_, &QTimer::timeout,
             this, &AppShellWindow::onRobotSyncCheckTick);
@@ -1286,6 +1295,10 @@ void AppShellWindow::goToStage3() {
     // Seed the Upload Data gate from robot status.json + the laptop
     // stick. Complete Mission does not wait on the copy; Dashboard does.
     stage3_->refreshThumbCopyStatus();
+    // Banners only show here, so make both checks fresh on arrival.
+    if (update_checker_) {
+        update_checker_->checkOnDashboardEntry();
+    }
     armRobotSync();
     // Ask on every Dashboard entry, not just the first: refreshRobotSyncBanner
     // alone only re-renders lastSnapshot(), which may be minutes stale or the
@@ -1509,16 +1522,15 @@ void AppShellWindow::showUpdateModal(const update::VersionInfo& info) {
 
     connect(modal, &UpdateModal::remindMeLaterRequested, this,
             [this](const update::VersionInfo& vi) {
-                Q_UNUSED(vi);
                 if (!update_checker_) return;
-                const qint64 until_ms =
-                    QDateTime::currentMSecsSinceEpoch() +
-                    update::kSnoozeDurationMs;
-                update_checker_->setSnoozedUntil(until_ms);
+                const qint64 duration_ms =
+                    update_checker_->snoozeRelease(vi.commitSha);
                 update::log::info(
                     "appshell",
-                    QStringLiteral("snooze 4h: until_ms=%1")
-                        .arg(until_ms));
+                    QStringLiteral("snooze %1 min: sha=%2 until_ms=%3")
+                        .arg(duration_ms / 60000)
+                        .arg(vi.commitSha.left(7))
+                        .arg(update_checker_->snoozedUntil()));
                 has_pending_update_ = false;
                 refreshUpdateBanner();
             });
@@ -1553,14 +1565,34 @@ bool AppShellWindow::isScanLaunchActive() const {
 }
 
 bool AppShellWindow::bannersAllowedNow() const {
+    // Dashboard only, and never while a scan is launching or running: an
+    // operator mid-mission must not be offered an install or a sync.
     const QWidget* page = stack_ ? stack_->currentWidget() : nullptr;
-    const bool on_home = page == stage1_ || (stage3_ && page == stage3_);
-    return on_home && !isScanLaunchActive();
+    return stage3_ && page == stage3_ && !isScanLaunchActive();
+}
+
+bool AppShellWindow::robotSyncBannerWanted() const {
+    if (!robot_sync_banner_ || !repo_sync_) {
+        return false;
+    }
+    const qint64 snooze = QSettings(kSettingsOrgName, kSettingsAppName)
+                              .value(kSettingsRobotSyncSnoozeKey, 0)
+                              .toLongLong();
+    const bool snoozed =
+        snooze > 0 && QDateTime::currentMSecsSinceEpoch() < snooze;
+    return repo_sync_->lastSnapshot().offer_update && !snoozed &&
+           bannersAllowedNow();
 }
 
 void AppShellWindow::refreshUpdateBanner() {
+    const bool ota = has_pending_update_ && bannersAllowedNow();
     if (update_banner_) {
-        update_banner_->setVisible(has_pending_update_ && bannersAllowedNow());
+        update_banner_->setVisible(ota);
+    }
+    if (robot_sync_banner_) {
+        // One banner at a time, OCU first: installing the OCU restarts the
+        // app, and the robot sync is offered once that is done or snoozed.
+        robot_sync_banner_->setVisible(robotSyncBannerWanted() && !ota);
     }
     refreshBannerHostVisibility();
 }
@@ -1629,23 +1661,23 @@ void AppShellWindow::refreshRobotSyncBanner() {
     if (!robot_sync_banner_) {
         return;
     }
-    const RepoSyncSnapshot snap =
-        repo_sync_ ? repo_sync_->lastSnapshot() : RepoSyncSnapshot{};
-    const qint64 snooze = QSettings(kSettingsOrgName, kSettingsAppName)
-                              .value(kSettingsRobotSyncSnoozeKey, 0)
-                              .toLongLong();
-    const bool snoozed =
-        snooze > 0 && QDateTime::currentMSecsSinceEpoch() < snooze;
-    const bool show =
-        snap.offer_update && !snoozed && bannersAllowedNow();
-    robot_sync_banner_->setSnapshot(snap);
-    robot_sync_banner_->setVisible(show);
-    refreshUpdateBanner();
+    robot_sync_banner_->setSnapshot(
+        repo_sync_ ? repo_sync_->lastSnapshot() : RepoSyncSnapshot{});
+    refreshUpdateBanner();  // sets both banners (OCU first)
 }
 
 void AppShellWindow::onRobotSyncSnapshot(const RepoSyncSnapshot& snap) {
     if (robot_sync_dialog_ && robot_sync_dialog_->isVisible()) {
         robot_sync_dialog_->setSnapshot(snap);
+    }
+    // Robot not reachable yet (often still booting when the app opens):
+    // retry in 30 s rather than at the next 5-min poll. Not during a scan.
+    if (robot_sync_retry_) {
+        if (!snap.robot_online && !isScanLaunchActive()) {
+            robot_sync_retry_->start();
+        } else {
+            robot_sync_retry_->stop();
+        }
     }
     refreshRobotSyncBanner();
 }

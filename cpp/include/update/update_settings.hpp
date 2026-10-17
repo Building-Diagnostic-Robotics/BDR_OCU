@@ -19,6 +19,12 @@ namespace f2c_cpp::update {
 /// Epoch-ms timestamp until which banner+modal must stay hidden. 0 = no snooze.
 inline constexpr const char* kKeySnoozeUntilMs = "update/snooze_until_ms";
 
+/// Release SHA the snooze count below belongs to.
+inline constexpr const char* kKeySnoozeSha = "update/snooze_sha";
+
+/// How many times kKeySnoozeSha has been snoozed (drives the back-off).
+inline constexpr const char* kKeySnoozeCount = "update/snooze_count";
+
 /// Master toggle for OTA polling. Default true. Set to false on an OCU
 /// that must stay on its current build regardless of what `latest`
 /// says (UpdateChecker::start() then never polls, and checkNow() is a
