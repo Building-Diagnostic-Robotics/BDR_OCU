@@ -361,6 +361,14 @@ MapCaptureRunner::MapCaptureRunner(QObject* parent) : QObject(parent) {
     timeout_ = new QTimer(this);
     timeout_->setSingleShot(true);
     connect(timeout_, &QTimer::timeout, this, &MapCaptureRunner::onTimeout);
+    retry_timer_ = new QTimer(this);
+    retry_timer_->setSingleShot(true);
+    connect(retry_timer_, &QTimer::timeout, this, [this] {
+        if (cancelling_ || stage_ != Stage::Collecting) {
+            return;
+        }
+        beginRemoteCollection(/*gate=*/true);
+    });
     connect(proc_, &QProcess::readyReadStandardOutput, this,
             &MapCaptureRunner::noteOutput);
     connect(proc_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -436,6 +444,8 @@ bool MapCaptureRunner::start(const QString& host, const QString& ssh_user,
     cancelling_ = false;
     identity_gate_cleared_ = false;
     collecting_announced_ = false;
+    connect_attempts_ = 0;
+    retry_timer_->stop();
     beginRemoteCollection(/*gate=*/true);
     return true;
 }
@@ -509,6 +519,9 @@ QString MapCaptureRunner::collectionScript(bool gate) const {
 void MapCaptureRunner::beginRemoteCollection(bool gate) {
     stage_ = Stage::Collecting;
     collecting_announced_ = !gate;
+    if (gate) {
+        ++connect_attempts_;
+    }
     const QString script = collectionScript(gate);
     QStringList args = sshBaseArgs();
     // Concatenate, don't arg(): the identity prefix contains `%s`, and a
@@ -540,6 +553,7 @@ void MapCaptureRunner::cancel() {
         return;
     }
     timeout_->stop();
+    retry_timer_->stop();
     if (robotRunMayBeLive()) {
         startRobotStop(QStringLiteral("Map collection cancelled."));
         return;
@@ -568,10 +582,28 @@ void MapCaptureRunner::startRobotStop(const QString& reason) {
 
 void MapCaptureRunner::fail(const QString& message) {
     timeout_->stop();
+    retry_timer_->stop();
+    log(QStringLiteral("[capture] failed: %1").arg(message));
     stage_ = Stage::Idle;
     MapCapture capture;
     capture.error = message;
     emit finished(capture);
+}
+
+void MapCaptureRunner::log(const QString& line) {
+    emit logLine(line);
+    if (local_dir_.isEmpty()) {
+        return;
+    }
+    QFile file(local_dir_ + QStringLiteral("/capture.log"));
+    if (file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        file.write(QDateTime::currentDateTime()
+                       .toString(Qt::ISODateWithMs)
+                       .toUtf8());
+        file.write(" ");
+        file.write(line.toUtf8());
+        file.write("\n");
+    }
 }
 
 void MapCaptureRunner::onTimeout() {
@@ -615,6 +647,30 @@ void MapCaptureRunner::onProcessFinished(int exit_code) {
                            .arg(stop_reason_));
             return;
         case Stage::Collecting: {
+            log(QStringLiteral("[capture] ssh rc=%1 attempt=%2 gated=%3\n%4")
+                    .arg(exit_code)
+                    .arg(connect_attempts_)
+                    .arg(identity_gate_cleared_ ? 0 : 1)
+                    .arg(output.trimmed().right(4000)));
+            // The gated script prints the ID line before anything else. No
+            // line at all means SSH never ran it (radio drop, connect
+            // timeout), so nothing was launched and a retry is safe. This
+            // must not be read as "no ID on file".
+            if (!identity_gate_cleared_ && !collecting_announced_ &&
+                !output.contains(QLatin1String(kRobotIdentityMarker))) {
+                if (connect_attempts_ < kMaxConnectAttempts) {
+                    log(QStringLiteral("[capture] robot not reached; retrying "
+                                       "in %1 ms")
+                            .arg(kConnectRetryDelayMs));
+                    retry_timer_->start(kConnectRetryDelayMs);
+                    return;
+                }
+                fail(QStringLiteral("Could not reach the robot after %1 "
+                                    "attempts (ssh rc=%2).")
+                         .arg(kMaxConnectAttempts)
+                         .arg(exit_code));
+                return;
+            }
             const RobotIdentityReport id =
                 classifyRobotIdentity(expected_robot_id_, output);
             switch (decideCaptureIdentity(id.verdict, identity_gate_cleared_)) {
@@ -631,9 +687,11 @@ void MapCaptureRunner::onProcessFinished(int exit_code) {
                 }
                 case CaptureIdentityDecision::WarnAndRecollect: {
                     identity_gate_cleared_ = true;
-                    emit identityUnchecked(
-                        robotIdentityUnreadableText(expected_robot_id_) +
-                        QStringLiteral("\n\nMap collection will continue."));
+                    // Not blocking and not shown: Send continues in the same
+                    // case. Logged so a robot missing its ID file is found.
+                    log(QStringLiteral("[capture] %1 Continuing.")
+                            .arg(robotIdentityUnreadableText(
+                                expected_robot_id_)));
                     if (cancelling_ || stage_ != Stage::Collecting) {
                         return;
                     }
