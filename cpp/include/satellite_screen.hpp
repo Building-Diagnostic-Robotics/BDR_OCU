@@ -556,6 +556,11 @@ private:
     void startMetadataPushLoop();
     void stopMetadataPushLoop();
     void attemptMetadataPush();
+    /** Log whether the robot recorded this mission's OCU log id. */
+    void reportMissionLogLink(const QString& log_id, bool linked,
+                              const QString& why_not);
+    /** SSH fallback: ocu_log_id in a separate, best-effort call. */
+    void pushMissionLogIdOverSsh();
     /** Both push paths land here; resumes a pending Start Scan. */
     void onMetadataPushed(const QString& via);
     void updateBotPill();

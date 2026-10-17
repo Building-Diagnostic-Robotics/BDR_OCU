@@ -2,6 +2,7 @@
 
 #include "async_process.hpp"
 #include "launch_env.hpp"
+#include "ocu_log_store.hpp"
 #include "robot_registry.hpp"
 
 #include <QCoreApplication>
@@ -12,6 +13,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QStandardPaths>
 
 #include <algorithm>
@@ -219,26 +221,27 @@ void MissionController::noteLaunchIdentity(const QString& line) {
         Qt::QueuedConnection);
 }
 
+QString MissionController::missionLogId() const {
+    return mission_log_path_.isEmpty()
+               ? QString()
+               : QFileInfo(mission_log_path_).completeBaseName();
+}
+
 void MissionController::openMissionLog() {
     closeMissionLog();
-    const QString dir_path =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
-        QStringLiteral("/mission_logs");
-    QDir dir(dir_path);
-    if (!dir.mkpath(QStringLiteral("."))) {
+    const QString dir_path = ocu_logs::storeDir();
+    if (dir_path.isEmpty()) {
         return;
     }
-    // QDir::Time is newest-first, so everything from index kMissionLogsKept-1
-    // on is the oldest: dropping them leaves room for the one about to open.
-    const QFileInfoList existing = dir.entryInfoList(
-        {QStringLiteral("*.log")}, QDir::Files, QDir::Time);
-    for (int i = kMissionLogsKept - 1; i < existing.size(); ++i) {
-        QFile::remove(existing.at(i).absoluteFilePath());
-    }
-    const QString path =
-        dir.filePath(QStringLiteral("mission_%1.log")
-                         .arg(QDateTime::currentDateTime().toString(
-                             QStringLiteral("yyyyMMdd_hhmmss"))));
+    QDir dir(dir_path);
+    const QString id = QStringLiteral("mission_%1").arg(
+        QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_hhmmss")));
+    // Space only, like the robot's data: logs go only when the laptop is
+    // short of disk, uploaded ones first. Nothing is deleted for age.
+    const ocu_logs::PruneResult pruned = ocu_logs::prune(
+        dir_path, ocu_logs::kFreeFloorBytes,
+        [dir_path] { return ocu_logs::freeBytesAt(dir_path); }, id);
+    const QString path = dir.filePath(id + QLatin1String(ocu_logs::kLogSuffix));
     auto* file = new QFile(path, this);
     if (!file->open(QIODevice::WriteOnly | QIODevice::Append |
                     QIODevice::Text)) {
@@ -247,6 +250,24 @@ void MissionController::openMissionLog() {
     }
     mission_log_ = file;
     mission_log_path_ = path;
+    mission_log_opened_epoch_s_ = QDateTime::currentSecsSinceEpoch();
+    // After the open, so these land in the new log.
+    if (!pruned.deleted_uploaded.isEmpty()) {
+        emit logLine(QStringLiteral("[logs] low disk: removed %1 uploaded mission log(s)")
+                         .arg(pruned.deleted_uploaded.size()));
+    }
+    if (!pruned.deleted_not_uploaded.isEmpty()) {
+        emit logLine(QStringLiteral(
+                         "[logs] WARNING low disk: removed %1 mission log(s) that "
+                         "were never uploaded: %2")
+                         .arg(pruned.deleted_not_uploaded.size())
+                         .arg(pruned.deleted_not_uploaded.join(QStringLiteral(", "))));
+    }
+    if (!pruned.floor_reached) {
+        emit logLine(QStringLiteral(
+            "[logs] WARNING laptop disk is below 10 GB free even after "
+            "removing old mission logs"));
+    }
 }
 
 void MissionController::closeMissionLog() {
@@ -258,6 +279,54 @@ void MissionController::closeMissionLog() {
     mission_log_ = nullptr;
     // mission_log_path_ deliberately survives: the failure dialogs shown
     // after teardown still need to name the file.
+    startLaptopRosLogBundle();
+}
+
+namespace {
+
+/// Installed beside uploader.py; dev builds use cpp/scripts/.
+QString resolveRosLogBundleScript() {
+    QStringList candidates{
+        QStringLiteral("/usr/share/bdr-coverage-planner/ros_log_bundle.py")};
+    const QString app_dir = QCoreApplication::instance()
+                                ? QCoreApplication::applicationDirPath()
+                                : QString();
+    if (!app_dir.isEmpty()) {
+        candidates << QDir(app_dir).filePath(QStringLiteral("../scripts/ros_log_bundle.py"))
+                   << QDir(app_dir).filePath(QStringLiteral("scripts/ros_log_bundle.py"));
+    }
+    for (const QString& c : candidates) {
+        const QFileInfo fi(c);
+        if (fi.isFile() && fi.isReadable()) {
+            return fi.canonicalFilePath();
+        }
+    }
+    return QString();
+}
+
+}  // namespace
+
+void MissionController::startLaptopRosLogBundle() {
+    const QString id = missionLogId();
+    const QString script = resolveRosLogBundleScript();
+    if (id.isEmpty() || mission_log_opened_epoch_s_ <= 0 || script.isEmpty()) {
+        return;
+    }
+    const QString out = QFileInfo(mission_log_path_).absoluteDir().filePath(
+        id + QLatin1String(ocu_logs::kLaptopRosSuffix));
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    // Window: 2 min before the log opened (the launch starts right after)
+    // to 35 s from now. The packer waits up to 30 s for a laptop launch
+    // still exiting so its last lines are on disk. Detached: never holds
+    // up teardown or the next launch, and survives the app closing.
+    const QStringList args{
+        script,
+        QStringLiteral("--since"), QString::number(mission_log_opened_epoch_s_ - 120),
+        QStringLiteral("--until"), QString::number(now + 35),
+        QStringLiteral("--out"), out,
+        QStringLiteral("--wait-launch-secs"), QStringLiteral("30")};
+    mission_log_opened_epoch_s_ = 0;
+    QProcess::startDetached(QStringLiteral("python3"), args);
 }
 
 void MissionController::appendMissionLog(const QString& line) {

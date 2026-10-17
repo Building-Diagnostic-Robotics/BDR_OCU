@@ -186,6 +186,13 @@ if [ ! -f "${SCRIPTS_DIR}/uploader.py" ]; then
     exit 1
 fi
 cp "${SCRIPTS_DIR}/uploader.py" "$DEB_DIR/usr/share/bdr-coverage-planner/uploader.py"
+# Packs the laptop's ROS logs of each mission next to its OCU log
+# (MissionController::closeMissionLog). Stdlib only.
+if [ ! -f "${SCRIPTS_DIR}/ros_log_bundle.py" ]; then
+    echo "Error: ros_log_bundle.py missing at ${SCRIPTS_DIR}/ros_log_bundle.py"
+    exit 1
+fi
+cp "${SCRIPTS_DIR}/ros_log_bundle.py" "$DEB_DIR/usr/share/bdr-coverage-planner/ros_log_bundle.py"
 
 # Create launcher script
 echo "Creating launcher script..."

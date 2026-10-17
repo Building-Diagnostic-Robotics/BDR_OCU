@@ -314,6 +314,17 @@ class RecordTests(unittest.TestCase):
             write(os.path.join(tmp, "manifest.json"), b"not-json")
             self.assertIn("unreadable", uploader.manifest_size_drift(tmp))
 
+    def test_ocu_log_paths_are_exact(self):
+        ok = uploader.is_ocu_log
+        self.assertTrue(ok("logs/ocu/mission_1.log"))
+        self.assertTrue(ok("logs/ocu/mission_1.laptop_ros_logs.tar.gz"))
+        self.assertFalse(ok("logs/ocu/"))
+        self.assertFalse(ok("logs/ocu/sub/x.log"))
+        self.assertFalse(ok("logs/ocu/.hidden"))
+        self.assertFalse(ok("logs/ocu/mission_1.log.part"))
+        self.assertFalse(ok("logs/other.log"))
+        self.assertFalse(ok("Visual_data/logs/ocu/x.log"))
+
     def test_parse_cli_accepts_force_only_as_the_last_arg(self):
         self.assertEqual(
             uploader.parse_cli(["/data", "robot", "run/id"]),
@@ -723,6 +734,31 @@ class PutTests(UploadCase):
         self.assertNotIn("photo.jpg", rels)
         self.assertIn("a.bin", rels)
         self.assertEqual(out.count("photo.jpg"), 1)
+
+    def test_ocu_logs_on_a_mission_upload_although_not_in_the_record(self):
+        day = os.path.join(self.root, "October_09_2026", "BNY")
+        mission = os.path.join(day, "Mission_120000")
+        cfg = b'{"ocu_logs": ["mission_20261009_115900"]}'
+        write(os.path.join(mission, "mission_config.json"), cfg)
+        write(os.path.join(mission, uploader.THUMB_MANIFEST), json.dumps({
+            "schema": 2, "sections": [],
+            "files": {"Mission_120000/mission_config.json": {
+                "size": len(cfg), "sha256": hashlib.sha256(cfg).hexdigest()}},
+        }).encode())
+        ocu = os.path.join(mission, "logs", "ocu")
+        write(os.path.join(ocu, "mission_20261009_115900.log"), b"ocu")
+        write(os.path.join(ocu, "mission_20261009_115900.laptop_ros_logs.tar.gz"), b"tgz")
+        write(os.path.join(ocu, "mission_20261009_115900.log.part"), b"half")
+        write(os.path.join(mission, "logs", "stray.txt"), b"not ocu")
+        rc, out = self.run_upload(mission)
+        self.assertEqual(rc, 0, out)
+        rels = {rec["rel"] for rec in self.puts()}
+        self.assertIn("logs/ocu/mission_20261009_115900.log", rels)
+        self.assertIn("logs/ocu/mission_20261009_115900.laptop_ros_logs.tar.gz", rels)
+        self.assertIn("mission_config.json", rels)
+        self.assertNotIn("logs/ocu/mission_20261009_115900.log.part", rels)
+        self.assertNotIn("logs/stray.txt", rels)
+        self.assertNotIn("logs/ocu/mission_20261009_115900.log is not", out)
 
     def test_unreadable_sibling_manifest_blocks_the_section(self):
         section = self.stick_section({"a.bin": b"abc"})

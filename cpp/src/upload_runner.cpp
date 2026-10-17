@@ -5,6 +5,8 @@
 
 #include "upload_runner.hpp"
 
+#include "ocu_log_store.hpp"
+
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -936,6 +938,9 @@ UploadTarget UploadRunner::activeTarget() const {
 
 void UploadRunner::resetQueueState() {
     busy_ = false;
+    // An attach still copying belongs to the queue being dropped.
+    attach_pending_ = false;
+    ++attach_seq_;
     cancel_requested_ = false;
     paused_during_target_ = false;
     pause_reason_.clear();
@@ -1040,6 +1045,71 @@ void UploadRunner::launchActiveTarget() {
     // Pause would stop this run at its first file boundary.
     clearPauseFlag(target);
 
+    // The laptop's own log of this mission goes up with it. Only before
+    // the first full upload: once manifest.json exists, adding a file
+    // would just force a re-upload. Off the GUI thread: a long mission's
+    // log can be tens of MB on a slow stick.
+    if (source_ == UploadSource::ThumbDrive && target.isMission() &&
+        !ocu_logs::missionAlreadyUploaded(target.data_path)) {
+        const QString mission = target.data_path;
+        const QString store = ocuLogStoreDir();
+        const int seq = ++attach_seq_;
+        const bool first_attempt = retry_attempts_done_ == 0;
+        attach_pending_ = true;
+        auto* watcher = new QFutureWatcher<ocu_logs::AttachResult>(this);
+        connect(watcher, &QFutureWatcher<ocu_logs::AttachResult>::finished, this,
+                [this, watcher, seq, first_attempt]() {
+                    const ocu_logs::AttachResult r = watcher->result();
+                    watcher->deleteLater();
+                    if (seq != attach_seq_ || current_index_ < 0 ||
+                        current_index_ >= queue_.size()) {
+                        return;  // cancelled meanwhile
+                    }
+                    attach_pending_ = false;
+                    if (!r.copied.isEmpty()) {
+                        emit logLine(QStringLiteral("OCU logs added: %1")
+                                         .arg(r.copied.join(QStringLiteral(", "))));
+                    }
+                    if (!r.error.isEmpty()) {
+                        emit logLine(QStringLiteral(
+                                         "OCU logs not added (%1); uploading "
+                                         "the scan data without them")
+                                         .arg(r.error));
+                    }
+                    if (!r.missing.isEmpty() && first_attempt) {
+                        emit logLine(QStringLiteral(
+                                         "OCU log %1 is not on this laptop "
+                                         "(run from another OCU?)")
+                                         .arg(r.missing.join(QStringLiteral(", "))));
+                    }
+                    const UploadTarget current = queue_.at(current_index_);
+                    if (paused_during_target_) {
+                        // Paused while copying: same outcome as a pause
+                        // before the first file.
+                        emit targetPaused(current,
+                                          pause_reason_.isEmpty()
+                                              ? QStringLiteral("Paused")
+                                              : pause_reason_);
+                        busy_ = false;
+                        emit queueFinished(false);
+                        return;
+                    }
+                    spawnUploader(current);
+                });
+        watcher->setFuture(QtConcurrent::run([mission, store]() {
+            return ocu_logs::attachToMission(mission, store);
+        }));
+        return;
+    }
+    spawnUploader(target);
+}
+
+QString UploadRunner::ocuLogStoreDir() const {
+    return ocu_log_store_dir_.isEmpty() ? ocu_logs::storeDir()
+                                        : ocu_log_store_dir_;
+}
+
+void UploadRunner::spawnUploader(const UploadTarget& target) {
     proc_ = new QProcess(this);
     proc_->setProcessChannelMode(QProcess::SeparateChannels);
     connect(proc_, &QProcess::readyReadStandardOutput,
@@ -1128,6 +1198,15 @@ void UploadRunner::clearPauseFlag(const UploadTarget& target) {
 }
 
 void UploadRunner::requestPause() {
+    if (busy_ && attach_pending_ && current_index_ >= 0 &&
+        current_index_ < queue_.size()) {
+        // Still copying the OCU logs: stop before the uploader starts.
+        paused_during_target_ = true;
+        if (pause_reason_.isEmpty()) {
+            pause_reason_ = QStringLiteral("Operator paused");
+        }
+        return;
+    }
     if (!busy_ || !proc_ || current_index_ < 0 ||
         current_index_ >= queue_.size()) {
         return;
@@ -1433,6 +1512,10 @@ void UploadRunner::onProcessFinished(int exit_code,
         return;
     }
 
+    if (source_ == UploadSource::ThumbDrive && current.isMission()) {
+        // Uploaded logs are the first to go when the laptop runs short.
+        ocu_logs::markUploaded(current.data_path, ocuLogStoreDir());
+    }
     emit targetCompleted(current);
     current_index_ += 1;
     launchNext();

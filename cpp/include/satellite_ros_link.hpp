@@ -188,11 +188,18 @@ public:
      * the callback fires false immediately (the caller retries on a
      * timer while the robot stack boots). Callback is marshalled to the
      * GUI thread.
+     *
+     * `ocu_log_id` (optional, sent as a 4th parameter when non-empty)
+     * links this mission to the OCU log of it. It never gates: `ok` is
+     * the first three parameters only, because a robot without the
+     * parameter rejects it and must still arm. `log_linked` says whether
+     * the robot took it.
      */
     void pushSessionMetadata(const QString& building_name,
                              const QString& operator_name,
                              const QString& units_preference,
-                             std::function<void(bool ok)> on_complete);
+                             const QString& ocu_log_id,
+                             std::function<void(bool ok, bool log_linked)> on_complete);
 
     // Telemetry snapshots (safe from GUI thread).
     GridSnapshot gridSnapshot() const;

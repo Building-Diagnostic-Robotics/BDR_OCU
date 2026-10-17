@@ -1046,12 +1046,16 @@ void SatelliteScreen::attemptMetadataPush() {
         settings.value(kSettingsOperatorNameKey).toString();
     const QString units_pref =
         units::toString(UnitsProvider::instance()->units());
+    const QString log_id = mission_->missionLogId();
     ros_->pushSessionMetadata(
-        building, operator_name, units_pref, [this](bool ok) {
+        building, operator_name, units_pref, log_id,
+        [this, log_id](bool ok, bool log_linked) {
             if (!mission_->missionActive() || metadata_pushed_) {
                 return;
             }
             if (ok) {
+                reportMissionLogLink(log_id, log_linked,
+                                     QStringLiteral("not accepted by the robot"));
                 onMetadataPushed(QStringLiteral("by coordinator"));
                 return;
             }
@@ -1103,6 +1107,7 @@ void SatelliteScreen::attemptMetadataPush() {
                         // "successful=False" is acceptance.
                         if (ssh_ok && !detail.contains(
                                           QLatin1String("successful=False"))) {
+                            pushMissionLogIdOverSsh();
                             onMetadataPushed(QStringLiteral("via SSH"));
                         } else {
                             appendLog(QStringLiteral(
@@ -1111,6 +1116,48 @@ void SatelliteScreen::attemptMetadataPush() {
                         }
                     });
             }
+        });
+}
+
+void SatelliteScreen::reportMissionLogLink(const QString& log_id, bool linked,
+                                           const QString& why_not) {
+    if (log_id.isEmpty()) {
+        return;
+    }
+    if (linked) {
+        appendLog(QStringLiteral("[send] mission log %1 linked to this mission")
+                      .arg(log_id));
+    } else {
+        // Never blocks the scan: only the upload loses this laptop's log.
+        appendLog(QStringLiteral(
+                      "[send] mission log id %1 %2 (robot software older than "
+                      "this OCU?) — this mission's upload will not include "
+                      "the OCU log")
+                      .arg(log_id, why_not));
+    }
+}
+
+void SatelliteScreen::pushMissionLogIdOverSsh() {
+    // Its own call, after the gating three landed: an older robot rejects
+    // an unknown parameter, and that must not fail the arming push.
+    const QString log_id = mission_->missionLogId();
+    if (log_id.isEmpty()) {
+        return;
+    }
+    const QString request =
+        QStringLiteral("{parameters: [{name: ocu_log_id, value: {type: 4, "
+                       "string_value: \"%1\"}}]}")
+            .arg(log_id);  // sanitised id: [A-Za-z0-9._-] only
+    mission_->remoteServiceCall(
+        QStringLiteral("/data_collection_coordinator/set_parameters"),
+        QStringLiteral("rcl_interfaces/srv/SetParameters"), request,
+        [this, log_id](bool ssh_ok, const QString& detail) {
+            const bool linked =
+                ssh_ok && !detail.contains(QLatin1String("successful=False"));
+            reportMissionLogLink(
+                log_id, linked,
+                ssh_ok ? QStringLiteral("not accepted by the robot")
+                       : QStringLiteral("not sent (%1)").arg(detail));
         });
 }
 

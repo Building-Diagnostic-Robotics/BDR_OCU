@@ -971,7 +971,8 @@ clearing, `FailedToStart` handling).
   re-upload starts and never uploads it. The robot's
   `rdata_thumbdrive_sync.py` treats a destination with
   `thumbsync_manifest.json` as done and never re-copies, so anything
-  else the laptop leaves there is permanent.
+  else the laptop leaves there is permanent. The second exception is
+  `<Mission>/logs/ocu/` (see **Mission logs in the upload** below).
 - The SSH fallback **must NOT** go through `ros2 run` — invoke
   `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`
   directly.
@@ -989,6 +990,37 @@ clearing, `FailedToStart` handling).
   the manifest does not list, and still requires `manifest.json`.
 - **Do NOT batch more than one `run_id` into a `/verify` call.** A
   large section's listing is ~0.5 MB and Lambda responses cap at 6 MB.
+- **Mission logs in the upload.** Each mission's upload carries its
+  logs, matched exactly, never by clock:
+  - *Robot ROS logs, per section.* The moment a mission completes, the
+    robot's offload worker (drive or no drive) cuts `~/.ros/log` by the
+    timestamp on each line (`ros_log_bundle.py`): each saved section gets
+    its own start..end lines in `<Section>/logs/robot_ros_logs.tar.gz`; the
+    mission gets the rest (startup from start − 120 s, between sections, up
+    to completion) in `<Mission>/logs/robot_ros_logs.tar.gz`. Every line
+    lands once; teardown after completion is not included. ≤ 100 MiB per
+    archive. They are in the copy record like any data file;
+    `mission_config.json` `robot_ros_logs` records what was packed.
+  - *OCU log + laptop ROS logs.* The OCU pushes `ocu_log_id`
+    (`mission_<yyyyMMdd_hhmmss>`, the log's file name) with the Stage 6
+    metadata; the coordinator lists it in `mission_config.json`
+    `ocu_logs`. On teardown `MissionController::closeMissionLog` starts
+    `ros_log_bundle.py` detached → `<id>.laptop_ros_logs.tar.gz` beside
+    the `.log`. Before a Mission_* target uploads, `UploadRunner` copies
+    exactly the listed ids (`ocu_log_store.hpp`) to `<Mission>/logs/ocu/`
+    on a worker thread; `uploader.py` uploads that folder although the
+    copy record does not list it (`is_ocu_log`). After the upload, the
+    ids are marked `<id>.uploaded`.
+  - **`ocu_log_id` never gates arming.** Success is the first three
+    parameters only; a robot without the parameter rejects the 4th and
+    must still arm. The SSH fallback sends it as its own call.
+  - **Laptop retention is by free space only** (`kFreeFloorBytes`
+    10 GiB): uploaded logs oldest first, then not-uploaded (logged as a
+    WARNING), never the log being written. No age or count limit.
+  - `scripts/ros_log_bundle.py` is byte-for-byte the robot's
+    `pilot_control/scripts/ros_log_bundle.py`; change both.
+  - Nothing is attached once `manifest.json` exists (it would only force
+    a re-upload).
 - **A failed or offline cloud check must leave rows Uploaded.** Do not
   mark a section missing because the check itself could not run.
 - **Do NOT mark a row missing when its manifest names a different
@@ -1942,7 +1974,8 @@ an optional Advanced dropdown for pinning a dated mosaic release.
  name the mission log instead. Every line the screen displays goes through
  `SatelliteScreen::appendLog` → `MissionController::appendMissionLog`, which
  is the ONE choke point writing `AppData/mission_logs/mission_<stamp>.log`
- (flushed per line, newest `kMissionLogsKept = 10` kept). Do not also write
+ (flushed per line; pruned by free space only, see `ocu_log_store.hpp`
+ and **Mission logs in the upload**). Do not also write
  from `hookProcessLogging` — process output would land twice — and do not
  re-log `recentRobotOutput()` at failure time for the same reason.
 - **Send and Capture Point Cloud check `/etc/pilot_robot_id`.** The
