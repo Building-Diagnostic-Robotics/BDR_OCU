@@ -568,12 +568,8 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
                 BdrMessageBox::warning(this, QStringLiteral("Wrong robot"),
                                        message);
             });
-    connect(map_capture_, &MapCaptureRunner::identityUnchecked, this,
-            [this](const QString& message) {
-                appendLog(QStringLiteral("[align] %1").arg(message));
-                BdrMessageBox::warning(
-                    this, QStringLiteral("Robot ID not confirmed"), message);
-            });
+    connect(map_capture_, &MapCaptureRunner::logLine, this,
+            [this](const QString& line) { appendLog(line); });
 
     // ---- Map <-> rail sync ----
     connect(map_, &SatelliteMapWidget::roiChanged, this, [this] {
@@ -6297,6 +6293,10 @@ QString SatelliteScreen::captureErrorForOperator(const QString& raw) {
         return QStringLiteral(
             "The robot couldn't be cleared for capture. Restart the robot "
             "and try again.");
+    }
+    if (raw.startsWith(QLatin1String("Could not reach the robot"))) {
+        return QStringLiteral(
+            "Can't reach the robot. Check the radio and try again.");
     }
     if (raw.startsWith(QLatin1String("Timed out"))) {
         return QStringLiteral(
