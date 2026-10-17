@@ -7276,6 +7276,7 @@ void SatelliteScreen::onScanCancelClicked() {
             QStringLiteral("Cancel Mission"))) {
         return;
     }
+    operator_ended_mission_ = true;
     setAutonomyEnabled(false);
     // The abort RPC alone can take ~10 s (bridge, then SSH), so the modal
     // goes up on the click rather than when the teardown chain starts.
@@ -7395,18 +7396,22 @@ void SatelliteScreen::maybePromptRevisit() {
 }
 
 void SatelliteScreen::maybePromptMissionDone(const CoverageStatus& status) {
-    mission_done_notice_policy::Inputs in;
+    namespace dn = mission_done_notice_policy;
+    dn::Inputs in;
+    in.status_fresh = status.valid && status.fresh(kDirectorFreshMs);
     in.robot_complete = status.state == QLatin1String("COMPLETE");
-    in.status_fresh = status.fresh(kDirectorFreshMs);
-    in.mission_active = mission_->missionActive();
-    in.tearing_down = mission_->tearingDown();
+    in.mission_live = mission_->missionActive() && !mission_->tearingDown();
     in.autonomy_ran = scan_autonomy_ran_;
-    in.operator_finishing = complete_mission_in_flight_;
-    in.already_shown = done_notice_shown_;
-    if (!mission_done_notice_policy::shouldShow(in)) {
+    in.operator_ended = operator_ended_mission_ || complete_mission_in_flight_;
+    in.manual_override = manual_override_;
+    const dn::Output out = dn::step(done_notice_, in);
+    done_notice_ = out.next;
+    if (out.close) {
+        closePrompt(done_box_);
+    }
+    if (!out.show) {
         return;
     }
-    done_notice_shown_ = true;
     appendLog(QStringLiteral("[scan] coverage complete — notified operator"));
     // The revisit question is moot once the robot has finished.
     closePrompt(revisit_box_);
@@ -7414,19 +7419,40 @@ void SatelliteScreen::maybePromptMissionDone(const CoverageStatus& status) {
     // which the launch can die underneath the operator.
     auto* box = makeSatPrompt(
         this, QStringLiteral("Scan complete"),
-        QStringLiteral("The robot finished scanning the roof."),
-        QStringLiteral("Complete Mission"), QStringLiteral("Later"));
+        QStringLiteral("The robot has finished the scan."),
+        QStringLiteral("Complete Mission"),
+        QStringLiteral("Drive back first"));
     box->setAttribute(Qt::WA_DeleteOnClose);
     box->setModal(false);
+    // Escape also rejects, so manual mode hangs off the button itself:
+    // dismissing the notice must never take control of the robot.
+    for (QPushButton* button : box->findChildren<QPushButton*>()) {
+        if (button->objectName() == QLatin1String("Accept")) {
+            continue;
+        }
+        disconnect(button, &QPushButton::clicked, box, &QDialog::reject);
+        connect(button, &QPushButton::clicked, box, [box] {
+            box->setProperty("drive_back", true);
+            box->reject();
+        });
+    }
     done_box_ = box;
-    connect(box, &QDialog::finished, this, [this](int result) {
+    connect(box, &QDialog::finished, this, [this, box](int result) {
         if (result == kPromptAutoClosed) {
             return;
         }
         done_box_ = nullptr;
-        if (result == QDialog::Accepted && mission_->missionActive()) {
+        if (!mission_->missionActive() || mission_->tearingDown()) {
+            return;
+        }
+        if (result == QDialog::Accepted) {
             // This prompt was the confirmation.
             completeMission(/*ask_confirm=*/false);
+        } else if (box->property("drive_back").toBool()) {
+            // Same as a click on the camera view. Complete Mission stays in
+            // the footer for when the robot is back.
+            appendLog(QStringLiteral("[scan] drive back first — manual control"));
+            setManualOverride(true);
         }
     });
     centerSatPrompt(box, this);
@@ -7861,6 +7887,7 @@ void SatelliteScreen::completeMission(bool ask_confirm) {
         return;
     }
     complete_mission_in_flight_ = true;
+    operator_ended_mission_ = true;
     setAutonomyEnabled(false);
 
     // Data-first branch. On a truly dead link the disarm wait and the
@@ -9291,7 +9318,8 @@ void SatelliteScreen::clearAttention() {
     attention_ = {};
     attention_last_stop_.clear();
     revisit_hold_ = false;
-    done_notice_shown_ = false;
+    done_notice_ = {};
+    operator_ended_mission_ = false;
     closePrompt(attention_box_);
     closePrompt(revisit_box_);
     closePrompt(done_box_);

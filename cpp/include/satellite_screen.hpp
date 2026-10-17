@@ -472,7 +472,8 @@ private:
     void handleLaunchDeath(const QString& side, int exit_code);
     void maybePromptRevisit();
     /** Once per mission, when the robot finishes coverage on its own
-        (mission_done_notice_policy). Offers Complete Mission. */
+        (mission_done_notice_policy). Offers Complete Mission or driving
+        the robot back by hand first. */
     void maybePromptMissionDone(const CoverageStatus& status);
     /** Raise / remind / auto-close the "robot needs help" prompt
         (attention_policy). Runs on every status sample. */
@@ -971,7 +972,10 @@ private:
     bool manual_override_ = false;
     QPointer<QDialog> revisit_box_;
     QPointer<QDialog> done_box_;
-    bool done_notice_shown_ = false;  // "Scan complete" shown this mission
+    mission_done_notice_policy::Tracker done_notice_{};
+    // Sticky for the mission: the operator asked to end it (Complete
+    // Mission, Finish scan, Cancel), even if that attempt was cancelled.
+    bool operator_ended_mission_ = false;
     attention_policy::Tracker attention_{};
     QPointer<QDialog> attention_box_;
     // Last stop/stale reason seen since progress, for the prompt text.

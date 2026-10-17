@@ -1,6 +1,6 @@
 /**
  * @file mission_done_notice_policy_tests.cpp
- * @brief Stage 6 "scan complete" notice rule.
+ * @brief Stage 6 "scan complete" notice rule — must never misfire.
  */
 
 #include "mission_done_notice_policy.hpp"
@@ -10,63 +10,83 @@
 namespace policy = f2c_cpp::mission_done_notice_policy;
 
 namespace {
-// The robot finished on its own during a live autonomous mission.
-policy::Inputs finishedOnItsOwn() {
+policy::Inputs live(bool complete) {
     policy::Inputs in;
-    in.robot_complete = true;
     in.status_fresh = true;
-    in.mission_active = true;
-    in.tearing_down = false;
+    in.robot_complete = complete;
+    in.mission_live = true;
     in.autonomy_ran = true;
-    in.operator_finishing = false;
-    in.already_shown = false;
     return in;
+}
+
+// Robot seen working after Start, then reports COMPLETE.
+policy::Tracker afterWorking() {
+    return policy::step({}, live(false)).next;
 }
 }  // namespace
 
-TEST(MissionDoneNoticePolicy, ShowsWhenRobotFinishesOnItsOwn) {
-    EXPECT_TRUE(policy::shouldShow(finishedOnItsOwn()));
+TEST(MissionDoneNoticePolicy, ShowsOnWorkingToComplete) {
+    const auto out = policy::step(afterWorking(), live(true));
+    EXPECT_TRUE(out.show);
+    EXPECT_TRUE(out.next.shown);
 }
 
 TEST(MissionDoneNoticePolicy, OnlyOncePerMission) {
-    auto in = finishedOnItsOwn();
-    in.already_shown = true;
-    EXPECT_FALSE(policy::shouldShow(in));
+    auto t = policy::step(afterWorking(), live(true)).next;
+    EXPECT_FALSE(policy::step(t, live(true)).show);
+    // Even if the state wobbles and returns.
+    t = policy::step(t, live(false)).next;
+    EXPECT_FALSE(policy::step(t, live(true)).show);
 }
 
-TEST(MissionDoneNoticePolicy, SilentWhenOperatorFinished) {
-    // Complete Mission (or "Finish scan" on the revisit prompt) also ends in
-    // COMPLETE; the operator already knows.
-    auto in = finishedOnItsOwn();
-    in.operator_finishing = true;
-    EXPECT_FALSE(policy::shouldShow(in));
+TEST(MissionDoneNoticePolicy, NeverOnACompleteThatWasAlreadyThere) {
+    // First fresh status of the mission already reads COMPLETE.
+    EXPECT_FALSE(policy::step({}, live(true)).show);
 }
 
-TEST(MissionDoneNoticePolicy, SilentWhileNotComplete) {
-    // Includes ERROR: a failed save outranks COMPLETE on the robot.
-    auto in = finishedOnItsOwn();
-    in.robot_complete = false;
-    EXPECT_FALSE(policy::shouldShow(in));
-}
-
-TEST(MissionDoneNoticePolicy, SilentOnStaleStatus) {
-    auto in = finishedOnItsOwn();
-    in.status_fresh = false;
-    EXPECT_FALSE(policy::shouldShow(in));
-}
-
-TEST(MissionDoneNoticePolicy, SilentWhenAutonomyNeverRan) {
-    // A leftover COMPLETE from before this mission's first Start.
-    auto in = finishedOnItsOwn();
+TEST(MissionDoneNoticePolicy, WorkingBeforeAutonomyDoesNotCount) {
+    // Status seen before Start (autonomy never ran) does not arm it.
+    auto in = live(false);
     in.autonomy_ran = false;
-    EXPECT_FALSE(policy::shouldShow(in));
+    const auto t = policy::step({}, in).next;
+    EXPECT_FALSE(t.seen_working);
+    EXPECT_FALSE(policy::step(t, live(true)).show);
 }
 
-TEST(MissionDoneNoticePolicy, SilentOutsideALiveMission) {
-    auto in = finishedOnItsOwn();
-    in.mission_active = false;
-    EXPECT_FALSE(policy::shouldShow(in));
-    in = finishedOnItsOwn();
-    in.tearing_down = true;
-    EXPECT_FALSE(policy::shouldShow(in));
+TEST(MissionDoneNoticePolicy, SilentAfterAnyOperatorEnd) {
+    // Complete Mission / Finish scan / Cancel, even if later cancelled.
+    auto in = live(true);
+    in.operator_ended = true;
+    EXPECT_FALSE(policy::step(afterWorking(), in).show);
+}
+
+TEST(MissionDoneNoticePolicy, StaleStatusChangesNothing) {
+    auto in = live(true);
+    in.status_fresh = false;
+    const auto out = policy::step(afterWorking(), in);
+    EXPECT_FALSE(out.show);
+    EXPECT_FALSE(out.close);
+    EXPECT_FALSE(out.next.shown);
+}
+
+TEST(MissionDoneNoticePolicy, NothingOutsideALiveMission) {
+    auto in = live(true);
+    in.mission_live = false;  // no mission, or tearing down
+    EXPECT_FALSE(policy::step(afterWorking(), in).show);
+}
+
+TEST(MissionDoneNoticePolicy, WaitsWhileDrivingByHand) {
+    auto in = live(true);
+    in.manual_override = true;
+    const auto out = policy::step(afterWorking(), in);
+    EXPECT_FALSE(out.show);
+    EXPECT_FALSE(out.next.shown);
+    // Shown once the operator lets go.
+    EXPECT_TRUE(policy::step(out.next, live(true)).show);
+}
+
+TEST(MissionDoneNoticePolicy, ClosesWhenStateLeavesComplete) {
+    // e.g. ERROR after a late save failure.
+    auto t = policy::step(afterWorking(), live(true)).next;
+    EXPECT_TRUE(policy::step(t, live(false)).close);
 }
