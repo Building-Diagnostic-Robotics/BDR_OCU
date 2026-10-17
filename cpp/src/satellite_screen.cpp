@@ -701,6 +701,7 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
         }
         maybePromptAttention(status);
         maybePromptRevisit();
+        maybePromptMissionDone(ros_->coverageStatus());
         refreshScanRunUi();
     });
     connect(ros_, &RosLink::motorStatusUpdated, this, [this] {
@@ -7275,6 +7276,7 @@ void SatelliteScreen::onScanCancelClicked() {
             QStringLiteral("Cancel Mission"))) {
         return;
     }
+    operator_ended_mission_ = true;
     setAutonomyEnabled(false);
     // The abort RPC alone can take ~10 s (bridge, then SSH), so the modal
     // goes up on the click rather than when the teardown chain starts.
@@ -7387,6 +7389,70 @@ void SatelliteScreen::maybePromptRevisit() {
         revisit_box_ = nullptr;
         if (result == QDialog::Accepted && mission_->missionActive()) {
             onCompleteMission();
+        }
+    });
+    centerSatPrompt(box, this);
+    box->show();
+}
+
+void SatelliteScreen::maybePromptMissionDone(const CoverageStatus& status) {
+    namespace dn = mission_done_notice_policy;
+    dn::Inputs in;
+    in.status_fresh = status.valid && status.fresh(kDirectorFreshMs);
+    in.robot_complete = status.state == QLatin1String("COMPLETE");
+    in.mission_live = mission_->missionActive() && !mission_->tearingDown();
+    in.autonomy_ran = scan_autonomy_ran_;
+    in.operator_ended = operator_ended_mission_ || complete_mission_in_flight_;
+    in.manual_override = manual_override_;
+    const dn::Output out = dn::step(done_notice_, in);
+    done_notice_ = out.next;
+    if (out.close) {
+        closePrompt(done_box_);
+    }
+    if (!out.show) {
+        return;
+    }
+    appendLog(QStringLiteral("[scan] coverage complete — notified operator"));
+    // The revisit question is moot once the robot has finished.
+    closePrompt(revisit_box_);
+    // Modeless, like the other prompts: exec() would spin a nested loop in
+    // which the launch can die underneath the operator.
+    auto* box = makeSatPrompt(
+        this, QStringLiteral("Scan complete"),
+        QStringLiteral("The robot has finished the scan."),
+        QStringLiteral("Complete Mission"),
+        QStringLiteral("Drive back first"));
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setModal(false);
+    // Escape also rejects, so manual mode hangs off the button itself:
+    // dismissing the notice must never take control of the robot.
+    for (QPushButton* button : box->findChildren<QPushButton*>()) {
+        if (button->objectName() == QLatin1String("Accept")) {
+            continue;
+        }
+        disconnect(button, &QPushButton::clicked, box, &QDialog::reject);
+        connect(button, &QPushButton::clicked, box, [box] {
+            box->setProperty("drive_back", true);
+            box->reject();
+        });
+    }
+    done_box_ = box;
+    connect(box, &QDialog::finished, this, [this, box](int result) {
+        if (result == kPromptAutoClosed) {
+            return;
+        }
+        done_box_ = nullptr;
+        if (!mission_->missionActive() || mission_->tearingDown()) {
+            return;
+        }
+        if (result == QDialog::Accepted) {
+            // This prompt was the confirmation.
+            completeMission(/*ask_confirm=*/false);
+        } else if (box->property("drive_back").toBool()) {
+            // Same as a click on the camera view. Complete Mission stays in
+            // the footer for when the robot is back.
+            appendLog(QStringLiteral("[scan] drive back first — manual control"));
+            setManualOverride(true);
         }
     });
     centerSatPrompt(box, this);
@@ -7780,6 +7846,10 @@ qint64 SatelliteScreen::lastScanFpvFrameWallMs() const {
 }
 
 void SatelliteScreen::onCompleteMission() {
+    completeMission(/*ask_confirm=*/true);
+}
+
+void SatelliteScreen::completeMission(bool ask_confirm) {
     if (complete_mission_in_flight_) {
         return;
     }
@@ -7806,7 +7876,7 @@ void SatelliteScreen::onCompleteMission() {
                 .arg(progress),
             QStringLiteral("Finish and Save"));
     } else {
-        confirmed = confirmDialog(
+        confirmed = !ask_confirm || confirmDialog(
             QStringLiteral("Complete Mission"),
             QStringLiteral(
                 "Autonomy will be disabled, the motors disarmed, the mission "
@@ -7817,6 +7887,7 @@ void SatelliteScreen::onCompleteMission() {
         return;
     }
     complete_mission_in_flight_ = true;
+    operator_ended_mission_ = true;
     setAutonomyEnabled(false);
 
     // Data-first branch. On a truly dead link the disarm wait and the
@@ -9247,8 +9318,11 @@ void SatelliteScreen::clearAttention() {
     attention_ = {};
     attention_last_stop_.clear();
     revisit_hold_ = false;
+    done_notice_ = {};
+    operator_ended_mission_ = false;
     closePrompt(attention_box_);
     closePrompt(revisit_box_);
+    closePrompt(done_box_);
 }
 
 void SatelliteScreen::devRenderAttentionPrompts(const QString& stall_png,
