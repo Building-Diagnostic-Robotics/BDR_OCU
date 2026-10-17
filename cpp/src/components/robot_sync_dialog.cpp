@@ -2,6 +2,9 @@
 #include "ui_theme_constants.hpp"
 
 #include <QHBoxLayout>
+#include <QHideEvent>
+#include <QShowEvent>
+#include <QTimer>
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
@@ -10,6 +13,9 @@
 namespace f2c_cpp {
 
 RobotSyncDialog::RobotSyncDialog(QWidget* parent) : QDialog(parent) {
+    power_poll_timer_ = new QTimer(this);
+    power_poll_timer_->setInterval(5000);
+    connect(power_poll_timer_, &QTimer::timeout, this, &RobotSyncDialog::pollPower);
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground);
     setWindowModality(Qt::ApplicationModal);
@@ -188,8 +194,9 @@ void RobotSyncDialog::refreshButtons() {
     QString why;
     if (gate_.launch_active) {
         why = QStringLiteral("A scan is active. Complete Mission first.");
-    } else if (gate_.battery_pct >= 0 && gate_.battery_pct < 20) {
-        why = QStringLiteral("Battery below 20%. Plug in before syncing.");
+    } else if (update::lowBatteryBlocks(gate_.power)) {
+        why = QStringLiteral("Battery below %1%. Plug in before syncing.")
+                  .arg(update::kLowBatteryThresholdPct);
     }
     const bool ok = why.isEmpty() && !busy_;
     btn_sync_->setEnabled(ok);
@@ -201,6 +208,26 @@ void RobotSyncDialog::refreshButtons() {
         lbl_stage_->setText(why);
         lbl_stage_->setVisible(!why.isEmpty());
     }
+}
+
+void RobotSyncDialog::pollPower() {
+    const update::PowerStatus power = update::readPowerStatus();
+    if (power == gate_.power) {
+        return;
+    }
+    gate_.power = power;
+    refreshButtons();
+}
+
+void RobotSyncDialog::showEvent(QShowEvent* event) {
+    QDialog::showEvent(event);
+    pollPower();
+    power_poll_timer_->start();
+}
+
+void RobotSyncDialog::hideEvent(QHideEvent* event) {
+    power_poll_timer_->stop();
+    QDialog::hideEvent(event);
 }
 
 }  // namespace f2c_cpp
