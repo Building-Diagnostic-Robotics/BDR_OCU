@@ -30,7 +30,6 @@ private:
     bool dark_mode_ = false;
     QLabel* icon_tile_ = nullptr;
     QLabel* lbl_title_ = nullptr;
-    QLabel* lbl_pill_ = nullptr;
     QLabel* lbl_subtitle_ = nullptr;
     QPushButton* btn_view_ = nullptr;
 };
