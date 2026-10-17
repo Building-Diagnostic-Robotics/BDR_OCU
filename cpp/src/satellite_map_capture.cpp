@@ -451,9 +451,14 @@ QString MapCaptureRunner::collectionScript(bool gate) const {
     // the collection stack and the robot zenohd share loopback CycloneDDS.
     //
     // Any other `ros2 launch` (director, robot_complete, a previous app's
-    // run) holds the same LiDAR, CAN bus and /cmd_vel, so refuse rather than
-    // fight it. A leftover map-collection tree is ours to clear: a cancel
-    // from an older build, or a lost link, leaves one spinning.
+    // run) holds the same LiDAR, CAN bus and /cmd_vel. Capture is disabled
+    // while this OCU has a mission up, so whatever is found is a leftover
+    // (crash, closed app, lost link): kRobotSweep clears it first, the same
+    // sweep Send runs before a launch. It goes before the preamble because
+    // it opens with `set +e`, and after the identity prefix, so the wrong
+    // robot is never touched. Anything still up after the sweep (a launch
+    // outside pilot_control robot_*) is refused, not fought. A leftover
+    // map-collection tree is cleared by kMapCollectionStop below.
     //
     // The launch file name is quoted so this script's own command line does
     // not match the stop fragment's pattern (see kMapCollectionStop). The
@@ -465,6 +470,7 @@ QString MapCaptureRunner::collectionScript(bool gate) const {
     // stat would print the string "%Y" instead of the mtime. The identity
     // prefix is concatenated after arg(), because it contains `%s`.
     const QString script =
+        QString::fromLatin1(kRobotSweep) + QStringLiteral("; ") +
         QString::fromLatin1(kLaunchEnvPreamble) +
         QStringLiteral(
             "if pgrep -af '[r]os2 launch' 2>/dev/null | grep -v robot_map_collection | grep -q .; then "
@@ -642,8 +648,8 @@ void MapCaptureRunner::onProcessFinished(int exit_code) {
                 const QString running =
                     output.mid(busy_at + int(qstrlen(kRobotBusy))).trimmed();
                 fail(QStringLiteral(
-                         "Another launch is running on the robot; stop it "
-                         "before collecting a map.%1")
+                         "Another launch is still running on the robot after "
+                         "the sweep; not collecting a map.%1")
                          .arg(running.isEmpty()
                                   ? QString()
                                   : QStringLiteral("\n") + running.left(300)));

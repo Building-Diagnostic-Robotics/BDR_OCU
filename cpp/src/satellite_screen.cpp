@@ -3423,8 +3423,9 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
 
     pcd_pane_stack_ = new QStackedWidget(split);
 
-    // Empty state (234:2209): 48px frame icon, muted title, green CTA with a
-    // 16px refresh glyph, 12px hint. Column is 235px in the frame.
+    // Empty state: 48px frame icon and the green CTA only. No status text:
+    // progress and robot output go to the log, and a failure the operator
+    // must act on is a popup (showCaptureError).
     pcd_empty_ = new QWidget(pcd_pane_stack_);
     pcd_empty_->setObjectName("SatPcdPane");
     pcd_empty_->setAttribute(Qt::WA_StyledBackground, true);
@@ -3447,13 +3448,6 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
         icon->setFixedSize(48, 48);
         col->addWidget(icon, 0, Qt::AlignHCenter);
         col->addSpacing(16);
-        pcd_empty_title_ =
-            new QLabel(QStringLiteral("Point cloud not yet captured"), column);
-        pcd_empty_title_->setObjectName("SatPcdEmptyTitle");
-        pcd_empty_title_->setAlignment(Qt::AlignCenter);
-        pcd_empty_title_->setWordWrap(true);
-        col->addWidget(pcd_empty_title_);
-        col->addSpacing(16);
         capture_button_ =
             new QPushButton(QStringLiteral("Capture Point Cloud"), column);
         capture_button_->setObjectName("SatNextButton");
@@ -3463,14 +3457,6 @@ QWidget* SatelliteScreen::buildCorrespondPage() {
         capture_button_->setFixedHeight(kFooterButtonHeight);
         capture_button_->setCursor(Qt::PointingHandCursor);
         col->addWidget(capture_button_, 0, Qt::AlignHCenter);
-        col->addSpacing(16);
-        pcd_empty_hint_ = new QLabel(
-            QStringLiteral("Robot will rotate 360° to scan surroundings"),
-            column);
-        pcd_empty_hint_->setObjectName("SatPcdEmptyHint");
-        pcd_empty_hint_->setAlignment(Qt::AlignCenter);
-        pcd_empty_hint_->setWordWrap(true);
-        col->addWidget(pcd_empty_hint_);
         grid->addWidget(column, 0, 0, Qt::AlignCenter);
         connect(capture_button_, &QPushButton::clicked, this,
                 &SatelliteScreen::onCollectMap);
@@ -4583,12 +4569,6 @@ QLabel#SatPaneTag {
     background-color: @OVERLAY_BG@; border: 1px solid @OVERLAY_BORDER@; border-radius: 4px;
     font-family: 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 12px;
     color: @BODY@; padding: 4px 10px; margin: 8px 12px;
-}
-QLabel#SatPcdEmptyTitle {
-    background: transparent; font-family: 'Arimo'; font-size: 14px; color: @BODY@;
-}
-QLabel#SatPcdEmptyHint {
-    background: transparent; font-family: 'Arimo'; font-size: 12px; color: @MUTED@;
 }
 #SatAlignSuccess {
     background-color: @SURFACE@; border: 1px solid rgba(0, 188, 125, 0.50); border-radius: 14px;
@@ -5709,6 +5689,9 @@ void SatelliteScreen::onCollectMap() {
         if (!image_error.isEmpty()) {
             setAlignStatus(image_error);
             appendLog(QStringLiteral("[align] %1").arg(image_error));
+            // Already written for the operator and says what to do.
+            BdrMessageBox::warning(this, QStringLiteral("Capture failed"),
+                                   image_error);
             return;
         }
     }
@@ -5717,6 +5700,8 @@ void SatelliteScreen::onCollectMap() {
         MissionController::resolveRobotTarget(&target_error);
     if (!target.valid) {
         setAlignStatus(target_error);
+        appendLog(QStringLiteral("[align] %1").arg(target_error));
+        showCaptureError(target_error);
         return;
     }
     if (!confirmDialog(
@@ -5724,6 +5709,7 @@ void SatelliteScreen::onCollectMap() {
             QStringLiteral(
                 "The robot will ARM ITS MOTORS, turn 360° in place, then "
                 "drive a short forward/back leg to resolve a GPS heading.\n\n"
+                "Anything still running on the robot will be stopped.\n\n"
                 "Confirm the area around the robot is clear."),
             QStringLiteral("Collect Map"))) {
         return;
@@ -5735,6 +5721,7 @@ void SatelliteScreen::onCollectMap() {
                              local_dir, &error)) {
         setAlignStatus(error);
         appendLog(QStringLiteral("[align] %1").arg(error));
+        showCaptureError(error);
         return;
     }
     setAlignStatus(QStringLiteral("Starting map collection…"));
@@ -5746,6 +5733,7 @@ void SatelliteScreen::onMapCaptured(const MapCapture& capture) {
         appendLog(QStringLiteral("[align] %1").arg(capture.error));
         updateAlignCardUi();
         setAlignStatus(capture.error);  // after: the refresh resets the title
+        showCaptureError(capture.error);
         return;
     }
     pcd_image_ = capture.image;
@@ -6280,15 +6268,8 @@ void SatelliteScreen::setAlignStatus(const QString& status) {
             : busy   ? QStringLiteral("Cancel Collection")
                      : QStringLiteral("Collect Map from Robot"));
     }
-    // Point-cloud pane empty state: the title carries progress while a
-    // capture runs, the CTA flips to Cancel, and the hint changes from
-    // "what will happen" to "what to keep clear".
-    if (pcd_empty_title_) {
-        pcd_empty_title_->setText(
-            busy || !status.isEmpty()
-                ? status
-                : QStringLiteral("Point cloud not yet captured"));
-    }
+    // Point-cloud pane empty state: only the CTA changes (Capture / Cancel /
+    // Stopping). The status text is not shown there.
     if (capture_button_) {
         capture_button_->setText(
             stopping ? QStringLiteral("Stopping…")
@@ -6296,12 +6277,42 @@ void SatelliteScreen::setAlignStatus(const QString& status) {
                      : QStringLiteral("Capture Point Cloud"));
         capture_button_->setEnabled(!mission_->missionActive());
     }
-    if (pcd_empty_hint_) {
-        pcd_empty_hint_->setText(
-            busy ? QStringLiteral(
-                       "Keep the area around the robot clear until it stops")
-                 : QStringLiteral(
-                       "Robot will rotate 360° to scan surroundings"));
+}
+
+// Short operator text for a failed capture; empty means no popup. The full
+// message is already in the log.
+QString SatelliteScreen::captureErrorForOperator(const QString& raw) {
+    if (raw.contains(QLatin1String("Could not confirm the robot stopped"))) {
+        return QStringLiteral(
+            "Couldn't confirm the robot stopped. Check it before retrying.");
+    }
+    if (raw.contains(QLatin1String("cancelled"))) {
+        return QString();  // the operator pressed Cancel
+    }
+    if (raw.contains(QLatin1String("Map collection was not started."))) {
+        return QString();  // the "Wrong robot" popup already covers it
+    }
+    if (raw.startsWith(QLatin1String("Another launch is still running"))) {
+        // Only reached when the pre-capture sweep could not clear it.
+        return QStringLiteral(
+            "The robot couldn't be cleared for capture. Restart the robot "
+            "and try again.");
+    }
+    if (raw.startsWith(QLatin1String("Timed out"))) {
+        return QStringLiteral(
+            "Lost contact with the robot. Check the link and try again.");
+    }
+    if (raw.contains(QLatin1String("already running")) ||
+        raw.contains(QLatin1String("still stopping"))) {
+        return QStringLiteral("A capture is already running.");
+    }
+    return QStringLiteral("Point cloud capture failed. Try again.");
+}
+
+void SatelliteScreen::showCaptureError(const QString& raw) {
+    const QString text = captureErrorForOperator(raw);
+    if (!text.isEmpty()) {
+        BdrMessageBox::warning(this, QStringLiteral("Capture failed"), text);
     }
 }
 
