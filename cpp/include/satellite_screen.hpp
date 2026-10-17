@@ -52,6 +52,7 @@
 
 class QCheckBox;
 class QDialog;
+class QHideEvent;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -64,6 +65,7 @@ class QSlider;
 class QStackedWidget;
 class QTimer;
 class QVBoxLayout;
+class QWindow;
 
 namespace f2c_cpp {
 
@@ -195,6 +197,7 @@ signals:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 private:
     /**
@@ -482,6 +485,12 @@ private:
     static QString stopHeadline(const CoverageStatus& status);
     static QString stopGuidance(const CoverageStatus& status);
     void setManualOverride(bool active);
+    /** Focus moved to another window (or app): drop held drive keys. */
+    void onFocusWindowChanged(QWindow* focus);
+    /** Drop held drive keys; the ramp brakes ROOFUS to a stop. With
+        `notify`, a "Driving stopped" note shows when focus comes back. */
+    void releaseTeleopKeys(const QString& reason, bool notify);
+    void showTeleopFocusStopNotice();
     void refreshScanRunUi();
     void startScanFpv();
     void stopScanFpv();
@@ -1007,6 +1016,9 @@ private:
     LinkHealthMonitor* link_monitor_ = nullptr;
     QSet<int> pressed_keys_;
     bool teleop_last_nonzero_ = false;
+    /** Driving was stopped by a focus loss; tell the operator on return. */
+    bool teleop_focus_stop_pending_ = false;
+    QPointer<QDialog> teleop_focus_notice_;
     teleop_ramp::Ramp teleop_ramp_;  ///< WASD target -> published twist
     bool autonomy_on_ = false;
     bool dark_mode_ = false;

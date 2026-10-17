@@ -42,6 +42,9 @@
 #include "window_controls_metrics.hpp"
 
 #include <QApplication>
+#include <QGuiApplication>
+#include <QHideEvent>
+#include <QWindow>
 #include <QCheckBox>
 #include <QDateTime>
 #include <QDialog>
@@ -291,6 +294,12 @@ constexpr double kUsWestLon = -125.0;
 constexpr double kUsEastLon = -66.9;
 // Same setpoints and ramp as the map-capture teleop (teleop_ramp.hpp).
 constexpr double kTeleopAngularSpeed = teleop_ramp::kAngularSpeedRps;  // rad/s
+
+bool isTeleopKey(int key) {
+    return key == Qt::Key_W || key == Qt::Key_S || key == Qt::Key_A ||
+           key == Qt::Key_D || key == Qt::Key_Up || key == Qt::Key_Down ||
+           key == Qt::Key_Left || key == Qt::Key_Right;
+}
 
 // Measured plans live in a fictional geo frame anchored at the reference
 // origin — the operator only ever sees meters.
@@ -881,6 +890,18 @@ SatelliteScreen::SatelliteScreen(QWidget* parent) : QWidget(parent) {
     connect(teleop_timer_, &QTimer::timeout, this,
             &SatelliteScreen::publishTeleopTick);
     qApp->installEventFilter(this);
+    // Losing focus while a drive key is held means the key release goes to
+    // another window and never reaches us, so ROOFUS would keep driving.
+    // Any focus change away from this window drops the held keys; the ramp
+    // then brakes ROOFUS to a stop.
+    connect(qApp, &QGuiApplication::focusWindowChanged, this,
+            &SatelliteScreen::onFocusWindowChanged);
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+            [this](Qt::ApplicationState state) {
+                if (state != Qt::ApplicationActive) {
+                    releaseTeleopKeys(QStringLiteral("OCU lost focus"), true);
+                }
+            });
 
     metadata_timer_ = new QTimer(this);
     metadata_timer_->setInterval(3000);
@@ -8267,6 +8288,15 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
             return false;
         }
     }
+    // A drive-key release always counts — with a text field focused, the
+    // screen hidden or teleop off — so a key can never stay "held". Only
+    // presses are gated below.
+    if (event->type() == QEvent::KeyRelease) {
+        const auto* release = static_cast<QKeyEvent*>(event);
+        if (!release->isAutoRepeat() && isTeleopKey(release->key())) {
+            pressed_keys_.remove(release->key());
+        }
+    }
     if (!isVisible() || !teleop_check_ || !teleop_check_->isChecked()) {
         return QWidget::eventFilter(watched, event);
     }
@@ -8282,19 +8312,66 @@ bool SatelliteScreen::eventFilter(QObject* watched, QEvent* event) {
         return QWidget::eventFilter(watched, event);
     }
     const int key = key_event->key();
-    const bool teleop_key = key == Qt::Key_W || key == Qt::Key_S ||
-                            key == Qt::Key_A || key == Qt::Key_D ||
-                            key == Qt::Key_Up || key == Qt::Key_Down ||
-                            key == Qt::Key_Left || key == Qt::Key_Right;
-    if (!teleop_key) {
+    if (!isTeleopKey(key)) {
         return QWidget::eventFilter(watched, event);
     }
     if (event->type() == QEvent::KeyPress) {
         pressed_keys_.insert(key);
-    } else {
-        pressed_keys_.remove(key);
     }
     return true;
+}
+
+void SatelliteScreen::onFocusWindowChanged(QWindow* focus) {
+    QWindow* own = window() ? window()->windowHandle() : nullptr;
+    if (focus && focus == own) {
+        if (teleop_focus_stop_pending_) {
+            teleop_focus_stop_pending_ = false;
+            showTeleopFocusStopNotice();
+        }
+        return;
+    }
+    releaseTeleopKeys(QStringLiteral("OCU lost focus"), true);
+}
+
+void SatelliteScreen::releaseTeleopKeys(const QString& reason, bool notify) {
+    if (pressed_keys_.isEmpty()) {
+        return;
+    }
+    // Clear the keys only. The ramp is left running, so the teleop tick keeps
+    // publishing while ROOFUS brakes (~0.4 s from full speed), then sends the
+    // final zero. Resetting the ramp here would jump to zero = coast.
+    pressed_keys_.clear();
+    appendLog(QStringLiteral("[teleop] driving stopped: %1").arg(reason));
+    if (notify) {
+        teleop_focus_stop_pending_ = true;
+    }
+}
+
+void SatelliteScreen::showTeleopFocusStopNotice() {
+    if (teleop_focus_notice_) {
+        teleop_focus_notice_->raise();
+        return;
+    }
+    auto* box = makeSatPrompt(
+        this, QStringLiteral("Driving stopped"),
+        QStringLiteral("ROOFUS stopped because another window opened on top "
+                       "of the controller. Hold W, A, S or D again to keep "
+                       "driving."),
+        QStringLiteral("OK"), QString());
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    // Do not take focus from the controller: the operator may want to drive
+    // straight away, and stealing focus would itself stop driving.
+    box->setAttribute(Qt::WA_ShowWithoutActivating);
+    box->setModal(false);
+    centerSatPrompt(box, this);
+    teleop_focus_notice_ = box;
+    box->show();
+}
+
+void SatelliteScreen::hideEvent(QHideEvent* event) {
+    // Leaving the screen with a key held: the timer would keep sending it.
+    releaseTeleopKeys(QStringLiteral("screen hidden"), false);
+    QWidget::hideEvent(event);
 }
 
 void SatelliteScreen::setAutonomyEnabled(bool enabled) {
