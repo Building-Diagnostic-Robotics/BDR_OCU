@@ -192,6 +192,7 @@ set(HEADERS
     include/components/update_modal.hpp
     include/components/robot_sync_banner.hpp
     include/components/robot_sync_dialog.hpp
+    include/components/robot_update_copy.hpp
     include/units_system.hpp
     include/link_health_monitor.hpp
     include/robot_reachability_probe.hpp
@@ -735,6 +736,28 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME repo_sync_tests COMMAND repo_sync_tests)
+
+        # ROOFUS update dialog: operator wording + button flows. Own main()
+        # (offscreen QApplication); headers listed for AUTOMOC.
+        add_executable(robot_update_copy_tests
+            tests/robot_update_copy_tests.cpp
+            src/components/robot_sync_dialog.cpp
+            include/components/robot_sync_dialog.hpp
+            include/components/robot_update_copy.hpp
+            src/repo_sync_manager.cpp
+            include/repo_sync_manager.hpp
+        )
+        target_include_directories(robot_update_copy_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(robot_update_copy_tests PRIVATE
+            bdr_update_core
+            ${QT_GUI_LIBS}
+            GTest::gtest
+        )
+        add_test(NAME robot_update_copy_tests COMMAND robot_update_copy_tests)
+        set_tests_properties(robot_update_copy_tests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
         add_executable(async_process_tests
             tests/async_process_tests.cpp

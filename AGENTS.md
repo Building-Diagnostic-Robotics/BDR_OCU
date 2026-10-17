@@ -545,8 +545,11 @@ the OTA snooze backs off 30 min, 1 h, then 2 h).
 
 Sync targets compiled-in `kRobotDeployBranch` (`cliff-on-autonomy`).
 A clean laptop on another branch switches; a dirty or diverged tree
-hard-fails. Prepare robot is offered only when Check says helpers
-are missing. Modal is `show()`, not `exec()`.
+hard-fails. When Check says helpers are missing, Update Now prepares
+the robot and then syncs (one press). Modal is `show()`, not `exec()`.
+**Operator copy only** (`robot_update_copy.hpp`): no branch, SHA, git or
+workspace words; engineer text only behind "Details for BDR support"
+after a failure.
 
 ### Key entry points
 

@@ -1721,7 +1721,6 @@ void AppShellWindow::showRobotSyncDialog() {
         });
     }
     RobotSyncDialog::GateState gate;
-    gate.launch_active = isScanLaunchActive();
     gate.power = update::readPowerStatus();
     robot_sync_dialog_->setBusy(false);
     robot_sync_dialog_->setGateState(gate);

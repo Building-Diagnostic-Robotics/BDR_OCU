@@ -41,6 +41,15 @@ the OTA snooze is separate: 30 min, then 1 h, then 2 h). **Prepare robot**
 appears only when Check says helpers or `updateInstead` are missing.
 A helper without `--no-build` is treated as missing (same Prepare CTA).
 
+**Operator wording.** The banner and modal say only "ROOFUS update" in
+plain words (`components/robot_update_copy.hpp`, tested): banner
+**Update**; modal **Update Now** / **Later**; progress "Step 1 of 2:
+Updating the laptop" / "Step 2 of 2: Updating ROOFUS". A robot that needs
+the helpers is prepared and then synced from the same Update Now press
+(no separate Prepare button). Branches, SHAs and RepoSyncManager's
+headline/detail never show, except behind "Details for BDR support"
+after a failure; every outcome is still in update.log.
+
 ## Sync now
 
 Targets `kRobotDeployBranch` on both sides. If the laptop is on
