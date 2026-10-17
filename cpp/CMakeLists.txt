@@ -784,6 +784,19 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME topple_notice_policy_tests COMMAND topple_notice_policy_tests)
 
+        # Stage 6 motor-state reading + Arm-button blink rule. Header-only.
+        add_executable(motors_state_policy_tests
+            tests/motors_state_policy_tests.cpp
+        )
+        target_include_directories(motors_state_policy_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(motors_state_policy_tests PRIVATE
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME motors_state_policy_tests COMMAND motors_state_policy_tests)
+
         # Post-launch WASD teleop rate limiter. Header-only, no Qt/ROS.
         add_executable(teleop_ramp_tests
             tests/teleop_ramp_tests.cpp
@@ -840,7 +853,7 @@ if(BDR_BUILD_TESTS)
         )
         add_test(NAME link_health_monitor_tests COMMAND link_health_monitor_tests)
 
-        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests gps_prealign_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests robot_registry_tests repo_sync_tests async_process_tests mission_finalize_policy_tests attention_policy_tests estop_latch_policy_tests topple_notice_policy_tests touch_gesture_state_tests swath_preview_tests radio_link_pill_tests link_health_monitor_tests)")
+        message(STATUS "Unit tests: enabled (update_checker_tests obstacle_geometry_tests similarity_2d_tests robust_fit_tests gps_prealign_tests canvas_extent_tests aligned_canvas_tests pick_loop_tests satellite_tile_policy_tests satellite_job_store_tests upload_thumb_drive_tests cloud_verifier_tests uploader_integrity_tests robot_registry_tests repo_sync_tests async_process_tests mission_finalize_policy_tests attention_policy_tests estop_latch_policy_tests topple_notice_policy_tests motors_state_policy_tests touch_gesture_state_tests swath_preview_tests radio_link_pill_tests link_health_monitor_tests)")
     else()
         message(STATUS "Unit tests: GTest not found, skipping")
     endif()

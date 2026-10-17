@@ -31,6 +31,7 @@
 #include "attention_policy.hpp"
 #include "estop_latch_policy.hpp"
 #include "topple_notice_policy.hpp"
+#include "motors_state_policy.hpp"
 #include "radio_link_pill.hpp"
 #include "satellite_job_model.hpp"
 #include "satellite_map_capture.hpp"
@@ -586,6 +587,12 @@ private:
     void setMotorsChip(const QString& text, const QColor& color);
     /** Drives the motors chip from live controller_status. */
     void updateMotorsChip();
+    /** Live controller_status read through motors_state_policy, so the chip
+        and the Arm hint cannot disagree. */
+    motors_state_policy::MotorsState currentMotorsState() const;
+    /** Starts or stops the Arm-button blink (motors_state_policy::
+        shouldBlinkArm). Level-triggered: safe to call on any change. */
+    void updateArmBlink();
     void appendLog(const QString& line);
     bool confirmDialog(const QString& title, const QString& body,
                        const QString& accept_label,
@@ -886,6 +893,9 @@ private:
     // arming-with-autonomy.
     QPushButton* arm_button_ = nullptr;
     QPushButton* disarm_button_ = nullptr;
+    // Pulses Arm while the operator drives by hand on IDLE axes.
+    QTimer* arm_blink_timer_ = nullptr;
+    bool arm_blink_dim_ = false;
     QPushButton* estop_button_ = nullptr;
     QPushButton* scan_start_pause_button_ = nullptr;
     QLabel* scan_start_pause_icon_ = nullptr;
