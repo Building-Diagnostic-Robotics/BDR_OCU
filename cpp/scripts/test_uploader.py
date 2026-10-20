@@ -713,6 +713,9 @@ class PutTests(UploadCase):
         self.assertIn("does not match the robot", out)
         self.assertIn("October_09_2026/BNY/Mission_120000", out)
         self.assertEqual(self.puts(), [])
+        mission = os.path.join(os.path.dirname(section), "Mission_120000")
+        with open(os.path.join(mission, uploader.NEEDS_RECOPY_FILENAME)) as fh:
+            self.assertEqual(json.load(fh)["files"], ["Section_1/a.bin"])
         self.assertFalse(os.path.exists(
             os.path.join(section, uploader.MANIFEST_FILENAME)))
 
@@ -769,12 +772,14 @@ class PutTests(UploadCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("Copy record unreadable", out)
         self.assertIn("October_09_2026/BNY/Mission_120000", out)
-        self.assertIn("plug the stick into the robot", out)
+        self.assertIn("Plug the stick into the robot", out)
         self.assertEqual(self.puts(), [])
         self.assertFalse(os.path.exists(
             os.path.join(section, uploader.MANIFEST_FILENAME)))
 
-    def test_readable_sibling_that_omits_the_section_still_uploads(self):
+    def test_section_no_record_lists_is_an_unfinished_copy(self):
+        # The robot writes the record last. On a stick with per-file
+        # records, a folder none of them lists was never finished.
         section = self.stick_section({"a.bin": b"abc"})
         manifest = os.path.join(
             os.path.dirname(section), "Mission_120000", uploader.THUMB_MANIFEST)
@@ -784,9 +789,50 @@ class PutTests(UploadCase):
             "files": {},
         }).encode())
         rc, out = self.run_upload(section)
-        self.assertEqual(rc, 0, out)
-        self.assertIn("a.bin", {rec["rel"] for rec in self.puts()})
-        self.assertNotIn("unreadable", out)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("did not finish", out)
+        self.assertEqual(self.puts(), [])
+
+    def test_mission_without_its_record_is_an_unfinished_copy(self):
+        self.stick_section({"a.bin": b"abc"})
+        other = os.path.join(
+            self.root, "October_09_2026", "BNY", "Mission_130000")
+        write(os.path.join(other, "notes.txt"), b"n")
+        rc, out = self.run_upload(other)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("did not finish", out)
+        self.assertEqual(self.puts(), [])
+
+    def test_zero_byte_stick_files_block_and_ask_the_robot_to_recopy(self):
+        section = self.stick_section({"a.bin": b"abc", "b.bin": b"defg"})
+        write(os.path.join(section, "b.bin"), b"")
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("does not match the robot", out)
+        self.assertIn("b.bin", out)
+        self.assertEqual(self.puts(), [])
+        mission = os.path.join(os.path.dirname(section), "Mission_120000")
+        with open(os.path.join(mission, uploader.NEEDS_RECOPY_FILENAME)) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["schema"], 1)
+        self.assertEqual(doc["files"], ["Section_1/b.bin"])
+
+    def test_needs_recopy_merges_across_runs(self):
+        section = self.stick_section({"a.bin": b"abc", "b.bin": b"defg"})
+        write(os.path.join(section, "b.bin"), b"")
+        self.run_upload(section)
+        write(os.path.join(section, "b.bin"), b"defg")
+        write(os.path.join(section, "a.bin"), b"")
+        self.run_upload(section)
+        mission = os.path.join(os.path.dirname(section), "Mission_120000")
+        with open(os.path.join(mission, uploader.NEEDS_RECOPY_FILENAME)) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["files"], ["Section_1/a.bin", "Section_1/b.bin"])
+
+    def test_needs_recopy_is_never_uploaded(self):
+        self.assertTrue(uploader.is_sentinel(uploader.NEEDS_RECOPY_FILENAME))
+        self.assertTrue(uploader.is_sentinel(
+            "x/" + uploader.NEEDS_RECOPY_FILENAME + ".tmp"))
 
     def test_old_stick_manifest_uploads_everything(self):
         section = self.stick_section(
@@ -834,6 +880,103 @@ class PutTests(UploadCase):
         self.assertIsNone(self.puts()[0]["content_md5"])
         self.assertFalse(os.path.exists(
             os.path.join(self.root, "manifest.json")))
+
+
+class StateBatchTests(UploadCase):
+    def test_state_is_saved_in_batches_and_complete_at_the_end(self):
+        for i in range(450):
+            write(os.path.join(self.root, "f%03d.bin" % i), b"x%d" % i)
+        saves = []
+        real = uploader.save_state
+
+        def counting(root, state):
+            saves.append(len(state.get("uploaded", {})))
+            real(root, state)
+
+        with unittest.mock.patch.object(uploader, "save_state", side_effect=counting), \
+                unittest.mock.patch.object(uploader, "STATE_SAVE_EVERY_S", 3600.0):
+            rc, out = self.run_upload()
+        self.assertEqual(rc, 0, out)
+        # 450 files at 200 per batch: 2 batch saves + the final flush,
+        # not one save per file.
+        self.assertLessEqual(len(saves), 4, saves)
+        self.assertEqual(saves[-1], 450)
+
+    def test_pause_keeps_the_records_of_the_files_already_sent(self):
+        for i in range(30):
+            write(os.path.join(self.root, "f%02d.bin" % i), b"y%d" % i)
+        flag = os.path.join(self.root, uploader.PAUSE_FILENAME)
+        sent = []
+
+        def on_put(rel, body):
+            sent.append(rel)
+            if len(sent) == 5:
+                write(flag, b"")
+
+        SERVER.on_put = on_put
+        uploader.UPLOAD_WORKERS = 1
+        rc, out = self.run_upload()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Manual pause detected", out)
+        with open(os.path.join(self.root, uploader.STATE_FILENAME)) as fh:
+            state = json.load(fh)
+        self.assertGreaterEqual(len(state["uploaded"]), 5)
+        self.assertEqual(sorted(state["completed"]), sorted(state["uploaded"]))
+        self.assertFalse(any(k.startswith("_") for k in state))
+
+
+class _FakeResponse:
+    def __init__(self, status, text=""):
+        self.status_code = status
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise uploader.requests.exceptions.HTTPError(
+                "%d Server Error" % self.status_code, response=self)
+
+    def json(self):
+        return {"ok": True}
+
+
+class ApiErrorTests(unittest.TestCase):
+    def test_auth_and_client_errors_are_not_retried(self):
+        for status in (400, 401, 403, 404, 413):
+            with self.assertRaises(uploader.CloudRejected) as ctx:
+                uploader._api_response(_FakeResponse(status, "nope"), "/presign")
+            self.assertIn("(HTTP %d)" % status, str(ctx.exception))
+
+    def test_throttling_and_server_errors_stay_transient(self):
+        for status in (408, 429, 500, 503):
+            with self.assertRaises(uploader.requests.exceptions.RequestException):
+                uploader._api_response(_FakeResponse(status), "/presign")
+
+    def test_ok_returns_the_body(self):
+        self.assertEqual(
+            uploader._api_response(_FakeResponse(200), "/complete"), {"ok": True})
+
+
+class RejectedRunTests(UploadCase):
+    def test_presign_403_fails_the_folder_without_auto_pause(self):
+        self.presign.stop()
+        rejected = unittest.mock.patch.object(
+            uploader, "presign",
+            side_effect=uploader.CloudRejected("/presign", 403, "bad token"))
+        rejected.start()
+        try:
+            write(os.path.join(self.root, "a.bin"), b"abc")
+            rc, out = self.run_upload()
+        finally:
+            rejected.stop()
+            self.presign.start()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Cloud refused /presign (HTTP 403)", out)
+        self.assertNotIn("Connection error:", out)
+
+    def test_missing_folder_is_not_a_connection_error(self):
+        rc, out = self.run_upload(os.path.join(self.root, "nope"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Unexpected error: data_root does not exist", out)
 
 
 if __name__ == "__main__":

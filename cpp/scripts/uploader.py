@@ -66,6 +66,7 @@ import json
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -120,15 +121,64 @@ THUMB_MANIFEST = "thumbsync_manifest.json"
 # A re-upload deletes it. A finished folder that no-ops keeps it: that
 # file is the robot's proof the scan is already in the cloud.
 CLOUD_VERIFIED_FILENAME = "cloud_verified.json"
+# Written next to a mission's thumbsync_manifest.json by the laptop when
+# the stick copy does not match the robot's record. The robot re-copies
+# the listed files when the stick is plugged back in, then deletes it.
+# Shared contract with pilot_control/scripts/rdata_thumbdrive_sync.py.
+NEEDS_RECOPY_FILENAME = "needs_recopy.json"
 _BOOKKEEPING_NAMES = frozenset((
     STATE_FILENAME,
     PAUSE_FILENAME,
     MANIFEST_FILENAME,
     CLOUD_VERIFIED_FILENAME,
+    NEEDS_RECOPY_FILENAME,
     STATE_FILENAME + ".tmp",
     MANIFEST_FILENAME + ".tmp",
     CLOUD_VERIFIED_FILENAME + ".tmp",
+    NEEDS_RECOPY_FILENAME + ".tmp",
 ))
+
+# upload_state.json is saved after this many newly uploaded files, or
+# this many seconds, whichever comes first, and always when a run stops.
+# Rewriting it after every file costs O(files^2) bytes on the stick: a
+# 45k-file section wrote hundreds of GB of state. A crash loses at most
+# one batch of records, and those files are PUT again (same key, same
+# bytes), which is harmless.
+STATE_SAVE_EVERY_FILES = 200
+STATE_SAVE_EVERY_S = 5.0
+# Keys starting with "_" live only in memory and are never saved.
+_PRIVATE_PREFIX = "_"
+
+
+class CloudRejected(Exception):
+    """The BDR API refused a request with a status a retry will not fix.
+
+    401/403 from /presign or /complete mean the robot's credentials are
+    wrong for every folder; the OCU stops the whole queue on them. Other
+    4xx answers fail this folder only. 408, 429 and 5xx stay on the
+    connection-error path and are retried.
+    """
+
+    def __init__(self, endpoint: str, status: int, detail: str = ""):
+        self.endpoint = endpoint
+        self.status = status
+        text = f"Cloud refused {endpoint} (HTTP {status})"
+        if detail:
+            text += f": {detail}"
+        super().__init__(text)
+
+
+def _api_response(r, endpoint: str):
+    """Raise CloudRejected for a non-retryable 4xx, else raise_for_status."""
+    status = r.status_code
+    if 400 <= status < 500 and status not in (408, 429):
+        try:
+            detail = (r.text or "").strip().replace("\n", " ")[:200]
+        except Exception:
+            detail = ""
+        raise CloudRejected(endpoint, status, detail)
+    r.raise_for_status()
+    return r.json()
 
 
 class UploadIntegrityError(Exception):
@@ -261,14 +311,36 @@ def save_state(data_root: str, state: dict) -> None:
     finalize_mission_local."""
     target = state_path(data_root)
     tmp = target + ".tmp"
+    public = {k: v for k, v in state.items()
+              if not (isinstance(k, str) and k.startswith(_PRIVATE_PREFIX))}
     with open(tmp, "w") as f:
-        json.dump(state, f, indent=2)
+        json.dump(public, f, indent=2)
         f.flush()
         try:
             os.fsync(f.fileno())
         except OSError:
             pass
     os.replace(tmp, target)
+    state["_unsaved"] = 0
+    state["_saved_at"] = time.monotonic()
+
+
+def note_progress(data_root: str, state: dict) -> None:
+    """Count one new record and save when a batch is due. Hold the
+    state lock when calling from a worker."""
+    state["_unsaved"] = int(state.get("_unsaved") or 0) + 1
+    last = state.get("_saved_at")
+    if last is None:
+        state["_saved_at"] = last = time.monotonic()
+    if (state["_unsaved"] >= STATE_SAVE_EVERY_FILES
+            or time.monotonic() - last >= STATE_SAVE_EVERY_S):
+        save_state(data_root, state)
+
+
+def flush_state(data_root: str, state: dict) -> None:
+    """Save when anything is unsaved. Every exit path of a run calls this."""
+    if int(state.get("_unsaved") or 0) > 0:
+        save_state(data_root, state)
 
 
 def should_pause(data_root: str) -> bool:
@@ -408,9 +480,24 @@ def record_uploaded(state: dict, rel_norm: str, size: int, md5_hex: str) -> None
     completed = state.get("completed")
     if not isinstance(completed, list):
         state["completed"] = [rel_norm]
+        state["_completed_set"] = {rel_norm}
         return
-    if rel_norm not in completed:
+    seen = _completed_set(state)
+    if rel_norm not in seen:
         completed.append(rel_norm)
+        seen.add(rel_norm)
+
+
+def _completed_set(state: dict) -> set:
+    """Membership index for `completed`, built once per run. A list scan
+    per file was O(files^2) on large sections."""
+    seen = state.get("_completed_set")
+    if not isinstance(seen, set):
+        completed = state.get("completed")
+        seen = set(c for c in completed if isinstance(c, str)) \
+            if isinstance(completed, list) else set()
+        state["_completed_set"] = seen
+    return seen
 
 
 def forget_upload(state: dict, rel_norm: str) -> None:
@@ -421,6 +508,9 @@ def forget_upload(state: dict, rel_norm: str) -> None:
     completed = state.get("completed")
     if isinstance(completed, list):
         state["completed"] = [rel for rel in completed if rel != rel_norm]
+    seen = state.get("_completed_set")
+    if isinstance(seen, set):
+        seen.discard(rel_norm)
 
 
 def _sample(names: List[str]) -> str:
@@ -457,8 +547,7 @@ def presign(robot_id: str, run_id: str, relpath: str, size_bytes: int,
         "content_md5": content_md5,
     }
     r = requests.post(url, headers=_auth_headers(), json=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return _api_response(r, "/presign")
 
 
 def complete(robot_id: str, run_id: str,
@@ -470,8 +559,7 @@ def complete(robot_id: str, run_id: str,
         "manifest_relpath": manifest_relpath,
     }
     r = requests.post(url, headers=_auth_headers(), json=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    return _api_response(r, "/complete")
 
 
 def _upload_url(presign_resp, rel_norm: str) -> str:
@@ -825,9 +913,16 @@ def _upload_one_file(
         size, md5_hex = put_verified_file(robot_id, run_id, full, rel_norm)
         with state_lock:
             record_uploaded(state, rel_norm, size, md5_hex)
+            note_progress(data_root, state)
+    except StickCopyMismatch as exc:
+        stop_event.set()
+        with state_lock:
             save_state(data_root, state)
+        return ("stick", exc)
     except UploadIntegrityError as exc:
         stop_event.set()
+        with state_lock:
+            save_state(data_root, state)
         return ("error", exc)
     except requests.exceptions.RequestException as exc:
         stop_event.set()
@@ -855,6 +950,9 @@ def _finish_one(status: str, err: Optional[BaseException]) -> Optional[int]:
         print(f"Connection error: {err}", flush=True)
         print("Auto-pausing. You can resume later.", flush=True)
         return 0
+    if status == "stick" and isinstance(err, StickCopyMismatch):
+        _report_bad_stick_copy([err.rel_norm], err.record)
+        return 1
     print(f"Unexpected error: {err}", flush=True)
     return 1
 
@@ -971,7 +1069,22 @@ def _upload_manifest_and_complete(data_root: str, robot_id: str, run_id: str):
 
 def _run_pending(data_root: str, robot_id: str, run_id: str,
                  state: dict, pending: List[Tuple[str, str]]) -> Optional[int]:
-    """Upload `pending`. Returns an exit code to stop with, or None."""
+    """Upload `pending`. Returns an exit code to stop with, or None.
+
+    upload_state.json is always saved before this returns, whatever the
+    outcome, so a pause or a stop never loses the last batch.
+    """
+    try:
+        return _run_pending_inner(data_root, robot_id, run_id, state, pending)
+    finally:
+        try:
+            flush_state(data_root, state)
+        except OSError as exc:
+            print(f"Warning: could not save {STATE_FILENAME}: {exc}", flush=True)
+
+
+def _run_pending_inner(data_root: str, robot_id: str, run_id: str,
+                       state: dict, pending: List[Tuple[str, str]]) -> Optional[int]:
     total_pending = len(pending)
     print(f"Uploading {total_pending} files with up to {UPLOAD_WORKERS} parallel workers.",
           flush=True)
@@ -1026,6 +1139,26 @@ class CopyRecord(NamedTuple):
 
     by_rel: dict
     mission_rel: str
+    # Absolute Mission_* folder holding the record; needs_recopy.json
+    # goes there.
+    mission_dir: str = ""
+    # This folder's name, the prefix of its keys in the record.
+    folder: str = ""
+
+
+class StickCopyMismatch(UploadIntegrityError):
+    """A stick file's bytes differ from the robot's record."""
+
+    def __init__(self, rel_norm: str, record: "CopyRecord"):
+        self.rel_norm = rel_norm
+        self.record = record
+        super().__init__(
+            f"Stick copy of {rel_norm} does not match the robot. "
+            + _stick_recovery(record))
+
+
+class CopyUnfinished(UploadIntegrityError):
+    """The robot's copy of this folder never wrote its record."""
 
 
 def _read_json_object(path: str):
@@ -1088,8 +1221,8 @@ def find_thumb_manifest(data_root: str) -> Optional[str]:
         rels = ", ".join(_mission_relpath(path) for path in unreadable)
         raise UploadIntegrityError(
             f"Copy record unreadable for {rels}, so it cannot say which "
-            f"sections it covers. Delete {rels} on the stick, then plug "
-            f"the stick into the robot to re-copy it.")
+            f"sections it covers. Plug the stick into the robot to "
+            f"re-copy {rels}.")
     if len(matches) > 1:
         raise UploadIntegrityError(
             f"More than one mission on the stick lists {folder}; "
@@ -1097,6 +1230,28 @@ def find_thumb_manifest(data_root: str) -> Optional[str]:
     if matches:
         return matches[0]
     return None
+
+
+def building_has_copy_records(data_root: str) -> bool:
+    """True when a sibling Mission_* holds a per-file (schema 2) record.
+
+    On such a stick every copied folder is listed by a record, so one
+    that is not was never finished: the robot writes the record last.
+    A stick with no per-file records (copied by an older robot) keeps
+    the old rule and uploads as before.
+    """
+    parent = os.path.dirname(os.path.abspath(data_root))
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return False
+    for name in names:
+        if not name.startswith("Mission_"):
+            continue
+        doc = _read_json_object(os.path.join(parent, name, THUMB_MANIFEST))
+        if doc is not None and isinstance(doc.get("files"), dict):
+            return True
+    return False
 
 
 def _parse_copy_files(files: dict, folder: str) -> dict:
@@ -1130,7 +1285,13 @@ def load_copy_record(data_root: str) -> Optional[CopyRecord]:
     raises instead of being treated as "no record".
     """
     path = find_thumb_manifest(data_root)
+    folder = os.path.basename(os.path.abspath(data_root))
     if path is None:
+        if building_has_copy_records(data_root):
+            raise CopyUnfinished(
+                f"The robot's copy of {folder} did not finish (no copy "
+                "record on the stick lists it). Plug the stick into the "
+                "robot to finish the copy.")
         return None
     doc = _read_json_object(path)
     if doc is None:
@@ -1139,13 +1300,73 @@ def load_copy_record(data_root: str) -> Optional[CopyRecord]:
     files = doc.get("files")
     if not isinstance(files, dict):
         return None
-    folder = os.path.basename(os.path.abspath(data_root))
-    return CopyRecord(_parse_copy_files(files, folder), _mission_relpath(path))
+    return CopyRecord(_parse_copy_files(files, folder), _mission_relpath(path),
+                      os.path.dirname(os.path.abspath(path)), folder)
 
 
 def _stick_recovery(record: CopyRecord) -> str:
-    return (f"Delete {record.mission_rel} on the stick, then plug the stick "
-            f"into the robot to re-copy it.")
+    return (f"Plug the stick into the robot to repair the copy of "
+            f"{record.mission_rel}.")
+
+
+def write_needs_recopy(mission_dir: str, keys: List[str]) -> None:
+    """Add `keys` (copy-record keys, `<folder>/<relpath>`) to the mission's
+    needs_recopy.json and flush it to the stick.
+
+    The robot re-copies those files the next time the stick is plugged in
+    and deletes the file. Existing entries are kept, so several sections
+    of one mission can report into the same file.
+    """
+    path = os.path.join(mission_dir, NEEDS_RECOPY_FILENAME)
+    files = set()
+    old = _read_json_object(path)
+    if old is not None and isinstance(old.get("files"), list):
+        files.update(k for k in old["files"] if isinstance(k, str))
+    files.update(keys)
+    doc = {
+        "schema": 1,
+        "written_by": "ocu-uploader",
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "files": sorted(files),
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(doc, fh, indent=2)
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError:
+            pass  # exFAT can refuse; the rename still lands the whole file.
+    os.replace(tmp, path)
+    try:
+        dfd = os.open(mission_dir, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
+
+
+def _report_bad_stick_copy(rels: List[str], record: CopyRecord,
+                           missing: bool = False) -> None:
+    """Print the operator error for damaged stick files and leave the
+    robot a list of them to re-copy."""
+    keys = [f"{record.folder}/{rel}" for rel in rels]
+    if record.mission_dir:
+        try:
+            write_needs_recopy(record.mission_dir, keys)
+        except OSError as exc:
+            print(f"Warning: could not write {NEEDS_RECOPY_FILENAME}: {exc}",
+                  flush=True)
+    shown = ", ".join(rels[:5])
+    extra = f" and {len(rels) - 5} more" if len(rels) > 5 else ""
+    if missing:
+        what = f"Stick is missing {shown}{extra} that the robot copied."
+    else:
+        what = (f"Stick copy of {shown}{extra} does not match the robot "
+                f"({len(rels)} file{'s' if len(rels) != 1 else ''}).")
+    print(f"Unexpected error: {what} {_stick_recovery(record)}", flush=True)
 
 
 def _check_stick_copy(rel_norm: str, size: int, sha: str) -> None:
@@ -1156,33 +1377,63 @@ def _check_stick_copy(rel_norm: str, size: int, sha: str) -> None:
         return
     if size == expected[0] and sha == expected[1]:
         return
-    raise UploadIntegrityError(
-        f"Stick copy of {rel_norm} does not match the robot. "
-        + _stick_recovery(_copy_record))
+    raise StickCopyMismatch(rel_norm, _copy_record)
 
 
-def missing_stick_files(data_root: str, record: CopyRecord) -> List[str]:
+def bad_stick_files(data_root: str,
+                    record: CopyRecord) -> Tuple[List[str], List[str]]:
+    """(missing, wrong_size) relpaths against the robot's record.
+
+    A stat per file, no reads: cheap enough to run before every upload,
+    and it catches a copy whose data never reached the stick (files
+    present at 0 bytes) before anything is sent.
+    """
     missing = []
-    for rel in record.by_rel:
+    wrong = []
+    for rel, (size, _sha) in record.by_rel.items():
         path = os.path.join(data_root, *rel.split("/"))
         if os.path.islink(path) or not os.path.isfile(path):
             missing.append(rel)
-    return missing
+            continue
+        try:
+            if os.path.getsize(path) != size:
+                wrong.append(rel)
+        except OSError:
+            missing.append(rel)
+    return sorted(missing), sorted(wrong)
+
+
+def missing_stick_files(data_root: str, record: CopyRecord) -> List[str]:
+    return bad_stick_files(data_root, record)[0]
 
 
 def upload_run(data_root: str, robot_id: str, run_id: str, *,
                force: bool = False) -> int:
+    """Upload one section or mission folder. Returns the exit code."""
+    global _copy_record
+    try:
+        return _upload_run(data_root, robot_id, run_id, force=force)
+    finally:
+        # The record belongs to this run only; a later caller in the
+        # same process (tests, a future batch mode) must not inherit it.
+        _copy_record = None
+
+
+def _upload_run(data_root: str, robot_id: str, run_id: str, *,
+                force: bool = False) -> int:
+    # Not "Connection error:" — the OCU retries those, and a retry cannot
+    # fix a missing setting or a folder that is not there.
     if not CLIENT_ID:
-        print("Connection error: BDR_CLOUD_CLIENT_ID env var unset.", flush=True)
+        print("Unexpected error: BDR_CLOUD_CLIENT_ID env var unset.", flush=True)
         return 1
     if not DEVICE_TOKEN:
-        print("Connection error: BDR_CLOUD_DEVICE_TOKEN env var unset.", flush=True)
+        print("Unexpected error: BDR_CLOUD_DEVICE_TOKEN env var unset.", flush=True)
         return 1
     if not API_BASE:
-        print("Connection error: BDR_CLOUD_API_BASE env var unset.", flush=True)
+        print("Unexpected error: BDR_CLOUD_API_BASE env var unset.", flush=True)
         return 1
     if not os.path.isdir(data_root):
-        print(f"Connection error: data_root does not exist: {data_root}", flush=True)
+        print(f"Unexpected error: data_root does not exist: {data_root}", flush=True)
         return 1
 
     global _copy_record
@@ -1197,14 +1448,12 @@ def upload_run(data_root: str, robot_id: str, run_id: str, *,
         print(f"Unexpected error: {exc}", flush=True)
         return 1
     if _copy_record is not None:
-        missing = missing_stick_files(data_root, _copy_record)
-        if missing:
-            shown = ", ".join(missing[:5])
-            extra = (f" and {len(missing) - 5} more"
-                     if len(missing) > 5 else "")
-            print(f"Unexpected error: Stick is missing {shown}{extra} "
-                  f"that the robot copied. {_stick_recovery(_copy_record)}",
-                  flush=True)
+        missing, wrong = bad_stick_files(data_root, _copy_record)
+        if missing or wrong:
+            if wrong:
+                _report_bad_stick_copy(missing + wrong, _copy_record)
+            else:
+                _report_bad_stick_copy(missing, _copy_record, missing=True)
             return 1
 
     if force:
@@ -1290,7 +1539,7 @@ def upload_run(data_root: str, robot_id: str, run_id: str, *,
 
     try:
         done = _upload_manifest_and_complete(data_root, robot_id, run_id)
-    except UploadIntegrityError as exc:
+    except (UploadIntegrityError, CloudRejected) as exc:
         print(f"Unexpected error: {exc}", flush=True)
         return 1
     except requests.exceptions.RequestException as exc:
