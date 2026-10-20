@@ -65,6 +65,8 @@ QString scansFoundText(int count) {
 
 QColor badgeColor(UploadRowBadge badge, bool dark) {
     switch (badge) {
+        case UploadRowBadge::NeedsRobot:
+            return QColor(uiThemeTokens(dark).danger);
         case UploadRowBadge::Missing:
         case UploadRowBadge::Partial:
             return QColor(QStringLiteral("#F59E0B"));
@@ -798,6 +800,17 @@ void UploadDialog::startProbe() {
             return;
         }
     }
+    if (tree_) {
+        // Keep the operator's ticks across the rescan (a finished queue
+        // re-probes the stick); repopulateTree re-ticks the rows that are
+        // still selectable.
+        for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+            QTreeWidgetItem* row = tree_->topLevelItem(i);
+            if (row && row->checkState(0) == Qt::Checked) {
+                sticky_checked_.insert(row->data(0, kBuildingKeyRole).toString());
+            }
+        }
+    }
     probe_in_progress_ = true;
     last_probe_error_.clear();
     const QString scanning = QStringLiteral("Scanning %1…").arg(sourceNoun());
@@ -911,7 +924,11 @@ void UploadDialog::repopulateTree() {
         row->setFlags(row->flags() | Qt::ItemIsUserCheckable);
         row->setCheckState(0, Qt::Unchecked);
         applyBuildingRow(row, view, false);
+        if (view.selectable && sticky_checked_.contains(view.key)) {
+            row->setCheckState(0, Qt::Checked);
+        }
     }
+    sticky_checked_.clear();
 }
 
 void UploadDialog::applyBuildingRow(QTreeWidgetItem* row,
@@ -1206,6 +1223,19 @@ void UploadDialog::onUploadClicked() {
     }
 
     background_hold_.clear();
+    if (flush_proc_) {
+        // A new queue owns the caption now; the old flush may still
+        // finish in the background, it just must not relabel this run.
+        QProcess* old = flush_proc_;
+        old->disconnect(this);
+        connect(old, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                old, &QObject::deleteLater);
+        flush_proc_ = nullptr;
+    }
+    failed_this_run_.clear();
+    queue_paused_ = false;
+    upload_started_.start();
+    last_file_progress_.start();
     runner_->setSource(source_);
     runner_->setQueue(sel.folders);
     active_queue_index_ = -1;
@@ -1228,7 +1258,13 @@ void UploadDialog::onUploadClicked() {
 }
 
 void UploadDialog::onPauseClicked() {
-    if (runner_) runner_->requestPause();
+    // Pause appears where Upload was. A second click of a double click,
+    // or a remote-desktop click that arrives late, must not pause the
+    // upload it just started.
+    if (upload_started_.isValid() && upload_started_.elapsed() < 1000) {
+        return;
+    }
+    if (runner_) runner_->requestPause(QStringLiteral("Paused"));
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
             QStringLiteral("Pause requested — waiting for current file to finish…"));
@@ -1290,7 +1326,7 @@ void UploadDialog::pauseForShutdown() {
     }
 
     QApplication::setOverrideCursor(Qt::WaitCursor);
-    runner_->requestPause();
+    runner_->requestPause(QStringLiteral("OCU closing"));
     if (runner_->isBusy()) {
         QEventLoop loop;
         QTimer timer;
@@ -1382,6 +1418,7 @@ void UploadDialog::onTargetStarted(int index, int total,
 
 void UploadDialog::onFileUploaded(const UploadTarget& target,
                                   const QString& relpath) {
+    last_file_progress_.start();
     active_files_done_ += 1;
     if (active_files_done_ > active_files_total_) {
         active_files_total_ = active_files_done_;
@@ -1408,6 +1445,7 @@ void UploadDialog::onFileUploaded(const UploadTarget& target,
 
 void UploadDialog::onFileSkipped(const UploadTarget& target,
                                  const QString& relpath) {
+    last_file_progress_.start();
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
             QStringLiteral("Skipped (already uploaded): %1").arg(relpath));
@@ -1421,6 +1459,7 @@ void UploadDialog::onLogLine(const QString& line) {
 
 void UploadDialog::onTargetPaused(const UploadTarget& target,
                                   const QString& reason) {
+    queue_paused_ = true;
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
             QStringLiteral("Paused: %1").arg(reason));
@@ -1456,30 +1495,17 @@ void UploadDialog::onTargetFailed(const UploadTarget& target,
         lbl_progress_detail_->setText(
             QStringLiteral("Failed: %1").arg(error));
     }
-    // The dialog is hidden behind the dashboard. A modal here covers
-    // whatever the operator is doing; the card and a toast carry it.
-    if (!isVisible()) {
-        background_hold_ = kHoldFailed;
-        publishBackgroundActivity();
-        QString brief = error;
-        const int nl = brief.indexOf(QLatin1Char('\n'));
-        if (nl >= 0) brief.truncate(nl);
-        if (brief.size() > 140) {
-            brief = brief.left(137) + QStringLiteral("…");
-        }
-        emit uploadAttentionRequested(
-            QStringLiteral("Upload stopped: %1").arg(brief));
-        return;
-    }
-    QMessageBox::warning(this,
-                         QStringLiteral("Upload failed"),
-                         QStringLiteral(
-                             "Section %1 / %2 failed:\n\n%3\n\n"
-                             "Other selected folders were not started. "
-                             "Press Refresh, then try again.")
-                             .arg(target.building_slug,
-                                  target.section_name,
-                                  error));
+    // The runner moves on to the next folder. One summary when the
+    // queue ends, instead of a modal per folder stacked over the rest
+    // of the upload.
+    QString brief = error;
+    brief.remove(QStringLiteral("Unexpected error: "));
+    const int nl = brief.indexOf(QLatin1Char('\n'));
+    if (nl >= 0) brief.truncate(nl);
+    if (brief.size() > 160) brief = brief.left(157) + QStringLiteral("…");
+    failed_this_run_.append({QStringLiteral("%1 / %2").arg(target.building_slug,
+                                                            target.section_name),
+                             brief});
 }
 
 void UploadDialog::onTargetCompleted(const UploadTarget& target) {
@@ -1499,18 +1525,68 @@ void UploadDialog::onQueueFinished(bool cancelled) {
     if (cancelled) {
         background_hold_.clear();
     }
-    if (lbl_progress_caption_) {
-        lbl_progress_caption_->setText(
-            cancelled ? QStringLiteral("Upload cancelled.")
-                      : (background_hold_.isEmpty()
-                             ? QStringLiteral("Upload finished.")
-                             : background_hold_));
+    const bool stopped_early = runner_ && runner_->stoppedEarly();
+    const int failed = failed_this_run_.size();
+    QString caption;
+    if (cancelled) {
+        caption = QStringLiteral("Upload cancelled.");
+    } else if (!background_hold_.isEmpty() &&
+               background_hold_ != kHoldFailed) {
+        caption = background_hold_;
+    } else if (queue_paused_) {
+        caption = QStringLiteral("Upload paused. Press Upload Data to continue.");
+    } else if (stopped_early) {
+        caption = QStringLiteral("Upload stopped.");
+    } else if (failed > 0) {
+        caption = QStringLiteral("Upload finished — %1 folder%2 did not upload.")
+                      .arg(failed)
+                      .arg(failed == 1 ? QString() : QStringLiteral("s"));
+    } else {
+        caption = QStringLiteral("Upload finished.");
+    }
+    if (failed > 0 && !isVisible()) {
+        background_hold_ = kHoldFailed;
+        emit uploadAttentionRequested(
+            QStringLiteral("%1 folder%2 did not upload. Open Upload Data.")
+                .arg(failed)
+                .arg(failed == 1 ? QString() : QStringLiteral("s")));
     }
     if (progress_bar_) {
+        // The bar shows what was sent. Only a queue that dispatched every
+        // folder without a pause or a failure reads full.
         progress_bar_->setRange(0, qMax(1, active_files_total_));
-        progress_bar_->setValue(progress_bar_->maximum());
+        if (!cancelled && !queue_paused_ && !stopped_early && failed == 0) {
+            progress_bar_->setValue(progress_bar_->maximum());
+        } else {
+            progress_bar_->setValue(qMin(active_files_done_, progress_bar_->maximum()));
+        }
     }
+    flushStickThen(caption);
     publishBackgroundActivity();
+    if (failed > 0 && isVisible()) {
+        QStringList lines;
+        constexpr int kShown = 6;
+        for (int i = 0; i < qMin(kShown, failed); ++i) {
+            lines << QStringLiteral("• %1\n   %2").arg(failed_this_run_.at(i).first,
+                                                     failed_this_run_.at(i).second);
+        }
+        if (failed > kShown) {
+            lines << QStringLiteral("… and %1 more").arg(failed - kShown);
+        }
+        const QString tail =
+            stopped_early
+                ? QStringLiteral("The other selected folders were not started.")
+                : QStringLiteral("The other selected folders uploaded.");
+        // Deferred: the rescan below must not wait behind the modal.
+        const QString text =
+            QStringLiteral("%1 folder%2 did not upload:\n\n%3\n\n%4")
+                .arg(failed)
+                .arg(failed == 1 ? QString() : QStringLiteral("s"))
+                .arg(lines.join(QLatin1Char('\n')), tail);
+        QTimer::singleShot(0, this, [this, text]() {
+            BdrMessageBox::warning(this, QStringLiteral("Upload"), text);
+        });
+    }
     // Hidden: the dashboard card is the surface. Let the next open
     // rescan. A drive-removed pause keeps the watcher armed so plugging
     // the stick back can change the card from "drive removed" to
@@ -1539,6 +1615,55 @@ void UploadDialog::onQueueFinished(bool cancelled) {
     if (!cancelled || recheck) {
         startProbe();
     }
+}
+
+void UploadDialog::flushStickThen(const QString& final_caption) {
+    auto show = [this](const QString& text) {
+        if (lbl_progress_caption_) lbl_progress_caption_->setText(text);
+    };
+    if (!isThumbDrive() || !drive_mounted_ || drive_mount_.isEmpty()) {
+        show(final_caption);
+        return;
+    }
+    // The uploader and this dialog write to the stick (upload state,
+    // manifests, the robot's re-copy list, OCU logs). Put it on the
+    // flash before saying anything that sounds like "done": the
+    // operator may pull the stick the moment the caption changes.
+    if (flush_proc_) {
+        flush_proc_->disconnect(this);
+        flush_proc_->kill();
+        flush_proc_->deleteLater();
+    }
+    show(QStringLiteral("Saving to the drive… do not unplug it yet."));
+    auto* proc = new QProcess(this);
+    flush_proc_ = proc;
+    auto* guard = new QTimer(proc);
+    guard->setSingleShot(true);
+    connect(guard, &QTimer::timeout, proc, [proc]() { proc->kill(); });
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, proc, final_caption](int code, QProcess::ExitStatus status) {
+                proc->deleteLater();
+                if (flush_proc_ != proc) return;
+                flush_proc_ = nullptr;
+                const bool ok = status == QProcess::NormalExit && code == 0;
+                if (lbl_progress_caption_) {
+                    lbl_progress_caption_->setText(
+                        ok ? final_caption
+                           : final_caption +
+                                 QStringLiteral(" The drive is still saving — wait "
+                                                "a minute before unplugging it."));
+                }
+            });
+    connect(proc, &QProcess::errorOccurred, this,
+            [this, proc, final_caption](QProcess::ProcessError error) {
+                if (error != QProcess::FailedToStart) return;
+                proc->deleteLater();
+                if (flush_proc_ != proc) return;
+                flush_proc_ = nullptr;
+                if (lbl_progress_caption_) lbl_progress_caption_->setText(final_caption);
+            });
+    guard->start(120000);
+    proc->start(QStringLiteral("sync"), {QStringLiteral("-f"), drive_mount_});
 }
 
 void UploadDialog::onTargetRetryScheduled(const UploadTarget& target,
@@ -1735,6 +1860,19 @@ void UploadDialog::onCloudProbeFinished(int exit_code, int /*status*/) {
 
 void UploadDialog::handleConnectivityTransition() {
     const bool now_online = isFullyOnline();
+    // The cloud check is a 4 s curl racing the upload for the same
+    // uplink; a busy upload can starve it. Files still landing prove the
+    // cloud is reachable, and a real outage reaches the uploader as a
+    // connection error it retries on its own.
+    const bool upload_moving =
+        runner_ && runner_->isBusy() && isSourceReady() &&
+        last_file_progress_.isValid() && last_file_progress_.elapsed() < 30000;
+    if (!now_online && upload_moving) {
+        refreshConnectivityBanner();
+        refreshButtonStates();
+        publishBackgroundActivity();
+        return;
+    }
     if (!now_online) {
         // A check that cannot finish must not relabel rows. Coming back
         // online retries it (`reschedule`).
@@ -1746,7 +1884,9 @@ void UploadDialog::handleConnectivityTransition() {
         if (runner_) runner_->setRetryEnabled(false);
         if (runner_ && runner_->isBusy() && !offline_pause_active_) {
             offline_pause_active_ = true;
-            runner_->requestPause();
+            runner_->requestPause((isThumbDrive() && !drive_mounted_)
+                                      ? QStringLiteral("Drive removed")
+                                      : QStringLiteral("Cloud unreachable"));
             if (lbl_progress_detail_) {
                 lbl_progress_detail_->setText(
                     (isThumbDrive() && !drive_mounted_)

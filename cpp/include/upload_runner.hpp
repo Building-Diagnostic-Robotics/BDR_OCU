@@ -87,6 +87,20 @@ enum class CloudCheck {
 };
 
 /**
+ * What the stick holds for a folder, checked against the robot's
+ * per-file copy record (`thumbsync_manifest.json` schema 2) before any
+ * upload. Only folders not yet uploaded are checked.
+ */
+enum class StickCopyProblem {
+    None = 0,     ///< Matches the record, or the stick predates records.
+    Unfinished,   ///< No record lists the folder: the robot's copy never
+                  ///  finished (the record is written last).
+    Damaged,      ///< Files missing or the wrong size, or the record
+                  ///  itself is unreadable. Plugging the stick into the
+                  ///  robot repairs it (`needs_recopy.json`).
+};
+
+/**
  * One section or mission folder at depth 3 under the data root.
  *
  * `run_id` is the slash-separated relative path from the data root,
@@ -120,6 +134,12 @@ struct UploadTarget {
     int completed_files = 0;
     int total_files = 0;
     qint64 total_bytes = 0;
+    /// Thumb drive only. A folder with a problem is never queued; the
+    /// row tells the operator to plug the stick into the robot.
+    StickCopyProblem copy_problem = StickCopyProblem::None;
+    /// Files missing or the wrong size (Damaged only; 0 when the record
+    /// itself could not be read).
+    int copy_bad_files = 0;
 
     bool isMission() const { return section_name.startsWith(QStringLiteral("Mission_")); }
 };
@@ -149,6 +169,9 @@ enum class UploadRowBadge {
     Checking,
     Verified,
     Missing,
+    /// Every folder still to upload has a stick copy problem. Not
+    /// selectable; the operator plugs the stick into the robot.
+    NeedsRobot,
 };
 
 /**
@@ -181,8 +204,8 @@ QList<UploadBuildingRow> groupUploadTargets(
     const QHash<QString, UploadTarget>& targets);
 
 /// Folders a ticked row should hand the runner. Skips folders that are
-/// already uploaded. A folder the cloud check marked missing is included
-/// with `force_reupload` set.
+/// already uploaded and folders whose stick copy has a problem. A folder
+/// the cloud check marked missing is included with `force_reupload` set.
 QList<UploadTarget> uploadTargetsForRow(const QHash<QString, UploadTarget>& targets,
                                         const UploadBuildingRow& row);
 
@@ -234,6 +257,54 @@ bool settleCloudVerified(const QString& folder,
                          const QString& client_id,
                          const QString& robot_id,
                          int file_count);
+
+// ---------------------------------------------------------------------------
+// Stick copy check (robot record vs. what is on the stick)
+// ---------------------------------------------------------------------------
+
+/// Laptop -> robot request, written into a `Mission_*` folder on the
+/// stick. Same file and format as `uploader.py` `write_needs_recopy`;
+/// the robot re-copies the listed files and deletes it.
+extern const char* const kNeedsRecopyFile;
+
+/// The copy records of one building folder, read once per probe.
+struct BuildingCopyRecords {
+    struct Record {
+        QString mission;          ///< `Mission_*` folder name.
+        QString dir;              ///< Absolute path of that folder.
+        bool readable = false;    ///< Parsed as a JSON object.
+        bool per_file = false;    ///< Has a `files` map (schema 2).
+        QStringList sections;
+        /// `<folder>/<relpath>` -> size, from `files`.
+        QHash<QString, qint64> sizes;
+    };
+    QList<Record> records;
+    /// True when any record has a `files` map. On such a stick every
+    /// copied folder is listed by one.
+    bool any_per_file = false;
+};
+
+BuildingCopyRecords loadBuildingCopyRecords(const QString& building_dir);
+
+struct StickCopyVerdict {
+    StickCopyProblem problem = StickCopyProblem::None;
+    /// Copy-record keys (`<folder>/<relpath>`) missing or the wrong size.
+    QStringList bad_keys;
+    /// Mission folder whose record covers the folder ("" when none).
+    QString mission_dir;
+};
+
+/// Same rules as `uploader.py` (`find_thumb_manifest`, `bad_stick_files`,
+/// the unfinished-copy check). `local_sizes` maps each file's path
+/// relative to the folder to its size on the stick.
+StickCopyVerdict checkStickCopy(const BuildingCopyRecords& records,
+                                const QString& folder,
+                                const QHash<QString, qint64>& local_sizes);
+
+/// Merge `keys` into `<mission_dir>/needs_recopy.json` and flush it to
+/// the stick. No write when every key is already listed. False on an
+/// I/O error.
+bool mergeNeedsRecopy(const QString& mission_dir, const QStringList& keys);
 
 // ---------------------------------------------------------------------------
 // State probe
@@ -394,8 +465,9 @@ public:
 
     /// Graceful pause for the *currently running* target (does nothing
     /// when idle). The active script finishes the in-flight file then
-    /// exits.
-    void requestPause();
+    /// exits. `reason` is what `targetPaused` reports ("Paused",
+    /// "Cloud unreachable", "Drive removed"); empty means "Paused".
+    void requestPause(const QString& reason = QString());
 
     /// Toggle the auto-retry-on-connection-error policy.  Default true.
     /// The OCU-side reachability gate sets this to false on offline
@@ -418,6 +490,16 @@ public:
 
     /// Snapshot of the queue head.
     UploadTarget activeTarget() const;
+
+    /// True when the last queue stopped on an error that every folder
+    /// would hit (`isQueueStoppingError`) with folders still unstarted.
+    bool stoppedEarly() const { return stopped_early_; }
+
+    /// Errors after which the rest of the queue is not attempted:
+    /// the cloud refusing the robot's credentials (HTTP 401/403), a
+    /// missing setting or interpreter, or the stick folder gone. Any
+    /// other failure is that folder's alone and the queue moves on.
+    static bool isQueueStoppingError(const QString& error);
 
     // ----- Retry policy (transient connection errors) -----
     //
@@ -469,9 +551,9 @@ signals:
     /// the idle button row but keeps the section row tagged "paused".
     void targetPaused(const UploadTarget& target, const QString& reason);
 
-    /// Hard error from the script (5GB ceiling, hash failure, etc.).
-    /// The runner stops the queue so the operator sees the message
-    /// before further work continues.
+    /// Hard error from the script (5GB ceiling, damaged stick copy,
+    /// etc.). The runner moves on to the next folder unless
+    /// `isQueueStoppingError(error)`, in which case it stops the queue.
     void targetFailed(const UploadTarget& target, const QString& error);
 
     /// Per-target success.
@@ -524,6 +606,7 @@ private:
     int current_index_ = -1;
     int queue_total_ = 0;
     bool busy_ = false;
+    bool stopped_early_ = false;
     bool cancel_requested_ = false;
     bool paused_during_target_ = false;
     QString pause_reason_;
