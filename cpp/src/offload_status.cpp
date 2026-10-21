@@ -66,6 +66,12 @@ bool OffloadSnapshot::copyIncomplete() const {
     if (queued > 0) {
         return true;
     }
+    // The last copy is done but its data may still be on its way to the
+    // flash (or the robot is checking an old copy). Pulling the stick
+    // now is how the 0-byte copies of October 2026 happened.
+    if (stick_safe_to_remove.has_value() && !*stick_safe_to_remove) {
+        return true;
+    }
     switch (state) {
         case OffloadCopyState::Queued:
         case OffloadCopyState::Copying:
@@ -101,6 +107,10 @@ OffloadSnapshot parseOffloadStatusJson(const QByteArray& json) {
         readByteCount(obj.value(QStringLiteral("robot_free_bytes")));
     out.robot_floor_bytes =
         readByteCount(obj.value(QStringLiteral("robot_floor_bytes")));
+    const QJsonValue safe = obj.value(QStringLiteral("stick_safe_to_remove"));
+    if (safe.isBool()) {
+        out.stick_safe_to_remove = safe.toBool();
+    }
 
     // The worker's top-level `state` is a coarse rollup: any non-current,
     // non-waiting queue is written as "error", including jobs that are

@@ -42,9 +42,14 @@ struct OffloadSnapshot {
     /// Unset when the field is missing or null (older robots).
     std::optional<qint64> robot_free_bytes;
     std::optional<qint64> robot_floor_bytes;
+    /// The robot has flushed (and, when it can, unmounted) the stick, so
+    /// pulling it now loses nothing. False while it is still writing or
+    /// checking the stick. Unset on robots that do not report it.
+    std::optional<bool> stick_safe_to_remove;
     bool parse_ok = false;
 
-    /// True while any job is unfinished. Idle + queued==0 is done.
+    /// True while any job is unfinished, or while the robot says it is
+    /// still writing to the stick. Idle + queued==0 + safe is done.
     bool copyIncomplete() const;
 };
 

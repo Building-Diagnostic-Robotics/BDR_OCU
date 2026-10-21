@@ -49,7 +49,10 @@
 #pragma once
 
 #include <QDialog>
+#include <QElapsedTimer>
 #include <QHash>
+#include <QPair>
+#include <QSet>
 #include <QList>
 #include <QPoint>
 #include <functional>
@@ -310,6 +313,28 @@ private:
     /// or the operator cancels.
     QString background_hold_;
     QString published_background_status_;
+
+    /// Folders that failed in the current queue, "<building> / <folder>"
+    /// with the reason. Shown once, when the queue ends.
+    QList<QPair<QString, QString>> failed_this_run_;
+    /// The queue ended on a pause (Pause, offline, drive removed), not
+    /// because every folder was dispatched.
+    bool queue_paused_ = false;
+    /// Started when Upload is pressed. A Pause press inside the first
+    /// second lands where the Upload button just was (double click,
+    /// remote-desktop lag) and is ignored.
+    QElapsedTimer upload_started_;
+    /// Restarted on every uploaded or skipped file. While it is fresh,
+    /// the upload itself proves the cloud is reachable.
+    QElapsedTimer last_file_progress_;
+    /// Building rows ticked before a rescan, re-ticked after it when
+    /// still selectable.
+    QSet<QString> sticky_checked_;
+    /// `sync -f` on the stick after a queue stops, so whatever the
+    /// uploader and the OCU wrote there is on the flash before the
+    /// card says the operator can take it.
+    QPointer<QProcess> flush_proc_;
+    void flushStickThen(const QString& final_caption);
     /// See `setUploadBlockReason`. Empty function means no extra gate.
     std::function<QString()> upload_block_reason_;
 

@@ -718,8 +718,10 @@ kept in sync by hand.
 - **Script** (`cpp/scripts/uploader.py`, canonical; installed by the
   `.deb` at `/usr/share/bdr-coverage-planner/uploader.py`): Python 3 +
   `requests`. Walks a single section/mission folder, calls `/presign`
-  per file, PUTs, writes `upload_state.json` after each file (atomic tmp
-  + `os.replace`), generates `manifest.json`, then `/complete`. Reads
+  per file, PUTs, saves `upload_state.json` every 200 files or 5 s and
+  on every exit path (atomic tmp + `os.replace`), generates
+  `manifest.json`, then `/complete`. A crash loses at most one batch of
+  records; those files are PUT again (same key, same bytes). Reads
   `BDR_CLOUD_API_BASE` / `BDR_CLOUD_CLIENT_ID` / `BDR_CLOUD_DEVICE_TOKEN`
   / `BDR_UPLOAD_WORKERS` from the environment. **State lives on the
   stick next to the data**, so a resume works from any laptop.
@@ -741,6 +743,15 @@ kept in sync by hand.
   the bookkeeping names, including `cloud_verified.json`. A Done folder
   whose `cloud_verified.json` hash matches `manifest.json` starts as
   Verified. `scanLocalDataRoot()` is the pure engine (tested).
+  **Stick copy check:** every folder not yet uploaded is compared with
+  the robot's schema-2 record (`checkStickCopy`, sizes only, from the
+  same walk). Files missing or the wrong size → `StickCopyProblem::Damaged`,
+  and the keys go into that mission's `needs_recopy.json`. A folder no
+  record lists, on a stick that has per-file records, →
+  `Unfinished` (the robot writes the record last). Either way the
+  folder is never queued; a building with nothing else to upload shows
+  **Copy damaged / Copy not finished — plug drive into ROOFUS** (red,
+  not selectable), otherwise its badge gets `· N need ROOFUS`.
 - **`UploadRunner`**: ThumbDrive mode runs `python3 -u <script>
   <data_path> <robot_id> <run_id> [--force]` as a plain `QProcess` with
   the creds in `QProcessEnvironment`; `resolveLocalScriptPath()` tries
@@ -795,7 +806,15 @@ kept in sync by hand.
   Header names the robot the upload is attributed to **and** the
   drive (`Drive: RDATA_EXT at /media/… · N GB free`). Banner + Upload
   gating = drive mounted AND cloud reachable (2 s `curl` HEAD, 2-miss
-  debounce). Pulling the stick mid-upload pauses the runner.
+  debounce). Pulling the stick mid-upload pauses the runner. A failed
+  cloud probe does **not** pause a run that finished a file in the last
+  30 s: the curl shares the uplink with the upload and loses, and a
+  real outage reaches the uploader as `Connection error:`, which it
+  retries. A failed folder does not stop the queue (see Decisions);
+  one summary lists the failures when it ends. Ticked rows stay
+  ticked across the rescan that follows. When the queue stops, the
+  dialog runs `sync -f <mount>` and says "Saving to the drive… do not
+  unplug it yet" until that returns.
 - **`OffloadStatus`** (`cpp/include/offload_status.hpp`): parses
   `/R_DATA/.offload/status.json` (SSH, 5 s while Stage 3 is visible)
   and classifies the laptop stick. Copy-complete is per `Mission_*`
@@ -834,17 +853,26 @@ kept in sync by hand.
   file hashed on the robot's disk and keyed from the building folder
   (`Section_1_120924/Visual_data/x.jpg`). A stick without that map
   (any copy made before schema 2) uploads exactly as before.
-- **A schema-2 record is enforced.** A file whose sha256 or size
-  disagrees is not uploaded, and neither is the rest of that section.
-  The message tells the operator to delete
-  `<date>/<building>/Mission_HHMMSS` on the stick and plug it into the
-  robot, which re-copies because the manifest is gone. A file the
-  robot recorded but the stick lacks stops the section before
-  anything is uploaded. A file on the stick that the robot did not
+- **A schema-2 record is enforced.** Before anything is sent, every
+  recorded file is stat-checked; a missing or wrong-size file stops
+  the section. A sha256 mismatch found while hashing stops it too.
+  Either way the uploader adds the keys to the mission's
+  `needs_recopy.json` and tells the operator to plug the stick into
+  the robot, which re-copies those files (pilot_ws
+  `rdata_thumbdrive_sync.py`). The operator never deletes anything.
+  A folder no record lists, on a stick with per-file records, is an
+  unfinished copy and is not uploaded. A file on the stick that the robot did not
   record is skipped, with one warning naming it.
   `thumbsync_manifest.json` itself is still uploaded.
   An unreadable copy record blocks every section in that building
   folder, because it cannot say which sections it covers.
+- **One failed folder does not stop the queue.** The runner moves on
+  and the dialog shows one summary at the end. Only
+  `UploadRunner::isQueueStoppingError` stops it: `Cloud refused …
+  (HTTP 401/403)`, a missing env var, interpreter or `requests`, or
+  `data_root does not exist`. The uploader reports `/presign` and
+  `/complete` 4xx (not 408/429) as `Cloud refused` instead of
+  `Connection error:`, so they are not retried three times.
 - **Single PUT only.** Backend mints single-PUT presigns; per-file
   ceiling is 5 GB.
 - **Sequential targets, parallel files within a target.** Script's
@@ -906,7 +934,11 @@ kept in sync by hand.
 ### Pause / cancel
 
 - **Pause** touches `<data_path>/pause.flag` on the stick; the script
-  exits at the next file boundary. Resume = press Upload again. **The
+  exits at the next file boundary. `requestPause(reason)` carries why
+  ("Paused", "Cloud unreachable", "Drive removed", "OCU closing"), and
+  a pause shows "Upload paused" with the real file count, never
+  "Upload finished" and a full bar. A Pause click in the first second
+  after Upload is ignored: Pause sits where Upload was. Resume = press Upload again. **The
   runner deletes a stale `pause.flag` before every launch** (locally, or
   via `rm -f` inside the SSH command) — the script never removes it, and
   before this fix a resume re-paused at its first file.
@@ -967,8 +999,11 @@ clearing, `FailedToStart` handling).
   uses an opacity effect because it *replaces* its own shadow.
 - **Do NOT add IAM credentials to the OCU.**
 - **Do NOT make the dialog write anything to the stick except through
-  `uploader.py`** (`upload_state.json`, `manifest.json`, `pause.flag`)
-  **and `cloud_verified.json`.** That file is the one exception: the
+  `uploader.py`** (`upload_state.json`, `manifest.json`, `pause.flag`,
+  `needs_recopy.json`) **, plus `cloud_verified.json` and the probe's
+  `needs_recopy.json`.** `needs_recopy.json` (schema 1, `files`: copy
+  record keys) is the laptop's request to the robot; the probe merges
+  into it and rewrites it only when a key is new. That file is the one exception: the
   dialog writes it only after a cloud check matches, and deletes it
   when the check says Missing. `uploader.py` deletes it when a
   re-upload starts and never uploads it. The robot's
@@ -980,8 +1015,8 @@ clearing, `FailedToStart` handling).
   `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`
   directly.
 - **Do NOT upload a schema-2 section whose stick bytes disagree
-  with `thumbsync_manifest.json`.** Delete that mission folder on
-  the stick and let the robot re-copy it. Do not re-copy by hand.
+  with `thumbsync_manifest.json`.** The robot re-copies what
+  `needs_recopy.json` lists. Do not re-copy by hand.
 - **Do NOT send `Content-MD5` unless `/presign` returned
   `md5_signed: true`.** S3 answers 403 `HeadersNotSigned` and the
   section stops.

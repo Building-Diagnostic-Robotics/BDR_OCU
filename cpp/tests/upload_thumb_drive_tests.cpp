@@ -17,6 +17,7 @@
 #include <QDate>
 #include <QElapsedTimer>
 #include <QDir>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTime>
@@ -24,6 +25,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
 
 using f2c_cpp::OffloadCopyState;
@@ -1387,4 +1389,301 @@ TEST(UploadOcuLogs, MissingLogIsReportedAndTheUploadStillRuns) {
     EXPECT_EQ(completed, 1);
     EXPECT_TRUE(logs.join(" | ").contains("is not on this laptop")) << logs.join(" | ").toStdString();
     EXPECT_FALSE(QFile::exists(rig.store + "/mission_20260913_115900.uploaded"));
+}
+
+// ---------------------------------------------------------------------------
+// Stick copy check: robot record vs. what is on the stick
+// ---------------------------------------------------------------------------
+
+namespace {
+
+QByteArray sha256Hex(const QByteArray& bytes) {
+    return QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
+}
+
+// A building whose Mission_120000 record covers itself and Section_1.
+// `stick` maps relpath (from the building) to the bytes on the stick;
+// `robot` maps the same keys to what the robot copied.
+QString layOutRecordedBuilding(const QString& root,
+                               const QHash<QString, QByteArray>& robot,
+                               const QHash<QString, QByteArray>& stick) {
+    const QString b = root + "/October_13_2026/Durafoam_ca";
+    QJsonObject files;
+    for (auto it = robot.cbegin(); it != robot.cend(); ++it) {
+        QJsonObject rec;
+        rec.insert("size", it.value().size());
+        rec.insert("sha256", QString::fromLatin1(sha256Hex(it.value())));
+        files.insert(it.key(), rec);
+    }
+    for (auto it = stick.cbegin(); it != stick.cend(); ++it) {
+        writeFile(b + "/" + it.key(), it.value());
+    }
+    QJsonObject doc;
+    doc.insert("schema", 2);
+    doc.insert("sections", QJsonArray{QStringLiteral("Section_1")});
+    doc.insert("files", files);
+    writeFile(b + "/Mission_120000/thumbsync_manifest.json",
+              QJsonDocument(doc).toJson());
+    return b;
+}
+
+QStringList needsRecopyFiles(const QString& mission_dir) {
+    QFile f(mission_dir + "/needs_recopy.json");
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    QStringList out;
+    for (const QJsonValue& v :
+         QJsonDocument::fromJson(f.readAll()).object().value("files").toArray()) {
+        out << v.toString();
+    }
+    return out;
+}
+
+}  // namespace
+
+using f2c_cpp::StickCopyProblem;
+
+TEST(StickCopyCheck, MatchingCopyHasNoProblem) {
+    QTemporaryDir tmp;
+    const QHash<QString, QByteArray> data{
+        {"Mission_120000/mission_config.json", "{}"},
+        {"Section_1/a.bin", "abc"},
+        {"Section_1/Visual_data/f.jxl", QByteArray(500, 'f')},
+    };
+    const QString b = layOutRecordedBuilding(tmp.path(), data, data);
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    ASSERT_EQ(all.size(), 2);
+    for (const UploadTarget& t : all) {
+        EXPECT_EQ(t.copy_problem, StickCopyProblem::None) << t.section_name.toStdString();
+    }
+    EXPECT_FALSE(QFileInfo::exists(b + "/Mission_120000/needs_recopy.json"));
+}
+
+TEST(StickCopyCheck, ZeroByteFilesAreDamagedAndTheRobotIsAskedToRecopy) {
+    QTemporaryDir tmp;
+    const QHash<QString, QByteArray> robot{
+        {"Mission_120000/mission_config.json", "{}"},
+        {"Section_1/a.bin", "abc"},
+        {"Section_1/Visual_data/f.jxl", QByteArray(500, 'f')},
+        {"Section_1/rosbag/x.mcap.zstd", QByteArray(900, 'r')},
+    };
+    QHash<QString, QByteArray> stick = robot;
+    // What the robot left when the stick was pulled before its cache
+    // flushed: the entries exist, the data does not.
+    stick["Section_1/Visual_data/f.jxl"] = QByteArray();
+    stick["Section_1/rosbag/x.mcap.zstd"] = QByteArray();
+    const QString b = layOutRecordedBuilding(tmp.path(), robot, stick);
+
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    const UploadTarget* section = find(all, "Section_1");
+    ASSERT_NE(section, nullptr);
+    EXPECT_EQ(section->copy_problem, StickCopyProblem::Damaged);
+    EXPECT_EQ(section->copy_bad_files, 2);
+    EXPECT_EQ(find(all, "Mission_120000")->copy_problem, StickCopyProblem::None);
+    EXPECT_EQ(needsRecopyFiles(b + "/Mission_120000"),
+              (QStringList{"Section_1/Visual_data/f.jxl",
+                           "Section_1/rosbag/x.mcap.zstd"}));
+
+    // The probe runs on every Refresh: an unchanged list is not rewritten.
+    const QDateTime before =
+        QFileInfo(b + "/Mission_120000/needs_recopy.json").lastModified();
+    QThread::msleep(1100);
+    UploadStateProbe::scanLocalDataRoot(tmp.path());
+    EXPECT_EQ(QFileInfo(b + "/Mission_120000/needs_recopy.json").lastModified(), before);
+}
+
+TEST(StickCopyCheck, MissingFileIsDamaged) {
+    QTemporaryDir tmp;
+    const QHash<QString, QByteArray> robot{
+        {"Section_1/a.bin", "abc"}, {"Section_1/b.bin", "de"}};
+    QHash<QString, QByteArray> stick{{"Section_1/a.bin", "abc"}};
+    layOutRecordedBuilding(tmp.path(), robot, stick);
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    EXPECT_EQ(find(all, "Section_1")->copy_problem, StickCopyProblem::Damaged);
+    EXPECT_EQ(find(all, "Section_1")->copy_bad_files, 1);
+}
+
+TEST(StickCopyCheck, UnlistedFolderOnARecordedStickIsUnfinished) {
+    QTemporaryDir tmp;
+    const QHash<QString, QByteArray> data{{"Section_1/a.bin", "abc"}};
+    const QString b = layOutRecordedBuilding(tmp.path(), data, data);
+    // A second mission whose copy stopped before its record was written.
+    writeFile(b + "/Mission_160000/mission_config.json", "{}");
+    writeFile(b + "/Section_2_160000/a.bin", "zz");
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    EXPECT_EQ(find(all, "Mission_160000")->copy_problem, StickCopyProblem::Unfinished);
+    EXPECT_EQ(find(all, "Section_2_160000")->copy_problem, StickCopyProblem::Unfinished);
+    EXPECT_EQ(find(all, "Section_1")->copy_problem, StickCopyProblem::None);
+}
+
+TEST(StickCopyCheck, StickFromAnOlderRobotIsNotChecked) {
+    QTemporaryDir tmp;
+    layOutStick(tmp.path());  // record without a files map
+    for (const UploadTarget& t : UploadStateProbe::scanLocalDataRoot(tmp.path())) {
+        EXPECT_EQ(t.copy_problem, StickCopyProblem::None) << t.section_name.toStdString();
+    }
+}
+
+TEST(StickCopyCheck, UnreadableRecordBlocksTheBuilding) {
+    QTemporaryDir tmp;
+    const QString b = tmp.path() + "/October_13_2026/Durafoam_ca";
+    writeFile(b + "/Mission_120000/thumbsync_manifest.json", "");  // 0 bytes
+    writeFile(b + "/Section_1/a.bin", "abc");
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    EXPECT_EQ(find(all, "Section_1")->copy_problem, StickCopyProblem::Damaged);
+    EXPECT_EQ(find(all, "Mission_120000")->copy_problem, StickCopyProblem::Damaged);
+}
+
+TEST(StickCopyCheck, FinishedUploadIsNotChecked) {
+    QTemporaryDir tmp;
+    const QHash<QString, QByteArray> robot{{"Section_1/a.bin", "abc"}};
+    const QHash<QString, QByteArray> stick{{"Section_1/a.bin", ""}};
+    const QString b = layOutRecordedBuilding(tmp.path(), robot, stick);
+    writeFile(b + "/Section_1/manifest.json", R"({"files":[]})");
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    EXPECT_EQ(find(all, "Section_1")->status, UploadStatus::Done);
+    EXPECT_EQ(find(all, "Section_1")->copy_problem, StickCopyProblem::None);
+}
+
+TEST(UploadBuildingRows, DamagedFolderIsHeldBackAndTheRestStillUploads) {
+    QHash<QString, UploadTarget> targets;
+    auto add = [&](const QString& section, StickCopyProblem problem) {
+        UploadTarget t;
+        t.date_folder = "October_15_2026";
+        t.building_slug = "1561_buckeye_dr";
+        t.section_name = section;
+        t.run_id = t.date_folder + "/" + t.building_slug + "/" + section;
+        t.copy_problem = problem;
+        targets.insert(t.run_id, t);
+    };
+    add("Mission_160735", StickCopyProblem::None);
+    add("Section_7_160735_complete", StickCopyProblem::None);
+    add("Mission_162137", StickCopyProblem::Damaged);
+    add("Section_8_162137_partial", StickCopyProblem::Damaged);
+
+    QList<UploadBuildingRow> rows = groupUploadTargets(targets);
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Pending);
+    EXPECT_TRUE(rows.at(0).selectable);
+    EXPECT_TRUE(rows.at(0).badge_text.contains("2 need ROOFUS"))
+        << rows.at(0).badge_text.toStdString();
+    const QList<UploadTarget> queued = uploadTargetsForRow(targets, rows.at(0));
+    ASSERT_EQ(queued.size(), 2);
+    for (const UploadTarget& t : queued) {
+        EXPECT_EQ(t.copy_problem, StickCopyProblem::None);
+    }
+
+    // Once the good folders are uploaded only the damaged ones remain:
+    // the row tells the operator what to do and cannot be ticked.
+    targets[queued.at(0).run_id].status = UploadStatus::Done;
+    targets[queued.at(1).run_id].status = UploadStatus::Done;
+    rows = groupUploadTargets(targets);
+    EXPECT_EQ(rows.at(0).badge, UploadRowBadge::NeedsRobot);
+    EXPECT_FALSE(rows.at(0).selectable);
+    EXPECT_TRUE(rows.at(0).badge_text.contains("plug drive into ROOFUS"));
+    EXPECT_TRUE(uploadTargetsForRow(targets, rows.at(0)).isEmpty());
+}
+
+TEST(OffloadStatus, StickStillBeingWrittenIsIncomplete) {
+    OffloadSnapshot s = parseOffloadStatusJson(
+        R"({"state":"idle","queued":0,"jobs":{},"stick_safe_to_remove":false})");
+    ASSERT_TRUE(s.parse_ok);
+    EXPECT_TRUE(s.copyIncomplete());
+    s = parseOffloadStatusJson(
+        R"({"state":"idle","queued":0,"jobs":{},"stick_safe_to_remove":true})");
+    EXPECT_FALSE(s.copyIncomplete());
+    // Older robots do not send the field.
+    s = parseOffloadStatusJson(R"({"state":"idle","queued":0,"jobs":{}})");
+    EXPECT_FALSE(s.stick_safe_to_remove.has_value());
+    EXPECT_FALSE(s.copyIncomplete());
+}
+
+TEST(UploadRunnerPolicy, OnlyQueueWideErrorsStopTheQueue) {
+    EXPECT_TRUE(UploadRunner::isQueueStoppingError(
+        "Unexpected error: Cloud refused /presign (HTTP 403): bad token"));
+    EXPECT_TRUE(UploadRunner::isQueueStoppingError(
+        "Unexpected error: Cloud refused /complete (HTTP 401)"));
+    EXPECT_TRUE(UploadRunner::isQueueStoppingError(
+        "Unexpected error: data_root does not exist: /media/x"));
+    EXPECT_FALSE(UploadRunner::isQueueStoppingError(
+        "Unexpected error: Cloud refused /presign (HTTP 400): bad relpath"));
+    EXPECT_FALSE(UploadRunner::isQueueStoppingError(
+        "Unexpected error: Stick copy of a.bin does not match the robot (1 file)."));
+    EXPECT_FALSE(UploadRunner::isQueueStoppingError(
+        "Unexpected error: File exceeds 5GB single-PUT limit: big.bin"));
+}
+
+namespace {
+
+struct QueueOutcome {
+    QStringList failures;
+    QStringList started;
+    int completed = 0;
+    bool stopped_early = false;
+};
+
+QueueOutcome runQueueWithStub(const QString& stub_body) {
+    QueueOutcome out;
+    QTemporaryDir tmp;
+    layOutStick(tmp.path());
+    const QList<UploadTarget> all = UploadStateProbe::scanLocalDataRoot(tmp.path());
+    const UploadTarget* s1 = find(all, "Section_1_101500");
+    const UploadTarget* s2 = find(all, "Section_2_113000");
+    const QString stub = tmp.path() + "/stub_uploader.py";
+    writeFile(stub, stub_body.toUtf8());
+
+    UploadRunner runner;
+    runner.setSource(f2c_cpp::UploadSource::ThumbDrive);
+    runner.setLocalScriptPath(stub);
+    runner.setCloudAuth("https://api.example/", "client_x", "tok_y");
+    runner.setRobotId("Roofus#0001");
+    runner.setQueue({*s1, *s2});
+    QObject::connect(&runner, &UploadRunner::targetStarted,
+                     [&](int, int, const UploadTarget& t) { out.started << t.section_name; });
+    QObject::connect(&runner, &UploadRunner::targetFailed,
+                     [&](const UploadTarget& t, const QString&) { out.failures << t.section_name; });
+    QObject::connect(&runner, &UploadRunner::targetCompleted,
+                     [&](const UploadTarget&) { ++out.completed; });
+    QEventLoop loop;
+    QObject::connect(&runner, &UploadRunner::queueFinished, [&](bool) { loop.quit(); });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    runner.start();
+    loop.exec();
+    out.stopped_early = runner.stoppedEarly();
+    return out;
+}
+
+}  // namespace
+
+TEST(UploadThumbDrive, OneDamagedFolderDoesNotStopTheRestOfTheQueue) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+    const QueueOutcome out = runQueueWithStub(R"PY(
+import sys
+if sys.argv[3].endswith("Section_1_101500"):
+    print("Unexpected error: Stick copy of a.bin does not match the robot (1 file).", flush=True)
+    sys.exit(1)
+print("Upload complete: {}", flush=True)
+)PY");
+    EXPECT_EQ(out.started, QStringList({"Section_1_101500", "Section_2_113000"}));
+    EXPECT_EQ(out.failures, QStringList({"Section_1_101500"}));
+    EXPECT_EQ(out.completed, 1);
+    EXPECT_FALSE(out.stopped_early);
+}
+
+TEST(UploadThumbDrive, RefusedCredentialsStopTheQueue) {
+    int argc = 1;
+    char arg0[] = "upload_thumb_drive_tests";
+    char* argv[] = {arg0, nullptr};
+    QCoreApplication app(argc, argv);
+    const QueueOutcome out = runQueueWithStub(R"PY(
+import sys
+print("Unexpected error: Cloud refused /presign (HTTP 403): bad token", flush=True)
+sys.exit(1)
+)PY");
+    EXPECT_EQ(out.started, QStringList({"Section_1_101500"}));
+    EXPECT_EQ(out.failures, QStringList({"Section_1_101500"}));
+    EXPECT_EQ(out.completed, 0);
+    EXPECT_TRUE(out.stopped_early);
 }

@@ -20,6 +20,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QTime>
@@ -43,16 +44,19 @@ const char* const kStateFile = "upload_state.json";
 const char* const kPauseFile = "pause.flag";
 const char* const kManifestFile = "manifest.json";
 const char* const kCloudVerifiedFile = "cloud_verified.json";
+const char* const kThumbManifestFile = "thumbsync_manifest.json";
 
 bool isUploadBookkeepingName(const QString& name) {
     const QString state = QLatin1String(kStateFile);
     const QString manifest = QLatin1String(kManifestFile);
     const QString verified = QLatin1String(kCloudVerifiedFile);
+    const QString recopy = QLatin1String("needs_recopy.json");
     return name == state || name == QLatin1String(kPauseFile) ||
-           name == manifest || name == verified ||
+           name == manifest || name == verified || name == recopy ||
            name == state + QStringLiteral(".tmp") ||
            name == manifest + QStringLiteral(".tmp") ||
-           name == verified + QStringLiteral(".tmp");
+           name == verified + QStringLiteral(".tmp") ||
+           name == recopy + QStringLiteral(".tmp");
 }
 
 // Where create_deb.sh installs the canonical script.
@@ -199,6 +203,7 @@ QString buildProbeRemoteCommand(const QString& data_root) {
                "    ! -name cloud_verified.json "
                "    ! -name upload_state.json.tmp ! -name manifest.json.tmp "
                "    ! -name cloud_verified.json.tmp "
+               "    ! -name needs_recopy.json ! -name needs_recopy.json.tmp "
                "    | wc -l); "
                "  size=$(du -sb \"$p\" 2>/dev/null | awk '{print $1}'); "
                "  cfg=\"$p/session_config.json\"; "
@@ -357,6 +362,171 @@ bool settleCloudVerified(const QString& folder,
     return writeCloudVerified(folder, client_id, robot_id, file_count);
 }
 
+// ---------------------------------------------------------------------------
+// Stick copy check
+// ---------------------------------------------------------------------------
+
+const char* const kNeedsRecopyFile = "needs_recopy.json";
+
+BuildingCopyRecords loadBuildingCopyRecords(const QString& building_dir) {
+    BuildingCopyRecords out;
+    const QDir dir(building_dir);
+    const QStringList missions = dir.entryList(
+        {QStringLiteral("Mission_*")},
+        QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks, QDir::Name);
+    for (const QString& mission : missions) {
+        const QString path = dir.filePath(mission) + QLatin1Char('/') +
+                             QLatin1String(kThumbManifestFile);
+        if (!QFileInfo(path).isFile()) continue;
+        BuildingCopyRecords::Record rec;
+        rec.mission = mission;
+        rec.dir = dir.filePath(mission);
+        QFile f(path);
+        QJsonParseError err{};
+        const QJsonDocument doc = f.open(QIODevice::ReadOnly)
+                                      ? QJsonDocument::fromJson(f.readAll(), &err)
+                                      : QJsonDocument();
+        if (doc.isObject()) {
+            rec.readable = true;
+            const QJsonObject obj = doc.object();
+            for (const QJsonValue& v : obj.value(QStringLiteral("sections")).toArray()) {
+                if (v.isString()) rec.sections << v.toString();
+            }
+            const QJsonValue files = obj.value(QStringLiteral("files"));
+            if (files.isObject()) {
+                rec.per_file = true;
+                out.any_per_file = true;
+                const QJsonObject map = files.toObject();
+                rec.sizes.reserve(map.size());
+                for (auto it = map.begin(); it != map.end(); ++it) {
+                    const QJsonValue size = it.value().toObject().value(QStringLiteral("size"));
+                    // A malformed entry is the uploader's to report; -1
+                    // makes it count as wrong here, so the folder is not
+                    // queued only to fail.
+                    rec.sizes.insert(it.key(), size.isDouble()
+                                                   ? static_cast<qint64>(size.toDouble())
+                                                   : -1);
+                }
+            }
+        }
+        out.records.append(rec);
+    }
+    return out;
+}
+
+StickCopyVerdict checkStickCopy(const BuildingCopyRecords& records,
+                                const QString& folder,
+                                const QHash<QString, qint64>& local_sizes) {
+    StickCopyVerdict verdict;
+    const BuildingCopyRecords::Record* use = nullptr;
+
+    // A mission folder carries its own record.
+    for (const auto& rec : records.records) {
+        if (rec.mission == folder) {
+            if (!rec.readable) {
+                verdict.problem = StickCopyProblem::Damaged;
+                verdict.mission_dir = rec.dir;
+                return verdict;
+            }
+            use = &rec;
+            break;
+        }
+    }
+    if (!use) {
+        // A section uses the sibling mission record that lists it. An
+        // unreadable sibling cannot say what it covers, so it blocks
+        // every section here (uploader.py does the same).
+        int matches = 0;
+        for (const auto& rec : records.records) {
+            if (!rec.readable) {
+                verdict.problem = StickCopyProblem::Damaged;
+                verdict.mission_dir = rec.dir;
+                return verdict;
+            }
+            if (rec.sections.contains(folder)) {
+                ++matches;
+                use = &rec;
+            }
+        }
+        if (matches > 1) {
+            verdict.problem = StickCopyProblem::Damaged;
+            return verdict;
+        }
+    }
+    if (!use) {
+        if (records.any_per_file) verdict.problem = StickCopyProblem::Unfinished;
+        return verdict;
+    }
+    verdict.mission_dir = use->dir;
+    if (!use->per_file) return verdict;  // older robot: nothing to compare
+
+    const QString prefix = folder + QLatin1Char('/');
+    for (auto it = use->sizes.cbegin(); it != use->sizes.cend(); ++it) {
+        if (!it.key().startsWith(prefix)) continue;
+        const QString rel = it.key().mid(prefix.size());
+        const auto found = local_sizes.constFind(rel);
+        if (found == local_sizes.cend() || found.value() != it.value()) {
+            verdict.bad_keys << it.key();
+        }
+    }
+    if (!verdict.bad_keys.isEmpty()) {
+        verdict.bad_keys.sort();
+        verdict.problem = StickCopyProblem::Damaged;
+    }
+    return verdict;
+}
+
+bool mergeNeedsRecopy(const QString& mission_dir, const QStringList& keys) {
+    if (mission_dir.isEmpty() || keys.isEmpty()) return true;
+    const QString dest = mission_dir + QLatin1Char('/') + QLatin1String(kNeedsRecopyFile);
+    QStringList files;
+    {
+        QFile in(dest);
+        if (in.open(QIODevice::ReadOnly)) {
+            const QJsonDocument doc = QJsonDocument::fromJson(in.readAll());
+            for (const QJsonValue& v : doc.object().value(QStringLiteral("files")).toArray()) {
+                if (v.isString()) files << v.toString();
+            }
+        }
+    }
+    const int before = files.size();
+    QSet<QString> seen(files.begin(), files.end());
+    for (const QString& key : keys) {
+        if (!seen.contains(key)) {
+            seen.insert(key);
+            files << key;
+        }
+    }
+    if (files.size() == before && QFileInfo::exists(dest)) return true;
+    files.sort();
+
+    QJsonObject obj;
+    obj.insert(QStringLiteral("schema"), 1);
+    obj.insert(QStringLiteral("written_by"), QStringLiteral("ocu"));
+    obj.insert(QStringLiteral("updated_at"),
+               QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-ddTHH:mm:ss")));
+    obj.insert(QStringLiteral("files"), QJsonArray::fromStringList(files));
+    const QByteArray bytes = QJsonDocument(obj).toJson(QJsonDocument::Indented);
+
+    const QString tmp = dest + QStringLiteral(".tmp");
+    QFile out(tmp);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    if (out.write(bytes) != bytes.size() || !out.flush()) {
+        out.close();
+        QFile::remove(tmp);
+        return false;
+    }
+    const int fd = static_cast<int>(out.handle());
+    if (fd >= 0) ::fsync(fd);  // best effort, as writeCloudVerified
+    out.close();
+    if (::rename(QFile::encodeName(tmp).constData(),
+                 QFile::encodeName(dest).constData()) != 0) {
+        QFile::remove(tmp);
+        return false;
+    }
+    return true;
+}
+
 namespace {
 
 // Oldest visit first. Equal timestamps put Mission_* ahead of Section_*,
@@ -378,7 +548,30 @@ bool folderNeedsUpload(const UploadTarget& target) {
     return target.cloud_check == CloudCheck::Missing;
 }
 
+/// Not uploaded yet, and the stick copy has a problem only the robot
+/// can fix. Never queued.
+bool folderNeedsRobot(const UploadTarget& target) {
+    return target.status != UploadStatus::Done &&
+           target.copy_problem != StickCopyProblem::None;
+}
+
+QString needsRobotText(bool any_damaged) {
+    return any_damaged
+               ? QStringLiteral("Copy damaged — plug drive into ROOFUS")
+               : QStringLiteral("Copy not finished — plug drive into ROOFUS");
+}
+
 QString folderStatusText(const UploadTarget& target) {
+    if (folderNeedsRobot(target)) {
+        if (target.copy_problem == StickCopyProblem::Unfinished) {
+            return QStringLiteral("Copy not finished — plug drive into ROOFUS");
+        }
+        return target.copy_bad_files > 0
+                   ? QStringLiteral("Copy damaged (%1 file%2) — plug drive into ROOFUS")
+                         .arg(target.copy_bad_files)
+                         .arg(target.copy_bad_files == 1 ? QString() : QStringLiteral("s"))
+                   : QStringLiteral("Copy damaged — plug drive into ROOFUS");
+    }
     if (target.status == UploadStatus::Done) {
         switch (target.cloud_check) {
             case CloudCheck::Checking: return QStringLiteral("Uploaded · checking…");
@@ -434,9 +627,17 @@ UploadBuildingRow makeBuildingRow(const QString& key, QList<UploadTarget> member
     bool any_partial = false;
     bool any_checking = false;
     bool all_verified = true;
+    int needs_robot = 0;
+    bool any_damaged = false;
     qint64 open_done = 0;
     qint64 open_total = 0;
     for (const UploadTarget& target : members) {
+        if (folderNeedsRobot(target)) {
+            ++needs_robot;
+            all_verified = false;
+            if (target.copy_problem == StickCopyProblem::Damaged) any_damaged = true;
+            continue;
+        }
         if (target.status == UploadStatus::Done &&
             target.cloud_check == CloudCheck::Missing) {
             any_missing = true;
@@ -473,6 +674,10 @@ UploadBuildingRow makeBuildingRow(const QString& key, QList<UploadTarget> member
         row.badge = UploadRowBadge::Pending;
         row.badge_text = QStringLiteral("Pending");
         row.selectable = true;
+    } else if (needs_robot > 0) {
+        // Nothing here can upload until the robot repairs the copy.
+        row.badge = UploadRowBadge::NeedsRobot;
+        row.badge_text = needsRobotText(any_damaged);
     } else if (any_checking) {
         row.badge = UploadRowBadge::Checking;
         row.badge_text = QStringLiteral("Uploaded · checking…");
@@ -482,6 +687,13 @@ UploadBuildingRow makeBuildingRow(const QString& key, QList<UploadTarget> member
     } else {
         row.badge = UploadRowBadge::Uploaded;
         row.badge_text = QStringLiteral("Uploaded");
+    }
+
+    if (needs_robot > 0 && row.badge != UploadRowBadge::NeedsRobot) {
+        // The rest of the building still uploads; say what is held back.
+        row.badge_text += QStringLiteral(" · %1 need%2 ROOFUS")
+                              .arg(needs_robot)
+                              .arg(needs_robot == 1 ? QStringLiteral("s") : QString());
     }
 
     QStringList lines;
@@ -544,6 +756,7 @@ QList<UploadTarget> uploadTargetsForRow(const QHash<QString, UploadTarget>& targ
         const auto it = targets.constFind(run_id);
         if (it == targets.constEnd()) continue;
         if (!folderNeedsUpload(*it)) continue;
+        if (folderNeedsRobot(*it)) continue;
         UploadTarget copy = *it;
         // The cloud check records the decision on the folder. Setting
         // the flag here means a missing folder cannot resume against
@@ -618,6 +831,11 @@ QList<UploadTarget> UploadStateProbe::scanLocalDataRoot(const QString& data_root
             const QDir building_dir(date_dir.filePath(building));
             const QStringList sections =
                 building_dir.entryList(dir_filters, QDir::Name);
+            // Read once per building: a mission record can list every
+            // section here and hold tens of thousands of entries.
+            const BuildingCopyRecords copy_records =
+                loadBuildingCopyRecords(building_dir.absolutePath());
+            QHash<QString, QStringList> recopy_by_mission;
             for (const QString& section : sections) {
                 if (!isSectionFolderName(section)) continue;
 
@@ -653,6 +871,9 @@ QList<UploadTarget> UploadStateProbe::scanLocalDataRoot(const QString& data_root
 
                 // Same counting rule as the SSH probe: every regular file
                 // except the bookkeeping sentinels; bytes over everything.
+                const bool check_copy = t.status != UploadStatus::Done;
+                QHash<QString, qint64> local_sizes;
+                const int prefix_len = t.data_path.size() + 1;
                 QDirIterator it(t.data_path,
                                 QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden,
                                 QDirIterator::Subdirectories);
@@ -660,13 +881,38 @@ QList<UploadTarget> UploadStateProbe::scanLocalDataRoot(const QString& data_root
                     it.next();
                     const QFileInfo fi = it.fileInfo();
                     t.total_bytes += fi.size();
+                    if (check_copy && !fi.isSymLink()) {
+                        local_sizes.insert(it.filePath().mid(prefix_len), fi.size());
+                    }
                     if (isUploadBookkeepingName(fi.fileName())) {
                         continue;
                     }
                     t.total_files += 1;
                 }
+                if (check_copy) {
+                    // A finished upload was already checked file by file
+                    // against the robot's hashes; only pending work is
+                    // checked here, before anything is queued.
+                    const StickCopyVerdict verdict =
+                        checkStickCopy(copy_records, section, local_sizes);
+                    t.copy_problem = verdict.problem;
+                    t.copy_bad_files = verdict.bad_keys.size();
+                    if (!verdict.bad_keys.isEmpty() && !verdict.mission_dir.isEmpty()) {
+                        recopy_by_mission[verdict.mission_dir] << verdict.bad_keys;
+                    }
+                }
                 fillTargetMetadata(t);
                 out.append(t);
+            }
+            // Tell the robot which files to re-copy the next time the
+            // stick is plugged into it. Best effort: the badge still
+            // blocks the upload if the stick refuses the write.
+            for (auto rit = recopy_by_mission.cbegin(); rit != recopy_by_mission.cend(); ++rit) {
+                if (!mergeNeedsRecopy(rit.key(), rit.value())) {
+                    qWarning().noquote()
+                        << "[UploadStateProbe] could not write needs_recopy.json in"
+                        << rit.key();
+                }
             }
         }
     }
@@ -959,10 +1205,21 @@ void UploadRunner::cancelPendingRetry() {
     }
 }
 
+bool UploadRunner::isQueueStoppingError(const QString& error) {
+    static const QRegularExpression auth(
+        QStringLiteral("Cloud refused \\S+ \\(HTTP 40[13]\\)"));
+    return auth.match(error).hasMatch() ||
+           error.contains(QLatin1String("env var unset")) ||
+           error.contains(QLatin1String("python3-requests is not installed")) ||
+           error.contains(QLatin1String("python3 could not be started")) ||
+           error.contains(QLatin1String("data_root does not exist"));
+}
+
 void UploadRunner::start() {
     if (busy_) {
         return;
     }
+    stopped_early_ = false;
     cancelPendingRetry();
     if (queue_.isEmpty()) {
         emit queueFinished(false);
@@ -1197,13 +1454,16 @@ void UploadRunner::clearPauseFlag(const UploadTarget& target) {
                   QLatin1String(kPauseFile));
 }
 
-void UploadRunner::requestPause() {
+void UploadRunner::requestPause(const QString& reason) {
+    // The caller says why. A pause the script reports itself (a
+    // connection error) keeps its own text.
+    const QString why = reason.isEmpty() ? QStringLiteral("Paused") : reason;
     if (busy_ && attach_pending_ && current_index_ >= 0 &&
         current_index_ < queue_.size()) {
         // Still copying the OCU logs: stop before the uploader starts.
         paused_during_target_ = true;
         if (pause_reason_.isEmpty()) {
-            pause_reason_ = QStringLiteral("Operator paused");
+            pause_reason_ = why;
         }
         return;
     }
@@ -1214,7 +1474,7 @@ void UploadRunner::requestPause() {
     const UploadTarget& target = queue_.at(current_index_);
     paused_during_target_ = true;
     if (pause_reason_.isEmpty()) {
-        pause_reason_ = QStringLiteral("Operator paused");
+        pause_reason_ = why;
     }
 
     const QString flag = target.data_path + QLatin1Char('/') +
@@ -1498,17 +1758,26 @@ void UploadRunner::onProcessFinished(int exit_code,
     }
 
     if (!fatal_error_.isEmpty() || exit_code != 0) {
-        emit targetFailed(current,
-                          fatal_error_.isEmpty()
-                              ? QStringLiteral("uploader exited with code %1")
-                                    .arg(exit_code)
-                              : fatal_error_);
-        // Hard error on a target halts the queue so the operator sees
-        // the message before mass-failing every other section.
-        resetQueueState();
-        queue_.clear();
-        current_index_ = -1;
-        emit queueFinished(false);
+        const QString error =
+            fatal_error_.isEmpty()
+                ? QStringLiteral("uploader exited with code %1").arg(exit_code)
+                : fatal_error_;
+        emit targetFailed(current, error);
+        if (isQueueStoppingError(error)) {
+            // Every other folder would fail the same way (credentials,
+            // a missing interpreter, the stick gone): stop here.
+            stopped_early_ = current_index_ + 1 < queue_.size();
+            resetQueueState();
+            queue_.clear();
+            current_index_ = -1;
+            emit queueFinished(false);
+            return;
+        }
+        // One bad folder (a damaged stick copy, a file over 5 GB) must
+        // not hold back the rest of the selection. The dialog lists the
+        // failures when the queue ends.
+        current_index_ += 1;
+        launchNext();
         return;
     }
 
