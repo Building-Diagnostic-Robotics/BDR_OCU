@@ -46,6 +46,13 @@ struct OffloadSnapshot {
     /// pulling it now loses nothing. False while it is still writing or
     /// checking the stick. Unset on robots that do not report it.
     std::optional<bool> stick_safe_to_remove;
+    /// The building being copied, across all of its queued missions
+    /// (`status.json` "building"). Empty / -1 when not copying or on
+    /// robots that do not report it.
+    QString building;          ///< "<date>/<building>"
+    int building_missions_done = 0;
+    int building_missions_total = 0;
+    double building_percent = -1.0;
     bool parse_ok = false;
 
     /// True while any job is unfinished, or while the robot says it is
@@ -54,6 +61,10 @@ struct OffloadSnapshot {
 };
 
 OffloadSnapshot parseOffloadStatusJson(const QByteArray& json);
+
+/// "Copying 1561_buckeye_dr to drive · 45% · scan 2 of 3", or empty when
+/// the snapshot carries no building progress.
+QString buildingCopyText(const OffloadSnapshot& snap);
 
 /// Queued copies the robot may delete to make room, or 0.
 /// Only a parsed snapshot with both byte fields set, queued work, and

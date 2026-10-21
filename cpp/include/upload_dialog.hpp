@@ -278,6 +278,10 @@ private:
     int active_files_total_ = 0;
     int active_queue_index_ = -1;
     int active_queue_total_ = 0;
+    /// What the bar shows: the whole building being uploaded, every
+    /// folder of it, not just the active folder.
+    BuildingUploadProgress building_progress_;
+    void showBuildingProgress();
 
     UploadStateProbe* probe_ = nullptr;
     UploadRunner* runner_ = nullptr;

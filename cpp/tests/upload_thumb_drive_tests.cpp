@@ -1687,3 +1687,69 @@ sys.exit(1)
     EXPECT_EQ(out.completed, 0);
     EXPECT_TRUE(out.stopped_early);
 }
+
+TEST(BuildingUploadProgress, BarCoversEveryFolderOfTheBuilding) {
+    auto folder = [](const QString& building, const QString& section,
+                     int total, int done) {
+        UploadTarget t;
+        t.date_folder = "October_15_2026";
+        t.building_slug = building;
+        t.building_name = building;
+        t.section_name = section;
+        t.run_id = t.date_folder + "/" + building + "/" + section;
+        t.total_files = total;
+        t.completed_files = done;
+        return t;
+    };
+    const QList<UploadTarget> queue{
+        folder("buckeye", "Mission_132530", 10, 0),
+        folder("buckeye", "Section_5_132530", 100, 40),  // partly uploaded before
+        folder("buckeye", "Section_7_160735", 50, 0),
+        folder("gibraltar", "Section_1_193836", 20, 0),
+    };
+    f2c_cpp::BuildingUploadProgress p;
+    p.reset(queue);
+    EXPECT_EQ(p.buildingCount(), 2);
+
+    p.targetStarted(queue.at(0));
+    EXPECT_EQ(p.total(), 160);
+    EXPECT_EQ(p.done(), 0);
+    EXPECT_EQ(p.folderNumber(), 1);
+    EXPECT_EQ(p.folderCount(), 3);
+    for (int i = 0; i < 10; ++i) p.fileDone();
+    p.targetFinished();
+    EXPECT_EQ(p.done(), 10);
+
+    p.targetStarted(queue.at(1));
+    EXPECT_EQ(p.done(), 50);   // 40 already in the cloud count as done
+    p.fileDone();
+    p.targetStarted(queue.at(1));  // connection retry: keeps what it sent
+    EXPECT_EQ(p.done(), 51);
+    EXPECT_EQ(p.folderNumber(), 2);
+    p.targetFinished();            // failed or done: the folder is processed
+    EXPECT_EQ(p.done(), 110);
+
+    p.targetStarted(queue.at(2));
+    for (int i = 0; i < 52; ++i) p.fileDone();  // OCU logs added 2 files
+    EXPECT_EQ(p.total(), 162);
+    p.targetFinished();
+
+    // Next building: the bar starts again.
+    p.targetStarted(queue.at(3));
+    EXPECT_EQ(p.buildingNumber(), 2);
+    EXPECT_EQ(p.buildingLabel(), "gibraltar");
+    EXPECT_EQ(p.total(), 20);
+    EXPECT_EQ(p.done(), 0);
+    EXPECT_EQ(p.folderCount(), 1);
+}
+
+TEST(OffloadStatus, BuildingProgressAcrossItsScans) {
+    OffloadSnapshot s = parseOffloadStatusJson(R"({"state":"copying","queued":2,
+        "mission":"October_15_2026/1561_buckeye_dr/Mission_160735","jobs":{},
+        "building":{"name":"October_15_2026/1561_buckeye_dr","missions_done":1,
+                    "missions_total":3,"percent":45.6}})");
+    EXPECT_EQ(f2c_cpp::buildingCopyText(s),
+              QStringLiteral("Copying 1561_buckeye_dr to drive · 45% · scan 2 of 3"));
+    s = parseOffloadStatusJson(R"({"state":"copying","queued":1,"jobs":{}})");
+    EXPECT_TRUE(f2c_cpp::buildingCopyText(s).isEmpty());
+}

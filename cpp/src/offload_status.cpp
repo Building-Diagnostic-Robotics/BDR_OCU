@@ -107,6 +107,16 @@ OffloadSnapshot parseOffloadStatusJson(const QByteArray& json) {
         readByteCount(obj.value(QStringLiteral("robot_free_bytes")));
     out.robot_floor_bytes =
         readByteCount(obj.value(QStringLiteral("robot_floor_bytes")));
+    const QJsonObject building = obj.value(QStringLiteral("building")).toObject();
+    if (!building.isEmpty()) {
+        out.building = building.value(QStringLiteral("name")).toString();
+        out.building_missions_done =
+            building.value(QStringLiteral("missions_done")).toInt(0);
+        out.building_missions_total =
+            building.value(QStringLiteral("missions_total")).toInt(0);
+        const QJsonValue pct = building.value(QStringLiteral("percent"));
+        out.building_percent = pct.isDouble() ? pct.toDouble() : -1.0;
+    }
     const QJsonValue safe = obj.value(QStringLiteral("stick_safe_to_remove"));
     if (safe.isBool()) {
         out.stick_safe_to_remove = safe.toBool();
@@ -192,6 +202,23 @@ OffloadSnapshot parseOffloadStatusJson(const QByteArray& json) {
         }
     }
     return out;
+}
+
+QString buildingCopyText(const OffloadSnapshot& snap) {
+    if (!snap.parse_ok || snap.building.isEmpty() || snap.building_percent < 0.0) {
+        return QString();
+    }
+    const int slash = snap.building.lastIndexOf(QLatin1Char('/'));
+    const QString name = slash >= 0 ? snap.building.mid(slash + 1) : snap.building;
+    QString text = QStringLiteral("Copying %1 to drive · %2%")
+                       .arg(name)
+                       .arg(qBound(0, int(snap.building_percent), 100));
+    if (snap.building_missions_total > 1) {
+        text += QStringLiteral(" · scan %1 of %2")
+                    .arg(qMin(snap.building_missions_done + 1, snap.building_missions_total))
+                    .arg(snap.building_missions_total);
+    }
+    return text;
 }
 
 bool thumbCopyIsReady(const ThumbCopyInputs& in) {

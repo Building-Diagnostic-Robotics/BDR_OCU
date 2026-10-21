@@ -1264,6 +1264,7 @@ void UploadDialog::onUploadClicked() {
     last_file_progress_.start();
     runner_->setSource(source_);
     runner_->setQueue(sel.folders);
+    building_progress_.reset(sel.folders);
     active_queue_index_ = -1;
     active_queue_total_ = sel.folders.size();
     if (progress_block_) progress_block_->setVisible(true);
@@ -1391,10 +1392,12 @@ void UploadDialog::publishBackgroundActivity() {
     if (!background_hold_.isEmpty()) {
         status = background_hold_;
     } else if (runner_ && runner_->isBusy()) {
-        status = active_files_total_ > 0
-                     ? QStringLiteral("Uploading · %1 / %2 files")
-                           .arg(active_files_done_)
-                           .arg(active_files_total_)
+        const int total = building_progress_.total();
+        status = total > 0
+                     ? QStringLiteral("Uploading %1 · %2 / %3 files")
+                           .arg(building_progress_.buildingLabel())
+                           .arg(building_progress_.done())
+                           .arg(total)
                      : QStringLiteral("Uploading…");
     }
     if (status == published_background_status_) return;
@@ -1412,23 +1415,27 @@ void UploadDialog::onTargetStarted(int index, int total,
     active_queue_total_ = total;
     active_files_done_ = target.completed_files;
     active_files_total_ = qMax(target.total_files, target.completed_files);
+    building_progress_.targetStarted(target);
 
     if (lbl_progress_caption_) {
-        lbl_progress_caption_->setText(
-            QStringLiteral("[%1/%2] Uploading %3 / %4")
-                .arg(index + 1).arg(total)
-                .arg(target.building_slug, target.section_name));
+        QString text = QStringLiteral("Uploading %1 · folder %2 of %3")
+                           .arg(building_progress_.buildingLabel())
+                           .arg(building_progress_.folderNumber())
+                           .arg(building_progress_.folderCount());
+        if (building_progress_.buildingCount() > 1) {
+            text += QStringLiteral(" · building %1 of %2")
+                        .arg(building_progress_.buildingNumber())
+                        .arg(building_progress_.buildingCount());
+        }
+        lbl_progress_caption_->setText(text);
     }
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
-            isThumbDrive() ? QStringLiteral("Starting uploader…")
+            isThumbDrive() ? QStringLiteral("Starting uploader… (%1)").arg(target.section_name)
                            : QStringLiteral("Connecting to robot…"));
     }
-    if (progress_bar_) {
-        progress_bar_->setRange(0, qMax(1, active_files_total_));
-        progress_bar_->setValue(active_files_done_);
-        progress_bar_->setFormat(QStringLiteral("%v / %m files"));
-    }
+    if (progress_bar_) progress_bar_->setFormat(QStringLiteral("%v / %m files"));
+    showBuildingProgress();
     if (all_targets_.contains(target.run_id)) {
         // The launch already captured force_reupload. A pause and a
         // later Upload press must not pass --force again.
@@ -1448,11 +1455,9 @@ void UploadDialog::onFileUploaded(const UploadTarget& target,
     active_files_done_ += 1;
     if (active_files_done_ > active_files_total_) {
         active_files_total_ = active_files_done_;
-        if (progress_bar_) {
-            progress_bar_->setRange(0, active_files_total_);
-        }
     }
-    if (progress_bar_) progress_bar_->setValue(active_files_done_);
+    building_progress_.fileDone();
+    showBuildingProgress();
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
             QStringLiteral("Last: %1").arg(relpath));
@@ -1521,9 +1526,12 @@ void UploadDialog::onTargetFailed(const UploadTarget& target,
         lbl_progress_detail_->setText(
             QStringLiteral("Failed: %1").arg(error));
     }
-    // The runner moves on to the next folder. One summary when the
+    // The folder is over: its files count as processed for the building
+    // bar. The runner moves on to the next folder. One summary when the
     // queue ends, instead of a modal per folder stacked over the rest
     // of the upload.
+    building_progress_.targetFinished();
+    showBuildingProgress();
     QString brief = error;
     brief.remove(QStringLiteral("Unexpected error: "));
     const int nl = brief.indexOf(QLatin1Char('\n'));
@@ -1534,7 +1542,15 @@ void UploadDialog::onTargetFailed(const UploadTarget& target,
                              brief});
 }
 
+void UploadDialog::showBuildingProgress() {
+    if (!progress_bar_) return;
+    progress_bar_->setRange(0, qMax(1, building_progress_.total()));
+    progress_bar_->setValue(qMin(building_progress_.done(), progress_bar_->maximum()));
+}
+
 void UploadDialog::onTargetCompleted(const UploadTarget& target) {
+    building_progress_.targetFinished();
+    showBuildingProgress();
     if (all_targets_.contains(target.run_id)) {
         UploadTarget& cached = all_targets_[target.run_id];
         cached.status = UploadStatus::Done;
@@ -1580,11 +1596,12 @@ void UploadDialog::onQueueFinished(bool cancelled) {
     if (progress_bar_) {
         // The bar shows what was sent. Only a queue that dispatched every
         // folder without a pause or a failure reads full.
-        progress_bar_->setRange(0, qMax(1, active_files_total_));
+        progress_bar_->setRange(0, qMax(1, building_progress_.total()));
         if (!cancelled && !queue_paused_ && !stopped_early && failed == 0) {
             progress_bar_->setValue(progress_bar_->maximum());
         } else {
-            progress_bar_->setValue(qMin(active_files_done_, progress_bar_->maximum()));
+            progress_bar_->setValue(
+                qMin(building_progress_.done(), progress_bar_->maximum()));
         }
     }
     flushStickThen(caption);
