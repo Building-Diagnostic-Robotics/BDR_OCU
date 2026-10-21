@@ -942,8 +942,13 @@ void UploadDialog::applyBuildingRow(QTreeWidgetItem* row,
     }
 
     QSignalBlocker blocker(tree_);
+    // While an upload runs the list stays scrollable (tooltips show each
+    // folder's status), but ticks cannot change: the running queue was
+    // fixed when Upload was pressed.
+    const bool locked = runner_ && runner_->isBusy();
     const Qt::ItemFlags enabled =
-        (row->flags() | Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        locked ? ((row->flags() | Qt::ItemIsEnabled) & ~Qt::ItemIsUserCheckable)
+               : (row->flags() | Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
     const Qt::ItemFlags disabled = (row->flags() & ~Qt::ItemIsEnabled);
     if (!view.selectable) {
         if (row->flags() != disabled) row->setFlags(disabled);
@@ -967,6 +972,20 @@ void UploadDialog::refreshRowForTarget(const UploadTarget& target,
             applyBuildingRow(row, view, tick_if_missing);
             return;
         }
+    }
+}
+
+void UploadDialog::relockRows() {
+    if (!tree_) return;
+    QHash<QString, UploadBuildingRow> by_key;
+    for (const UploadBuildingRow& view : groupUploadTargets(all_targets_)) {
+        by_key.insert(view.key, view);
+    }
+    for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* row = tree_->topLevelItem(i);
+        if (!row) continue;
+        const auto it = by_key.constFind(row->data(0, kBuildingKeyRole).toString());
+        if (it != by_key.constEnd()) applyBuildingRow(row, *it, false);
     }
 }
 
@@ -1114,7 +1133,14 @@ void UploadDialog::refreshButtonStates() {
         btn_refresh_->setEnabled(!busy && !probe_in_progress_);
     }
     if (tree_) {
-        tree_->setEnabled(!busy);
+        // Never disable the tree: a disabled QTreeWidget cannot scroll,
+        // and a long upload is when the operator wants to look through
+        // the list. applyBuildingRow drops the checkbox instead.
+        tree_->setEnabled(true);
+        if (busy != rows_locked_) {
+            rows_locked_ = busy;
+            relockRows();
+        }
     }
 
     if (busy) {
