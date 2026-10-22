@@ -183,6 +183,26 @@ enum class UploadRowBadge {
  * first, and on an equal timestamp the Mission folder before a Section.
  * The runner still launches one folder at a time.
  */
+/// One entry in a building's hover card: "Section 2" and when it was
+/// scanned ("Oct 13, 8:40 PM"; empty when unknown). Mission folders show as
+/// "Other scan files" with no time. Never a folder name.
+struct UploadRowItem {
+    QString name;
+    QString when;
+};
+
+/// What the hover card on a building row says. Counts are sections only;
+/// the lists hold just what the operator must act on.
+struct UploadRowSummary {
+    int sections = 0;
+    int uploaded = 0;
+    int left = 0;         ///< not uploaded yet, or partly
+    int need_robot = 0;   ///< copy damaged or unfinished on the drive
+    int missing = 0;      ///< uploaded, but gone from the cloud
+    QList<UploadRowItem> fix_on_robot;
+    QList<UploadRowItem> upload_again;
+};
+
 struct UploadBuildingRow {
     QString key;
     QString building_label;
@@ -195,6 +215,9 @@ struct UploadBuildingRow {
     QString badge_text;
     int partial_percent = 0;
     bool selectable = false;
+    UploadRowSummary summary;
+    /// Plain-text form of `summary` (tests, logs); the dialog renders
+    /// `summary` as a formatted card.
     QString tooltip;
 };
 
@@ -204,6 +227,12 @@ QString uploadBuildingKey(const UploadTarget& target);
 
 /// One row per building, newest scan first. Targets with an empty
 /// `run_id` are dropped.
+/// At most this many sections per list on the hover card, then "… and N more".
+constexpr int kUploadRowListCap = 8;
+
+/// Plain-text hover card: the summary line, then each action list.
+QString uploadRowTooltipText(const UploadRowSummary& summary);
+
 QList<UploadBuildingRow> groupUploadTargets(
     const QHash<QString, UploadTarget>& targets);
 

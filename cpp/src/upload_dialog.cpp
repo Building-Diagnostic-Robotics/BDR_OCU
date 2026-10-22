@@ -81,12 +81,80 @@ QColor badgeColor(UploadRowBadge badge, bool dark) {
                 : QColor(QStringLiteral("#52525B"));
 }
 
+QString esc(const QString& text) { return text.toHtmlEscaped(); }
+
 struct ManifestBatch {
     int generation = 0;
     QHash<QString, LoadedManifest> by_run;
 };
 
 }  // namespace
+
+QString uploadRowTooltipHtml(const UploadRowSummary& s, bool dark_mode) {
+    const UiThemeTokens t = uiThemeTokens(dark_mode);
+    const QString muted = t.muted;
+    QString html = QStringLiteral("<qt><div style='font-size:15px; font-weight:600;'>%1</div>")
+                       .arg(s.sections == 1 ? QStringLiteral("1 section")
+                                            : QStringLiteral("%1 sections").arg(s.sections));
+
+    // One line per state that has sections, dot in the badge color.
+    QString states;
+    const auto state = [&](int count, UploadRowBadge badge, const QString& label) {
+        if (count <= 0) return;
+        states += QStringLiteral(
+                      "<tr><td style='color:%1; padding:2px 8px 2px 0;'>&#9679;</td>"
+                      "<td style='padding:2px 0;'>%2 %3</td></tr>")
+                      .arg(badgeColor(badge, dark_mode).name())
+                      .arg(count)
+                      .arg(esc(label));
+    };
+    state(s.uploaded, UploadRowBadge::Verified, QStringLiteral("uploaded"));
+    state(s.left, UploadRowBadge::Pending, QStringLiteral("left to upload"));
+    state(s.need_robot, UploadRowBadge::NeedsRobot,
+          s.need_robot == 1 ? QStringLiteral("needs ROOFUS") : QStringLiteral("need ROOFUS"));
+    state(s.missing, UploadRowBadge::Missing, QStringLiteral("missing in cloud"));
+    if (!states.isEmpty()) {
+        html += QStringLiteral("<table cellspacing='0' cellpadding='0' style='margin-top:4px;'>") +
+                states + QStringLiteral("</table>");
+    }
+
+    // What to do, then which sections: bold heading in the state's color.
+    // Heading text uses the theme's danger / warning tokens: the badge amber
+    // is a dot color and too faint as text on a light card.
+    const auto group = [&](const QList<UploadRowItem>& items, const QString& color,
+                           const QString& heading) {
+        if (items.isEmpty()) return;
+        html += QStringLiteral("<div style='margin-top:10px; font-weight:600; color:%1;'>%2</div>"
+                               "<table cellspacing='0' cellpadding='0' style='margin-top:2px;'>")
+                    .arg(color, esc(heading));
+        const int shown = qMin(kUploadRowListCap, int(items.size()));
+        for (int i = 0; i < shown; ++i) {
+            const UploadRowItem& item = items.at(i);
+            const QString when =
+                item.when.isEmpty()
+                    ? QString()
+                    : QStringLiteral(" <span style='color:%1;'>&nbsp;·&nbsp; %2</span>")
+                          .arg(muted, esc(item.when));
+            html += QStringLiteral(
+                        "<tr><td style='color:%1; padding:2px 8px 2px 4px;'>&#8226;</td>"
+                        "<td style='padding:2px 0;'>%2%3</td></tr>")
+                        .arg(muted, esc(item.name), when);
+        }
+        if (items.size() > shown) {
+            html += QStringLiteral(
+                        "<tr><td></td><td style='color:%1; padding:2px 0;'>"
+                        "and %2 more</td></tr>")
+                        .arg(muted)
+                        .arg(items.size() - shown);
+        }
+        html += QStringLiteral("</table>");
+    };
+    group(s.fix_on_robot, t.danger, QStringLiteral("Plug the drive into ROOFUS to fix"));
+    group(s.upload_again, t.warning,
+          QStringLiteral("Missing in the cloud — tick to upload again"));
+    return html + QStringLiteral("</qt>");
+}
+
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -940,12 +1008,12 @@ void UploadDialog::applyBuildingRow(QTreeWidgetItem* row,
     row->setText(4, view.badge_text);
     row->setForeground(4, badgeColor(view.badge, dark_mode_));
     for (int column = 0; column < 5; ++column) {
-        row->setToolTip(column, view.tooltip);
+        row->setToolTip(column, uploadRowTooltipHtml(view.summary, dark_mode_));
     }
 
     QSignalBlocker blocker(tree_);
-    // While an upload runs the list stays scrollable (tooltips show each
-    // folder's status), but ticks cannot change: the running queue was
+    // While an upload runs the list stays scrollable (the hover card shows
+    // what each building still needs), but ticks cannot change: the running queue was
     // fixed when Upload was pressed.
     const bool locked = runner_ && runner_->isBusy();
     const Qt::ItemFlags enabled =

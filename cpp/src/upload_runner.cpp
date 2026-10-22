@@ -20,6 +20,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocale>
 #include <QSet>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
@@ -561,29 +562,85 @@ QString needsRobotText(bool any_damaged) {
                : QStringLiteral("Copy not finished — plug drive into ROOFUS");
 }
 
-QString folderStatusText(const UploadTarget& target) {
-    if (folderNeedsRobot(target)) {
-        if (target.copy_problem == StickCopyProblem::Unfinished) {
-            return QStringLiteral("Copy not finished — plug drive into ROOFUS");
-        }
-        return target.copy_bad_files > 0
-                   ? QStringLiteral("Copy damaged (%1 file%2) — plug drive into ROOFUS")
-                         .arg(target.copy_bad_files)
-                         .arg(target.copy_bad_files == 1 ? QString() : QStringLiteral("s"))
-                   : QStringLiteral("Copy damaged — plug drive into ROOFUS");
+UploadRowItem operatorFolderItem(const UploadTarget& target) {
+    if (target.isMission()) return {QStringLiteral("Other scan files"), QString()};
+    static const QRegularExpression kIndex(QStringLiteral("^Section_(\\d+)"));
+    const QRegularExpressionMatch m = kIndex.match(target.section_name);
+    UploadRowItem item;
+    item.name = m.hasMatch() ? QStringLiteral("Section %1").arg(m.captured(1).toInt())
+                             : QStringLiteral("Section");
+    if (target.captured_at.isValid()) {
+        item.when = QLocale().toString(target.captured_at,
+                                       QStringLiteral("MMM d, h:mm AP"));
     }
-    if (target.status == UploadStatus::Done) {
-        switch (target.cloud_check) {
-            case CloudCheck::Checking: return QStringLiteral("Uploaded · checking…");
-            case CloudCheck::Verified: return QStringLiteral("Uploaded · Verified");
-            case CloudCheck::Missing:  return QStringLiteral("Missing in cloud");
-            case CloudCheck::Unchecked: break;
-        }
-        return QStringLiteral("Uploaded");
-    }
-    if (target.status == UploadStatus::Partial) return QStringLiteral("Partial");
-    return QStringLiteral("Pending");
+    return item;
 }
+
+UploadRowSummary summarizeBuilding(const QList<UploadTarget>& oldest_first) {
+    UploadRowSummary s;
+    // Sections first, oldest first; "Other scan files" after them.
+    QList<UploadRowItem> other_fix;
+    QList<UploadRowItem> other_again;
+    for (const UploadTarget& target : oldest_first) {
+        const bool robot = folderNeedsRobot(target);
+        const bool gone = !robot && target.status == UploadStatus::Done &&
+                          target.cloud_check == CloudCheck::Missing;
+        if (target.isMission()) {
+            if (robot && other_fix.isEmpty()) other_fix << operatorFolderItem(target);
+            if (gone && other_again.isEmpty()) other_again << operatorFolderItem(target);
+            continue;
+        }
+        if (robot) s.fix_on_robot << operatorFolderItem(target);
+        if (gone) s.upload_again << operatorFolderItem(target);
+        ++s.sections;
+        if (robot) ++s.need_robot;
+        else if (gone) ++s.missing;
+        else if (target.status == UploadStatus::Done) ++s.uploaded;
+        else ++s.left;
+    }
+    s.fix_on_robot += other_fix;
+    s.upload_again += other_again;
+    return s;
+}
+
+}  // namespace
+
+QString uploadRowTooltipText(const UploadRowSummary& s) {
+    QStringList summary;
+    summary << (s.sections == 1 ? QStringLiteral("1 section")
+                                : QStringLiteral("%1 sections").arg(s.sections));
+    if (s.uploaded > 0) summary << QStringLiteral("%1 uploaded").arg(s.uploaded);
+    if (s.left > 0) summary << QStringLiteral("%1 left to upload").arg(s.left);
+    if (s.need_robot > 0) {
+        summary << QStringLiteral("%1 need%2 ROOFUS")
+                       .arg(s.need_robot)
+                       .arg(s.need_robot == 1 ? QStringLiteral("s") : QString());
+    }
+    if (s.missing > 0) summary << QStringLiteral("%1 missing in cloud").arg(s.missing);
+
+    QStringList lines{summary.join(QStringLiteral(" · "))};
+    const auto addGroup = [&lines](const QString& heading,
+                                   const QList<UploadRowItem>& items) {
+        if (items.isEmpty()) return;
+        lines << heading;
+        const int shown = qMin(kUploadRowListCap, int(items.size()));
+        for (int i = 0; i < shown; ++i) {
+            const UploadRowItem& item = items.at(i);
+            lines << QStringLiteral("  ") + item.name +
+                         (item.when.isEmpty() ? QString()
+                                              : QStringLiteral(" · ") + item.when);
+        }
+        if (items.size() > shown) {
+            lines << QStringLiteral("  … and %1 more").arg(items.size() - shown);
+        }
+    };
+    addGroup(QStringLiteral("Plug the drive into ROOFUS to fix:"), s.fix_on_robot);
+    addGroup(QStringLiteral("Missing in the cloud — select to upload again:"),
+             s.upload_again);
+    return lines.join(QLatin1Char('\n'));
+}
+
+namespace {
 
 UploadBuildingRow makeBuildingRow(const QString& key, QList<UploadTarget> members) {
     UploadBuildingRow row;
@@ -628,12 +685,14 @@ UploadBuildingRow makeBuildingRow(const QString& key, QList<UploadTarget> member
     bool any_checking = false;
     bool all_verified = true;
     int needs_robot = 0;
+    int sections_need_robot = 0;  // what the badge counts; missions are hidden
     bool any_damaged = false;
     qint64 open_done = 0;
     qint64 open_total = 0;
     for (const UploadTarget& target : members) {
         if (folderNeedsRobot(target)) {
             ++needs_robot;
+            if (!target.isMission()) ++sections_need_robot;
             all_verified = false;
             if (target.copy_problem == StickCopyProblem::Damaged) any_damaged = true;
             continue;
@@ -691,28 +750,18 @@ UploadBuildingRow makeBuildingRow(const QString& key, QList<UploadTarget> member
 
     if (needs_robot > 0 && row.badge != UploadRowBadge::NeedsRobot) {
         // The rest of the building still uploads; say what is held back.
-        row.badge_text += QStringLiteral(" · %1 need%2 ROOFUS")
-                              .arg(needs_robot)
-                              .arg(needs_robot == 1 ? QStringLiteral("s") : QString());
+        // Counts sections, the unit the operator knows; a mission folder
+        // alone still says ROOFUS is needed, without a number.
+        row.badge_text += sections_need_robot > 0
+                              ? QStringLiteral(" · %1 need%2 ROOFUS")
+                                    .arg(sections_need_robot)
+                                    .arg(sections_need_robot == 1 ? QStringLiteral("s")
+                                                                  : QString())
+                              : QStringLiteral(" · needs ROOFUS");
     }
 
-    QStringList lines;
-    constexpr int kTooltipCap = 12;
-    const int shown = qMin(kTooltipCap, newest_first.size());
-    for (int i = 0; i < shown; ++i) {
-        const UploadTarget& target = newest_first.at(i);
-        const QString when = target.date_folder.isEmpty()
-                                 ? QStringLiteral("—")
-                                 : target.date_folder;
-        const QString name = target.section_name.isEmpty()
-                                 ? target.run_id
-                                 : target.section_name;
-        lines << QStringLiteral("%1 · %2 · %3").arg(when, name, folderStatusText(target));
-    }
-    if (newest_first.size() > shown) {
-        lines << QStringLiteral("… and %1 more").arg(newest_first.size() - shown);
-    }
-    row.tooltip = lines.join(QLatin1Char('\n'));
+    row.summary = summarizeBuilding(members);
+    row.tooltip = uploadRowTooltipText(row.summary);
     return row;
 }
 

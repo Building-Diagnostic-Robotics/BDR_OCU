@@ -69,6 +69,7 @@
 #include "startup_screen.hpp"
 #include "transfer_manager.hpp"
 #include "ui_theme_constants.hpp"
+#include "tooltip_theme.hpp"
 #include "units_system.hpp"
 #include "upload_dialog.hpp"
 #include "update/update_checker.hpp"
@@ -1455,6 +1456,7 @@ void AppShellWindow::applyBannerHostTheme(QWidget* host) {
 void AppShellWindow::setDarkMode(bool dark_mode) {
     dark_mode_ = dark_mode;
     setAppDarkMode(dark_mode_);
+    applyTooltipTheme(dark_mode_);
     if (update_banner_) {
         update_banner_->setDarkMode(dark_mode_);
     }
