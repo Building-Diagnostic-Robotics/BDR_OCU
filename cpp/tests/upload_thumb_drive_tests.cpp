@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include <QLocale>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDate>
@@ -790,8 +791,8 @@ TEST(UploadBuildingRows, OneRowPerBuildingAcrossDates) {
     EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Pending);
     EXPECT_EQ(rows.at(0).badge_text, "Pending");
     EXPECT_TRUE(rows.at(0).selectable);
-    EXPECT_TRUE(rows.at(0).tooltip.contains("Section_1_142000"));
-    EXPECT_TRUE(rows.at(0).tooltip.contains("Mission_223126"));
+    // Summary only: nothing to fix, no folder names.
+    EXPECT_EQ(rows.at(0).tooltip, "2 sections · 1 uploaded · 1 left to upload");
     EXPECT_EQ(rows.at(0).run_ids.size(), 4);
     EXPECT_GT(rows.at(0).total_bytes, dec_mission.total_bytes);
 
@@ -1566,8 +1567,13 @@ TEST(UploadBuildingRows, DamagedFolderIsHeldBackAndTheRestStillUploads) {
     ASSERT_EQ(rows.size(), 1);
     EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Pending);
     EXPECT_TRUE(rows.at(0).selectable);
-    EXPECT_TRUE(rows.at(0).badge_text.contains("2 need ROOFUS"))
+    EXPECT_TRUE(rows.at(0).badge_text.contains("1 needs ROOFUS"))
         << rows.at(0).badge_text.toStdString();
+    EXPECT_EQ(rows.at(0).tooltip,
+              "2 sections · 1 left to upload · 1 needs ROOFUS\n"
+              "Plug the drive into ROOFUS to fix:\n"
+              "  Section 8\n"
+              "  Other scan files");
     const QList<UploadTarget> queued = uploadTargetsForRow(targets, rows.at(0));
     ASSERT_EQ(queued.size(), 2);
     for (const UploadTarget& t : queued) {
@@ -1583,6 +1589,41 @@ TEST(UploadBuildingRows, DamagedFolderIsHeldBackAndTheRestStillUploads) {
     EXPECT_FALSE(rows.at(0).selectable);
     EXPECT_TRUE(rows.at(0).badge_text.contains("plug drive into ROOFUS"));
     EXPECT_TRUE(uploadTargetsForRow(targets, rows.at(0)).isEmpty());
+}
+
+TEST(UploadBuildingRows, TooltipListsOnlySectionsToActOn) {
+    QHash<QString, UploadTarget> targets;
+    UploadTarget mission = folder("October_13_2026", "durafoam", "Mission_195941",
+                                  UploadStatus::Done, at(2026, 10, 13, 19, 59));
+    UploadTarget s1 = folder("October_13_2026", "durafoam",
+                             "Section_1_195941_complete_gnss_invalid",
+                             UploadStatus::None, at(2026, 10, 13, 20, 0), 0, 10);
+    s1.copy_problem = StickCopyProblem::Damaged;
+    s1.copy_bad_files = 12034;
+    UploadTarget s2 = folder("October_13_2026", "durafoam", "Section_2_204000",
+                             UploadStatus::Done, at(2026, 10, 13, 20, 40));
+    s2.cloud_check = CloudCheck::Missing;
+    UploadTarget s3 = folder("October_14_2026", "durafoam", "Section_3_090500",
+                             UploadStatus::Done, at(2026, 10, 14, 9, 5));
+    for (const UploadTarget& t : {mission, s1, s2, s3}) targets.insert(t.run_id, t);
+
+    const QList<UploadBuildingRow> rows = groupUploadTargets(targets);
+    ASSERT_EQ(rows.size(), 1);
+    const QString tip = rows.at(0).tooltip;
+    const QString when1 = QLocale().toString(at(2026, 10, 13, 20, 0), "MMM d, h:mm AP");
+    const QString when2 = QLocale().toString(at(2026, 10, 13, 20, 40), "MMM d, h:mm AP");
+    EXPECT_EQ(tip,
+              "3 sections · 1 uploaded · 1 needs ROOFUS · 1 missing in cloud\n"
+              "Plug the drive into ROOFUS to fix:\n"
+              "  Section 1 · " + when1 + "\n"
+              "Missing in the cloud — select to upload again:\n"
+              "  Section 2 · " + when2)
+        << tip.toStdString();
+    // Never folder names, file counts or the uploaded section.
+    EXPECT_FALSE(tip.contains("Mission_"));
+    EXPECT_FALSE(tip.contains("Section_"));
+    EXPECT_FALSE(tip.contains("12034"));
+    EXPECT_FALSE(tip.contains("Section 3"));
 }
 
 TEST(OffloadStatus, StickStillBeingWrittenIsIncomplete) {

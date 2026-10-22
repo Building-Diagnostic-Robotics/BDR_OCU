@@ -85,6 +85,11 @@ namespace f2c_cpp {
 class UploadStateProbe;
 class UploadRunner;
 
+/// The hover card on a building row, as rich text in the theme's colors:
+/// a bold section count, one colored dot per state, then a list of the
+/// sections the operator has to act on.
+QString uploadRowTooltipHtml(const UploadRowSummary& summary, bool dark_mode);
+
 class UploadDialog : public QDialog {
     Q_OBJECT
 public:

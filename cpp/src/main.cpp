@@ -31,6 +31,7 @@
 #include "single_instance.hpp"
 #include "components/bdr_message_box.hpp"
 #include "ui_theme_constants.hpp"
+#include "tooltip_theme.hpp"
 #include "update/update_lockfile.hpp"
 #include "update/update_log.hpp"
 #include "update/update_settings.hpp"
@@ -343,6 +344,7 @@ int main(int argc, char* argv[])
                                  QString::fromLatin1(f2c_cpp::kSettingsAppName));
         f2c_cpp::setAppDarkMode(
             theme_settings.value("ui/dark_mode", false).toBool());
+        f2c_cpp::applyTooltipTheme(f2c_cpp::appDarkMode());
     }
     
     // Set default font

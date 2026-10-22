@@ -979,6 +979,20 @@ resolver, `/proc/mounts` escape decoding, and an end-to-end runner
 launch against a stub script (env, argv, stdout contract, pause-flag
 clearing, `FailedToStart` handling).
 
+### Building row hover card
+
+Hovering a building row shows a card built from `UploadBuildingRow::summary`
+(`summarizeBuilding` in `upload_runner.cpp`, rendered by
+`uploadRowTooltipHtml` in `upload_dialog.cpp`): a bold section count, one
+colored dot per state (uploaded / left to upload / needs ROOFUS / missing in
+cloud), then only the sections the operator must act on, as "Section N ·
+Oct 13, 8:40 PM" under "Plug the drive into ROOFUS to fix" or "Missing in
+the cloud — tick to upload again". Rules: counts are sections only;
+`Mission_*` folders appear only as one "Other scan files" line, after the
+sections, when they need action; never folder names, file counts or other
+internals. The badge's "· N need ROOFUS" counts sections too.
+`row.tooltip` is the same content as plain text, for tests.
+
 ### Rules for agents touching this path
 
 - **Do NOT remove or "simplify"** any of the following — they are
@@ -2347,6 +2361,18 @@ labels, which are all ≥ 14 px bold.
 `bdrDarkMode` property that `main.cpp` seeds on `QApplication` **before any
 widget is constructed** and `AppShellWindow::setDarkMode` keeps in sync —
 that is how frameless dialogs get the right theme without being handed it.
+
+### Tooltips
+
+One look for every tooltip in the app (`tooltip_theme.hpp`):
+`applyTooltipTheme(dark)` runs in `main()` and in
+`AppShellWindow::setDarkMode`. It installs an app event filter that gives
+every `QTipLabel` the theme rule as its own style sheet (at `Polish`, and
+again at the `StyleChange` that `QToolTip::showText` triggers by setting
+`"/* */"` right before sizing). A tooltip otherwise inherits the style
+sheets of the widget it is shown for, so a bare `color: white` on a label
+restyled its tooltip. Do not style tooltips per widget; rich text inside a
+tooltip should take colors from `uiThemeTokens`.
 
 ### Decisions that are load-bearing
 

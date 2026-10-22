@@ -164,6 +164,7 @@ set(HEADERS
     include/transfer_manager.hpp
     include/preset_manager.hpp
     include/ui_theme_constants.hpp
+    include/tooltip_theme.hpp
     include/cloud_upload_manager.hpp
     include/robot_registry.hpp
     include/single_instance.hpp
@@ -262,6 +263,7 @@ set(GUI_SOURCES
     src/preset_manager.cpp
     src/cloud_upload_manager.cpp
     src/upload_runner.cpp
+    src/tooltip_theme.cpp
     src/ocu_log_store.cpp
     src/upload_dialog.cpp
     src/cloud_verifier.cpp
@@ -755,6 +757,22 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME repo_sync_tests COMMAND repo_sync_tests)
+
+        # App-wide tooltip theme (offscreen QApplication, own main()).
+        add_executable(tooltip_theme_tests
+            tests/tooltip_theme_tests.cpp
+            src/tooltip_theme.cpp
+        )
+        target_include_directories(tooltip_theme_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(tooltip_theme_tests PRIVATE
+            ${QT_GUI_LIBS}
+            GTest::gtest
+        )
+        add_test(NAME tooltip_theme_tests COMMAND tooltip_theme_tests)
+        set_tests_properties(tooltip_theme_tests PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
         # ROOFUS update dialog: operator wording + button flows. Own main()
         # (offscreen QApplication); headers listed for AUTOMOC.
