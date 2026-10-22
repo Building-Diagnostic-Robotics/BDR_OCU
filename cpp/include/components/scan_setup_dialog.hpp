@@ -91,6 +91,8 @@ private:
     void buildUi(const QVector<Job>& jobs);
     void showPage(int page);
     void recenter();
+    /** Fit the dialog after `changed` grew or shrank (see .cpp). */
+    void refitAfterChange(QWidget* changed);
     bool hasSavedPlans() const;
     void buildPlanSection(PlanSection& section, const QString& title,
                           const QVector<Job>& jobs, bool collapsible,

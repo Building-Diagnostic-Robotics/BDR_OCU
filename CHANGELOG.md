@@ -17,6 +17,7 @@ What's New in the OCU update box. Read by roofing contractors, so:
 ## Unreleased
 
 - A- and A+ no longer sit under the window buttons
+- Saved Scans shrinks back after you close the Completed list
 - Make all text bigger with A+ on the Get Started screen
 - Update box text is larger and easier to read
 - Hover a building to see what's uploaded and what needs fixing
