@@ -775,7 +775,7 @@ if(BDR_BUILD_TESTS)
         set_tests_properties(tooltip_theme_tests PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-        # App-wide zoom (Get Started "Text size"): level snapping, startup
+        # App-wide zoom (A- / A+ on Get Started): level snapping, startup
         # resolution, and the env handoff to a restarted copy.
         add_executable(ui_zoom_tests
             tests/ui_zoom_tests.cpp

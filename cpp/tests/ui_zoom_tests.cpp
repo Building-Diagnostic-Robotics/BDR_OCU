@@ -1,4 +1,4 @@
-// Unit tests for the app-wide zoom (Get Started "Text size", ui_zoom.hpp):
+// Unit tests for the app-wide zoom (A- / A+ on Get Started, ui_zoom.hpp):
 //   - snapUiZoom()           : only the allowed levels ever reach Qt
 //   - resolveStartupUiZoom() : dev override vs. saved choice vs. inherited env
 //   - applyUiZoomBeforeQApplication(): env handed to a restarted copy
@@ -55,7 +55,7 @@ TEST(UiZoom, DevShellOverrideWins) {
 }
 
 TEST(UiZoom, InheritedFromThisAppIsNotAnOverride) {
-    // Restart now / the update runner relaunch inherit our own env: the
+    // Restart to apply / the update runner relaunch inherit our own env: the
     // saved choice must still decide, or a change would never apply.
     const UiZoomStartup z = resolveStartupUiZoom("1.10", true, QVariant(1.15));
     EXPECT_DOUBLE_EQ(z.factor, 1.15);
@@ -85,7 +85,7 @@ TEST_F(UiZoomApply, SetsEnvFromSavedChoice) {
 }
 
 TEST_F(UiZoomApply, NormalClearsInheritedFactor) {
-    // Old copy ran at 1.15, operator picked Normal, pressed Restart now.
+    // Old copy ran at 1.15, operator pressed A- back to 100%, then Restart to apply.
     qputenv("QT_SCALE_FACTOR", "1.15");
     qputenv(kUiZoomAppliedEnv, "1");
     saveUiZoom(1.0);

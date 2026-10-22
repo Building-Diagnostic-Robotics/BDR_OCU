@@ -257,7 +257,7 @@ int main(int argc, char* argv[])
 
     rclcpp::init(argc, argv);
 
-    // App-wide zoom (Get Started "Text size"). Qt reads QT_SCALE_FACTOR
+    // App-wide zoom (Get Started A- / A+). Qt reads QT_SCALE_FACTOR
     // once, when the QApplication is created, so it is set here. The dev
     // screenshot hook compares pixels against 1920x1080 Figma frames, so it
     // always runs at 100%.
@@ -557,7 +557,7 @@ int main(int argc, char* argv[])
 
     rclcpp::shutdown();
 
-    // Restart now (Get Started, after a text-size change). The new copy finds
+    // Restart to apply (Get Started, after A- / A+). The new copy finds
     // this one still holding the single-instance lock, gets no answer (we
     // stopped listening when the window closed) and waits for us to exit.
     if (app.property(f2c_cpp::kRestartRequestedProperty).toBool()) {

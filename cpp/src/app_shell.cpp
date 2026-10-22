@@ -464,7 +464,7 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     stack_->setCurrentWidget(stage1_);
 
     connect(stage1_, &SetupScreen::getStartedRequested, this, &AppShellWindow::onGetStarted);
-    // Restart now (text size). main() starts a new copy once the event loop
+    // Restart to apply (A- / A+ on Get Started). main() starts a new copy once the event loop
     // ends. close() runs the normal close gates; if one says no, no restart.
     connect(stage1_, &SetupScreen::restartRequested, this, [this]() {
         qApp->setProperty(kRestartRequestedProperty, true);
