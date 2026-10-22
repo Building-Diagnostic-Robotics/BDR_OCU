@@ -942,8 +942,13 @@ void UploadDialog::applyBuildingRow(QTreeWidgetItem* row,
     }
 
     QSignalBlocker blocker(tree_);
+    // While an upload runs the list stays scrollable (tooltips show each
+    // folder's status), but ticks cannot change: the running queue was
+    // fixed when Upload was pressed.
+    const bool locked = runner_ && runner_->isBusy();
     const Qt::ItemFlags enabled =
-        (row->flags() | Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        locked ? ((row->flags() | Qt::ItemIsEnabled) & ~Qt::ItemIsUserCheckable)
+               : (row->flags() | Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
     const Qt::ItemFlags disabled = (row->flags() & ~Qt::ItemIsEnabled);
     if (!view.selectable) {
         if (row->flags() != disabled) row->setFlags(disabled);
@@ -967,6 +972,20 @@ void UploadDialog::refreshRowForTarget(const UploadTarget& target,
             applyBuildingRow(row, view, tick_if_missing);
             return;
         }
+    }
+}
+
+void UploadDialog::relockRows() {
+    if (!tree_) return;
+    QHash<QString, UploadBuildingRow> by_key;
+    for (const UploadBuildingRow& view : groupUploadTargets(all_targets_)) {
+        by_key.insert(view.key, view);
+    }
+    for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* row = tree_->topLevelItem(i);
+        if (!row) continue;
+        const auto it = by_key.constFind(row->data(0, kBuildingKeyRole).toString());
+        if (it != by_key.constEnd()) applyBuildingRow(row, *it, false);
     }
 }
 
@@ -1114,7 +1133,14 @@ void UploadDialog::refreshButtonStates() {
         btn_refresh_->setEnabled(!busy && !probe_in_progress_);
     }
     if (tree_) {
-        tree_->setEnabled(!busy);
+        // Never disable the tree: a disabled QTreeWidget cannot scroll,
+        // and a long upload is when the operator wants to look through
+        // the list. applyBuildingRow drops the checkbox instead.
+        tree_->setEnabled(true);
+        if (busy != rows_locked_) {
+            rows_locked_ = busy;
+            relockRows();
+        }
     }
 
     if (busy) {
@@ -1238,6 +1264,7 @@ void UploadDialog::onUploadClicked() {
     last_file_progress_.start();
     runner_->setSource(source_);
     runner_->setQueue(sel.folders);
+    building_progress_.reset(sel.folders);
     active_queue_index_ = -1;
     active_queue_total_ = sel.folders.size();
     if (progress_block_) progress_block_->setVisible(true);
@@ -1365,10 +1392,12 @@ void UploadDialog::publishBackgroundActivity() {
     if (!background_hold_.isEmpty()) {
         status = background_hold_;
     } else if (runner_ && runner_->isBusy()) {
-        status = active_files_total_ > 0
-                     ? QStringLiteral("Uploading · %1 / %2 files")
-                           .arg(active_files_done_)
-                           .arg(active_files_total_)
+        const int total = building_progress_.total();
+        status = total > 0
+                     ? QStringLiteral("Uploading %1 · %2 / %3 files")
+                           .arg(building_progress_.buildingLabel())
+                           .arg(building_progress_.done())
+                           .arg(total)
                      : QStringLiteral("Uploading…");
     }
     if (status == published_background_status_) return;
@@ -1386,23 +1415,27 @@ void UploadDialog::onTargetStarted(int index, int total,
     active_queue_total_ = total;
     active_files_done_ = target.completed_files;
     active_files_total_ = qMax(target.total_files, target.completed_files);
+    building_progress_.targetStarted(target);
 
     if (lbl_progress_caption_) {
-        lbl_progress_caption_->setText(
-            QStringLiteral("[%1/%2] Uploading %3 / %4")
-                .arg(index + 1).arg(total)
-                .arg(target.building_slug, target.section_name));
+        QString text = QStringLiteral("Uploading %1 · folder %2 of %3")
+                           .arg(building_progress_.buildingLabel())
+                           .arg(building_progress_.folderNumber())
+                           .arg(building_progress_.folderCount());
+        if (building_progress_.buildingCount() > 1) {
+            text += QStringLiteral(" · building %1 of %2")
+                        .arg(building_progress_.buildingNumber())
+                        .arg(building_progress_.buildingCount());
+        }
+        lbl_progress_caption_->setText(text);
     }
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
-            isThumbDrive() ? QStringLiteral("Starting uploader…")
+            isThumbDrive() ? QStringLiteral("Starting uploader… (%1)").arg(target.section_name)
                            : QStringLiteral("Connecting to robot…"));
     }
-    if (progress_bar_) {
-        progress_bar_->setRange(0, qMax(1, active_files_total_));
-        progress_bar_->setValue(active_files_done_);
-        progress_bar_->setFormat(QStringLiteral("%v / %m files"));
-    }
+    if (progress_bar_) progress_bar_->setFormat(QStringLiteral("%v / %m files"));
+    showBuildingProgress();
     if (all_targets_.contains(target.run_id)) {
         // The launch already captured force_reupload. A pause and a
         // later Upload press must not pass --force again.
@@ -1422,11 +1455,9 @@ void UploadDialog::onFileUploaded(const UploadTarget& target,
     active_files_done_ += 1;
     if (active_files_done_ > active_files_total_) {
         active_files_total_ = active_files_done_;
-        if (progress_bar_) {
-            progress_bar_->setRange(0, active_files_total_);
-        }
     }
-    if (progress_bar_) progress_bar_->setValue(active_files_done_);
+    building_progress_.fileDone();
+    showBuildingProgress();
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
             QStringLiteral("Last: %1").arg(relpath));
@@ -1495,9 +1526,12 @@ void UploadDialog::onTargetFailed(const UploadTarget& target,
         lbl_progress_detail_->setText(
             QStringLiteral("Failed: %1").arg(error));
     }
-    // The runner moves on to the next folder. One summary when the
+    // The folder is over: its files count as processed for the building
+    // bar. The runner moves on to the next folder. One summary when the
     // queue ends, instead of a modal per folder stacked over the rest
     // of the upload.
+    building_progress_.targetFinished();
+    showBuildingProgress();
     QString brief = error;
     brief.remove(QStringLiteral("Unexpected error: "));
     const int nl = brief.indexOf(QLatin1Char('\n'));
@@ -1508,7 +1542,15 @@ void UploadDialog::onTargetFailed(const UploadTarget& target,
                              brief});
 }
 
+void UploadDialog::showBuildingProgress() {
+    if (!progress_bar_) return;
+    progress_bar_->setRange(0, qMax(1, building_progress_.total()));
+    progress_bar_->setValue(qMin(building_progress_.done(), progress_bar_->maximum()));
+}
+
 void UploadDialog::onTargetCompleted(const UploadTarget& target) {
+    building_progress_.targetFinished();
+    showBuildingProgress();
     if (all_targets_.contains(target.run_id)) {
         UploadTarget& cached = all_targets_[target.run_id];
         cached.status = UploadStatus::Done;
@@ -1554,11 +1596,12 @@ void UploadDialog::onQueueFinished(bool cancelled) {
     if (progress_bar_) {
         // The bar shows what was sent. Only a queue that dispatched every
         // folder without a pause or a failure reads full.
-        progress_bar_->setRange(0, qMax(1, active_files_total_));
+        progress_bar_->setRange(0, qMax(1, building_progress_.total()));
         if (!cancelled && !queue_paused_ && !stopped_early && failed == 0) {
             progress_bar_->setValue(progress_bar_->maximum());
         } else {
-            progress_bar_->setValue(qMin(active_files_done_, progress_bar_->maximum()));
+            progress_bar_->setValue(
+                qMin(building_progress_.done(), progress_bar_->maximum()));
         }
     }
     flushStickThen(caption);
@@ -1988,8 +2031,17 @@ void UploadDialog::launchNextCloudBatch() {
             cloud_check_queue_.clear();
             return;
         }
-        const QList<UploadTarget> batch = cloud_check_queue_.mid(0, kCloudVerifyBatch);
-        cloud_check_queue_ = cloud_check_queue_.mid(kCloudVerifyBatch);
+        // Never mix re-checks of proved folders into a batch of unproved
+        // ones: one failed request voids its whole batch, and a re-check
+        // must not cost a first check its result.
+        const bool proved = cloud_check_queue_.first().cloud_check == CloudCheck::Verified;
+        int take = 0;
+        while (take < kCloudVerifyBatch && take < cloud_check_queue_.size() &&
+               (cloud_check_queue_.at(take).cloud_check == CloudCheck::Verified) == proved) {
+            ++take;
+        }
+        const QList<UploadTarget> batch = cloud_check_queue_.mid(0, take);
+        cloud_check_queue_ = cloud_check_queue_.mid(take);
         if (startCloudCheck(batch)) return;
     }
 }
@@ -2008,11 +2060,16 @@ bool UploadDialog::startCloudCheck(const QList<UploadTarget>& batch) {
         if (!all_targets_.contains(src.run_id)) continue;
         UploadTarget& cached = all_targets_[src.run_id];
         if (cached.status != UploadStatus::Done) continue;
-        cached.cloud_check = CloudCheck::Checking;
         cached.force_reupload = false;
         cloud_check_ids_ << src.run_id;
         jobs.append(qMakePair(src.run_id,
                               src.data_path + QStringLiteral("/manifest.json")));
+        if (cached.cloud_check == CloudCheck::Verified) {
+            // Re-check quietly: the row stays "Uploaded · Verified".
+            cached.cloud_recheck = true;
+            continue;
+        }
+        cached.cloud_check = CloudCheck::Checking;
         presentCloudRow(cached, false);
     }
     if (cloud_check_ids_.isEmpty()) {
@@ -2053,7 +2110,8 @@ void UploadDialog::cancelCloudCheck(bool reschedule) {
     cloud_check_queue_.clear();
     bool was_checking = false;
     for (const QString& run_id : cloud_check_ids_) {
-        if (all_targets_.value(run_id).cloud_check == CloudCheck::Checking) {
+        const UploadTarget t = all_targets_.value(run_id);
+        if (t.cloud_check == CloudCheck::Checking || t.cloud_recheck) {
             was_checking = true;
             break;
         }
@@ -2078,6 +2136,8 @@ void UploadDialog::revertCheckingRows() {
     for (const QString& run_id : ids) {
         if (!all_targets_.contains(run_id)) continue;
         UploadTarget& cached = all_targets_[run_id];
+        // A re-check that could not finish keeps its proof.
+        cached.cloud_recheck = false;
         if (cached.cloud_check != CloudCheck::Checking) continue;
         cached.cloud_check = CloudCheck::Unchecked;
         cached.force_reupload = false;
@@ -2128,12 +2188,16 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
     if (!all_targets_.contains(run_id)) return;
     UploadTarget& cached = all_targets_[run_id];
     if (cached.status != UploadStatus::Done) return;
-    if (cached.cloud_check != CloudCheck::Checking) return;
+    if (cached.cloud_check != CloudCheck::Checking && !cached.cloud_recheck) return;
+    const bool recheck = cached.cloud_recheck;
+    cached.cloud_recheck = false;
+    // Inconclusive results leave a re-checked folder as it was.
+    const CloudCheck inconclusive = recheck ? CloudCheck::Verified : CloudCheck::Unchecked;
 
     const LoadedManifest manifest = loaded_manifests_.value(run_id);
     QString summary;
     if (!manifest.ok) {
-        cached.cloud_check = CloudCheck::Unchecked;
+        cached.cloud_check = inconclusive;
         cached.force_reupload = false;
         summary = QStringLiteral("unavailable (%1)")
                       .arg(manifest.error.isEmpty()
@@ -2145,7 +2209,7 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
         // Listing this under the logged-in robot came back empty or
         // different because the objects live in another prefix. Leave
         // the row Uploaded so Upload cannot move them.
-        cached.cloud_check = CloudCheck::Unchecked;
+        cached.cloud_check = inconclusive;
         cached.force_reupload = false;
         summary = QStringLiteral("skipped (belongs to %1 / %2)")
                       .arg(manifest.client_id.isEmpty() ? QStringLiteral("unknown client")
@@ -2171,7 +2235,7 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
                 cached.force_reupload = false;
                 presentCloudRow(cached, false);
             } else {
-                cached.cloud_check = CloudCheck::Unchecked;
+                cached.cloud_check = inconclusive;
                 cached.force_reupload = false;
                 summary = QStringLiteral(
                     "matched, but the stick could not record the cloud check");
@@ -2195,7 +2259,8 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
     int pending = 0;
     for (const QString& id : cloud_check_ids_) {
         if (!all_targets_.contains(id)) continue;
-        if (all_targets_[id].cloud_check == CloudCheck::Checking) ++pending;
+        const UploadTarget& t = all_targets_[id];
+        if (t.cloud_check == CloudCheck::Checking || t.cloud_recheck) ++pending;
     }
     if (pending == 0 && !cloud_check_queue_.isEmpty()) {
         noteCloudVerify(QStringLiteral("Checking older scans against the cloud…"));

@@ -768,16 +768,111 @@ QList<UploadTarget> uploadTargetsForRow(const QHash<QString, UploadTarget>& targ
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// BuildingUploadProgress
+// ---------------------------------------------------------------------------
+
+namespace {
+int folderFiles(const UploadTarget& t) {
+    return qMax(0, qMax(t.total_files, t.completed_files));
+}
+}  // namespace
+
+void BuildingUploadProgress::reset(const QList<UploadTarget>& queue) {
+    groups_.clear();
+    group_ = -1;
+    folder_in_group_ = 0;
+    base_done_ = 0;
+    current_done_ = 0;
+    current_total_ = 0;
+    current_run_id_.clear();
+    for (const UploadTarget& t : queue) {
+        const QString key = uploadBuildingKey(t);
+        if (groups_.isEmpty() || groups_.last().key != key) {
+            Group g;
+            g.key = key;
+            g.label = t.building_name.trimmed().isEmpty() ? t.building_slug
+                                                          : t.building_name.trimmed();
+            if (g.label.isEmpty()) g.label = t.section_name;
+            groups_.append(g);
+        }
+        groups_.last().files += folderFiles(t);
+        groups_.last().folders += 1;
+    }
+}
+
+void BuildingUploadProgress::targetStarted(const UploadTarget& target) {
+    if (!current_run_id_.isEmpty() && target.run_id == current_run_id_) {
+        return;  // a retry of the same folder keeps what it already sent
+    }
+    if (!current_run_id_.isEmpty()) targetFinished();
+    const QString key = uploadBuildingKey(target);
+    if (group_ < 0 || group_ >= groups_.size() || groups_.at(group_).key != key) {
+        int next = group_ + 1;
+        while (next < groups_.size() && groups_.at(next).key != key) ++next;
+        if (next >= groups_.size()) {
+            // Not in the plan (should not happen): give it a group of its own.
+            Group g;
+            g.key = key;
+            g.label = target.building_slug;
+            g.files = folderFiles(target);
+            g.folders = 1;
+            groups_.append(g);
+            next = groups_.size() - 1;
+        }
+        group_ = next;
+        folder_in_group_ = 0;
+        base_done_ = 0;
+    }
+    folder_in_group_ += 1;
+    current_run_id_ = target.run_id;
+    current_done_ = qMax(0, target.completed_files);
+    current_total_ = folderFiles(target);
+}
+
+void BuildingUploadProgress::fileDone() {
+    current_done_ += 1;
+}
+
+void BuildingUploadProgress::targetFinished() {
+    if (current_run_id_.isEmpty()) return;
+    base_done_ += qMax(current_total_, current_done_);
+    current_done_ = 0;
+    current_total_ = 0;
+    current_run_id_.clear();
+}
+
+int BuildingUploadProgress::total() const {
+    const int planned =
+        (group_ >= 0 && group_ < groups_.size()) ? groups_.at(group_).files : 0;
+    // A folder can hold more than the probe counted (OCU logs added at
+    // launch); the bar never runs past its end.
+    return qMax(planned, done());
+}
+
+int BuildingUploadProgress::folderCount() const {
+    return (group_ >= 0 && group_ < groups_.size()) ? groups_.at(group_).folders : 0;
+}
+
+QString BuildingUploadProgress::buildingLabel() const {
+    return (group_ >= 0 && group_ < groups_.size()) ? groups_.at(group_).label
+                                                    : QString();
+}
+
 QList<UploadTarget> cloudCheckTargets(const QHash<QString, UploadTarget>& targets) {
-    QList<UploadTarget> out;
+    QList<UploadTarget> unproved;
+    QList<UploadTarget> proved;
     for (const UploadTarget& target : targets) {
         if (target.run_id.isEmpty()) continue;
         if (target.status != UploadStatus::Done) continue;
-        if (target.cloud_check == CloudCheck::Verified) continue;
-        out.append(target);
+        (target.cloud_check == CloudCheck::Verified ? proved : unproved).append(target);
     }
-    std::sort(out.begin(), out.end(), uploadBefore);
-    return out;
+    std::sort(unproved.begin(), unproved.end(), uploadBefore);
+    std::sort(proved.begin(), proved.end(), uploadBefore);
+    // A proof says S3 held the folder when it was written, not now: an
+    // object deleted from S3 later must show up as missing while the
+    // stick still has the data. Unproved folders go first.
+    return unproved + proved;
 }
 
 // ---------------------------------------------------------------------------

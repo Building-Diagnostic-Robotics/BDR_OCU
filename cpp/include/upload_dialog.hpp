@@ -247,6 +247,11 @@ private:
     bool dark_mode_ = false;
     bool in_close_ = false;
     bool shutting_down_ = false;
+    /// Rows have their checkboxes locked because an upload is running.
+    bool rows_locked_ = false;
+    /// Re-apply every row's flags (checkable or not) after `rows_locked_`
+    /// changes.
+    void relockRows();
     /// Cancel (unlike pause or a finished upload) used to skip the
     /// rescan, so a `--force` that was killed before it deleted the
     /// manifest stayed "Uploaded" with the force flag already cleared.
@@ -273,6 +278,10 @@ private:
     int active_files_total_ = 0;
     int active_queue_index_ = -1;
     int active_queue_total_ = 0;
+    /// What the bar shows: the whole building being uploaded, every
+    /// folder of it, not just the active folder.
+    BuildingUploadProgress building_progress_;
+    void showBuildingProgress();
 
     UploadStateProbe* probe_ = nullptr;
     UploadRunner* runner_ = nullptr;

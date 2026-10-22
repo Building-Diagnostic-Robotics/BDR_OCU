@@ -126,6 +126,10 @@ struct UploadTarget {
     /// the row. Only `Missing` is selectable, and it uploads with
     /// `force_reupload`.
     CloudCheck cloud_check = CloudCheck::Unchecked;
+    /// A `Verified` folder whose proof is being re-checked. It keeps its
+    /// Verified badge meanwhile; a failed or offline check leaves it
+    /// Verified, a mismatch makes it `Missing`.
+    bool cloud_recheck = false;
     /// Pass `--force` on the next launch of this target only. The
     /// runner clears it once that launch is built, so a connection
     /// retry or a later Upload press resumes the state file instead of
@@ -209,7 +213,55 @@ QList<UploadBuildingRow> groupUploadTargets(
 QList<UploadTarget> uploadTargetsForRow(const QHash<QString, UploadTarget>& targets,
                                         const UploadBuildingRow& row);
 
-/// Every `Done` folder that is not already `CloudCheck::Verified`.
+/**
+ * Progress of one upload queue, counted per building rather than per
+ * folder: the bar covers every folder of the building being uploaded
+ * (a building with 10 sections fills once, not 10 times), and starts
+ * again for the next building in the queue. Units are files.
+ *
+ * The queue is grouped by `uploadBuildingKey` in queue order; the
+ * dialog queues a building's folders together. A folder's files are
+ * `max(total_files, completed_files)`; files already uploaded before
+ * this run count as done from the start. A target that starts again
+ * (a connection retry) keeps the files it already sent.
+ */
+class BuildingUploadProgress {
+public:
+    void reset(const QList<UploadTarget>& queue);
+    void targetStarted(const UploadTarget& target);
+    void fileDone();
+    /// The active folder ended (uploaded, failed, or skipped): its files
+    /// count as processed so the building can still reach 100%.
+    void targetFinished();
+
+    int done() const { return base_done_ + current_done_; }
+    int total() const;
+    /// 1-based position of the active building / folder; 0 before start.
+    int buildingNumber() const { return group_ + 1; }
+    int buildingCount() const { return groups_.size(); }
+    int folderNumber() const { return folder_in_group_; }
+    int folderCount() const;
+    QString buildingLabel() const;
+
+private:
+    struct Group {
+        QString key;
+        QString label;
+        int files = 0;
+        int folders = 0;
+    };
+    QList<Group> groups_;
+    int group_ = -1;
+    int folder_in_group_ = 0;
+    int base_done_ = 0;
+    int current_done_ = 0;
+    int current_total_ = 0;
+    QString current_run_id_;
+};
+
+/// Every `Done` folder: those without a proof first, then the
+/// `CloudCheck::Verified` ones again (re-checked on every listing, so a
+/// later deletion in S3 is found while the stick still has the data).
 /// Oldest visit first, and on an equal timestamp the Mission folder
 /// before a Section. The caller checks them in batches; a folder the
 /// probe already marked Verified (a valid `cloud_verified.json`) is

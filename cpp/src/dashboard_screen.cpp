@@ -1480,7 +1480,10 @@ void DashboardScreen::refreshUploadAction() {
         } else if (offload_probe_ok_ && offload_.copyIncomplete() &&
                    offload_.state != OffloadCopyState::Error &&
                    offload_.state != OffloadCopyState::StickFull) {
-            desc = QStringLiteral("Syncing to thumb drive…");
+            // The whole building, across its scans, not one section.
+            const QString building = buildingCopyText(offload_);
+            desc = building.isEmpty() ? QStringLiteral("Syncing to thumb drive…")
+                                      : building;
         } else if (!thumbCopyReady() && robotCopyIncomplete()) {
             desc = !offload_probe_ok_
                        ? QStringLiteral("Robot not connected — last copy unfinished")
