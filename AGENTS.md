@@ -873,9 +873,14 @@ kept in sync by hand.
 - **A schema-2 record is enforced.** Before anything is sent, every
   recorded file is stat-checked; a missing or wrong-size file stops
   the section. A sha256 mismatch found while hashing stops it too.
-  Either way the uploader adds the keys to the mission's
-  `needs_recopy.json` and tells the operator to plug the stick into
-  the robot, which re-copies those files (pilot_ws
+  First the uploader tries to fix the file in place: with
+  `BDR_ROBOT_SSH` set (the OCU sets it to the paired robot), it fetches
+  that one file from the robot over SSH (`cat`, ≤ 1 GiB), checks the
+  robot's recorded size and sha256, fsyncs, renames it over the stick
+  file and carries on (`repair_from_robot`). One failed connection
+  stops it trying for the rest of the run. Only what it cannot fix
+  goes into the mission's `needs_recopy.json`, with the message to
+  plug the stick into the robot, which re-copies those files (pilot_ws
   `rdata_thumbdrive_sync.py`). The operator never deletes anything.
   A folder no record lists, on a stick with per-file records, is an
   unfinished copy and is not uploaded. A file on the stick that the robot did not
@@ -1046,8 +1051,10 @@ internals. The badge's "· N need ROOFUS" counts sections too.
   `python3 /home/<ssh_user>/pilot_ws/install/pilot_control/lib/pilot_control/uploader.py`
   directly.
 - **Do NOT upload a schema-2 section whose stick bytes disagree
-  with `thumbsync_manifest.json`.** The robot re-copies what
-  `needs_recopy.json` lists. Do not re-copy by hand.
+  with `thumbsync_manifest.json`.** A file fetched from the robot
+  replaces the stick file only after it matches the record's sha256;
+  otherwise the robot re-copies what `needs_recopy.json` lists. Do not
+  re-copy by hand.
 - **Do NOT send `Content-MD5` unless `/presign` returned
   `md5_signed: true`.** S3 answers 403 `HeadersNotSigned` and the
   section stops.

@@ -64,6 +64,9 @@ import base64
 import hashlib
 import json
 import os
+import posixpath
+import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -105,6 +108,18 @@ _unsigned_md5_warned = False
 # per-file record (copied before schema 2) and nothing is checked.
 _copy_record = None
 _stick_extra_warned = set()
+
+# The robot this stick was copied from, for fixing a damaged stick file in
+# place: `user@host`, set by the OCU when the robot is known. Empty means
+# no fix; the operator is asked to plug the stick into the robot.
+ROBOT_SSH = os.environ.get("BDR_ROBOT_SSH", "").strip()
+ROBOT_DATA_ROOT = os.environ.get("BDR_ROBOT_DATA_ROOT", "").strip() or "/R_DATA"
+# Over the radio a few MB/s is normal. Files above this wait for the robot.
+ROBOT_FIX_MAX_BYTES = 1024 * 1024 * 1024
+ROBOT_FIX_SUFFIX = ".bdr-robotfix"
+_robot_fix_lock = threading.Lock()
+# One failed connection per run is enough: no link, no point retrying per file.
+_robot_unreachable = threading.Event()
 
 try:
     UPLOAD_WORKERS = max(1, int(os.environ.get("BDR_UPLOAD_WORKERS", "12")))
@@ -267,7 +282,8 @@ def is_sentinel(rel_norm: str) -> bool:
     Any other `*.tmp` name is data — rosbag and capture files must
     not be dropped by a broad suffix rule.
     """
-    return _basename(rel_norm) in _BOOKKEEPING_NAMES
+    name = _basename(rel_norm)
+    return name in _BOOKKEEPING_NAMES or name.endswith(ROBOT_FIX_SUFFIX)
 
 
 def state_path(data_root: str) -> str:
@@ -759,7 +775,17 @@ def put_verified_file(robot_id: str, run_id: str,
             f"(read {size} bytes, file is now {current} bytes)")
     if size == 0:
         print(f"Warning: {rel_norm} is 0 bytes; uploading it empty.", flush=True)
-    _check_stick_copy(rel_norm, size, sha)
+    try:
+        _check_stick_copy(rel_norm, size, sha)
+    except StickCopyMismatch:
+        # Fix it from the robot when the link is up, then read it again.
+        if not repair_from_robot(full, rel_norm, _copy_record):
+            raise
+        try:
+            size, md5_hex, sha = hash_file(full)
+        except OSError as exc:
+            raise UploadIntegrityError(f"cannot read {rel_norm}: {exc}") from exc
+        _check_stick_copy(rel_norm, size, sha)
     _presign_and_put(robot_id, run_id, rel_norm, full, md5_hex, size)
     try:
         after = os.path.getsize(full)
@@ -1144,6 +1170,9 @@ class CopyRecord(NamedTuple):
     mission_dir: str = ""
     # This folder's name, the prefix of its keys in the record.
     folder: str = ""
+    # The robot's building folder (`/R_DATA/<date>/<building>`), from the
+    # record's `mission_folder`. Empty on records that do not carry it.
+    robot_building: str = ""
 
 
 class StickCopyMismatch(UploadIntegrityError):
@@ -1300,8 +1329,16 @@ def load_copy_record(data_root: str) -> Optional[CopyRecord]:
     files = doc.get("files")
     if not isinstance(files, dict):
         return None
-    return CopyRecord(_parse_copy_files(files, folder), _mission_relpath(path),
-                      os.path.dirname(os.path.abspath(path)), folder)
+    mission_rel = _mission_relpath(path)
+    robot_mission = doc.get("mission_folder")
+    if isinstance(robot_mission, str) and robot_mission.startswith("/"):
+        robot_building = posixpath.dirname(robot_mission.rstrip("/"))
+    else:
+        robot_building = posixpath.join(ROBOT_DATA_ROOT,
+                                        posixpath.dirname(mission_rel))
+    return CopyRecord(_parse_copy_files(files, folder), mission_rel,
+                      os.path.dirname(os.path.abspath(path)), folder,
+                      robot_building)
 
 
 def _stick_recovery(record: CopyRecord) -> str:
@@ -1367,6 +1404,96 @@ def _report_bad_stick_copy(rels: List[str], record: CopyRecord,
         what = (f"Stick copy of {shown}{extra} does not match the robot "
                 f"({len(rels)} file{'s' if len(rels) != 1 else ''}).")
     print(f"Unexpected error: {what} {_stick_recovery(record)}", flush=True)
+
+
+def _robot_fetch_argv(remote_path: str) -> List[str]:
+    """ssh command that writes one robot file to stdout (tests replace it)."""
+    return [
+        "ssh", "-o", "ConnectTimeout=6", "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=6",
+        ROBOT_SSH, "cat -- " + shlex.quote(remote_path),
+    ]
+
+
+def _fsync_path(path: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass  # exFAT can refuse on a directory
+    finally:
+        os.close(fd)
+
+
+def repair_from_robot(full: str, rel_norm: str, record: "CopyRecord") -> bool:
+    """Replace a damaged stick file with the robot's copy, over the radio.
+
+    The file is fetched next to the bad one, checked against the robot's
+    recorded size and sha256, flushed, and only then renamed over it. True
+    when the stick now holds the robot's bytes. False (and the stick left
+    as it was) when there is no robot link, the robot no longer has the
+    file, the file is too big for the radio, or what arrived is not right.
+    """
+    expected = record.by_rel.get(rel_norm)
+    if (not ROBOT_SSH or expected is None or not record.robot_building
+            or expected[0] > ROBOT_FIX_MAX_BYTES or _robot_unreachable.is_set()):
+        return False
+    size, sha = expected
+    remote = posixpath.join(record.robot_building, record.folder, rel_norm)
+    tmp = os.path.join(os.path.dirname(full),
+                       "." + os.path.basename(full) + ROBOT_FIX_SUFFIX)
+    # Serial: one radio link, and the stick writes one file at a time anyway.
+    with _robot_fix_lock:
+        if _robot_unreachable.is_set():
+            return False
+        timeout = 60 + size / 250_000  # ~250 kB/s worst case over the radio
+        try:
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(tmp, "wb") as out:
+                done = subprocess.run(_robot_fetch_argv(remote), stdout=out,
+                                      stderr=subprocess.PIPE, timeout=timeout)
+                out.flush()
+                os.fsync(out.fileno())
+        except subprocess.TimeoutExpired:
+            _robot_unreachable.set()
+            _remove_quietly(tmp)
+            return False
+        except OSError:
+            _remove_quietly(tmp)
+            return False
+        if done.returncode != 0:
+            if done.returncode == 255:  # ssh itself: no link, auth, host down
+                _robot_unreachable.set()
+            _remove_quietly(tmp)
+            return False
+        try:
+            got_size, _md5, got_sha = hash_file(tmp)
+        except OSError:
+            _remove_quietly(tmp)
+            return False
+        if got_size != size or got_sha != sha:
+            _remove_quietly(tmp)
+            return False
+        try:
+            os.replace(tmp, full)
+        except OSError:
+            _remove_quietly(tmp)
+            return False
+        _fsync_path(os.path.dirname(full))
+    print(f"Fixed {rel_norm} on the stick from the robot.", flush=True)
+    return True
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _check_stick_copy(rel_norm: str, size: int, sha: str) -> None:
@@ -1439,6 +1566,7 @@ def _upload_run(data_root: str, robot_id: str, run_id: str, *,
     global _copy_record
     _copy_record = None
     _stick_extra_warned.clear()
+    _robot_unreachable.clear()
     _reset_unsigned_md5_warning()
     remove_stale_temps(data_root)
 
@@ -1449,6 +1577,13 @@ def _upload_run(data_root: str, robot_id: str, run_id: str, *,
         return 1
     if _copy_record is not None:
         missing, wrong = bad_stick_files(data_root, _copy_record)
+        if missing or wrong:
+            # Fix what the robot can send over the radio; report the rest.
+            fixed = {rel for rel in missing + wrong
+                     if repair_from_robot(os.path.join(data_root, *rel.split("/")),
+                                          rel, _copy_record)}
+            missing = [rel for rel in missing if rel not in fixed]
+            wrong = [rel for rel in wrong if rel not in fixed]
         if missing or wrong:
             if wrong:
                 _report_bad_stick_copy(missing + wrong, _copy_record)
