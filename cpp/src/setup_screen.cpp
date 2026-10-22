@@ -2,6 +2,7 @@
 #include "dev_flags.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
+#include "ui_theme_constants.hpp"
 #include "ui_zoom.hpp"
 #include "update/update_log.hpp"
 
@@ -28,6 +29,7 @@ namespace {
 constexpr int kConnectionIconInset = 16;
 constexpr int kFieldHeight = 56;
 constexpr int kFieldSpacing = 12;
+constexpr int kRootMargin = 32;
 constexpr int kZoomButtonSize = 44;
 
 QPixmap tintWireframeToColor(const QPixmap& src, const QColor& color) {
@@ -68,7 +70,7 @@ SetupScreen::SetupScreen(QWidget* parent)
 
     // Root contains a top-left status + centered panel.
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(32, 32, 32, 32);
+    root->setContentsMargins(kRootMargin, kRootMargin, kRootMargin, kRootMargin);
     root->setSpacing(0);
 
     // Top-left "CONNECTED" indicator (matches Figma)
@@ -116,7 +118,9 @@ SetupScreen::SetupScreen(QWidget* parent)
     }
 
     auto* zoom_col = new QVBoxLayout();
-    zoom_col->setContentsMargins(0, 0, 0, 0);
+    // The window's min/max/close and theme toggle float over the top of
+    // every stage; start below that band so the buttons never sit under them.
+    zoom_col->setContentsMargins(0, kWindowTitleBarHeight - kRootMargin + 8, 0, 0);
     zoom_col->setSpacing(6);
     auto* zoom_row = new QHBoxLayout();
     zoom_row->setContentsMargins(0, 0, 0, 0);

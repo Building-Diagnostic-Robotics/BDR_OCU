@@ -23,6 +23,11 @@
 
 namespace f2c_cpp {
 
+// Height of the custom title-bar band along the top of the window, where the
+// frameless min/max/close and theme-toggle controls float over every stage.
+// Anything a stage puts in its top-right corner must start below this.
+inline constexpr int kWindowTitleBarHeight = 53;
+
 struct UiThemeTokens {
     QString bg;
     QString card_bg;
