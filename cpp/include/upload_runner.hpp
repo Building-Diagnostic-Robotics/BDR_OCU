@@ -513,6 +513,13 @@ public:
     /// therefore embedded in S3 keys + manifest.json).
     void setRobotId(const QString& robot_id);
 
+    /// ThumbDrive: `BDR_ROBOT_SSH=<user>@<host>` for uploader.py, so a
+    /// stick file that does not match the robot's record is fetched from
+    /// the robot and the upload continues. Empty host turns it off.
+    void setRobotFetch(const QString& host, const QString& ssh_user);
+    /// The `BDR_ROBOT_SSH` value, or empty when not set (tests).
+    QString robotFetchTarget() const;
+
     /// RobotSsh: absolute path of the installed `uploader.py` on the
     /// robot. Falls back to the default location under the SSH user's
     /// home; override only for dev installs in non-standard prefixes.
@@ -681,6 +688,9 @@ private:
     QString cloud_client_id_;
     QString cloud_device_token_;
     QString robot_id_;
+    // ThumbDrive repair source (setRobotFetch).
+    QString robot_fetch_host_;
+    QString robot_fetch_user_;
 
     // Queue state.
     QList<UploadTarget> queue_;

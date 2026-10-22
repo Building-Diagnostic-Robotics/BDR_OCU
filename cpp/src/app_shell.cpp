@@ -2277,6 +2277,10 @@ void AppShellWindow::onUploadDataRequested() {
         upload_dialog_->setCloudAuth(auth.api_base,
                                      auth.profile->cloud_client_id,
                                      auth.profile->cloud_device_token);
+        // A damaged stick file is fetched from the paired robot over the
+        // radio during the upload, when it is reachable.
+        const ResolvedRobotSshTarget robot = resolveRobotSshForRemoteOps();
+        upload_dialog_->setRobotFetch(robot.host, robot.ssh_user);
     }
 
     // Same backdrop-blur pattern as the New Scan modal so the

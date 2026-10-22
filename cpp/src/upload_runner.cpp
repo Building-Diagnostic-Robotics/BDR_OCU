@@ -1301,6 +1301,18 @@ void UploadRunner::setCloudAuth(const QString& api_base,
     cloud_device_token_ = device_token.trimmed();
 }
 
+void UploadRunner::setRobotFetch(const QString& host, const QString& ssh_user) {
+    robot_fetch_host_ = host.trimmed();
+    robot_fetch_user_ = ssh_user.trimmed();
+}
+
+QString UploadRunner::robotFetchTarget() const {
+    if (robot_fetch_host_.isEmpty()) return {};
+    const QString user = robot_fetch_user_.isEmpty() ? QStringLiteral("roofus")
+                                                     : robot_fetch_user_;
+    return user + QLatin1Char('@') + robot_fetch_host_;
+}
+
 void UploadRunner::setRobotId(const QString& robot_id) {
     robot_id_ = robot_id.trimmed();
 }
@@ -1536,6 +1548,14 @@ void UploadRunner::configureLocalProcess(QProcess* proc, const UploadTarget& tar
     env.insert(QStringLiteral("BDR_CLOUD_CLIENT_ID"), cloud_client_id_);
     env.insert(QStringLiteral("BDR_CLOUD_DEVICE_TOKEN"), cloud_device_token_);
     env.insert(QStringLiteral("BDR_UPLOAD_WORKERS"), QStringLiteral("12"));
+    // A damaged stick file is fetched from this robot instead of sending
+    // the operator back to it. Unset: the operator is asked, as before.
+    const QString robot = robotFetchTarget();
+    if (robot.isEmpty()) {
+        env.remove(QStringLiteral("BDR_ROBOT_SSH"));
+    } else {
+        env.insert(QStringLiteral("BDR_ROBOT_SSH"), robot);
+    }
     // Belt and braces with `-u`: never let a libc buffer hide a line.
     env.insert(QStringLiteral("PYTHONUNBUFFERED"), QStringLiteral("1"));
     proc->setProcessEnvironment(env);

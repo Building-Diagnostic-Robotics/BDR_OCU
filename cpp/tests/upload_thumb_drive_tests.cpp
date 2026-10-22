@@ -1796,3 +1796,16 @@ TEST(OffloadStatus, BuildingProgressAcrossItsScans) {
     s = parseOffloadStatusJson(R"({"state":"copying","queued":1,"jobs":{}})");
     EXPECT_TRUE(f2c_cpp::buildingCopyText(s).isEmpty());
 }
+
+// A damaged stick file is fetched from the paired robot during the upload:
+// uploader.py gets BDR_ROBOT_SSH=<user>@<host>, roofus when no user is known.
+TEST(UploadRunnerRobotFetch, TargetIsUserAtHostAndEmptyHostTurnsItOff) {
+    UploadRunner runner;
+    EXPECT_TRUE(runner.robotFetchTarget().isEmpty());
+    runner.setRobotFetch(QStringLiteral(" 10.0.0.5 "), QString());
+    EXPECT_EQ(runner.robotFetchTarget(), QStringLiteral("roofus@10.0.0.5"));
+    runner.setRobotFetch(QStringLiteral("10.0.0.5"), QStringLiteral("pilot"));
+    EXPECT_EQ(runner.robotFetchTarget(), QStringLiteral("pilot@10.0.0.5"));
+    runner.setRobotFetch(QString(), QStringLiteral("pilot"));
+    EXPECT_TRUE(runner.robotFetchTarget().isEmpty());
+}

@@ -834,6 +834,105 @@ class PutTests(UploadCase):
         self.assertTrue(uploader.is_sentinel(
             "x/" + uploader.NEEDS_RECOPY_FILENAME + ".tmp"))
 
+    # --- damaged stick file fixed from the robot over the radio ---------
+
+    def robot_copy(self, section, files):
+        """The robot's own folders, and the record pointing at them."""
+        robot_building = os.path.join(self.root, "robot", "October_09_2026", "BNY")
+        for rel, data in files.items():
+            write(os.path.join(robot_building, "Section_1", rel), data)
+        manifest = os.path.join(os.path.dirname(section), "Mission_120000",
+                                uploader.THUMB_MANIFEST)
+        with open(manifest) as fh:
+            doc = json.load(fh)
+        doc["mission_folder"] = os.path.join(robot_building, "Mission_120000")
+        write(manifest, json.dumps(doc).encode())
+        return robot_building
+
+    def with_robot(self, argv=None):
+        calls = []
+
+        def fetch(remote):
+            calls.append(remote)
+            return argv(remote) if argv else ["cat", "--", remote]
+
+        patches = [
+            unittest.mock.patch.object(uploader, "ROBOT_SSH", "roofus@robot"),
+            unittest.mock.patch.object(uploader, "_robot_fetch_argv", side_effect=fetch),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return calls
+
+    def test_same_size_damage_is_fixed_from_the_robot_and_uploaded(self):
+        good = {"a.bin": b"abc", "b.bin": b"defg"}
+        section = self.stick_section(good)
+        self.robot_copy(section, good)
+        write(os.path.join(section, "b.bin"), b"\0\0\0\0")  # right size, no data
+        calls = self.with_robot()
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Fixed b.bin on the stick from the robot.", out)
+        self.assertEqual(len(calls), 1)
+        with open(os.path.join(section, "b.bin"), "rb") as fh:
+            self.assertEqual(fh.read(), b"defg")
+        bodies = {rec["rel"]: rec["body"] for rec in self.puts()}
+        self.assertEqual(bodies["b.bin"], b"defg")
+        mission = os.path.join(os.path.dirname(section), "Mission_120000")
+        self.assertFalse(os.path.exists(
+            os.path.join(mission, uploader.NEEDS_RECOPY_FILENAME)))
+        self.assertEqual([n for n in os.listdir(section)
+                          if n.endswith(uploader.ROBOT_FIX_SUFFIX)], [])
+
+    def test_zero_byte_and_missing_files_are_fixed_before_upload(self):
+        good = {"a.bin": b"abc", "sub/b.bin": b"defg"}
+        section = self.stick_section(good)
+        self.robot_copy(section, good)
+        write(os.path.join(section, "a.bin"), b"")
+        os.remove(os.path.join(section, "sub", "b.bin"))
+        os.rmdir(os.path.join(section, "sub"))
+        self.with_robot()
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 0, out)
+        bodies = {rec["rel"]: rec["body"] for rec in self.puts()}
+        self.assertEqual(bodies["a.bin"], b"abc")
+        self.assertEqual(bodies["sub/b.bin"], b"defg")
+
+    def test_a_wrong_robot_copy_leaves_the_stick_and_asks_for_the_robot(self):
+        section = self.stick_section({"a.bin": b"abc"})
+        self.robot_copy(section, {"a.bin": b"xyz"})  # robot changed since
+        write(os.path.join(section, "a.bin"), b"\0\0\0")
+        self.with_robot()
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("does not match the robot", out)
+        with open(os.path.join(section, "a.bin"), "rb") as fh:
+            self.assertEqual(fh.read(), b"\0\0\0")
+        self.assertEqual([n for n in os.listdir(section)
+                          if n.endswith(uploader.ROBOT_FIX_SUFFIX)], [])
+        self.assertEqual(self.puts(), [])
+
+    def test_no_robot_link_tries_once_then_asks_for_the_robot(self):
+        good = {"a.bin": b"abc", "b.bin": b"defg"}
+        section = self.stick_section(good)
+        self.robot_copy(section, good)
+        write(os.path.join(section, "a.bin"), b"")
+        write(os.path.join(section, "b.bin"), b"")
+        calls = self.with_robot(lambda remote: ["sh", "-c", "exit 255"])
+        rc, out = self.run_upload(section)
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(len(calls), 1)  # link down: not once per file
+        self.assertIn("Plug the stick into the robot", out)
+        mission = os.path.join(os.path.dirname(section), "Mission_120000")
+        with open(os.path.join(mission, uploader.NEEDS_RECOPY_FILENAME)) as fh:
+            self.assertEqual(json.load(fh)["files"],
+                             ["Section_1/a.bin", "Section_1/b.bin"])
+
+    def test_robot_fix_temp_files_are_never_uploaded(self):
+        self.assertTrue(uploader.is_sentinel(
+            "frames/.f.jxl" + uploader.ROBOT_FIX_SUFFIX))
+
     def test_old_stick_manifest_uploads_everything(self):
         section = self.stick_section(
             {"a.bin": b"abc", "b.bin": b"defg"}, legacy=True)

@@ -276,6 +276,10 @@ void UploadDialog::setRobotId(const QString& robot_id) {
     refreshHeaderSubtitle();
 }
 
+void UploadDialog::setRobotFetch(const QString& host, const QString& ssh_user) {
+    if (runner_) runner_->setRobotFetch(host, ssh_user);
+}
+
 void UploadDialog::setDataRoot(const QString& root) {
     if (!root.trimmed().isEmpty()) {
         data_root_ = root.trimmed();

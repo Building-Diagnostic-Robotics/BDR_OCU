@@ -108,6 +108,10 @@ public:
                       const QString& client_id,
                       const QString& device_token);
     void setRobotId(const QString& robot_id);
+    /// ThumbDrive: the robot this stick is copied from. A damaged stick
+    /// file is fetched from it over the radio during the upload
+    /// (uploader.py repair_from_robot). Empty host: no fix in place.
+    void setRobotFetch(const QString& host, const QString& ssh_user);
     /// RobotSsh only — the robot's data root, defaults to "/R_DATA".
     /// ThumbDrive derives the root from the mount point.
     void setDataRoot(const QString& root);
