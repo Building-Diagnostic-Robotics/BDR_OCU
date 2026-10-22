@@ -363,8 +363,10 @@ void UploadDialog::buildUi() {
     progress_bar_->setObjectName("UploadDialogProgressBar");
     progress_bar_->setRange(0, 100);
     progress_bar_->setValue(0);
-    progress_bar_->setTextVisible(true);
-    progress_bar_->setMinimumHeight(18);
+    // The percentage is in the caption above the bar: one text colour
+    // cannot read on both the blue fill and the empty track.
+    progress_bar_->setTextVisible(false);
+    progress_bar_->setMinimumHeight(12);
     lbl_progress_detail_ = new QLabel(progress_block_);
     lbl_progress_detail_->setObjectName("UploadDialogProgressDetail");
     lbl_progress_detail_->setWordWrap(true);
@@ -1249,6 +1251,7 @@ void UploadDialog::onUploadClicked() {
     }
 
     background_hold_.clear();
+    progress_caption_base_.clear();
     if (flush_proc_) {
         // A new queue owns the caption now; the old flush may still
         // finish in the background, it just must not relabel this run.
@@ -1392,12 +1395,10 @@ void UploadDialog::publishBackgroundActivity() {
     if (!background_hold_.isEmpty()) {
         status = background_hold_;
     } else if (runner_ && runner_->isBusy()) {
-        const int total = building_progress_.total();
-        status = total > 0
-                     ? QStringLiteral("Uploading %1 · %2 / %3 files")
+        status = building_progress_.total() > 0
+                     ? QStringLiteral("Uploading %1 · %2%")
                            .arg(building_progress_.buildingLabel())
-                           .arg(building_progress_.done())
-                           .arg(total)
+                           .arg(buildingPercent())
                      : QStringLiteral("Uploading…");
     }
     if (status == published_background_status_) return;
@@ -1417,24 +1418,20 @@ void UploadDialog::onTargetStarted(int index, int total,
     active_files_total_ = qMax(target.total_files, target.completed_files);
     building_progress_.targetStarted(target);
 
-    if (lbl_progress_caption_) {
-        QString text = QStringLiteral("Uploading %1 · folder %2 of %3")
-                           .arg(building_progress_.buildingLabel())
-                           .arg(building_progress_.folderNumber())
-                           .arg(building_progress_.folderCount());
-        if (building_progress_.buildingCount() > 1) {
-            text += QStringLiteral(" · building %1 of %2")
-                        .arg(building_progress_.buildingNumber())
-                        .arg(building_progress_.buildingCount());
-        }
-        lbl_progress_caption_->setText(text);
+    progress_caption_base_ = QStringLiteral("Uploading %1 · folder %2 of %3")
+                                 .arg(building_progress_.buildingLabel())
+                                 .arg(building_progress_.folderNumber())
+                                 .arg(building_progress_.folderCount());
+    if (building_progress_.buildingCount() > 1) {
+        progress_caption_base_ += QStringLiteral(" · building %1 of %2")
+                                      .arg(building_progress_.buildingNumber())
+                                      .arg(building_progress_.buildingCount());
     }
     if (lbl_progress_detail_) {
         lbl_progress_detail_->setText(
             isThumbDrive() ? QStringLiteral("Starting uploader… (%1)").arg(target.section_name)
                            : QStringLiteral("Connecting to robot…"));
     }
-    if (progress_bar_) progress_bar_->setFormat(QStringLiteral("%v / %m files"));
     showBuildingProgress();
     if (all_targets_.contains(target.run_id)) {
         // The launch already captured force_reupload. A pause and a
@@ -1542,10 +1539,24 @@ void UploadDialog::onTargetFailed(const UploadTarget& target,
                              brief});
 }
 
+int UploadDialog::buildingPercent() const {
+    const int total = building_progress_.total();
+    if (total <= 0) return 0;
+    return qBound(0, int(qint64(building_progress_.done()) * 100 / total), 100);
+}
+
 void UploadDialog::showBuildingProgress() {
-    if (!progress_bar_) return;
-    progress_bar_->setRange(0, qMax(1, building_progress_.total()));
-    progress_bar_->setValue(qMin(building_progress_.done(), progress_bar_->maximum()));
+    if (progress_bar_) {
+        progress_bar_->setRange(0, qMax(1, building_progress_.total()));
+        progress_bar_->setValue(
+            qMin(building_progress_.done(), progress_bar_->maximum()));
+    }
+    // Only while a folder is running; the queue-end captions replace it.
+    if (lbl_progress_caption_ && runner_ && runner_->isBusy() &&
+        !progress_caption_base_.isEmpty()) {
+        lbl_progress_caption_->setText(
+            QStringLiteral("%1 · %2%").arg(progress_caption_base_).arg(buildingPercent()));
+    }
 }
 
 void UploadDialog::onTargetCompleted(const UploadTarget& target) {

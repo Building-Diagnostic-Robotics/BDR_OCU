@@ -1,16 +1,28 @@
 # Changelog
 
-All notable changes per release. The **top** `## ` block is the release notes
-that ship in the next OTA build — keep it short (≤5 bullets, ≤80 chars each)
-because the in-app modal renders only those bullets.
+What's New in the OCU update box. Read by roofing contractors, so:
 
-Bullets must start with `-`. Lines that don't start with `-` after the heading
-are dropped by the workflow's release-notes extractor. Add a new top section
-before pushing to `main` that triggers a release.
+- Every PR that changes the app adds its bullets at the top of
+  `## Unreleased`. The "Release notes" PR check fails without one (label the
+  PR `no-release-notes` when the operator will notice nothing).
+- Say what the operator will see or can now do, in plain words. No technical
+  terms (the check rejects words like ROS, S3, SHA, API), at most 80
+  characters, one line, starting with `- `.
+- Each release ships only the bullets added since the previous release
+  (`.github/scripts/release_notes.py`), newest first, at most 5.
+- Nothing to rotate: older bullets stay below and are never shipped again.
 
 ---
 
 ## Unreleased
+
+- Upload progress now shows the whole building as a percentage
+- Damaged scans on the drive are flagged: plug the drive into ROOFUS to fix
+- Uploads keep going when one scan has a problem and list it at the end
+- Uploads no longer pause on their own while files are still going up
+- Uploaded scans are checked again, and missing ones can be uploaded again
+
+## 2026-10-21 — OTA c72f8a5
 
 - Robot map is now clearly visible on the light-mode canvas
 - Satellite map turns to match the cloud, and parks when a pick disagrees

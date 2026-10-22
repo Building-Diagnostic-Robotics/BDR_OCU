@@ -438,6 +438,17 @@ the new `.deb`, and `execv`s the OCU back. A 60 s health-probe watchdog
 in the OCU's `main()` automatically rolls back to the previous `.deb` if
 the new OCU fails to fire `AppShellWindow::bootHealthy` in time.
 
+### What's New notes (every PR)
+
+The update box's "What's New" is read by roofing contractors. Every PR that
+changes the app adds plain-language bullets at the top of `## Unreleased`
+in `CHANGELOG.md`: what the operator will see or can now do, one line,
+at most 80 characters, no technical words. The `Release notes` PR check
+(`.github/workflows/release-notes-check.yml`) fails without a valid bullet;
+label the PR `no-release-notes` when nothing operator-visible changed.
+`release.yml` ships only the bullets added since the previous `v-*` tag
+(`.github/scripts/release_notes.py`, at most 5), so nothing is rotated.
+
 ### Key entry points
 
 - `cpp/src/main.cpp` — startup-time marker dispatch + watchdog wiring.
