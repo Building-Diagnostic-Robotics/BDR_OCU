@@ -281,7 +281,12 @@ private:
     /// What the bar shows: the whole building being uploaded, every
     /// folder of it, not just the active folder.
     BuildingUploadProgress building_progress_;
+    /// "Uploading <building> · folder 3 of 10"; showBuildingProgress()
+    /// appends " · 45%". The bar itself carries no text: dark text on the
+    /// blue fill was unreadable.
+    QString progress_caption_base_;
     void showBuildingProgress();
+    int buildingPercent() const;
 
     UploadStateProbe* probe_ = nullptr;
     UploadRunner* runner_ = nullptr;

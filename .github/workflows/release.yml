@@ -208,15 +208,10 @@ jobs:
       - name: Extract release notes from CHANGELOG.md
         id: notes
         run: |
-          # Print everything from after the first `## ` heading to (but not
-          # including) the next `## ` heading. Leading/trailing blank lines
-          # trimmed. Falls back to "No release notes" if extraction yields
-          # nothing.
-          NOTES="$(awk '/^## /{if(p)exit;p=1;next}p' CHANGELOG.md \
-                    | sed -e '/./,$!d' -e ':a;/^\n*$/{$d;N;ba;}' || true)"
-          if [ -z "$NOTES" ]; then
-            NOTES="No release notes provided."
-          fi
+          # Only the bullets added to CHANGELOG.md since the previous
+          # v-<sha> release, so a note never ships twice and every build
+          # says what changed (.github/scripts/release_notes.py).
+          NOTES="$(python3 .github/scripts/release_notes.py)"
           # Fleet targeting. The OCU's UpdateChecker reads this HTML
           # comment from the release body (UpdateChecker::parseTargets)
           # and stays quiet on OCUs whose `setup/robot_id` is excluded
