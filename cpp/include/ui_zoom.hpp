@@ -1,13 +1,13 @@
 /**
  * @file ui_zoom.hpp
- * @brief App-wide zoom ("Text size" on Get Started).
+ * @brief App-wide zoom (A- / A+ on Get Started).
  *
  * Text sizes are written in px across the app's style sheets and many
  * widgets have fixed sizes, so text-only scaling would clip. Instead the
  * whole UI is scaled with Qt's QT_SCALE_FACTOR: text, buttons, icons and
  * spacing grow together and every layout keeps its shape. Qt reads the
  * factor once when the QApplication is created, so a change applies after
- * a restart (Get Started offers "Restart now").
+ * a restart (Get Started shows "Restart to apply").
  *
  * The ceiling is set by the field laptop (14", 1920x1080, ~1046 px work
  * area under the GNOME top bar). The scan page's right rail needs a ~905 px
@@ -36,23 +36,24 @@ struct UiZoomLevel {
     const char* label;  // operator-facing
 };
 
-inline constexpr std::array<UiZoomLevel, 3> kUiZoomLevels{{
+// Two steps: A+ goes straight to the ceiling. A 110 % middle step was
+// dropped; it was too close to 100 % to be worth a press.
+inline constexpr std::array<UiZoomLevel, 2> kUiZoomLevels{{
     {1.0, "Normal"},
-    {1.1, "Large"},
-    {1.15, "Larger"},
+    {1.15, "Large"},
 }};
 
 inline constexpr double kUiZoomDefault = 1.0;
 
 /// Set next to QT_SCALE_FACTOR when the app sets it, so a process started
-/// from this one (Restart now, the update runner's relaunch) re-reads the
+/// from this one (Restart to apply, the update runner's relaunch) re-reads the
 /// saved choice instead of mistaking the inherited value for a dev override.
 inline constexpr const char* kUiZoomAppliedEnv = "BDR_UI_ZOOM_APPLIED";
 
 /// QApplication dynamic property: the zoom this process started with.
 inline constexpr const char* kUiZoomActiveProperty = "bdr_ui_zoom_active";
 
-/// QApplication dynamic property: set when the operator pressed Restart now;
+/// QApplication dynamic property: set when the operator pressed Restart to apply;
 /// main() starts a new copy after the event loop ends.
 inline constexpr const char* kRestartRequestedProperty = "bdr_restart_requested";
 

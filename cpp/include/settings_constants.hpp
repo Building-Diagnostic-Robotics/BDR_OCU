@@ -19,7 +19,7 @@ constexpr const char* kOcuStartEpochMsProperty = "bdr_ocu_start_epoch_ms";
 /** QSettings key: robot chosen at Setup (e.g. "Roofus#0002"). Also the OTA targeting id. */
 constexpr const char* kSettingsRobotIdKey = "setup/robot_id";
 
-/** QSettings key: app-wide zoom chosen at Setup ("Text size"). See ui_zoom.hpp. */
+/** QSettings key: app-wide zoom chosen with A- / A+ on Get Started. See ui_zoom.hpp. */
 constexpr const char* kSettingsUiZoomKey = "ui/zoom";
 
 // ---------------------------------------------------------------------------
