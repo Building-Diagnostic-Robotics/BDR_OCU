@@ -6,6 +6,7 @@
 #include <QString>
 #include <QWidget>
 
+class QButtonGroup;
 class QComboBox;
 class QLabel;
 class QPushButton;
@@ -32,12 +33,15 @@ public:
 
 signals:
     void getStartedRequested(const QString& robotId);
+    /** Restart now: the text size was changed (it only applies at launch). */
+    void restartRequested();
 
 private slots:
     void submit();
     void startConnectionMonitor();
     void checkConnection();
     void onPingFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onZoomChosen(int index);
 
 private:
     QString selectedRobotId() const;
@@ -49,6 +53,10 @@ private:
     QPushButton* btn_start_ = nullptr;
     QLabel* lbl_override_ = nullptr;
     QLabel* lbl_error_ = nullptr;
+
+    QButtonGroup* zoom_group_ = nullptr;
+    QWidget* restart_row_ = nullptr;
+    double active_zoom_ = 1.0;  // the zoom this process started with
 
     QLabel* lbl_connection_ = nullptr;
     QLabel* lbl_connection_icon_ = nullptr;

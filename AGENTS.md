@@ -2374,6 +2374,30 @@ sheets of the widget it is shown for, so a bare `color: white` on a label
 restyled its tooltip. Do not style tooltips per widget; rich text inside a
 tooltip should take colors from `uiThemeTokens`.
 
+### Text size (app-wide zoom)
+
+Get Started has a **Text size** picker: Normal / Large / Larger =
+100 / 110 / 115 % (`ui_zoom.hpp`, QSettings `ui/zoom`). It zooms the whole
+UI with `QT_SCALE_FACTOR`, set in `main()` before the `QApplication` is
+built, so text, buttons and spacing grow together. Do not scale fonts
+alone: sizes are px in hundreds of style sheets and many widgets are
+fixed-size, so text-only scaling clips. Qt reads the factor once, so a
+change shows **Restart now**; that sets `bdr_restart_requested`, closes the
+window through the normal close gates, and `main()` starts a new copy
+after the event loop ends. `BDR_UI_ZOOM_APPLIED` marks the env as ours so
+a restarted copy re-reads the saved choice; a `QT_SCALE_FACTOR` set in a
+dev shell (without the marker) wins. The dev screenshot hook always runs
+at 100 %.
+
+The 115 % ceiling comes from the field laptop (14", 1920x1080, ~1046 px
+work area): the scan page needs a ~905 px tall window. Raise the levels
+only after that page handles less height.
+
+New dialogs should size from height-for-width when they hold wrapped
+text (see `UpdateModal::fitHeightToContent`): a window takes its height
+from the plain size hint, which ignores wrapping, and gets squeezed as
+soon as text grows.
+
 ### Decisions that are load-bearing
 
 - **Green buttons keep the brand fill and swap the label.** White on

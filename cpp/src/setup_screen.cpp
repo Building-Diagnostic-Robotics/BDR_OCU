@@ -2,9 +2,12 @@
 #include "dev_flags.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
+#include "ui_zoom.hpp"
 #include "update/update_log.hpp"
 
 #include <algorithm>
+#include <QApplication>
+#include <QButtonGroup>
 #include <QColor>
 #include <QComboBox>
 #include <QHBoxLayout>
@@ -26,6 +29,7 @@ namespace {
 constexpr int kConnectionIconInset = 16;
 constexpr int kFieldHeight = 56;
 constexpr int kFieldSpacing = 12;
+constexpr int kZoomOptionHeight = 48;
 
 QPixmap tintWireframeToColor(const QPixmap& src, const QColor& color) {
     // Treat white pixels as transparent; map darker pixels to the provided color.
@@ -214,7 +218,64 @@ SetupScreen::SetupScreen(QWidget* parent)
         lbl_robot_value_->setFixedHeight(kFieldHeight);
         v->addWidget(lbl_robot_value_);
     }
-    v->addSpacing(32);
+    v->addSpacing(24);
+
+    // Text size: zooms the whole app (ui_zoom.hpp). Qt fixes the zoom at
+    // launch, so a change shows Restart now.
+    const QVariant active_prop = qApp->property(kUiZoomActiveProperty);
+    active_zoom_ = active_prop.isValid() ? active_prop.toDouble() : kUiZoomDefault;
+    const double saved_zoom = savedUiZoom();
+
+    auto* size_label = new QLabel(QStringLiteral("TEXT SIZE"), panel);
+    size_label->setObjectName("SetupFieldLabel");
+    v->addWidget(size_label);
+    v->addSpacing(kFieldSpacing);
+
+    auto* size_row = new QHBoxLayout();
+    size_row->setContentsMargins(0, 0, 0, 0);
+    size_row->setSpacing(12);
+    zoom_group_ = new QButtonGroup(this);
+    zoom_group_->setExclusive(true);
+    for (int i = 0; i < static_cast<int>(kUiZoomLevels.size()); ++i) {
+        const UiZoomLevel& level = kUiZoomLevels[static_cast<size_t>(i)];
+        auto* option = new QPushButton(QString::fromLatin1(level.label), panel);
+        option->setObjectName("SetupZoomOption");
+        // Each option is drawn a step bigger, so the choice previews itself.
+        option->setProperty("zoomStep", i);
+        option->setCheckable(true);
+        option->setChecked(qFuzzyCompare(level.factor, saved_zoom));
+        option->setCursor(Qt::PointingHandCursor);
+        option->setFixedHeight(kZoomOptionHeight);
+        zoom_group_->addButton(option, i);
+        size_row->addWidget(option, 1);
+    }
+    connect(zoom_group_, &QButtonGroup::idClicked, this, &SetupScreen::onZoomChosen);
+    v->addLayout(size_row);
+    v->addSpacing(8);
+
+    restart_row_ = new QWidget(panel);
+    restart_row_->setObjectName("SetupRestartRow");
+    auto* restart_lay = new QHBoxLayout(restart_row_);
+    restart_lay->setContentsMargins(0, 0, 0, 0);
+    restart_lay->setSpacing(12);
+    auto* restart_hint = new QLabel(
+        QStringLiteral("The new text size starts after a restart."), restart_row_);
+    restart_hint->setObjectName("SetupRestartHint");
+    restart_hint->setWordWrap(true);
+    restart_lay->addWidget(restart_hint, 1);
+    auto* btn_restart = new QPushButton(QStringLiteral("RESTART NOW"), restart_row_);
+    btn_restart->setObjectName("SetupRestartButton");
+    btn_restart->setCursor(Qt::PointingHandCursor);
+    btn_restart->setFixedHeight(40);
+    connect(btn_restart, &QPushButton::clicked, this, [this]() {
+        update::log::info("setup", QStringLiteral("restart requested for text size"));
+        emit restartRequested();
+    });
+    restart_lay->addWidget(btn_restart, 0);
+    restart_row_->setVisible(!qFuzzyCompare(saved_zoom, active_zoom_));
+    v->addWidget(restart_row_);
+
+    v->addSpacing(24);
 
     btn_start_ = new QPushButton("GET STARTED", panel);
     btn_start_->setObjectName("SetupStartButton");
@@ -271,6 +332,16 @@ void SetupScreen::submit() {
     settings.setValue(kSettingsRobotIdKey, robot_id);
     update::log::info("setup", QStringLiteral("get started: robot_id=%1").arg(robot_id));
     emit getStartedRequested(robot_id);
+}
+
+void SetupScreen::onZoomChosen(int index) {
+    if (index < 0 || index >= static_cast<int>(kUiZoomLevels.size())) return;
+    const double factor = kUiZoomLevels[static_cast<size_t>(index)].factor;
+    saveUiZoom(factor);
+    update::log::info("setup", QStringLiteral("text size set to %1").arg(factor));
+    if (restart_row_) {
+        restart_row_->setVisible(!qFuzzyCompare(factor, active_zoom_));
+    }
 }
 
 void SetupScreen::startConnectionMonitor() {
@@ -439,6 +510,43 @@ void SetupScreen::applyLocalStyle() {
             color: rgba(255, 255, 255, 0.5);
         }
 
+        #SetupZoomOption {
+            background-color: transparent;
+            border: 2px solid rgba(22, 163, 74, 0.4);
+            border-radius: 2px;
+            color: #E5E7EB;
+            font-weight: 600;
+        }
+        #SetupZoomOption[zoomStep="0"] { font-size: 16px; }
+        #SetupZoomOption[zoomStep="1"] { font-size: 18px; }
+        #SetupZoomOption[zoomStep="2"] { font-size: 20px; }
+        #SetupZoomOption:hover:!checked {
+            border: 2px solid rgba(22, 163, 74, 0.75);
+        }
+        #SetupZoomOption:checked {
+            background-color: rgba(22, 163, 74, 0.25);
+            border: 2px solid #16a34a;
+            color: #FFFFFF;
+        }
+        #SetupRestartHint {
+            color: #FBBF24;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        #SetupRestartButton {
+            background-color: transparent;
+            border: 2px solid #16a34a;
+            border-radius: 2px;
+            color: #16a34a;
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            padding: 0 16px;
+        }
+        #SetupRestartButton:hover {
+            background-color: rgba(22, 163, 74, 0.15);
+        }
+
         #SetupNotice {
             color: #FBBF24;
             font-size: 12px;
@@ -481,6 +589,19 @@ void SetupScreen::applyLocalStyle() {
             background-color: #FFFFFF;
             color: #1F2937;
         }
+        #SetupScreenRoot[theme="light"] #SetupZoomOption {
+            color: #1F2937;
+        }
+        #SetupScreenRoot[theme="light"] #SetupZoomOption:checked {
+            background-color: #DCFCE7;
+            color: #166534;
+        }
+        #SetupScreenRoot[theme="light"] #SetupRestartHint {
+            color: #92400E;
+        }
+        #SetupScreenRoot[theme="light"] #SetupRestartButton {
+            color: #166534;
+        }
         #SetupScreenRoot[theme="light"] #SetupNotice {
             color: #92400E;
         }
@@ -488,8 +609,14 @@ void SetupScreen::applyLocalStyle() {
             color: #B91C1C;
         }
     )");
+    // The [theme] rules match on this widget's property, which Qt only
+    // re-reads for a child when that child is repolished.
     style()->unpolish(this);
     style()->polish(this);
+    for (QWidget* w : findChildren<QWidget*>()) {
+        w->style()->unpolish(w);
+        w->style()->polish(w);
+    }
     update();
 }
 

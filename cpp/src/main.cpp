@@ -28,6 +28,7 @@
 #include "dev_flags.hpp"
 #include "robot_registry.hpp"
 #include "settings_constants.hpp"
+#include "ui_zoom.hpp"
 #include "single_instance.hpp"
 #include "components/bdr_message_box.hpp"
 #include "ui_theme_constants.hpp"
@@ -256,8 +257,18 @@ int main(int argc, char* argv[])
 
     rclcpp::init(argc, argv);
 
+    // App-wide zoom (Get Started "Text size"). Qt reads QT_SCALE_FACTOR
+    // once, when the QApplication is created, so it is set here. The dev
+    // screenshot hook compares pixels against 1920x1080 Figma frames, so it
+    // always runs at 100%.
+    const double ui_zoom =
+        qEnvironmentVariable("BDR_DEV_STAGE6_SHOT").trimmed().isEmpty()
+            ? f2c_cpp::applyUiZoomBeforeQApplication()
+            : 1.0;
+
     // Create Qt application
     QApplication app(argc, argv);
+    app.setProperty(f2c_cpp::kUiZoomActiveProperty, ui_zoom);
     app.setProperty(
         f2c_cpp::kOcuStartEpochMsProperty,
         QVariant::fromValue(QDateTime::currentMSecsSinceEpoch()));
@@ -545,6 +556,17 @@ int main(int argc, char* argv[])
     int exit_code = app.exec();
 
     rclcpp::shutdown();
+
+    // Restart now (Get Started, after a text-size change). The new copy finds
+    // this one still holding the single-instance lock, gets no answer (we
+    // stopped listening when the window closed) and waits for us to exit.
+    if (app.property(f2c_cpp::kRestartRequestedProperty).toBool()) {
+        const QString self = QCoreApplication::applicationFilePath();
+        if (!QProcess::startDetached(self, app.arguments().mid(1))) {
+            f2c_cpp::update::log::error(
+                "ocu", QStringLiteral("restart: startDetached failed for %1").arg(self));
+        }
+    }
     return exit_code;
 }
 

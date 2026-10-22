@@ -165,6 +165,7 @@ set(HEADERS
     include/preset_manager.hpp
     include/ui_theme_constants.hpp
     include/tooltip_theme.hpp
+    include/ui_zoom.hpp
     include/cloud_upload_manager.hpp
     include/robot_registry.hpp
     include/single_instance.hpp
@@ -773,6 +774,22 @@ if(BDR_BUILD_TESTS)
         add_test(NAME tooltip_theme_tests COMMAND tooltip_theme_tests)
         set_tests_properties(tooltip_theme_tests PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+        # App-wide zoom (Get Started "Text size"): level snapping, startup
+        # resolution, and the env handoff to a restarted copy.
+        add_executable(ui_zoom_tests
+            tests/ui_zoom_tests.cpp
+            include/ui_zoom.hpp
+        )
+        target_include_directories(ui_zoom_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(ui_zoom_tests PRIVATE
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME ui_zoom_tests COMMAND ui_zoom_tests)
 
         # ROOFUS update dialog: operator wording + button flows. Own main()
         # (offscreen QApplication); headers listed for AUTOMOC.
