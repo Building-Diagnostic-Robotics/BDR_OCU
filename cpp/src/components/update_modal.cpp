@@ -12,9 +12,11 @@
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QLabel>
+#include <QLayout>
 #include <QLocale>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QShowEvent>
 #include <QStringList>
 #include <QStyle>
@@ -23,6 +25,8 @@
 #include <QToolTip>
 #include <QVBoxLayout>
 
+#include "components/update_text_scale.hpp"
+#include "settings_constants.hpp"
 #include "ui_theme_constants.hpp"
 #include "update/update_log.hpp"
 
@@ -57,17 +61,78 @@ UpdateModal::UpdateModal(const update::VersionInfo& info,
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground);
     setWindowModality(Qt::ApplicationModal);
-    setMinimumWidth(560);
+    setMinimumWidth(560);  // raised to scale with the text in applyStyle
 
     battery_poll_timer_ = new QTimer(this);
     battery_poll_timer_->setInterval(kBatteryPollIntervalMs);
     connect(battery_poll_timer_, &QTimer::timeout,
             this, &UpdateModal::onPollBattery);
 
+    text_scale_ = clampUpdateTextScale(
+        QSettings(QString::fromLatin1(kSettingsOrgName),
+                  QString::fromLatin1(kSettingsAppName))
+            .value(QString::fromLatin1(kSettingsUpdateTextScaleKey),
+                   kUpdateTextScaleDefault)
+            .toDouble());
     buildUi();
     applyStyle();
     populateContent();
     refreshInstallButton();
+    fitToText();
+}
+
+void UpdateModal::fitToText() {
+    // Size the dialog to the text at the chosen scale, not to the 560 px
+    // floor. Runs after applyStyle, populateContent and every scale change.
+    // Polish children first so their font metrics are the scaled ones.
+    for (QWidget* w : findChildren<QWidget*>()) w->ensurePolished();
+    // Bullets are added to a nested layout. Invalidate every layout so the
+    // cached sizes from the pre-scale font are dropped.
+    for (QLayout* l : findChildren<QLayout*>()) l->invalidate();
+    layout()->invalidate();
+    layout()->activate();
+    // Wrapped bullets have a height that depends on width. The outer layout
+    // sizes the card from a one-line guess unless we give each bullet its
+    // real height at the width it will get (card inner width).
+    const int card_inner = qMax(width(), minimumWidth()) - 2 * 24 - 2 * 16;
+    for (QLabel* bullet : findChildren<QLabel*>(
+             QStringLiteral("UpdateModal_WhatsNewBullet"))) {
+        // Bullets are one line at every size we allow (the dialog is at
+        // least 600 px * scale wide), so the line height is exact.
+        bullet->setWordWrap(false);
+        bullet->setMinimumHeight(bullet->fontMetrics().height() + 4);
+        Q_UNUSED(card_inner)
+    }
+    // The card's own layout knows the true height of title + bullets; hand
+    // that to the card so the outer layout cannot squeeze it.
+    if (QWidget* card = findChild<QWidget*>(QStringLiteral("UpdateModal_WhatsNew"))) {
+        card->setMinimumHeight(card->layout()->totalSizeHint().height());
+        card->updateGeometry();
+    }
+    // The rows below the card are placed by the container's layout, which
+    // cached the card's old height. Invalidate it so they move down.
+    if (QWidget* container = findChild<QWidget*>(QStringLiteral("UpdateModal_Container"))) {
+        if (QLayout* root = container->layout()) {
+            root->invalidate();
+            root->activate();
+            // activate() keeps the old placement if nothing changed size
+            // from its point of view; set the geometry explicitly.
+            root->setGeometry(container->contentsRect());
+        }
+    }
+    layout()->invalidate();
+    layout()->activate();
+    // Height the content needs at this width. adjustSize() can settle on a
+    // smaller height (its hints were taken before the new font), and the
+    // layout then squeezes the header and the warning to fit.
+    const int needed = layout()->totalHeightForWidth(width());
+    resize(width(), needed + 0);
+    // Geometry from the first pass is replaced once the window is laid out;
+    // run the fit again on the next loop turn so the card and the rows below
+    // it are placed from the final sizes.
+    // Geometry from the first pass can be replaced once the window is shown;
+    // run the fit again on the next loop turn.
+    QTimer::singleShot(0, this, &UpdateModal::fitToText);
 }
 
 void UpdateModal::buildUi() {
@@ -103,9 +168,32 @@ void UpdateModal::buildUi() {
 
     lbl_subtitle_ = new QLabel(container);
     lbl_subtitle_->setObjectName(QStringLiteral("UpdateModal_Subtitle"));
+    lbl_subtitle_->setWordWrap(true);  // wrap at large text sizes, never clip
     title_col->addWidget(lbl_subtitle_);
 
     header->addLayout(title_col, 1);
+
+    // Text size: A- / A+ so the operator can read it from a distance.
+    auto* size_row = new QHBoxLayout();
+    size_row->setContentsMargins(0, 0, 0, 0);
+    size_row->setSpacing(4);
+    btn_text_smaller_ = new QPushButton(QStringLiteral("A\u2212"), container);
+    btn_text_smaller_->setObjectName(QStringLiteral("UpdateModal_TextSmaller"));
+    btn_text_smaller_->setToolTip(QStringLiteral("Smaller text"));
+    btn_text_smaller_->setCursor(Qt::PointingHandCursor);
+    btn_text_smaller_->setFixedSize(40, 32);
+    connect(btn_text_smaller_, &QPushButton::clicked, this,
+            [this]() { changeTextScale(-kUpdateTextScaleStep); });
+    size_row->addWidget(btn_text_smaller_);
+    btn_text_larger_ = new QPushButton(QStringLiteral("A+"), container);
+    btn_text_larger_->setObjectName(QStringLiteral("UpdateModal_TextLarger"));
+    btn_text_larger_->setToolTip(QStringLiteral("Larger text"));
+    btn_text_larger_->setCursor(Qt::PointingHandCursor);
+    btn_text_larger_->setFixedSize(40, 32);
+    connect(btn_text_larger_, &QPushButton::clicked, this,
+            [this]() { changeTextScale(kUpdateTextScaleStep); });
+    size_row->addWidget(btn_text_larger_);
+    header->addLayout(size_row, 0);
 
     btn_close_ = new QPushButton(QStringLiteral("\u00D7"), container);
     btn_close_->setObjectName(QStringLiteral("UpdateModal_Close"));
@@ -217,7 +305,7 @@ void UpdateModal::buildUi() {
 void UpdateModal::applyStyle() {
     const UiThemeTokens t = uiThemeTokens(dark_mode_);
 
-    setStyleSheet(QStringLiteral(
+    setStyleSheet(scaleCssFontSizes(QStringLiteral(
         "QWidget#UpdateModal_Container {"
         "  background-color: %1;"
         "  border: 1px solid %2;"
@@ -232,14 +320,14 @@ void UpdateModal::applyStyle() {
         "}"
         "QLabel#UpdateModal_Title {"
         "  color: %4;"
-        "  font-size: 18px;"
+        "  font-size: 22px;"
         "  font-weight: 700;"
         "  background: transparent;"
         "  border: none;"
         "}"
         "QLabel#UpdateModal_Subtitle {"
         "  color: %5;"
-        "  font-size: 13px;"
+        "  font-size: 16px;"
         "  background: transparent;"
         "  border: none;"
         "}"
@@ -262,20 +350,20 @@ void UpdateModal::applyStyle() {
         "}"
         "QLabel#UpdateModal_WhatsNewTitle {"
         "  color: %4;"
-        "  font-size: 13px;"
+        "  font-size: 16px;"
         "  font-weight: 700;"
         "  background: transparent;"
         "  border: none;"
         "}"
         "QLabel#UpdateModal_WhatsNewBullet {"
         "  color: %4;"
-        "  font-size: 13px;"
+        "  font-size: 16px;"
         "  background: transparent;"
         "  border: none;"
         "}"
         "QLabel#UpdateModal_WhatsNewEmpty {"
         "  color: %5;"
-        "  font-size: 13px;"
+        "  font-size: 16px;"
         "  font-style: italic;"
         "  background: transparent;"
         "  border: none;"
@@ -286,12 +374,12 @@ void UpdateModal::applyStyle() {
         "  border: 1px solid %7;"
         "  border-radius: 8px;"
         "  padding: 10px 12px;"
-        "  font-size: 12px;"
+        "  font-size: 15px;"
         "  font-weight: 600;"
         "}"
         "QLabel#UpdateModal_StatCaption {"
         "  color: %5;"
-        "  font-size: 11px;"
+        "  font-size: 13px;"
         "  font-weight: 600;"
         "  text-transform: uppercase;"
         "  background: transparent;"
@@ -299,14 +387,14 @@ void UpdateModal::applyStyle() {
         "}"
         "QLabel#UpdateModal_StatValue {"
         "  color: %4;"
-        "  font-size: 14px;"
+        "  font-size: 17px;"
         "  font-weight: 600;"
         "  background: transparent;"
         "  border: none;"
         "}"
         "QLabel#UpdateModal_StatValueWarn {"
         "  color: %7;"
-        "  font-size: 14px;"
+        "  font-size: 17px;"
         "  font-weight: 700;"
         "  background: transparent;"
         "  border: none;"
@@ -316,7 +404,7 @@ void UpdateModal::applyStyle() {
         "  background-color: transparent;"
         "  border: 1px solid %2;"
         "  border-radius: 8px;"
-        "  font-size: 13px;"
+        "  font-size: 16px;"
         "  font-weight: 600;"
         "  padding: 0px 14px;"
         "}"
@@ -324,12 +412,27 @@ void UpdateModal::applyStyle() {
         "  color: %4;"
         "  background-color: %6;"
         "}"
+        "QPushButton#UpdateModal_TextSmaller, QPushButton#UpdateModal_TextLarger {"
+        "  color: %4;"
+        "  background-color: %9;"
+        "  border: 1px solid %2;"
+        "  border-radius: 8px;"
+        "  font-size: 14px;"
+        "  font-weight: 700;"
+        "  padding: 0px;"
+        "}"
+        "QPushButton#UpdateModal_TextSmaller:hover, QPushButton#UpdateModal_TextLarger:hover {"
+        "  background-color: %6;"
+        "}"
+        "QPushButton#UpdateModal_TextSmaller:disabled, QPushButton#UpdateModal_TextLarger:disabled {"
+        "  color: %5;"
+        "}"
         "QPushButton#UpdateModal_InstallNow {"
         "  color: white;"
         "  background-color: %3;"
         "  border: none;"
         "  border-radius: 8px;"
-        "  font-size: 13px;"
+        "  font-size: 16px;"
         "  font-weight: 700;"
         "  padding: 0px 16px;"
         "}"
@@ -348,7 +451,11 @@ void UpdateModal::applyStyle() {
         .arg(t.muted)           // %5 muted text
         .arg(t.bg)              // %6 nested card / hover bg
         .arg(t.warning)         // %7 amber warning
-        .arg(t.accent_hover));  // %8 install hover
+        .arg(t.accent_hover)    // %8 install hover
+        .arg(t.raised),         // %9 A-/A+ fill
+        text_scale_));
+    setMinimumWidth(qRound(600 * text_scale_));
+    updateTextScaleButtons();
 }
 
 void UpdateModal::populateContent() {
@@ -446,6 +553,26 @@ void UpdateModal::refreshInstallButton() {
 void UpdateModal::setGateState(const GateState& gate_state) {
     gate_ = gate_state;
     refreshInstallButton();
+}
+
+void UpdateModal::changeTextScale(double delta) {
+    const double next = clampUpdateTextScale(text_scale_ + delta);
+    if (qFuzzyCompare(next, text_scale_)) return;
+    text_scale_ = next;
+    QSettings(QString::fromLatin1(kSettingsOrgName),
+              QString::fromLatin1(kSettingsAppName))
+        .setValue(QString::fromLatin1(kSettingsUpdateTextScaleKey), text_scale_);
+    applyStyle();
+    fitToText();
+}
+
+void UpdateModal::updateTextScaleButtons() {
+    if (btn_text_smaller_) {
+        btn_text_smaller_->setEnabled(text_scale_ > kUpdateTextScaleMin + 1e-6);
+    }
+    if (btn_text_larger_) {
+        btn_text_larger_->setEnabled(text_scale_ < kUpdateTextScaleMax - 1e-6);
+    }
 }
 
 void UpdateModal::showEvent(QShowEvent* event) {
