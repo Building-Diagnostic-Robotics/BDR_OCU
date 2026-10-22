@@ -69,6 +69,7 @@
 #include "startup_screen.hpp"
 #include "transfer_manager.hpp"
 #include "ui_theme_constants.hpp"
+#include "ui_zoom.hpp"
 #include "tooltip_theme.hpp"
 #include "units_system.hpp"
 #include "upload_dialog.hpp"
@@ -463,6 +464,14 @@ AppShellWindow::AppShellWindow(QWidget* parent)
     stack_->setCurrentWidget(stage1_);
 
     connect(stage1_, &SetupScreen::getStartedRequested, this, &AppShellWindow::onGetStarted);
+    // Restart now (text size). main() starts a new copy once the event loop
+    // ends. close() runs the normal close gates; if one says no, no restart.
+    connect(stage1_, &SetupScreen::restartRequested, this, [this]() {
+        qApp->setProperty(kRestartRequestedProperty, true);
+        if (!close()) {
+            qApp->setProperty(kRestartRequestedProperty, false);
+        }
+    });
     connect(stack_, &QStackedWidget::currentChanged, this,
             [this](int) { refreshRobotSyncBanner(); });
 

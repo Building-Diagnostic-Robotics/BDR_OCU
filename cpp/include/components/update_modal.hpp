@@ -88,16 +88,14 @@ private slots:
     void onPollBattery();
     void onInstallClicked();
     void onRemindMeLaterClicked();
-    void changeTextScale(double delta);
 
 private:
     void buildUi();
     void applyStyle();
     void populateContent();
+    // Sets the height the content needs at the fixed width.
+    void fitHeightToContent();
     void refreshInstallButton();
-    void updateTextScaleButtons();
-    /// Re-polish and resize the dialog to fit the current text scale.
-    void fitToText();
 
     static QStringList parseReleaseNotesBullets(const QString& body,
                                                 int max_bullets = 5);
@@ -122,10 +120,6 @@ private:
 
     QLabel* lbl_size_value_ = nullptr;
     QLabel* lbl_battery_value_ = nullptr;
-    QPushButton* btn_text_smaller_ = nullptr;
-    QPushButton* btn_text_larger_ = nullptr;
-    /// Operator text size, 1.0 = designed size. Saved in QSettings.
-    double text_scale_ = 1.0;
 
     QPushButton* btn_remind_later_ = nullptr;
     QPushButton* btn_install_now_ = nullptr;

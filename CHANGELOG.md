@@ -16,7 +16,8 @@ What's New in the OCU update box. Read by roofing contractors, so:
 
 ## Unreleased
 
-- Update box text is larger, and A- / A+ change its size
+- Pick a bigger text size on the Get Started screen
+- Update box text is larger and easier to read
 - Hover a building to see what's uploaded and what needs fixing
 - Pop-up hints now match the app's light and dark theme
 - Upload progress now shows the whole building as a percentage

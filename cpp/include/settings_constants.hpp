@@ -19,6 +19,9 @@ constexpr const char* kOcuStartEpochMsProperty = "bdr_ocu_start_epoch_ms";
 /** QSettings key: robot chosen at Setup (e.g. "Roofus#0002"). Also the OTA targeting id. */
 constexpr const char* kSettingsRobotIdKey = "setup/robot_id";
 
+/** QSettings key: app-wide zoom chosen at Setup ("Text size"). See ui_zoom.hpp. */
+constexpr const char* kSettingsUiZoomKey = "ui/zoom";
+
 // ---------------------------------------------------------------------------
 // Per-mission session metadata (collected via MissionMetadataDialog before
 // every Stage 3 → Stage 4 transition). Values persist across runs so a
@@ -65,8 +68,6 @@ constexpr const char* kRobotDeployBranch = "cliff-on-autonomy";
 
 /** Epoch-ms until the robot-software banner stays hidden. 0 = none. */
 constexpr const char* kSettingsRobotSyncSnoozeKey = "robot_sync/snooze_until_ms";
-// OTA update modal text size (A-/A+ on the modal); 1.0 = designed size.
-constexpr const char* kSettingsUpdateTextScaleKey = "ui/update_text_scale";
 
 /** How long "Later" hides the robot-software banner: a flat 30 min every
  *  time (no back-off, unlike the OTA snooze `update::snoozeDurationMs`). A
