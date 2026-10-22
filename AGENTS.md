@@ -2376,8 +2376,8 @@ tooltip should take colors from `uiThemeTokens`.
 
 ### Text size (app-wide zoom)
 
-Get Started has **A− / A+** in its top-right corner, stepping through
-100 / 110 / 115 % (`ui_zoom.hpp`, QSettings `ui/zoom`). Keep it to those
+Get Started has **A− / A+** in its top-right corner, stepping between
+100 % and 115 % (`ui_zoom.hpp`, QSettings `ui/zoom`). Keep it to those
 two buttons: a labelled picker on the panel was rejected as too invasive. It zooms the whole
 UI with `QT_SCALE_FACTOR`, set in `main()` before the `QApplication` is
 built, so text, buttons and spacing grow together. Do not scale fonts

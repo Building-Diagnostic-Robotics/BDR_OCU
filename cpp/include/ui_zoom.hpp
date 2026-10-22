@@ -36,10 +36,11 @@ struct UiZoomLevel {
     const char* label;  // operator-facing
 };
 
-inline constexpr std::array<UiZoomLevel, 3> kUiZoomLevels{{
+// Two steps: A+ goes straight to the ceiling. A 110 % middle step was
+// dropped; it was too close to 100 % to be worth a press.
+inline constexpr std::array<UiZoomLevel, 2> kUiZoomLevels{{
     {1.0, "Normal"},
-    {1.1, "Large"},
-    {1.15, "Larger"},
+    {1.15, "Large"},
 }};
 
 inline constexpr double kUiZoomDefault = 1.0;

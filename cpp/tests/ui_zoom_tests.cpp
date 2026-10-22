@@ -18,7 +18,8 @@ using namespace f2c_cpp;
 
 TEST(UiZoom, SnapsToAllowedLevels) {
     EXPECT_DOUBLE_EQ(snapUiZoom(1.0), 1.0);
-    EXPECT_DOUBLE_EQ(snapUiZoom(1.1), 1.1);
+    // 1.1 was a level once; a laptop that saved it lands on Large.
+    EXPECT_DOUBLE_EQ(snapUiZoom(1.1), 1.15);
     EXPECT_DOUBLE_EQ(snapUiZoom(1.15), 1.15);
     // Out of range or junk never exceeds the field-laptop ceiling.
     EXPECT_DOUBLE_EQ(snapUiZoom(2.0), 1.15);
@@ -37,8 +38,8 @@ TEST(UiZoom, LevelsStayWithinTheFieldLaptopCeiling) {
 }
 
 TEST(UiZoom, SavedChoiceWhenNoEnv) {
-    const UiZoomStartup z = resolveStartupUiZoom(QByteArray(), false, QVariant(1.1));
-    EXPECT_DOUBLE_EQ(z.factor, 1.1);
+    const UiZoomStartup z = resolveStartupUiZoom(QByteArray(), false, QVariant(1.15));
+    EXPECT_DOUBLE_EQ(z.factor, 1.15);
     EXPECT_FALSE(z.external_override);
 }
 
