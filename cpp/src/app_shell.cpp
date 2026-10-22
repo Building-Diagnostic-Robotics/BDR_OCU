@@ -96,12 +96,11 @@ constexpr int kCorrectedMapRetryDelayMs = 750;
 constexpr int kOdriveAxisStateIdle = 1;
 constexpr int kOdriveAxisStateClosedLoopControl = 8;
 
-// Height of the custom title-bar band along the top of the window where
-// the frameless min/max/close + theme-toggle controls float. Shared by
+// Title-bar band height (ui_theme_constants.hpp). Shared by
 // updateWindowControlsPosition() (vertical centering of the controls) and
 // the OTA banner host (so the banner drops below the controls instead of
 // sliding under them).
-constexpr int kTitleBarHeight = 53;
+constexpr int kTitleBarHeight = kWindowTitleBarHeight;
 
 QString sshUserHostSpec(const ResolvedRobotSshTarget& t) {
     const QString user =
