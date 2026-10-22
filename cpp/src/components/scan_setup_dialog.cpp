@@ -375,7 +375,7 @@ void ScanSetupDialog::buildPlanSection(PlanSection& section,
                     chevron->setText(open ? QStringLiteral("▾")
                                           : QStringLiteral("▸"));
                     section.body->setVisible(open);
-                    adjustSize();
+                    refitAfterChange(section.host);
                 });
     } else {
         section.header = new QLabel(title, section.host);
@@ -426,7 +426,7 @@ void ScanSetupDialog::refreshSectionChrome() {
     completed_.host->setVisible(completed_.count > 0);
     completed_.header->setText(
         QStringLiteral("COMPLETED (%1)").arg(completed_.count));
-    adjustSize();
+    recenter();
 }
 
 bool ScanSetupDialog::hasSavedPlans() const {
@@ -466,7 +466,20 @@ void ScanSetupDialog::showPage(int page) {
     recenter();
 }
 
+void ScanSetupDialog::refitAfterChange(QWidget* changed) {
+    // Each parent caches its child's size hint until told the geometry
+    // changed. Without this, collapsing COMPLETED or deleting a plan kept
+    // the dialog at its old, taller height.
+    for (QWidget* w = changed; w && w != this; w = w->parentWidget()) {
+        w->updateGeometry();
+    }
+    recenter();
+}
+
 void ScanSetupDialog::recenter() {
+    if (layout()) {
+        layout()->activate();  // pick up the new minimum before resizing
+    }
     adjustSize();
     QWidget* host = parentWidget();
     if (!host) {
@@ -503,9 +516,11 @@ void ScanSetupDialog::onDeletePlanClicked(const Job& job, QWidget* row) {
     }
     PlanSection& section = job.executed() ? completed_ : planned_;
     section.rows->removeWidget(row);
+    row->hide();
     row->deleteLater();
     section.count = std::max(section.count - 1, 0);
     refreshSectionChrome();
+    refitAfterChange(section.host);
     if (!hasSavedPlans()) {
         showPage(kPageNew);
     }
