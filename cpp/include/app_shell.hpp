@@ -22,6 +22,7 @@
 #include <std_srvs/srv/set_bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
+#include "scan_reports.hpp"
 #include "imagery_reachability_probe.hpp"
 #include "link_health_monitor.hpp"
 #include "robot_reachability_probe.hpp"
@@ -192,6 +193,8 @@ private:
     /// the robot cannot change while it is up. The scan and copy checks
     /// always run.
     QString uploadUnavailableReason(bool uploading, bool profile_checked) const;
+    /// The next `scan_report.py send` run for the paired robot (scan_reports.hpp).
+    scan_reports::SendRun scanReportSendRun() const;
     void applyRobotSyncSnooze();
 
     /// Phase 7 OCU→runner handoff (locked Q1=A CLI args, Q3=B lockfile-
@@ -462,6 +465,7 @@ private:
     /// toggles instead of leaving an unthemed white band at the top.
     QWidget* rollback_banner_host_ = nullptr;
     update::UpdateChecker* update_checker_ = nullptr;
+    scan_reports::ScanReportScheduler* scan_report_scheduler_ = nullptr;
     RepoSyncManager* repo_sync_ = nullptr;
     RobotSyncBanner* robot_sync_banner_ = nullptr;
     RobotSyncDialog* robot_sync_dialog_ = nullptr;

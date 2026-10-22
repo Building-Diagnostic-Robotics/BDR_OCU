@@ -245,6 +245,8 @@ private:
         mission into <id>.laptop_ros_logs.tar.gz beside it (detached). */
     void closeMissionLog();
     void startLaptopRosLogBundle();
+    /// Detached `scan_report.py collect` for this mission (scan_reports.hpp).
+    void startScanReportCollect();
 
     RobotTarget target_;
     QProcess* laptop_proc_ = nullptr;
