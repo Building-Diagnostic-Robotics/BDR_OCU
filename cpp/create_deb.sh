@@ -193,6 +193,13 @@ if [ ! -f "${SCRIPTS_DIR}/ros_log_bundle.py" ]; then
     exit 1
 fi
 cp "${SCRIPTS_DIR}/ros_log_bundle.py" "$DEB_DIR/usr/share/bdr-coverage-planner/ros_log_bundle.py"
+# Reports each scan to BDR when the laptop is online (scan_reports.hpp).
+# Imports uploader.py from the same folder.
+if [ ! -f "${SCRIPTS_DIR}/scan_report.py" ]; then
+    echo "Error: scan_report.py missing at ${SCRIPTS_DIR}/scan_report.py"
+    exit 1
+fi
+cp "${SCRIPTS_DIR}/scan_report.py" "$DEB_DIR/usr/share/bdr-coverage-planner/scan_report.py"
 
 # Create launcher script
 echo "Creating launcher script..."

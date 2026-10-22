@@ -4,6 +4,8 @@
 #include "launch_env.hpp"
 #include "ocu_log_store.hpp"
 #include "robot_registry.hpp"
+#include "scan_reports.hpp"
+#include "settings_constants.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -14,6 +16,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QSettings>
 #include <QStandardPaths>
 
 #include <algorithm>
@@ -231,6 +234,37 @@ void MissionController::closeMissionLog() {
     // mission_log_path_ deliberately survives: the failure dialogs shown
     // after teardown still need to name the file.
     startLaptopRosLogBundle();
+    startScanReportCollect();
+}
+
+void MissionController::startScanReportCollect() {
+    const QString id = missionLogId();
+    if (id.isEmpty() || !target_.valid) {
+        return;
+    }
+    scan_reports::CollectRequest request;
+    request.log_id = id;
+    request.robot_id = target_.robot_id;
+    request.host = target_.host;
+    request.ssh_user = target_.ssh_user;
+    request.logs_dir = QFileInfo(mission_log_path_).absolutePath();
+    RobotRegistry registry;
+    if (registry.load()) {
+        if (const auto profile = registry.findById(target_.robot_id)) {
+            request.client_id = profile->cloud_client_id;
+            request.data_root = profile->robot_data_path;
+        }
+    }
+    const QSettings settings(kSettingsOrgName, kSettingsAppName);
+    request.building = settings.value(kSettingsBuildingNameKey).toString();
+    request.operator_name = settings.value(kSettingsOperatorNameKey).toString();
+    request.ocu_version = QCoreApplication::applicationVersion();
+    QString why;
+    if (!scan_reports::startCollect(request, &why)) {
+        // The log file is closed by now; the scan still reaches BDR with its upload.
+        qWarning("[scan_report] not collected for %s: %s",
+                 qPrintable(id), qPrintable(why));
+    }
 }
 
 namespace {

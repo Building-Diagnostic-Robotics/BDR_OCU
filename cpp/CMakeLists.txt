@@ -170,6 +170,7 @@ set(HEADERS
     include/single_instance.hpp
     include/upload_runner.hpp
     include/ocu_log_store.hpp
+    include/scan_reports.hpp
     include/upload_dialog.hpp
     include/cloud_verifier.hpp
     include/thumb_drive_watcher.hpp
@@ -265,6 +266,7 @@ set(GUI_SOURCES
     src/upload_runner.cpp
     src/tooltip_theme.cpp
     src/ocu_log_store.cpp
+    src/scan_reports.cpp
     src/upload_dialog.cpp
     src/cloud_verifier.cpp
     src/thumb_drive_watcher.cpp
@@ -718,6 +720,29 @@ if(BDR_BUILD_TESTS)
             GTest::gtest_main
         )
         add_test(NAME ocu_log_store_tests COMMAND ocu_log_store_tests)
+
+        # Scan reports: argv/env the OCU hands scan_report.py, and the
+        # scheduler that never overlaps runs.
+        add_executable(scan_reports_tests
+            tests/scan_reports_tests.cpp
+            src/scan_reports.cpp
+            include/scan_reports.hpp
+        )
+        target_include_directories(scan_reports_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_link_libraries(scan_reports_tests PRIVATE
+            ${QT_CORE_LIBS}
+            GTest::gtest
+            GTest::gtest_main
+        )
+        add_test(NAME scan_reports_tests COMMAND scan_reports_tests)
+
+        # scan_report.py: collect at mission close, send when online. No Qt.
+        add_test(
+            NAME scan_report_script_tests
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_scan_report.py
+        )
 
         # uploader.py integrity checks (Content-MD5, ETag, resume). No Qt.
         add_test(

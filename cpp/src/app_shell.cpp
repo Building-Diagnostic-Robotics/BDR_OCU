@@ -427,6 +427,20 @@ AppShellWindow::AppShellWindow(QWidget* parent)
             });
     update_checker_->start();
 
+    // Scan reports: tell BDR about each scan the next time this laptop is
+    // online (scan_reports.hpp). Nothing here is shown to the operator.
+    scan_report_scheduler_ = new scan_reports::ScanReportScheduler(
+        [this]() { return scanReportSendRun(); }, this);
+    connect(scan_report_scheduler_, &scan_reports::ScanReportScheduler::runFinished,
+            this, [](int code, const QString& summary) {
+                // 0 sent or nothing to do, 3 offline, -1 no robot or no
+                // credentials yet: all normal. Log the rest.
+                if (code != 0 && code != 3 && code != -1) {
+                    qWarning("[scan_report] send exit %d: %s", code, qPrintable(summary));
+                }
+            });
+    scan_report_scheduler_->start();
+
     repo_sync_ = new RepoSyncManager(this);
     robot_sync_poll_ = new QTimer(this);
     robot_sync_retry_ = new QTimer(this);
@@ -2147,6 +2161,31 @@ UploadRobotAuth resolveUploadRobotAuth() {
 }
 
 }  // namespace
+
+scan_reports::SendRun AppShellWindow::scanReportSendRun() const {
+    scan_reports::SendRun run;
+    const QString script = scan_reports::resolveScript();
+    const QString outbox = scan_reports::outboxDir();
+    if (script.isEmpty() || outbox.isEmpty()) {
+        run.reason = QStringLiteral("scan_report.py or its outbox is missing");
+        return run;
+    }
+    const UploadRobotAuth auth = resolveUploadRobotAuth();
+    if (!auth.valid || !auth.profile.has_value()) {
+        run.reason = auth.reason;
+        return run;
+    }
+    // While a scan is up nothing may use the radio link to the robot, so
+    // pending reports are only fetched between scans.
+    run.args = scan_reports::sendArgs(script, outbox, auth.profile->robot_id,
+                                      QCoreApplication::applicationVersion(),
+                                      isScanLaunchActive());
+    run.env = scan_reports::sendEnvironment(
+        QProcessEnvironment::systemEnvironment(), auth.api_base,
+        auth.profile->cloud_client_id, auth.profile->cloud_device_token);
+    run.valid = true;
+    return run;
+}
 
 QString AppShellWindow::uploadUnavailableReason(bool uploading,
                                                 bool profile_checked) const {
