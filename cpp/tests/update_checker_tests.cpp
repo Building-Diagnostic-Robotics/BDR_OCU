@@ -11,9 +11,12 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+
 #include <QByteArray>
 #include <QString>
 
+#include "components/update_text_scale.hpp"
 #include "update/update_checker.hpp"
 
 using f2c_cpp::update::OtaTargets;
@@ -280,4 +283,28 @@ TEST(DashboardRecheck, ThrottledWithinAMinute) {
 TEST(DashboardRecheck, RespectsRateLimitCooldown) {
     EXPECT_FALSE(UpdateChecker::dashboardRecheckAllowed(2'000'000, 0, 2'500'000));
     EXPECT_TRUE(UpdateChecker::dashboardRecheckAllowed(2'500'000, 0, 2'500'000));
+}
+
+// ---------------------------------------------------------------------------
+// OTA modal text size: A-/A+ steps and the font scaling they apply.
+
+TEST(UpdateTextScale, ClampsAndSnapsToTenths) {
+    using f2c_cpp::clampUpdateTextScale;
+    EXPECT_DOUBLE_EQ(clampUpdateTextScale(0.5), 0.9);
+    EXPECT_DOUBLE_EQ(clampUpdateTextScale(3.0), 1.6);
+    EXPECT_DOUBLE_EQ(clampUpdateTextScale(1.0 + 0.1 + 0.1 + 0.1), 1.3);
+    EXPECT_DOUBLE_EQ(clampUpdateTextScale(1.23), 1.2);
+    EXPECT_DOUBLE_EQ(clampUpdateTextScale(std::nan("")), 1.0);
+}
+
+TEST(UpdateTextScale, ScalesEveryFontSizeAndLeavesTheRestAlone) {
+    const QString css = QStringLiteral(
+        "QLabel { color: red; font-size: 16px; }"
+        "QPushButton { font-size: 13px; padding: 0px 14px; }");
+    EXPECT_EQ(f2c_cpp::scaleCssFontSizes(css, 1.0), css);
+    EXPECT_EQ(f2c_cpp::scaleCssFontSizes(css, 1.5),
+              QStringLiteral("QLabel { color: red; font-size: 24px; }"
+                             "QPushButton { font-size: 20px; padding: 0px 14px; }"));
+    EXPECT_EQ(f2c_cpp::scaleCssFontSizes(QStringLiteral("a { font-size: 10px; }"), 0.9),
+              QStringLiteral("a { font-size: 9px; }"));
 }

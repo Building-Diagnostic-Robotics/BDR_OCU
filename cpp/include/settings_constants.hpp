@@ -65,6 +65,8 @@ constexpr const char* kRobotDeployBranch = "cliff-on-autonomy";
 
 /** Epoch-ms until the robot-software banner stays hidden. 0 = none. */
 constexpr const char* kSettingsRobotSyncSnoozeKey = "robot_sync/snooze_until_ms";
+// OTA update modal text size (A-/A+ on the modal); 1.0 = designed size.
+constexpr const char* kSettingsUpdateTextScaleKey = "ui/update_text_scale";
 
 /** How long "Later" hides the robot-software banner: a flat 30 min every
  *  time (no back-off, unlike the OTA snooze `update::snoozeDurationMs`). A
