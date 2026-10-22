@@ -2031,8 +2031,17 @@ void UploadDialog::launchNextCloudBatch() {
             cloud_check_queue_.clear();
             return;
         }
-        const QList<UploadTarget> batch = cloud_check_queue_.mid(0, kCloudVerifyBatch);
-        cloud_check_queue_ = cloud_check_queue_.mid(kCloudVerifyBatch);
+        // Never mix re-checks of proved folders into a batch of unproved
+        // ones: one failed request voids its whole batch, and a re-check
+        // must not cost a first check its result.
+        const bool proved = cloud_check_queue_.first().cloud_check == CloudCheck::Verified;
+        int take = 0;
+        while (take < kCloudVerifyBatch && take < cloud_check_queue_.size() &&
+               (cloud_check_queue_.at(take).cloud_check == CloudCheck::Verified) == proved) {
+            ++take;
+        }
+        const QList<UploadTarget> batch = cloud_check_queue_.mid(0, take);
+        cloud_check_queue_ = cloud_check_queue_.mid(take);
         if (startCloudCheck(batch)) return;
     }
 }
@@ -2051,11 +2060,16 @@ bool UploadDialog::startCloudCheck(const QList<UploadTarget>& batch) {
         if (!all_targets_.contains(src.run_id)) continue;
         UploadTarget& cached = all_targets_[src.run_id];
         if (cached.status != UploadStatus::Done) continue;
-        cached.cloud_check = CloudCheck::Checking;
         cached.force_reupload = false;
         cloud_check_ids_ << src.run_id;
         jobs.append(qMakePair(src.run_id,
                               src.data_path + QStringLiteral("/manifest.json")));
+        if (cached.cloud_check == CloudCheck::Verified) {
+            // Re-check quietly: the row stays "Uploaded · Verified".
+            cached.cloud_recheck = true;
+            continue;
+        }
+        cached.cloud_check = CloudCheck::Checking;
         presentCloudRow(cached, false);
     }
     if (cloud_check_ids_.isEmpty()) {
@@ -2096,7 +2110,8 @@ void UploadDialog::cancelCloudCheck(bool reschedule) {
     cloud_check_queue_.clear();
     bool was_checking = false;
     for (const QString& run_id : cloud_check_ids_) {
-        if (all_targets_.value(run_id).cloud_check == CloudCheck::Checking) {
+        const UploadTarget t = all_targets_.value(run_id);
+        if (t.cloud_check == CloudCheck::Checking || t.cloud_recheck) {
             was_checking = true;
             break;
         }
@@ -2121,6 +2136,8 @@ void UploadDialog::revertCheckingRows() {
     for (const QString& run_id : ids) {
         if (!all_targets_.contains(run_id)) continue;
         UploadTarget& cached = all_targets_[run_id];
+        // A re-check that could not finish keeps its proof.
+        cached.cloud_recheck = false;
         if (cached.cloud_check != CloudCheck::Checking) continue;
         cached.cloud_check = CloudCheck::Unchecked;
         cached.force_reupload = false;
@@ -2171,12 +2188,16 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
     if (!all_targets_.contains(run_id)) return;
     UploadTarget& cached = all_targets_[run_id];
     if (cached.status != UploadStatus::Done) return;
-    if (cached.cloud_check != CloudCheck::Checking) return;
+    if (cached.cloud_check != CloudCheck::Checking && !cached.cloud_recheck) return;
+    const bool recheck = cached.cloud_recheck;
+    cached.cloud_recheck = false;
+    // Inconclusive results leave a re-checked folder as it was.
+    const CloudCheck inconclusive = recheck ? CloudCheck::Verified : CloudCheck::Unchecked;
 
     const LoadedManifest manifest = loaded_manifests_.value(run_id);
     QString summary;
     if (!manifest.ok) {
-        cached.cloud_check = CloudCheck::Unchecked;
+        cached.cloud_check = inconclusive;
         cached.force_reupload = false;
         summary = QStringLiteral("unavailable (%1)")
                       .arg(manifest.error.isEmpty()
@@ -2188,7 +2209,7 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
         // Listing this under the logged-in robot came back empty or
         // different because the objects live in another prefix. Leave
         // the row Uploaded so Upload cannot move them.
-        cached.cloud_check = CloudCheck::Unchecked;
+        cached.cloud_check = inconclusive;
         cached.force_reupload = false;
         summary = QStringLiteral("skipped (belongs to %1 / %2)")
                       .arg(manifest.client_id.isEmpty() ? QStringLiteral("unknown client")
@@ -2214,7 +2235,7 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
                 cached.force_reupload = false;
                 presentCloudRow(cached, false);
             } else {
-                cached.cloud_check = CloudCheck::Unchecked;
+                cached.cloud_check = inconclusive;
                 cached.force_reupload = false;
                 summary = QStringLiteral(
                     "matched, but the stick could not record the cloud check");
@@ -2238,7 +2259,8 @@ void UploadDialog::applyCloudResult(const QString& run_id) {
     int pending = 0;
     for (const QString& id : cloud_check_ids_) {
         if (!all_targets_.contains(id)) continue;
-        if (all_targets_[id].cloud_check == CloudCheck::Checking) ++pending;
+        const UploadTarget& t = all_targets_[id];
+        if (t.cloud_check == CloudCheck::Checking || t.cloud_recheck) ++pending;
     }
     if (pending == 0 && !cloud_check_queue_.isEmpty()) {
         noteCloudVerify(QStringLiteral("Checking older scans against the cloud…"));

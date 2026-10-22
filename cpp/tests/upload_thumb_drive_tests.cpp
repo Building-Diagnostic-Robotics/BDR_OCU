@@ -966,6 +966,8 @@ TEST(UploadBuildingRows, CloudCheckReachesEveryFinishedFolderOldestFirst) {
         targets.insert(target.run_id, target);
         if (day != 4) expected << target.run_id;
     }
+    // Proved folders are checked again, after every unproved one.
+    const QString proved = QStringLiteral("January_4_2026/b4/Section_1_120000");
     UploadTarget pending = folder("January_01_2026", "pending", "Section_1_120000",
                                   UploadStatus::None, at(2026, 1, 2, 8, 0));
     pending.run_id = QStringLiteral("January_02_2026/pending/Section_1_120000");
@@ -978,7 +980,7 @@ TEST(UploadBuildingRows, CloudCheckReachesEveryFinishedFolderOldestFirst) {
                                   UploadStatus::Done, at(2026, 3, 1, 9, 0));
     targets.insert(mission.run_id, mission);
     targets.insert(section.run_id, section);
-    expected << mission.run_id << section.run_id;
+    expected << mission.run_id << section.run_id << proved;
 
     const QList<UploadTarget> checked = cloudCheckTargets(targets);
     QStringList ids;

@@ -766,8 +766,14 @@ kept in sync by hand.
   with the SSH mode.
 - **`CloudVerifier`** (`cpp/include/cloud_verifier.hpp`): every time the
   Upload dialog finishes a stick listing and the cloud is reachable, it
-  `POST`s `/verify` for **every Done folder that does not already have
-  a valid `cloud_verified.json`**, oldest first, in batches of 10,
+  `POST`s `/verify` for **every Done folder**: those without a valid
+  `cloud_verified.json` first, then the proved ones again (an object
+  deleted from S3 after the proof was written must show up while the
+  stick still holds the data). A re-check keeps the row's
+  **Uploaded · Verified** badge while it runs and after any inconclusive
+  result; a match rewrites the proof (fresh `verified_at`), a mismatch
+  deletes it and marks the folder **Missing in cloud**. Batches never
+  mix proved and unproved folders. Oldest first, in batches of 10,
   **one `run_id` per request**, 30 s
   timeout. A match writes `cloud_verified.json` next to `manifest.json`
   (tmp, flush, rename) with the sha256 of the manifest file bytes; a

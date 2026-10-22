@@ -860,15 +860,19 @@ QString BuildingUploadProgress::buildingLabel() const {
 }
 
 QList<UploadTarget> cloudCheckTargets(const QHash<QString, UploadTarget>& targets) {
-    QList<UploadTarget> out;
+    QList<UploadTarget> unproved;
+    QList<UploadTarget> proved;
     for (const UploadTarget& target : targets) {
         if (target.run_id.isEmpty()) continue;
         if (target.status != UploadStatus::Done) continue;
-        if (target.cloud_check == CloudCheck::Verified) continue;
-        out.append(target);
+        (target.cloud_check == CloudCheck::Verified ? proved : unproved).append(target);
     }
-    std::sort(out.begin(), out.end(), uploadBefore);
-    return out;
+    std::sort(unproved.begin(), unproved.end(), uploadBefore);
+    std::sort(proved.begin(), proved.end(), uploadBefore);
+    // A proof says S3 held the folder when it was written, not now: an
+    // object deleted from S3 later must show up as missing while the
+    // stick still has the data. Unproved folders go first.
+    return unproved + proved;
 }
 
 // ---------------------------------------------------------------------------

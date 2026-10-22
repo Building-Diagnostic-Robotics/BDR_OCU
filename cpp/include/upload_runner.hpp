@@ -126,6 +126,10 @@ struct UploadTarget {
     /// the row. Only `Missing` is selectable, and it uploads with
     /// `force_reupload`.
     CloudCheck cloud_check = CloudCheck::Unchecked;
+    /// A `Verified` folder whose proof is being re-checked. It keeps its
+    /// Verified badge meanwhile; a failed or offline check leaves it
+    /// Verified, a mismatch makes it `Missing`.
+    bool cloud_recheck = false;
     /// Pass `--force` on the next launch of this target only. The
     /// runner clears it once that launch is built, so a connection
     /// retry or a later Upload press resumes the state file instead of
@@ -255,7 +259,9 @@ private:
     QString current_run_id_;
 };
 
-/// Every `Done` folder that is not already `CloudCheck::Verified`.
+/// Every `Done` folder: those without a proof first, then the
+/// `CloudCheck::Verified` ones again (re-checked on every listing, so a
+/// later deletion in S3 is found while the stick still has the data).
 /// Oldest visit first, and on an equal timestamp the Mission folder
 /// before a Section. The caller checks them in batches; a folder the
 /// probe already marked Verified (a valid `cloud_verified.json`) is
