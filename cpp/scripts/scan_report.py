@@ -242,7 +242,23 @@ def new_entry(args) -> dict:
 
 # ------------------------------------------------------------- build report ---
 
-def build_record(entry: dict, config: dict, run_id: str, bundled: List[str], robot_logs_note: str) -> dict:
+# What the uploaded record carries from the robot's scan_report/record.json
+# (pilot_ws mission_report.py); the whole file is in the bundle.
+ROBOT_SUMMARY_KEYS = ("schema", "written_at", "duration_s", "distance_m", "events", "gnss", "log_levels",
+                      "top_errors", "errors_truncated", "track_lio_points", "calibration", "software")
+
+
+def robot_summary(report: Optional[dict]) -> Optional[dict]:
+    if not isinstance(report, dict):
+        return None
+    out = {k: report[k] for k in ROBOT_SUMMARY_KEYS if k in report}
+    out["sections"] = [{k: s.get(k) for k in ("name", "files", "bytes", "by_folder")}
+                       for s in report.get("sections") or [] if isinstance(s, dict)]
+    return out
+
+
+def build_record(entry: dict, config: dict, run_id: str, bundled: List[str], robot_logs_note: str,
+                 robot: Optional[dict] = None) -> dict:
     sections = []
     for item in config.get("sections") or []:
         if not isinstance(item, dict):
@@ -280,7 +296,9 @@ def build_record(entry: dict, config: dict, run_id: str, bundled: List[str], rob
         "robot_logs_in_bundle": robot_logs_note,
         "ocu": dict(entry["ocu"], collected_at=iso(now_utc())),
         "bundle": bundled,
-        "robot_report": "mission_config",
+        # "scan_report" once the robot writes one: then `robot` holds its summary.
+        "robot_report": "scan_report" if robot else "mission_config",
+        "robot": robot,
     }
 
 
@@ -368,11 +386,14 @@ def fetch_entry(folder: Path, entry: dict, robot: Robot, wait_s: float = 0.0,
                     bundled.append(rel)
                 else:
                     note = "partly included"
-        # A robot that writes scan_report/ (planned) gets it all, small by design.
+        # The robot's scan report (pilot_ws mission_report.py), small by design: all of it.
+        summary = None
         for remote in robot.list_files(f"{mission_dir}/scan_report"):
             rel = "robot/" + remote[len(mission_dir.rsplit('/', 1)[0]) + 1:]
             if robot.fetch(remote, stage / rel):
                 bundled.append(rel)
+                if rel.endswith("/scan_report/record.json"):
+                    summary = robot_summary(read_json(stage / rel))
 
         # OCU's own logs for this mission. The laptop ROS bundle is packed
         # detached ~35-65 s after the log closes; wait for it inside wait_s.
@@ -392,7 +413,7 @@ def fetch_entry(folder: Path, entry: dict, robot: Robot, wait_s: float = 0.0,
         with tarfile.open(folder / BUNDLE, "w:gz") as tar:
             for rel in bundled:
                 tar.add(stage / rel, arcname=rel)
-        record = build_record(entry, config, run_id, bundled, note)
+        record = build_record(entry, config, run_id, bundled, note, summary)
         write_json(folder / RECORD, record)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
