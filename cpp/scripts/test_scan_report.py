@@ -113,6 +113,8 @@ class CollectTests(Case):
         self.assertEqual(record["sections"][0]["name"], "Section_1_131104_complete_gnss_invalid")
         self.assertEqual(record["gnss"]["invalid_reasons"], ["RAWX coverage ratio 0.612 below 0.800"])
         self.assertEqual(record["robot_logs_in_bundle"], "included")
+        self.assertEqual(record["robot_report"], "mission_config")
+        self.assertIsNone(record["robot"])
         with tarfile.open(self.outbox / LOG_ID / scan_report.BUNDLE) as tar:
             names = sorted(tar.getnames())
         self.assertEqual(names, sorted([
@@ -122,6 +124,31 @@ class CollectTests(Case):
             f"ocu/{LOG_ID}.log",
             f"ocu/{LOG_ID}.laptop_ros_logs.tar.gz",
         ]))
+
+    def test_the_robots_scan_report_rides_along_and_is_summarised(self):
+        mission = make_robot_mission(self.robot_root)
+        report = mission / "scan_report"
+        report.mkdir()
+        (report / "record.json").write_text(json.dumps({
+            "schema": 1, "duration_s": 8935.0, "distance_m": 1210.4,
+            "events": {"recorded": True, "cliff_active": 2, "tip": 0, "link_gaps": 3},
+            "gnss": {"rawx_epochs": 2, "fix3d_pct": 100.0}, "log_levels": {"WARN": 4, "ERROR": 1, "FATAL": 0},
+            "top_errors": [{"level": "ERROR", "node": "gps_driver", "message": "no RAWX", "count": 1}],
+            "sections": [{"name": "Section_1_131104_complete_gnss_invalid", "files": 45210, "bytes": 9,
+                          "by_folder": {"Visual_data": 45000}, "start": "x"}],
+            "software": {"pilot_ws_commit": "abc1234"}, "ocu_logs": [LOG_ID]}))
+        (report / "events.jsonl").write_text('{"t": 1, "type": "cliff"}\n')
+        self.collect()
+        record = json.loads((self.outbox / LOG_ID / scan_report.RECORD).read_text())
+        self.assertEqual(record["robot_report"], "scan_report")
+        self.assertEqual(record["robot"]["events"]["cliff_active"], 2)
+        self.assertEqual(record["robot"]["sections"][0]["files"], 45210)
+        self.assertNotIn("start", record["robot"]["sections"][0])
+        self.assertNotIn("ocu_logs", record["robot"])
+        with tarfile.open(self.outbox / LOG_ID / scan_report.BUNDLE) as tar:
+            names = tar.getnames()
+        self.assertIn(f"robot/{MISSION}/scan_report/record.json", names)
+        self.assertIn(f"robot/{MISSION}/scan_report/events.jsonl", names)
 
     def test_big_robot_logs_stay_for_the_stick(self):
         make_robot_mission(self.robot_root, big_logs=True)
