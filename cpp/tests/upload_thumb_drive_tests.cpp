@@ -826,13 +826,53 @@ TEST(UploadBuildingRows, PartialPercentIgnoresUploadedFolders) {
     ASSERT_EQ(rows.size(), 1);
     EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Partial);
     EXPECT_EQ(rows.at(0).partial_percent, 50);
-    EXPECT_EQ(rows.at(0).badge_text, "Partial · 50%");
+    // The badge counts scans (Section folders), not files.
+    EXPECT_EQ(rows.at(0).scans_total, 2);
+    EXPECT_EQ(rows.at(0).scans_done, 1);
+    EXPECT_EQ(rows.at(0).badge_text, "1 of 2 scans uploaded");
     EXPECT_EQ(rows.at(0).total_bytes, 550);
     EXPECT_TRUE(rows.at(0).selectable);
 
     const QList<UploadTarget> queued = uploadTargetsForRow(targets, rows.at(0));
     ASSERT_EQ(queued.size(), 1);
     EXPECT_EQ(queued.at(0).section_name, "Section_1_140000");
+}
+
+TEST(UploadBuildingRows, PartialBadgeCountsSectionsNotMissionFolders) {
+    // 688 Gibraltar, 2026-10-26: 5 scans in the cloud, 2 recovered ones
+    // uploading. The old badge said "Partial · 61%" (files over the two
+    // open folders) next to a bar at 72% (one folder): two numbers, neither
+    // the building. The operator wants "5 of 7 scans uploaded".
+    QHash<QString, UploadTarget> targets;
+    const char* missions[] = {"Mission_193836", "Mission_201005", "Mission_202001",
+                              "Mission_203153", "Mission_204558"};
+    const char* sections[] = {"Section_1_193836_complete", "Section_2_201005_complete",
+                              "Section_3_202001_complete", "Section_4_203153_complete",
+                              "Section_5_204558_complete"};
+    for (int k = 0; k < 5; ++k) {
+        UploadTarget m = folder("October_15_2026", "688_Gibraltar", missions[k],
+                                UploadStatus::Done, at(2026, 10, 15, 19, k));
+        UploadTarget s = folder("October_15_2026", "688_Gibraltar", sections[k],
+                                UploadStatus::Done, at(2026, 10, 15, 19, k), 100, 100);
+        targets.insert(m.run_id, m);
+        targets.insert(s.run_id, s);
+    }
+    UploadTarget m6 = folder("October_15_2026", "688_Gibraltar", "Mission_211237",
+                             UploadStatus::Partial, at(2026, 10, 15, 21, 12), 1, 2);
+    UploadTarget s6 = folder("October_15_2026", "688_Gibraltar", "Section_6_211237",
+                             UploadStatus::Partial, at(2026, 10, 15, 21, 12), 300, 1000);
+    UploadTarget m7 = folder("October_14_2026", "688_Gibraltar", "Mission_133756",
+                             UploadStatus::None, at(2026, 10, 14, 13, 37), 0, 2);
+    UploadTarget s7 = folder("October_14_2026", "688_Gibraltar", "Section_3_133756",
+                             UploadStatus::None, at(2026, 10, 14, 13, 37), 0, 2000);
+    for (const UploadTarget& t : {m6, s6, m7, s7}) targets.insert(t.run_id, t);
+
+    const QList<UploadBuildingRow> rows = groupUploadTargets(targets);
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows.at(0).badge, UploadRowBadge::Partial);
+    EXPECT_EQ(rows.at(0).scans_total, 7);
+    EXPECT_EQ(rows.at(0).scans_done, 5);
+    EXPECT_EQ(rows.at(0).badge_text, "5 of 7 scans uploaded");
 }
 
 TEST(UploadBuildingRows, MissingBeatsPartialAndForcesReupload) {

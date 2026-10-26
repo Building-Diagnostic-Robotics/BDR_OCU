@@ -16,6 +16,8 @@ What's New in the OCU update box. Read by roofing contractors, so:
 
 ## Unreleased
 
+- Upload list shows "5 of 7 scans uploaded" instead of a percent
+
 - End & Save now waits for ROOFUS to finish saving before stopping it
 
 - Copy progress on the Upload Data card no longer gets cut off

@@ -213,7 +213,9 @@ struct UploadBuildingRow {
     qint64 total_bytes = 0;
     UploadRowBadge badge = UploadRowBadge::Pending;
     QString badge_text;
-    int partial_percent = 0;
+    int partial_percent = 0;   // files done / files total over unfinished folders
+    int scans_total = 0;       // Section folders in the building (or all folders)
+    int scans_done = 0;        // of those, uploaded and present in the cloud
     bool selectable = false;
     UploadRowSummary summary;
     /// Plain-text form of `summary` (tests, logs); the dialog renders
