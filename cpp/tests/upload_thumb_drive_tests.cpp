@@ -1797,6 +1797,27 @@ TEST(OffloadStatus, BuildingProgressAcrossItsScans) {
     EXPECT_TRUE(f2c_cpp::buildingCopyText(s).isEmpty());
 }
 
+TEST(OffloadStatus, BuildingProgressAsTwoCardLines) {
+    // The Dashboard card has a two-line slot; a long building name must
+    // not push the percent off the card (Ansys_2645_zanker_rd, 2026-10-26).
+    OffloadSnapshot s = parseOffloadStatusJson(R"({"state":"copying","queued":4,
+        "mission":"October_14_2026/Ansys_2645_zanker_rd/Mission_173713","jobs":{},
+        "building":{"name":"October_14_2026/Ansys_2645_zanker_rd","missions_done":0,
+                    "missions_total":1,"percent":31.0}})");
+    const auto lines = f2c_cpp::buildingCopyLines(s);
+    EXPECT_EQ(lines.status, QStringLiteral("Copying to drive · 31%"));
+    EXPECT_EQ(lines.building, QStringLiteral("Ansys_2645_zanker_rd"));
+    s = parseOffloadStatusJson(R"({"state":"copying","queued":2,
+        "mission":"October_15_2026/1561_buckeye_dr/Mission_160735","jobs":{},
+        "building":{"name":"October_15_2026/1561_buckeye_dr","missions_done":1,
+                    "missions_total":3,"percent":45.6}})");
+    EXPECT_EQ(f2c_cpp::buildingCopyLines(s).status,
+              QStringLiteral("Copying to drive · 45% · scan 2 of 3"));
+    s = parseOffloadStatusJson(R"({"state":"copying","queued":1,"jobs":{}})");
+    EXPECT_TRUE(f2c_cpp::buildingCopyLines(s).status.isEmpty());
+    EXPECT_TRUE(f2c_cpp::buildingCopyLines(s).building.isEmpty());
+}
+
 // A damaged stick file is fetched from the paired robot during the upload:
 // uploader.py gets BDR_ROBOT_SSH=<user>@<host>, roofus when no user is known.
 TEST(UploadRunnerRobotFetch, TargetIsUserAtHostAndEmptyHostTurnsItOff) {
