@@ -240,6 +240,7 @@ bool RosLink::start(QString* error) {
                     s.takeover = obj.value(QLatin1String("takeover")).toBool();
                     s.dc_paused =
                         obj.value(QLatin1String("dc_paused")).toBool();
+                    s.saving = obj.value(QLatin1String("saving")).toBool();
                     s.revisit = int(jsonNumber(obj, "revisit", 0.0));
                     s.tip_seq = int(jsonNumber(obj, "tip_seq", 0.0));
                     s.tip_cells = int(jsonNumber(obj, "tip_cells", 0.0));
