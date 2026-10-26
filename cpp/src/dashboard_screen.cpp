@@ -161,7 +161,9 @@ QPushButton* makeActionButton(QWidget* parent,
     btn->setObjectName(objectName);
     btn->setCursor(Qt::PointingHandCursor);
     btn->setFlat(true);  // so native style doesn't paint over icon/title/desc
-    btn->setFixedHeight(168);
+    // 24 + icon 40 + 16 + title 28 + 16 + two 20 px description lines + 24.
+    // One line clipped "Copying <building> to drive · 31%" top and bottom.
+    btn->setFixedHeight(188);
     const QString selector = QString("#%1").arg(objectName);
     btn->setStyleSheet(QString(
         "%1 {"
@@ -203,6 +205,7 @@ QPushButton* makeActionButton(QWidget* parent,
         "font-family: 'Arimo'; font-size: 14px; line-height: 20px; color: #4A5565;");
     descLbl->setAlignment(Qt::AlignCenter);
     descLbl->setWordWrap(true);
+    descLbl->setFixedHeight(40);
     layout->addWidget(descLbl, 0, Qt::AlignCenter);
 
     return btn;
@@ -1481,9 +1484,22 @@ void DashboardScreen::refreshUploadAction() {
                    offload_.state != OffloadCopyState::Error &&
                    offload_.state != OffloadCopyState::StickFull) {
             // The whole building, across its scans, not one section.
-            const QString building = buildingCopyText(offload_);
-            desc = building.isEmpty() ? QStringLiteral("Syncing to thumb drive…")
-                                      : building;
+            // Status on one line, building name on the next, elided:
+            // "Copying Ansys_2645_zanker_rd to drive · 31%" wrapped to
+            // three lines in a two-line slot.
+            const BuildingCopyLines lines = buildingCopyLines(offload_);
+            if (lines.status.isEmpty()) {
+                desc = QStringLiteral("Syncing to thumb drive…");
+            } else {
+                QString name = lines.building;
+                if (auto* label = findChild<QLabel*>(
+                        QStringLiteral("DashboardBtnRecordingsDesc"))) {
+                    const int width = qMax(120, label->width() - 8);
+                    name = label->fontMetrics().elidedText(name, Qt::ElideMiddle,
+                                                           width);
+                }
+                desc = lines.status + QLatin1Char('\n') + name;
+            }
         } else if (!thumbCopyReady() && robotCopyIncomplete()) {
             desc = !offload_probe_ok_
                        ? QStringLiteral("Robot not connected — last copy unfinished")

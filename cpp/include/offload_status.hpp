@@ -66,6 +66,15 @@ OffloadSnapshot parseOffloadStatusJson(const QByteArray& json);
 /// the snapshot carries no building progress.
 QString buildingCopyText(const OffloadSnapshot& snap);
 
+/// The same progress as two short lines for a narrow card: the status
+/// ("Copying to drive · 45% · scan 2 of 3") and the building name. Both
+/// empty when the snapshot carries no building progress.
+struct BuildingCopyLines {
+    QString status;
+    QString building;
+};
+BuildingCopyLines buildingCopyLines(const OffloadSnapshot& snap);
+
 /// Queued copies the robot may delete to make room, or 0.
 /// Only a parsed snapshot with both byte fields set, queued work, and
 /// free space under twice the floor counts. A missing field is not a

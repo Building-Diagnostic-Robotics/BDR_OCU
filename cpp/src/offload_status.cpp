@@ -221,6 +221,24 @@ QString buildingCopyText(const OffloadSnapshot& snap) {
     return text;
 }
 
+BuildingCopyLines buildingCopyLines(const OffloadSnapshot& snap) {
+    BuildingCopyLines out;
+    if (!snap.parse_ok || snap.building.isEmpty() || snap.building_percent < 0.0) {
+        return out;
+    }
+    const int slash = snap.building.lastIndexOf(QLatin1Char('/'));
+    out.building = slash >= 0 ? snap.building.mid(slash + 1) : snap.building;
+    out.status = QStringLiteral("Copying to drive · %1%")
+                     .arg(qBound(0, int(snap.building_percent), 100));
+    if (snap.building_missions_total > 1) {
+        out.status += QStringLiteral(" · scan %1 of %2")
+                          .arg(qMin(snap.building_missions_done + 1,
+                                    snap.building_missions_total))
+                          .arg(snap.building_missions_total);
+    }
+    return out;
+}
+
 bool thumbCopyIsReady(const ThumbCopyInputs& in) {
     if (in.stick_full) {
         return true;
