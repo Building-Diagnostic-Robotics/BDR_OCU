@@ -689,6 +689,28 @@ UploadBuildingRow makeBuildingRow(const QString& key, QList<UploadTarget> member
     bool any_damaged = false;
     qint64 open_done = 0;
     qint64 open_total = 0;
+    // Scans uploaded, for the badge. A scan is a Section folder; the
+    // Mission folder beside it is metadata. A building with Mission folders
+    // only (nothing scanned) counts those instead.
+    int scans_total = 0;
+    int scans_done = 0;
+    int folders_done = 0;
+    for (const UploadTarget& target : members) {
+        const bool uploaded = target.status == UploadStatus::Done &&
+                              target.cloud_check != CloudCheck::Missing &&
+                              !folderNeedsRobot(target);
+        if (uploaded) ++folders_done;
+        if (!target.isMission()) {
+            ++scans_total;
+            if (uploaded) ++scans_done;
+        }
+    }
+    if (scans_total == 0) {
+        scans_total = members.size();
+        scans_done = folders_done;
+    }
+    row.scans_total = scans_total;
+    row.scans_done = scans_done;
     for (const UploadTarget& target : members) {
         if (folderNeedsRobot(target)) {
             ++needs_robot;
@@ -725,10 +747,13 @@ UploadBuildingRow makeBuildingRow(const QString& key, QList<UploadTarget> member
         if (open_total > 0) {
             row.partial_percent = static_cast<int>(
                 qBound<qint64>(0, open_done * 100 / open_total, 100));
-            row.badge_text = QStringLiteral("Partial · %1%").arg(row.partial_percent);
-        } else {
-            row.badge_text = QStringLiteral("Partial");
         }
+        // "N of M scans uploaded", not a percent: the percent was files
+        // done across the unfinished folders, which read like the whole
+        // building and never matched the progress bar (a per-folder figure).
+        row.badge_text = QStringLiteral("%1 of %2 scans uploaded")
+                             .arg(row.scans_done)
+                             .arg(row.scans_total);
     } else if (any_open) {
         row.badge = UploadRowBadge::Pending;
         row.badge_text = QStringLiteral("Pending");
