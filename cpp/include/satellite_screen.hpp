@@ -1019,6 +1019,9 @@ private:
     ScanRunState arm_wait_from_ = ScanRunState::Idle;
     QTimer* conclude_wait_timer_ = nullptr;
     int conclude_wait_ticks_ = 0;
+    // Consecutive settle ticks without a fresh /coverage/status.
+    int conclude_stale_ticks_ = 0;
+    bool slow_save_noticed_ = false;
     /** Abort-and-save CTA. A click never re-enables. */
     bool abort_consumed_ = false;
     /** Operator chose abort-and-save — skip the COMPLETED stamp. */

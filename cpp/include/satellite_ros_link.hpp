@@ -98,6 +98,8 @@ struct CoverageStatus {
     bool waiting_revisit = false;
     bool takeover = false;
     bool dc_paused = false;
+    // /dc/end_and_save issued and not yet answered. Absent reads false.
+    bool saving = false;
     int revisit = 0;
     // Topple guard (pilot_control tip_guard). `tip_seq` counts trips this
     // director session; the robot has already E-Stopped itself for each one.

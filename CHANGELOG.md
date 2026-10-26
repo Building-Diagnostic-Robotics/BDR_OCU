@@ -16,6 +16,8 @@ What's New in the OCU update box. Read by roofing contractors, so:
 
 ## Unreleased
 
+- End & Save now waits for ROOFUS to finish saving before stopping it
+
 - Copy progress on the Upload Data card no longer gets cut off
 
 - A damaged file on the drive is fixed from ROOFUS during the upload

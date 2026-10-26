@@ -8122,6 +8122,8 @@ void SatelliteScreen::startCompleteMissionSettle() {
         conclude_wait_timer_->setInterval(250);
     }
     conclude_wait_ticks_ = 0;
+    conclude_stale_ticks_ = 0;
+    slow_save_noticed_ = false;
     abort_consumed_ = false;
     abort_save_used_ = false;
     disconnect(conclude_wait_timer_, &QTimer::timeout, nullptr, nullptr);
@@ -8133,28 +8135,81 @@ void SatelliteScreen::startCompleteMissionSettle() {
         ++conclude_wait_ticks_;
         const CoverageStatus status = ros_->coverageStatus();
         const QString copy = status.copy.toLower();
+        const std::string copy_std = copy.toStdString();
+        if (status.fresh(finalize_policy::kStatusFreshMs)) {
+            conclude_stale_ticks_ = 0;
+        } else {
+            ++conclude_stale_ticks_;
+        }
+        // pending = /dc/end_and_save issued, section still closing on the
+        // robot. Stopping the stack now kills the save (Ansys, 2026-10-14).
         const bool save_done =
-            status.complete || copy == QLatin1String("pending") ||
-            copy == QLatin1String("queued") ||
-            copy == QLatin1String("waiting_for_drive") ||
-            copy == QLatin1String("copying") ||
-            copy == QLatin1String("done") ||
-            copy == QLatin1String("skipped") ||
-            copy == QLatin1String("failed") ||
-            copy == QLatin1String("stick_full");
+            finalize_policy::saveSettled(status.saving, status.complete,
+                                         copy_std);
+        const bool saving =
+            finalize_policy::saveInFlight(status.saving, copy_std);
+        // A robot that says it is saving has re-issued the save; an error
+        // from an earlier attempt must not cut this one short.
+        const bool save_failed =
+            !status.saving &&
+            finalize_policy::saveReportedFailed(status.error.toStdString());
         // Skip-copy stays unwired here: those copy states already count as
         // save_done, so the button would appear and vanish in the same tick.
-        if (finalize_policy::shouldOfferAbort(save_done, conclude_wait_ticks_,
+        // No abort offer while the robot is saving: the save was issued.
+        if (finalize_policy::shouldOfferAbort(save_done || saving,
+                                             conclude_wait_ticks_,
                                              abort_consumed_)) {
             offerAbortAndSave();
         }
-        // 250 ms × 120 = 30 s ceiling. Do not wait on the thumb-drive
-        // copy — Dashboard surfaces that. A hung conclude RPC must not
-        // strand the operator on this page.
-        if (!save_done && conclude_wait_ticks_ < 120) {
+        if (saving && !slow_save_noticed_ &&
+            conclude_wait_ticks_ >= finalize_policy::kSlowSaveNoticeTicks) {
+            slow_save_noticed_ = true;
+            appendLog(QStringLiteral(
+                "[mission] robot still saving the scan — waiting for it"));
+            showFinalizeProgress(QStringLiteral(
+                "Saving the scan on the robot… Long scans take a few "
+                "minutes. Keep the robot powered on."));
+        }
+        const finalize_policy::SettleStep step = finalize_policy::settleStep(
+            save_done, saving, save_failed, conclude_wait_ticks_,
+            conclude_stale_ticks_);
+        if (step == finalize_policy::SettleStep::Wait) {
             return;
         }
         conclude_wait_timer_->stop();
+        if (step == finalize_policy::SettleStep::LeaveRobotRunning) {
+            // The last status said the robot was saving and then the link
+            // went quiet. Stopping the stack now would kill the save; the
+            // robot finishes it on its own and closes the mission at the
+            // next start if anything was left open.
+            appendLog(QStringLiteral(
+                "[mission] link lost while the robot was saving the scan — "
+                "robot software left running so the save can finish. Plan "
+                "left PLANNED; check the Dashboard once the link is back"));
+            if (finalize_dialog_) {
+                finalize_dialog_->setDetail(
+                    QStringLiteral("Link lost while the robot was saving. "
+                                   "The robot keeps saving on its own. Do "
+                                   "not power it off for a few minutes."),
+                    true);
+            }
+            finishCompleteMissionAndLeave();
+            return;
+        }
+        if (step == finalize_policy::SettleStep::ProceedUnconfirmed) {
+            appendLog(QStringLiteral(
+                          "[mission] save NOT confirmed by the robot (%1, "
+                          "copy=%2, %3) — stopping the robot anyway; it "
+                          "closes the mission at its next start")
+                          .arg(conclude_stale_ticks_ >=
+                                       finalize_policy::kLinkLostSettleTicks
+                                   ? QStringLiteral("no status for 30 s")
+                                   : QStringLiteral("waited %1 s")
+                                         .arg(conclude_wait_ticks_ / 4))
+                          .arg(copy.isEmpty() ? QStringLiteral("?") : copy)
+                          .arg(status.error.isEmpty() ? QStringLiteral("no error")
+                                                      : status.error));
+        }
         if (finalize_policy::shouldStampCompleted(save_done, status.complete,
                                                   abort_save_used_)) {
             markCurrentPlanCompleted();
@@ -8164,8 +8219,7 @@ void SatelliteScreen::startCompleteMissionSettle() {
                 "[mission] thumb drive is full — upload older scans "
                 "from the laptop, run the cloud check, then plug the "
                 "stick back into the robot"));
-        } else if (copy == QLatin1String("pending") ||
-                   copy == QLatin1String("queued") ||
+        } else if (copy == QLatin1String("queued") ||
                    copy == QLatin1String("waiting_for_drive") ||
                    copy == QLatin1String("copying")) {
             appendLog(QStringLiteral(
