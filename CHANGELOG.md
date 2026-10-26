@@ -16,6 +16,8 @@ What's New in the OCU update box. Read by roofing contractors, so:
 
 ## Unreleased
 
+- Copy progress on the Upload Data card no longer gets cut off
+
 - A damaged file on the drive is fixed from ROOFUS during the upload
 - A- and A+ no longer sit under the window buttons
 - Saved Scans shrinks back after you close the Completed list
